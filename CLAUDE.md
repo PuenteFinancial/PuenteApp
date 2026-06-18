@@ -6,8 +6,8 @@ MVP: signup, credit score check, financial literacy content.
 
 ## Stack
 - Monorepo: Turborepo. `apps/mobile` (RN + Expo), `apps/api` (Fastify), `packages/shared` (TS types)
-- API: Fastify v4, TypeScript, Zod schema validation, Supabase (Postgres)
-- Mobile: Expo SDK 51, expo-router, NativeWind (Tailwind), react-i18next
+- API: Fastify v5, TypeScript 6, Zod schema validation, Supabase (Postgres)
+- Mobile: Expo SDK 56, expo-router, NativeWind (Tailwind), react-i18next
 - Auth: Supabase Auth + Twilio SMS OTP + JWT
 - Credit: CRS Credit API (server-side only — never called from client)
 - Analytics: PostHog. Feature flags via PostHog.
@@ -50,3 +50,26 @@ Never duplicate type definitions across apps.
 - Commit before every session
 - Use security-reviewer subagent before merging auth/financial code
 - Use compliance-reviewer subagent before merging any user-facing consent flows
+
+## Money & financial integrity (applies when remittance lands)
+- Money is integer minor units + explicit currency. NEVER floats. Type: Money = {amountMinor, currency}
+- No mixing currencies without an explicit FX step that records rate + timestamp
+- Double-entry ledger is source of truth; balances are derived, never stored mutable
+- Every money-moving endpoint takes an idempotency key and is safe to retry
+- Transaction lifecycle is an explicit state machine; reversals/refunds are states, not deletes
+
+## Harness / tooling
+- Skills (auto-apply when relevant):
+  - `api-route` — every new Fastify route
+  - `migration` — every new DB migration
+  - `tdd` — every implementation session
+  - `feature-flag` — gating new features
+  - `i18n` — any user-facing string
+  - `ledger` — any route that moves money
+  - `adverse-action` — any credit decision that can be negative
+  - `furnisher` — any credit bureau reporting or dispute code
+  - `fx-rate` — any cross-currency operation
+  - `supabase-postgres-best-practices` — any new table or RLS policy
+  - `pr-prep` — before opening any PR
+- Supabase MCP is available for schema/inspection. NEVER run destructive SQL or
+  apply migrations to a remote/prod project via MCP. Write migration files; apply via reviewed pipeline

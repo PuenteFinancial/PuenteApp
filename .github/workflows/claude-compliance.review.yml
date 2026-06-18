@@ -1,0 +1,32 @@
+name: Security and Compliance Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "apps/api/src/routes/**"
+      - "apps/api/src/services/**"
+      - "apps/api/src/plugins/audit.ts"
+      - "**/consent/**"
+      - "**/credit/**"
+      - "**/*auth*"
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # so it can post findings as a comment
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # full history so it can diff against base
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Review the diff in this PR (against the base branch) using TWO subagents:
+            1. The security-reviewer subagent.
+            2. The compliance-reviewer subagent.
+            Run each, then post a single PR comment with their findings grouped by
+            agent. If both report no issues, post "✅ Security & compliance: no issues."

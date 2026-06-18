@@ -21,17 +21,31 @@ packages/shared/src/types/credit.test.ts
 4. Any business rule specific to that route (e.g. FCRA gate → 403)
 
 ## Supertest integration test template (API routes)
+
 ```ts
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import supertest from 'supertest'
 import Fastify from 'fastify'
+import fp from 'fastify-plugin'
 import { <resource>Route } from './<resource>.js'
+
+// Mock auth plugin — decorates request.user so protected routes work in tests.
+// Real JWT verification only runs in production; here we control the identity.
+const mockAuth = fp(async (server) => {
+  server.addHook('onRequest', async (request, reply) => {
+    const token = request.headers.authorization?.replace('Bearer ', '')
+    if (!token) return reply.code(401).send({ error: 'Unauthorized' })
+    // Any non-empty token is treated as valid in tests; decode to extract test user
+    request.user = { id: 'test-user-id' }
+  })
+})
 
 describe('<METHOD> /v1/<resource>', () => {
   let app: ReturnType<typeof Fastify>
 
   beforeAll(async () => {
     app = Fastify({ logger: false })
+    await app.register(mockAuth)          // must register before the route
     await app.register(<resource>Route, { prefix: '/v1' })
     await app.ready()
   })
@@ -41,6 +55,7 @@ describe('<METHOD> /v1/<resource>', () => {
   it('happy path', async () => {
     const res = await supertest(app.server)
       .post('/v1/<resource>')
+      .set('Authorization', 'Bearer test-token')
       .send({ /* valid input */ })
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ /* expected shape */ })
@@ -49,6 +64,7 @@ describe('<METHOD> /v1/<resource>', () => {
   it('returns 400 with missing required field', async () => {
     const res = await supertest(app.server)
       .post('/v1/<resource>')
+      .set('Authorization', 'Bearer test-token')
       .send({})
     expect(res.status).toBe(400)
   })
@@ -56,10 +72,13 @@ describe('<METHOD> /v1/<resource>', () => {
   it('returns 401 without auth token', async () => {
     const res = await supertest(app.server)
       .get('/v1/<resource>')
+      // no Authorization header
     expect(res.status).toBe(401)
   })
 })
 ```
+
+For public routes (`config: { public: true }`), omit `mockAuth` registration entirely.
 
 ## Unit test template (pure functions)
 ```ts

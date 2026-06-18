@@ -1,4 +1,13 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(npm run typecheck)",
+      "Bash(npm run typecheck --silent *)",
+      "Bash(npm run lint)",
+      "Bash(npm run lint --silent *)",
+      "Bash(npm run test)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {

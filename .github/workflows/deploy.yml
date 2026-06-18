@@ -6,13 +6,19 @@ on:
 
 jobs:
   deploy-api:
-    name: Deploy API to Railway (staging)
+    name: Deploy API to Railway
     runs-on: ubuntu-latest
-    needs: [] # add 'check' job as dependency once CI is green consistently
+    needs: [check]  # CI must pass first
+    if: false  # TODO: remove this line once Railway is wired up
     steps:
       - uses: actions/checkout@v4
       - name: Deploy to Railway
-        run: |
-          echo "Connect Railway via: railway link && railway up"
-          echo "Add RAILWAY_TOKEN to GitHub secrets and use railwayapp/railway-github-action"
-        # TODO: add railwayapp/railway-github-action@v2 once Railway project is linked
+        uses: railwayapp/railway-github-action@v2
+        with:
+          railway_token: ${{ secrets.RAILWAY_TOKEN }}
+
+  # To activate:
+  # 1. Link Railway project: railway link (run locally)
+  # 2. Add RAILWAY_TOKEN to GitHub repo secrets
+  # 3. Remove the `if: false` line above
+  # 4. Verify the 'check' job name in ci.yml matches the `needs` array
