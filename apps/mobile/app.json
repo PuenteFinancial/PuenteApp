@@ -22,7 +22,14 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store"
+      [
+        "@sentry/react-native/expo",
+        {
+          "url": "https://sentry.io/",
+          "project": "react-native",
+          "organization": "puente-financial"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
