@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OG</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:#0B2138}
+  #og{
+    width:1200px;height:630px;position:relative;overflow:hidden;
+    background:
+      radial-gradient(820px 520px at 82% -8%, rgba(45,107,228,.26), transparent 62%),
+      #0F2B4A;
+    font-family:'Hanken Grotesk',system-ui,sans-serif;color:#F4F8FF;
+  }
+  .grid{position:absolute;inset:0;
+    background-image:linear-gradient(rgba(255,255,255,.05) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(255,255,255,.05) 1px,transparent 1px);
+    background-size:62px 62px;
+    -webkit-mask-image:radial-gradient(130% 120% at 25% 35%,#000 30%,transparent 78%);
+            mask-image:radial-gradient(130% 120% at 25% 35%,#000 30%,transparent 78%);
+  }
+  .bigmark{position:absolute;right:-30px;bottom:-50px;opacity:.55}
+  .top{position:absolute;top:60px;left:72px;display:flex;align-items:center;gap:14px}
+  .wm{font-size:27px;font-weight:900;letter-spacing:-.02em;white-space:nowrap}
+  .wm .fin{font-weight:600;color:#93A8C4}
+  .pill{position:absolute;top:166px;left:72px;display:inline-flex;align-items:center;gap:9px;
+    background:rgba(75,222,128,.12);border:1px solid rgba(75,222,128,.32);
+    color:#4BDE80;font-weight:700;font-size:17px;padding:9px 18px;border-radius:99px;white-space:nowrap}
+  .dot{width:9px;height:9px;border-radius:50%;background:#4BDE80}
+  .head{position:absolute;top:230px;left:70px;font-size:58px;font-weight:900;line-height:1.0;letter-spacing:-.03em}
+  .head .hl{display:block;white-space:nowrap}
+  .es{position:absolute;top:398px;left:72px;color:#F6A724;font-weight:800;font-size:29px;letter-spacing:-.01em;white-space:nowrap}
+  .foot{position:absolute;left:72px;right:72px;bottom:54px;display:flex;align-items:center;justify-content:space-between}
+  .foot .tag{color:#9FB3CE;font-size:22px;font-weight:500}
+  .foot .tag b{color:#F4F8FF;font-weight:800}
+  .foot .zero{color:#F4F8FF;font-weight:800;font-size:22px;white-space:nowrap}
+</style>
+</head>
+<body>
+<div id="og">
+  <div class="grid"></div>
+  <svg class="bigmark" width="620" viewBox="0 0 240 116" fill="none" style="color:#2D6BE4">
+    <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"/>
+  </svg>
+
+  <div class="top">
+    <svg width="82" viewBox="0 0 240 116" fill="none" style="color:#2D6BE4">
+      <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"/>
+    </svg>
+    <div class="wm">Puente <span class="fin">Financial</span></div>
+  </div>
+
+  <div class="pill"><span class="dot"></span>Now accepting waitlist</div>
+  <div class="head"><span class="hl">Send money home free.</span><span class="hl">Build your credit.</span></div>
+  <div class="es">El dinero que mandas a casa, te trae a casa.</div>
+
+  <div class="foot">
+    <div class="tag">The only card that turns remittances into <b>credit history</b>.</div>
+    <div class="zero">Zero fees.</div>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Puente — Bridge Mark</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --navy:#0F2B4A;
+    --navy-deep:#0B2138;
+    --line:rgba(255,255,255,.08);
+    --blue:#2D6BE4;
+    --ink:#F4F8FF;
+    --muted:#93A8C4;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:'Hanken Grotesk',system-ui,sans-serif;
+    background:var(--navy-deep);
+    color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+    padding:56px 48px 96px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  .kicker{font-size:13px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  h1{font-size:38px;font-weight:900;letter-spacing:-.02em;margin:10px 0 6px}
+  .sub{color:var(--muted);font-size:16px;max-width:600px;line-height:1.55}
+  section{margin-top:56px}
+  .sec-head{display:flex;align-items:baseline;gap:14px;margin-bottom:24px;border-bottom:1px solid var(--line);padding-bottom:14px}
+  .sec-head h2{font-size:14px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}
+  .sec-head span{font-size:14px;color:var(--muted)}
+
+  .hero{
+    display:grid;grid-template-columns:1.1fr 1fr;gap:24px;
+  }
+  .stage{
+    border:1px solid var(--line);border-radius:20px;
+    display:flex;align-items:center;justify-content:center;
+    padding:64px;min-height:300px;
+  }
+  .stage.navy{background:var(--navy)}
+  .stage.blue{background:var(--blue)}
+  .stage.paper{background:#EAF0FA}
+
+  .treat{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+  .cell{border:1px solid var(--line);border-radius:16px;padding:36px 24px;display:flex;flex-direction:column;align-items:center;gap:18px;min-height:180px;justify-content:center}
+  .cell .cap{font-size:12px;color:var(--muted);font-family:ui-monospace,monospace}
+  .cell.navy{background:var(--navy)}
+  .cell.blue{background:var(--blue)}
+  .cell.paper{background:#EAF0FA}
+
+  /* lockup */
+  .lockrow{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  .panel{border:1px solid var(--line);border-radius:18px;padding:44px;display:flex;align-items:center;gap:18px}
+  .panel.dark{background:var(--navy)}
+  .panel.light{background:#EAF0FA;color:var(--navy)}
+  .wordmark{font-weight:900;letter-spacing:-.025em;line-height:1}
+  .wordmark .fin{font-weight:600;color:var(--muted)}
+  .panel.light .wordmark .fin{color:#5C7characterized}
+  .panel.light .wordmark .fin{color:#6B83A3}
+
+  /* favicon */
+  .favrow{display:flex;align-items:flex-end;gap:30px;flex-wrap:wrap}
+  .favitem{display:flex;flex-direction:column;align-items:center;gap:10px}
+  .favitem .cap{font-size:12px;color:var(--muted);font-family:ui-monospace,monospace}
+  .tile{border-radius:24%;display:flex;align-items:center;justify-content:center;border:1px solid var(--line)}
+  .tile.navy{background:var(--navy)}
+  .tile.blue{background:var(--blue)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="kicker">Puente Financial</div>
+  <h1>Bridge Mark — simplified</h1>
+  <p class="sub">Your three-arch bridge, reduced to a single solid silhouette. Rail removed, even arches, one color. Built to read as a structure at any size — and as a clean app icon.</p>
+
+  <!-- HERO -->
+  <section>
+    <div class="sec-head"><h2>The Mark</h2><span>one shape · one color</span></div>
+    <div class="hero">
+      <div class="stage navy">
+        <svg width="320" viewBox="0 0 240 116" style="color:var(--blue)" aria-label="Puente bridge mark">
+          <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z
+            M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z
+            M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z
+            M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+        </svg>
+      </div>
+      <div class="stage blue">
+        <svg width="320" viewBox="0 0 240 116" style="color:#fff" aria-label="Puente bridge mark white">
+          <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z
+            M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z
+            M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z
+            M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- TREATMENTS -->
+  <section>
+    <div class="sec-head"><h2>Color Treatments</h2><span>monochrome — pick a context</span></div>
+    <div class="treat">
+      <div class="cell navy">
+        <svg width="150" viewBox="0 0 240 116" style="color:var(--blue)">
+          <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+        </svg>
+        <span class="cap">blue on navy</span>
+      </div>
+      <div class="cell navy">
+        <svg width="150" viewBox="0 0 240 116" style="color:#fff">
+          <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+        </svg>
+        <span class="cap">white on navy</span>
+      </div>
+      <div class="cell paper">
+        <svg width="150" viewBox="0 0 240 116" style="color:var(--navy)">
+          <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+        </svg>
+        <span class="cap">navy on paper</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- LOCKUP -->
+  <section>
+    <div class="sec-head"><h2>Lockup</h2><span>mark + wordmark</span></div>
+    <div class="lockrow">
+      <div class="panel dark">
+        <svg width="58" viewBox="0 0 240 116" style="color:var(--blue)">
+          <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+        </svg>
+        <div class="wordmark" style="font-size:30px">Puente <span class="fin">Financial</span></div>
+      </div>
+      <div class="panel light">
+        <svg width="44" viewBox="0 0 240 116" style="color:var(--navy)">
+          <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+        </svg>
+        <div class="wordmark" style="font-size:26px">Puente</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAVICON -->
+  <section>
+    <div class="sec-head"><h2>As a Favicon</h2><span>holds up small</span></div>
+    <div class="favrow">
+      <div class="favitem">
+        <div class="tile navy" style="width:120px;height:120px">
+          <svg width="84" viewBox="0 0 240 116" style="color:var(--blue)">
+            <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+          </svg>
+        </div>
+        <span class="cap">128px</span>
+      </div>
+      <div class="favitem">
+        <div class="tile blue" style="width:64px;height:64px">
+          <svg width="46" viewBox="0 0 240 116" style="color:#fff">
+            <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+          </svg>
+        </div>
+        <span class="cap">64px</span>
+      </div>
+      <div class="favitem">
+        <div class="tile navy" style="width:32px;height:32px">
+          <svg width="24" viewBox="0 0 240 116" style="color:var(--blue)">
+            <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+          </svg>
+        </div>
+        <span class="cap">32px</span>
+      </div>
+      <div class="favitem">
+        <div class="tile navy" style="width:16px;height:16px;border-radius:3px">
+          <svg width="13" viewBox="0 0 240 116" style="color:var(--blue)">
+            <path fill="currentColor" fill-rule="evenodd" d="M8 108 L8 58 Q120 30 232 58 L232 108 Z M40 108 L40 78 A20 20 0 0 1 80 78 L80 108 Z M100 108 L100 78 A20 20 0 0 1 140 78 L140 108 Z M160 108 L160 78 A20 20 0 0 1 200 78 L200 108 Z"></path>
+          </svg>
+        </div>
+        <span class="cap">16px</span>
+      </div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>
