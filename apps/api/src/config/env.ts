@@ -11,6 +11,7 @@ const envSchema = z.object({
     .transform((s) => s.split(',')),
   SUPABASE_URL: z.string().url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  SENTRY_DSN: z.string().url().optional(),
 })
 
 const parsed = envSchema.safeParse(process.env)

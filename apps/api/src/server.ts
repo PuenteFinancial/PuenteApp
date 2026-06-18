@@ -1,3 +1,5 @@
+import './instrument.js'
+import * as Sentry from '@sentry/node'
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import helmet from '@fastify/helmet'
@@ -13,6 +15,7 @@ const server = Fastify({
   },
 })
 
+Sentry.setupFastifyErrorHandler(server)
 await server.register(helmet)
 await server.register(cors, {
   origin: env.ALLOWED_ORIGINS,
