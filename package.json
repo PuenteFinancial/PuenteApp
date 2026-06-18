@@ -20,17 +20,9 @@
     "eslint": "^10.5.0",
     "@typescript-eslint/eslint-plugin": "^8.61.1",
     "@typescript-eslint/parser": "^8.61.1",
-    "husky": "^9.1.7",
-    "lint-staged": "^16.0.0"
   },
-  "lint-staged": {
-    "*.{ts,tsx}": [
-      "eslint --fix",
-      "prettier --write"
-    ],
-    "*.{js,json,md}": [
-      "prettier --write"
-    ]
+  "overrides": {
+    "react": "19.2.7"
   },
   "packageManager": "npm@11.17.0",
   "engines": {
