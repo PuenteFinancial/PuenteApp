@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /Users/joshuaphelps/Puente/PuenteApp && npm run typecheck --silent 2>&1 | head -20"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /Users/joshuaphelps/Puente/PuenteApp && npm run lint --silent 2>&1 | head -20"
+          }
+        ]
+      }
+    ]
+  }
+}

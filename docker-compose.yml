@@ -1,0 +1,19 @@
+# Local development only — runs a Postgres instance matching Supabase's version
+# Usage: docker compose up -d
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: puente
+      POSTGRES_PASSWORD: localdev
+      POSTGRES_DB: puente_dev
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

@@ -1,0 +1,13 @@
+{
+  "welcome": {
+    "title": "Welcome to Puente",
+    "tagline": "Send money home. Build credit here."
+  },
+  "dashboard": {
+    "title": "Dashboard"
+  },
+  "credit": {
+    "score": "Your Credit Score",
+    "building": "Keep going — you're building something."
+  }
+}

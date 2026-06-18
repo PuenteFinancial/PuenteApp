@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.turbo/
+
+# Environment variables — NEVER commit these
+.env
+.env.local
+.env.*.local
+.env.production
+
+# Personal Claude Code notes (not shared)
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Expo
+.expo/
+apps/mobile/.expo/
+
+# Testing
+coverage/
+
+# IDE
+.vscode/
+.idea/
