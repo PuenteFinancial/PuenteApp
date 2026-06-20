@@ -58,6 +58,30 @@ Never duplicate type definitions across apps.
 - Every money-moving endpoint takes an idempotency key and is safe to retry
 - Transaction lifecycle is an explicit state machine; reversals/refunds are states, not deletes
 
+## Monorepo / Turborepo
+
+Turborepo runs tasks in dependency order and caches outputs by hashing inputs.
+- `turbo run build` builds `packages/shared` first (upstream dep), then apps in parallel
+- `turbo run typecheck/lint/test` runs across all workspaces; skip unchanged packages via cache
+- `turbo.json` controls task ordering (`dependsOn: ["^build"]` = build deps first)
+
+**Root devDependencies — do not remove `react` and `react-dom`.**
+They exist at root to prevent `react-native`'s peer dep from hoisting `react@18` above `react@19`
+at the workspace root. npm overrides don't apply to auto-installed peer deps; a direct dep does.
+Removing them will break Vercel builds with a React version mismatch.
+
+## CI
+
+Workflows in `.github/workflows/`:
+- `ci.yml` — typecheck, lint, test, `next build` (web), audit. Runs on every PR and push to main.
+- `deploy.yml` — Railway API deploy. Disabled (`if: false`) until Railway is connected.
+- `claude.yml` — Claude PR assistant (responds to `@claude` in PRs/issues).
+- `claude-code-review.yml` — Claude auto-reviews every PR.
+- `claude-compliance.review.yml` — Claude compliance review on PRs.
+
+The `next build` step in CI catches Vercel deploy failures before they happen. env vars are
+lazily initialized (request-time only), so the build succeeds in CI without secrets.
+
 ## Harness / tooling
 - Skills (auto-apply when relevant):
   - `api-route` — every new Fastify route

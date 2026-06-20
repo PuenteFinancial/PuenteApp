@@ -30,5 +30,10 @@ jobs:
       - name: Test
         run: npm run test
 
+      - name: Build web
+        run: cd apps/web && npx next build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+
       - name: Audit dependencies
         run: npm audit --audit-level=high
