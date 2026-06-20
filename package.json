@@ -22,7 +22,8 @@
     "@typescript-eslint/parser": "^8.61.1"
   },
   "overrides": {
-    "react": "19.2.7"
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
   },
   "packageManager": "npm@11.17.0",
   "engines": {
