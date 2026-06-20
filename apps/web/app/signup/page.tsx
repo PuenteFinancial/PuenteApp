@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import Link from 'next/link'
 import SignupFlow from '@/components/SignupFlow'
 
 export const metadata: Metadata = {
@@ -21,9 +22,9 @@ export default function SignupPage() {
         maxWidth: 480,
         marginBottom: 36,
       }}>
-        <a href="/" aria-label="Puente Financial — home">
+        <Link href="/" aria-label="Puente Financial — home">
           <img src="/logo-dark.svg" alt="Puente" style={{ height: 34 }} />
-        </a>
+        </Link>
       </div>
       <SignupFlow />
     </main>

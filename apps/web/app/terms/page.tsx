@@ -50,7 +50,7 @@ export default function TermsPage() {
             <h2 className="text-xl font-semibold text-gray-900 mb-3">4. Limitation of Liability</h2>
             <p>
               Puente Financial shall not be liable for any damages arising from your use of or
-              reliance on this website or its content. This website is provided "as is" without
+              reliance on this website or its content. This website is provided &ldquo;as is&rdquo; without
               warranties of any kind.
             </p>
           </section>

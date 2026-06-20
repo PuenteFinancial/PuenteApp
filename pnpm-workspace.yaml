@@ -1,0 +1,12 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# Packages permitted to run install scripts (postinstall/preinstall).
+# All approved: these download platform binaries or compile native addons.
+allowBuilds:
+  '@sentry/cli': true   # downloads Sentry CLI binary
+  core-js: true         # polyfill environment check (React Native / Expo)
+  esbuild: true         # downloads platform esbuild binary (tsup, Next.js)
+  sharp: true           # native image addon (Next.js image optimisation)
+  unrs-resolver: true   # Rust-based module resolver

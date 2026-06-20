@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import { useLanguage } from '@/components/LanguageProvider'
 import LanguageToggle from '@/components/LanguageToggle'
 
@@ -10,9 +11,9 @@ export default function Footer() {
     <footer className="footer">
       <div className="footer-inner">
         <div>
-          <a href="/" aria-label="Puente Financial — home">
+          <Link href="/" aria-label="Puente Financial — home">
             <img src="/logo-hero.svg" alt="Puente" style={{ height: 34 }} />
-          </a>
+          </Link>
           <p className="footer-tag">{t.footer.tagline}</p>
         </div>
         <div className="footer-right">

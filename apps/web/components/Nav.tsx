@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 import { useLanguage } from '@/components/LanguageProvider'
 import LanguageToggle from '@/components/LanguageToggle'
 
@@ -21,9 +22,9 @@ export default function Nav() {
     <>
       <nav className={`nav${scrolled ? ' nav--scrolled' : ''}`}>
         <div className="nav-inner">
-          <a href="/" aria-label="Puente Financial — home">
+          <Link href="/" aria-label="Puente Financial — home">
             <img src="/logo-hero.svg" alt="Puente" className="nav-logo" />
-          </a>
+          </Link>
           <div className="nav-links">
             <a href="#remittances">{t.nav.remit}</a>
             <a href="#how">{t.nav.how}</a>
