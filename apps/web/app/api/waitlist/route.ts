@@ -1,6 +1,12 @@
+import { createHash } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { getSupabaseClient } from '@/lib/supabase'
 import { getPostHogClient } from '@/lib/posthog-server'
+
+// Hash phone so PostHog never holds raw PII — same phone always hashes to same ID
+function hashPhone(phone: string): string {
+  return createHash('sha256').update(phone.trim().replace(/\s+/g, '')).digest('hex')
+}
 
 export async function POST(req: NextRequest) {
   const distinctId = req.headers.get('X-POSTHOG-DISTINCT-ID')
@@ -16,9 +22,11 @@ export async function POST(req: NextRequest) {
     if (!phone?.trim()) {
       return NextResponse.json({ error: 'Phone number is required' }, { status: 400 })
     }
+
     const url = new URL(req.url)
-    const utm_source = req.headers.get('referer')
-      ? new URL(req.headers.get('referer')!).searchParams.get('utm_source')
+    const referer = req.headers.get('referer')
+    const utm_source_referer = referer
+      ? (() => { try { return new URL(referer).searchParams.get('utm_source') } catch { return null } })()
       : null
 
     const supabase = getSupabaseClient()
@@ -34,17 +42,20 @@ export async function POST(req: NextRequest) {
       knows_credit_score: knows_credit_score || null,
       credit_score_range: credit_score_range || null,
       language_preference: lang || 'en',
-      utm_source: url.searchParams.get('utm_source') ?? utm_source,
+      utm_source: url.searchParams.get('utm_source') ?? utm_source_referer,
       utm_medium: url.searchParams.get('utm_medium'),
       utm_campaign: url.searchParams.get('utm_campaign'),
       user_agent: req.headers.get('user-agent'),
     })
 
+    const phoneHash = hashPhone(phone)
+    const phId = distinctId ?? phoneHash
+
     if (error) {
-      console.error('Supabase insert error:', error)
+      console.error('Supabase insert error:', error.message)
       const ph = getPostHogClient()
       ph.capture({
-        distinctId: distinctId ?? phone.trim(),
+        distinctId: phId,
         event: 'waitlist_signup_failed',
         properties: {
           destination_country,
@@ -59,16 +70,15 @@ export async function POST(req: NextRequest) {
 
     const ph = getPostHogClient()
     ph.identify({
-      distinctId: distinctId ?? phone.trim(),
+      distinctId: phId,
       properties: {
         first_name: first_name.trim(),
-        phone: phone.trim(),
-        email: email?.trim() || undefined,
+        // No phone or email in PostHog — raw PII stays in Supabase only
         language_preference: lang || 'en',
       },
     })
     ph.capture({
-      distinctId: distinctId ?? phone.trim(),
+      distinctId: phId,
       event: 'waitlist_signup_completed',
       properties: {
         destination_country,
@@ -77,7 +87,7 @@ export async function POST(req: NextRequest) {
         remit_frequency: remit_frequency || undefined,
         remit_years: remit_years || undefined,
         language: lang || 'en',
-        utm_source: url.searchParams.get('utm_source') ?? utm_source,
+        utm_source: url.searchParams.get('utm_source') ?? utm_source_referer,
         utm_medium: url.searchParams.get('utm_medium'),
         utm_campaign: url.searchParams.get('utm_campaign'),
         $session_id: sessionId ?? undefined,
@@ -86,7 +96,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ success: true }, { status: 200 })
   } catch (err) {
-    console.error('Waitlist API error:', err)
+    console.error('Waitlist API error:', err instanceof Error ? err.message : 'Unknown error')
     const ph = getPostHogClient()
     ph.captureException(err, distinctId ?? 'anonymous')
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })

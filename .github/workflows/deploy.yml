@@ -8,8 +8,7 @@ jobs:
   deploy-api:
     name: Deploy API to Railway
     runs-on: ubuntu-latest
-    needs: [check]  # CI must pass first
-    if: false  # TODO: remove this line once Railway is wired up
+    if: false  # TODO: remove once Railway is wired up (also add needs: [check] from ci.yml at that point)
     steps:
       - uses: actions/checkout@v4
       - name: Deploy to Railway

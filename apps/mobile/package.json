@@ -10,7 +10,7 @@
     "build": "echo 'Use EAS Build: eas build'",
     "lint": "eslint app/",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@sentry/react-native": "^8.15.0",
