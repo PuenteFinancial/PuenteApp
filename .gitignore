@@ -39,3 +39,6 @@ coverage/
 
 # Supabase CLI temp files (linked project, version cache)
 supabase/.temp
+
+# Turborepo
+.turbo
