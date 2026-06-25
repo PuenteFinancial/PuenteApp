@@ -2,7 +2,7 @@
 
 ## Project
 Fintech monorepo. Credit-building remittance app targeting LATAM immigrants in the US.
-MVP: waitlist, credit score check, financial literacy content. Landing page is live.
+MVP: waitlist, credit score check, financial literacy content. Landing page is live at puentefinancial.com.
 
 ## Stack
 - Monorepo: Turborepo. `apps/mobile` (RN + Expo), `apps/api` (Fastify), `packages/shared` (TS types)
