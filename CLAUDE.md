@@ -106,7 +106,7 @@ feature/* ──PR──▶ main ──auto──▶ staging
 ## CI
 
 Workflows in `.github/workflows/`:
-- `ci.yml` — typecheck, lint, test, `next build` (web), audit. Runs on every PR and push to main.
+- `ci.yml` — typecheck, lint, test, `next build` (web). Runs on every PR and push to main. Uses Turborepo remote cache (requires `TURBO_TOKEN` + `TURBO_TEAM` GitHub secrets).
 - `secret-scan.yml` — Gitleaks secret scanning. Runs on every PR and push to main.
 - `deploy.yml` — Railway API deploy. Disabled (`if: false`) until Railway is connected.
 - `claude.yml` — Claude PR assistant (responds to `@claude` in PRs/issues).
