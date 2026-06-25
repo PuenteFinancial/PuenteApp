@@ -8,6 +8,7 @@ updates:
       day: monday
       time: "09:00"
       timezone: America/Denver
+    rebase-strategy: auto
     open-pull-requests-limit: 5
     groups:
       # Batch minor/patch bumps into one PR per group to reduce noise
@@ -32,4 +33,5 @@ updates:
       day: monday
       time: "09:00"
       timezone: America/Denver
+    rebase-strategy: auto
     open-pull-requests-limit: 3
