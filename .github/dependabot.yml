@@ -1,0 +1,35 @@
+version: 2
+updates:
+  # Root workspace + all pnpm packages
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    open-pull-requests-limit: 5
+    groups:
+      # Batch minor/patch bumps into one PR per group to reduce noise
+      expo:
+        patterns: ["expo*", "@expo/*"]
+      react-native:
+        patterns: ["react-native*", "@react-native/*"]
+      fastify:
+        patterns: ["fastify*", "@fastify/*"]
+      typescript-tooling:
+        patterns: ["typescript", "@typescript-eslint/*", "eslint*"]
+    ignore:
+      # Expo SDK major versions require manual migration
+      - dependency-name: "expo"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Denver
+    open-pull-requests-limit: 3

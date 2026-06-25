@@ -40,9 +40,9 @@ Never duplicate type definitions across apps.
 - expo-secure-store for any sensitive local storage (tokens, etc.)
 
 ## Testing
-- API: Vitest + Supertest. Run: `npm test` from `apps/api/`
+- API: Vitest + Supertest. Run: `pnpm test` from `apps/api/`
 - Write tests alongside implementation, not after
-- Run `npm run typecheck` after any change
+- Run `pnpm run typecheck` after any change
 
 ## Workflow
 - One task per session. `/clear` between unrelated tasks
@@ -70,14 +70,48 @@ They exist at root to prevent `react-native`'s peer dep from hoisting `react@18`
 at the workspace root. npm overrides don't apply to auto-installed peer deps; a direct dep does.
 Removing them will break Vercel builds with a React version mismatch.
 
+## Environments
+
+```
+feature/* ──PR──▶ main ──auto──▶ staging
+                                    │
+                              tag v* or manual
+                                    │
+                                    ▼
+                               production
+```
+
+| | Local | Preview (per-PR) | Staging | Production |
+|---|---|---|---|---|
+| Web | localhost:3000 | Vercel preview URL | Vercel (main branch) | Vercel (prod) |
+| API | localhost:3001 | → staging API | Railway staging | Railway prod |
+| DB | supabase start | → staging DB | Supabase staging project | Supabase prod project |
+| Mobile | Expo Go / dev build | — | EAS preview build | EAS production build |
+
+- `main` merges auto-deploy to staging. Production is promoted deliberately (tag or workflow dispatch).
+- Preview PRs point at the staging API + DB — no ephemeral API per PR at this stage.
+- Two separate Supabase projects: migrations run against staging first, then prod.
+- Secrets managed via Doppler, synced to Vercel / Railway / GitHub Actions / EAS.
+
+## Branch model & protection
+
+- `main` is the only long-lived branch. Feature work lives in short-lived branches merged via PR.
+- Branch protection on `main`:
+  - 1 required approving review (stale reviews dismissed on new commits)
+  - Required status checks: `Typecheck, Lint, Test` + `Gitleaks`
+  - Required conversation resolution before merge
+  - Linear history required (squash or rebase merges only)
+  - No force pushes, no deletion, no admin bypass
+
 ## CI
 
 Workflows in `.github/workflows/`:
 - `ci.yml` — typecheck, lint, test, `next build` (web), audit. Runs on every PR and push to main.
+- `secret-scan.yml` — Gitleaks secret scanning. Runs on every PR and push to main.
 - `deploy.yml` — Railway API deploy. Disabled (`if: false`) until Railway is connected.
 - `claude.yml` — Claude PR assistant (responds to `@claude` in PRs/issues).
 - `claude-code-review.yml` — Claude auto-reviews every PR.
-- `claude-compliance.review.yml` — Claude compliance review on PRs.
+- `claude-compliance.review.yml` — Claude security + compliance review on financial/auth paths.
 
 The `next build` step in CI catches Vercel deploy failures before they happen. env vars are
 lazily initialized (request-time only), so the build succeeds in CI without secrets.

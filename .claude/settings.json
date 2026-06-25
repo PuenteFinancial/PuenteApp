@@ -1,11 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm run typecheck)",
-      "Bash(npm run typecheck --silent *)",
-      "Bash(npm run lint)",
-      "Bash(npm run lint --silent *)",
-      "Bash(npm run test)"
+      "Bash(pnpm run typecheck)",
+      "Bash(pnpm run typecheck --silent *)",
+      "Bash(pnpm run lint)",
+      "Bash(pnpm run lint --silent *)",
+      "Bash(pnpm run test)"
     ]
   },
   "hooks": {
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd /Users/joshuaphelps/Puente/PuenteApp && npm run typecheck --silent 2>&1 | head -20"
+            "command": "cd /Users/joshuaphelps/Puente/PuenteApp && pnpm run typecheck --silent 2>&1 | head -20"
           }
         ]
       }
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd /Users/joshuaphelps/Puente/PuenteApp && npm run lint --silent 2>&1 | head -20"
+            "command": "cd /Users/joshuaphelps/Puente/PuenteApp && pnpm run lint --silent 2>&1 | head -20"
           }
         ]
       }

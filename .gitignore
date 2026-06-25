@@ -36,3 +36,6 @@ coverage/
 # IDE
 .vscode/
 .idea/
+
+# Supabase CLI temp files (linked project, version cache)
+supabase/.temp
