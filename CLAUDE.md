@@ -97,7 +97,7 @@ feature/* ──PR──▶ main ──auto──▶ staging
 
 - `main` is the only long-lived branch. Feature work lives in short-lived branches merged via PR.
 - Branch protection on `main`:
-  - 1 required approving review (stale reviews dismissed on new commits)
+  - 0 required reviews (solo — restore to 1 when a collaborator joins)
   - Required status checks: `Typecheck, Lint, Test` + `Gitleaks`
   - Required conversation resolution before merge
   - Linear history required (squash or rebase merges only)
