@@ -95,6 +95,11 @@ policy setting:
   velocity, account-verification signals) — instant for seasoned trusted users, hold-for-clearing for
   new/large/risky transfers. The gate code is unchanged; it reads a per-transfer decision instead of a
   constant.
+- **Float ceiling (MVP guardrail, live now):** the instant policy fronts cash before ACH clears, so
+  cap the **aggregate outstanding `funding_receivable`**. Block `FUNDED → SUBMITTED` when fronting
+  this transfer would push total fronted float past a configured ceiling. The ledger already computes
+  that number; this bounds a bug or bad actor from running exposure unbounded. It's the one risk
+  control we turn on from day one — everything else in the risk engine is "later."
 
 This is a config flag, not an architecture. Same philosophy as the funding-source abstraction.
 

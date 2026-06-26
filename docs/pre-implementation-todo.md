@@ -31,6 +31,7 @@ Everything to settle or build before we write feature code. We tackle these one 
 
 ## Compliance (design now, finish before launch)
 - [ ] **Reg E disclosures** — prepayment disclosure (FX rate, fees, MXN received) + receipt; EN + ES, human-translated.
+- [ ] **Confirm Bridge fee / FX-spread structure** — get a sample quote API response; blocks exact Reg E disclosure numbers and the ledger `provider_fees` booking.
 - [ ] **Error-resolution process** (Reg E §1005.33) — intake + investigation path.
 - [ ] **Cancellation handling** within the open window (wired into the state machine).
 - [ ] **Confirm OFAC / KYC division with Bridge** — who screens, what data we pass, where the handoff sits.
@@ -44,7 +45,7 @@ Everything to settle or build before we write feature code. We tackle these one 
 - [ ] Sentry + end-to-end trace IDs; alerts on stuck/failed transfers.
 - [ ] Reconciliation job — ledger vs Stripe funding vs Bridge payout.
 - [ ] Admin/ops console — view transfers, resolve stuck payout, process refund/cancel.
-- [ ] Fraud guardrails — amount caps, velocity limits, first-transaction holds.
+- [ ] Fraud & exposure guardrails — **float ceiling (cap aggregate fronted `funding_receivable`)**, amount caps, velocity limits, first-transaction holds.
 
 ---
 
