@@ -20,8 +20,12 @@ updates:
         patterns: ["fastify*", "@fastify/*"]
       typescript-tooling:
         patterns: ["typescript", "@typescript-eslint/*", "eslint*"]
+        update-types: ["minor", "patch"]
+      misc:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
     ignore:
-      # Expo SDK major versions require manual migration
+      # Major versions require manual migration — Dependabot will still open standalone PRs for them
       - dependency-name: "expo"
         update-types: ["version-update:semver-major"]
 
