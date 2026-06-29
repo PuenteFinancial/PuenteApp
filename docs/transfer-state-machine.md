@@ -141,13 +141,11 @@ are near-instant, the practical window is "until `COMPLETED`," often seconds.
 - Webhooks (Stripe, Bridge) are the source of truth for `FUNDED`, `IN_FLIGHT`, `COMPLETED`,
   `PAYOUT_FAILED`; handlers are idempotent (providers redeliver).
 
-## Ledger hooks (detail lives in ledger-rules doc)
+## Ledger hooks (see ledger-rules.md for the authoritative posting rules)
 
-- `FUNDED` — debit user funding source, credit Puente clearing.
-- `SUBMITTED`/`IN_FLIGHT` — move from clearing to Bridge payable; recognize Puente fee.
-- `COMPLETED` — settle payable.
-- `CANCELED` / `PAYOUT_FAILED` → `REFUNDED` — reverse the funding entries.
-- `FUNDING_REVERSED` — book a receivable/loss against the user (recovery).
+Every money-moving transition posts a balanced `ledger_transaction`. The precise debit/credit lines,
+account names, and exception paths (CANCELED, PAYOUT_FAILED, FUNDING_REVERSED, UNDER_REVIEW) are
+defined in `ledger-rules.md` — do not restate them here to avoid drift.
 
 Every transition writes an **audit log** entry. Balances are derived from ledger entries, never stored.
 
@@ -173,8 +171,9 @@ accepted now because users are trusted.
 ## Resolved decisions (2026-06-25)
 
 1. **Cancel UX:** disclosure of the cancellation right (on the receipt) is mandatory. The cancel
-   *action* is available only while pre-delivery (`FUNDED` / `SUBMITTED`) — naturally brief with
-   instant payout. Don't over-build the UX. Matches Remitly/Wise.
+   *action* is available only in `FUNDED` (before Bridge submission) — once `SUBMITTED` to an
+   instant rail, cancellation is no longer reliable and routes through `UNDER_REVIEW` instead.
+   Don't over-build the UX. Matches Remitly/Wise.
 2. **`FUNDING_REVERSED`:** manual ops/recovery for MVP. Risk engine (above) comes later.
 3. **Funding rail:** **ACH first, card second.** Accepts the ~60-day ACH return exposure (fine at
    trusted-user scale; neutralized later by the `funding_cleared` gate + risk engine).

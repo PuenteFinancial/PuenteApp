@@ -2,7 +2,8 @@
 
 ## Project
 Fintech monorepo. Credit-building remittance app targeting LATAM immigrants in the US.
-MVP: waitlist, credit score check, financial literacy content. Landing page is live at puentefinancial.com.
+Live now: waitlist, credit score check, financial literacy content (puentefinancial.com).
+In progress: USD → MXN remittance MVP — pure money movement. Lending is a separate future stack.
 
 ## Stack
 - Monorepo: Turborepo. `apps/mobile` (RN + Expo), `apps/api` (Fastify), `packages/shared` (TS types)
@@ -65,11 +66,6 @@ Turborepo runs tasks in dependency order and caches outputs by hashing inputs.
 - `turbo run typecheck/lint/test` runs across all workspaces; skip unchanged packages via cache
 - `turbo.json` controls task ordering (`dependsOn: ["^build"]` = build deps first)
 
-**Root devDependencies — do not remove `react` and `react-dom`.**
-They exist at root to prevent `react-native`'s peer dep from hoisting `react@18` above `react@19`
-at the workspace root. npm overrides don't apply to auto-installed peer deps; a direct dep does.
-Removing them will break Vercel builds with a React version mismatch.
-
 ## Environments
 
 ```
@@ -127,7 +123,7 @@ lazily initialized (request-time only), so the build succeeds in CI without secr
   - `adverse-action` — any credit decision that can be negative
   - `furnisher` — any credit bureau reporting or dispute code
   - `fx-rate` — any cross-currency operation
-  - `supabase-postgres-best-practices` — any new table or RLS policy
+  - `financial-schema-checklist` — any new table or RLS policy
   - `pr-prep` — before opening any PR
 - Supabase MCP is available for schema/inspection. NEVER run destructive SQL or
   apply migrations to a remote/prod project via MCP. Write migration files; apply via reviewed pipeline
