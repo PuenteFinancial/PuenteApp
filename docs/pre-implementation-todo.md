@@ -27,7 +27,7 @@ Everything to settle or build before we write feature code. We tackle these one 
 - [ ] **API contract** — v1 endpoints, Zod input/response schemas, error taxonomy, idempotency-key convention.
 - [ ] **Flow / sequence diagrams** — send-money happy path, payout webhook, error resolution, cancel/refund.
 - [ ] **Architecture diagram** — mobile, API, worker, Supabase, Railway, Bridge, Stripe, Twilio, PostHog, Sentry.
-- [ ] **`Money` type** in `packages/shared` — integer minor units + currency, no float constructors.
+- [x] **`Money` type** in `packages/shared` — integer minor units + currency, no float constructors.
 
 ## Compliance (design now, finish before launch)
 - [ ] **Reg E disclosures** — prepayment disclosure (FX rate, fees, MXN received) + receipt; EN + ES, human-translated.
