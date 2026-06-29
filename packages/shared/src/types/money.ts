@@ -11,6 +11,7 @@ export function moneyFromMinorUnits(amountMinor: number, currency: string): Mone
 
 // Parse a user-input display string like "10.99" — string-split avoids float drift
 export function moneyFromString(display: string, currency: string): Money {
+  if (display.trimStart().startsWith('-')) throw new Error(`Negative amounts are not allowed: "${display}"`)
   const divisor = MINOR_UNIT_DIVISORS[currency] ?? 100
   const decimals = Math.round(Math.log10(divisor))
   const cleaned = display.replace(/[^0-9.]/g, '')
@@ -38,6 +39,20 @@ export function formatMoney(m: Money, locale = 'en-US'): string {
     style: 'currency',
     currency: m.currency,
   }).format(m.amountMinor / divisor)
+}
+
+/** Returns negative / 0 / positive — same contract as Array.sort comparator. */
+export function compareMoney(a: Money, b: Money): number {
+  assertSameCurrency(a, b)
+  return a.amountMinor - b.amountMinor
+}
+
+export function isZero(m: Money): boolean {
+  return m.amountMinor === 0
+}
+
+export function zeroOf(currency: string): Money {
+  return { amountMinor: 0, currency }
 }
 
 function assertSameCurrency(a: Money, b: Money): void {
