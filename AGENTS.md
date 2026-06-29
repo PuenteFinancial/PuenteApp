@@ -1,4 +1,4 @@
-# Puente — Claude Code Context
+# Puente — Codex Context
 
 ## Project
 Fintech monorepo. Credit-building remittance app targeting LATAM immigrants in the US.
@@ -105,9 +105,9 @@ Workflows in `.github/workflows/`:
 - `ci.yml` — typecheck, lint, test, `next build` (web). Runs on every PR and push to main. Uses Turborepo remote cache (requires `TURBO_TOKEN` + `TURBO_TEAM` GitHub secrets).
 - `secret-scan.yml` — Gitleaks secret scanning. Runs on every PR and push to main.
 - `deploy.yml` — Railway API deploy. Disabled (`if: false`) until Railway is connected.
-- `claude.yml` — Claude PR assistant (responds to `@claude` in PRs/issues).
-- `claude-code-review.yml` — Claude auto-reviews every PR.
-- `claude-compliance.review.yml` — Claude security + compliance review on financial/auth paths.
+- `Codex.yml` — Codex PR assistant (responds to `@Codex` in PRs/issues).
+- `Codex-review.yml` — Codex auto-reviews every PR.
+- `Codex-compliance.review.yml` — Codex security + compliance review on financial/auth paths.
 
 The `next build` step in CI catches Vercel deploy failures before they happen. env vars are
 lazily initialized (request-time only), so the build succeeds in CI without secrets.

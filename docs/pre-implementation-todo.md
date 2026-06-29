@@ -1,7 +1,9 @@
 # Puente — Pre-Implementation To-Do
 
-**Date:** 2026-06-25
+**Date:** 2026-06-25 (updated 2026-06-29)
 **Scope:** USD → MXN remittance MVP (one send-money flow). Lending is a separate stack (cofounder owns it).
+
+Status legend: **drafted** → reviewed → approved → implemented
 
 Everything to settle or build before we write feature code. We tackle these one by one.
 
@@ -21,13 +23,13 @@ Everything to settle or build before we write feature code. We tackle these one 
 - [x] **Limits:** No Puente-imposed limits for MVP (5 trusted users). Keep limit fields in the data model as config for later. Note: Bridge's own AML monitoring + BSA thresholds (e.g., CTR at $10k) still apply underneath us regardless.
 
 ## Design artifacts (the "before code" docs)
-- [ ] **ERD / data model** — users, kyc_records, recipients, quotes, transfers, ledger_entries, payment_events, audit_log; RLS plan per table.
-- [x] **Transfer state machine** — v1 drafted in `docs/transfer-state-machine.md` (PENDING_PAYMENT → FUNDED → SUBMITTED → IN_FLIGHT → COMPLETED + exception states; `funding_cleared` gate; cancellation window). Pending review.
-- [ ] **Double-entry ledger rules** — account taxonomy, posting rules per event, invariants ("sum of entries = balance", money never created or destroyed).
-- [ ] **API contract** — v1 endpoints, Zod input/response schemas, error taxonomy, idempotency-key convention.
+- [x] **ERD / data model** — drafted in `docs/erd.md`. Pending: explicit constraint names; `idempotency_keys` table (in skill checklist).
+- [x] **Transfer state machine** — drafted in `docs/transfer-state-machine.md`. Pending review.
+- [x] **Double-entry ledger rules** — drafted in `docs/ledger-rules.md`. Pending: Bridge fee treatment; FX/slippage amounts once sample Bridge quote available.
+- [x] **API contract** — drafted in `docs/api-contract.md`. Pending: field-level Zod schemas; finalize after Bridge quote sample.
 - [ ] **Flow / sequence diagrams** — send-money happy path, payout webhook, error resolution, cancel/refund.
 - [ ] **Architecture diagram** — mobile, API, worker, Supabase, Railway, Bridge, Stripe, Twilio, PostHog, Sentry.
-- [x] **`Money` type** in `packages/shared` — integer minor units + currency, no float constructors.
+- [x] **`Money` type** in `packages/shared` — integer minor units + currency, no float constructors. Tests written.
 
 ## Compliance (design now, finish before launch)
 - [ ] **Reg E disclosures** — prepayment disclosure (FX rate, fees, MXN received) + receipt; EN + ES, human-translated.
