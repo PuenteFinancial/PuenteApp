@@ -13,7 +13,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@sentry/react-native": "^8.15.0",
+    "@sentry/react-native": "^8.16.0",
     "expo": "~56.0.12",
     "expo-constants": "~56.0.18",
     "expo-linking": "~56.0.14",
