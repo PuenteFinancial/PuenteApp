@@ -29,6 +29,9 @@
 
 ## Chart of accounts (all USD)
 
+All accounts are company-level (one row each). Per-transfer attribution is via `transfer_id` on
+`ledger_entries`, not separate accounts per transfer.
+
 | Account | Type | Normal balance | Meaning |
 |---|---|---|---|
 | `cash_clearing` | asset | debit | Float / cash on hand (our Stripe/bank balance). |
@@ -38,6 +41,7 @@
 | `refunds_payable` | liability | credit | Owed back to a sender on cancel/failure. |
 | `fee_revenue` | revenue | credit | Puente's fee (plus any FX spread, realized in USD). |
 | `provider_fees` | expense | debit | What we pay Bridge + Stripe. |
+| `fx_slippage` | expense | debit | Variance between the quoted USD send and Bridge's actual USD cost at execution (Bridge doesn't lock). Can be a credit when favorable. |
 | `loss_funding_reversed` | expense | debit | Write-offs from post-delivery ACH returns / chargebacks. |
 
 Convention: **assets & expenses increase on debit; liabilities & revenue increase on credit.**
@@ -79,11 +83,21 @@ against an open `funding_receivable`** — that gap is your ACH exposure, sittin
 ### Exceptions
 
 ```
-CANCELED  (in FUNDED, pre-submission — reverse the FUNDED batch)
+CANCELED  (ACH not yet in flight — reverse the FUNDED batch cleanly)
+  DR transfer_payable        98
+  DR fee_revenue              2    ← reverses the FUNDED credit; fee not earned on a cancel
+  CR funding_receivable     100
+
+CANCELED  (ACH already in flight — keep funding_receivable open; owe refund from float)
   DR transfer_payable        98
   DR fee_revenue              2
+  CR refunds_payable        100
+  ── pay the refund immediately from float:
+  DR refunds_payable        100
+  CR cash_clearing          100
+  ── ACH clears independently (may be days later):
+  DR cash_clearing          100
   CR funding_receivable     100
-  (nothing has left float yet; clean. If ACH already pulled, refund via refunds_payable.)
 
 PAYOUT_FAILED → REFUNDED  (after SUBMITTED; Bridge returns principal)
   1) Bridge returns the $98:
@@ -105,11 +119,15 @@ FUNDING_REVERSED  (ACH return after COMPLETED — money already delivered, irrev
   (Or DR a user receivable instead of straight loss, then write off to loss_funding_reversed if
    unrecoverable. This is the loss the risk engine exists to prevent.)
 
-UNDER_REVIEW → REFUNDED  (post-delivery correction — NOT a reversal)
+UNDER_REVIEW → REFUNDED  (entry from COMPLETED — post-delivery Reg E correction, NOT a reversal)
   DR loss_funding_reversed   X      ← or a dedicated correction-expense account
   CR cash_clearing           X
   (A correction payment is a NEW debit against Puente. The original COMPLETED entries remain
    intact — we never rewrite delivered history.)
+
+  Pre-delivery exits (entry from FUNDED, SUBMITTED, or IN_FLIGHT) use the CANCELED or
+  PAYOUT_FAILED posting for the corresponding stage — those paths are TBD pending
+  full design of the ops console and pre-delivery dispute handling.
 ```
 
 ## Invariants (must always hold)
@@ -118,7 +136,9 @@ UNDER_REVIEW → REFUNDED  (post-delivery correction — NOT a reversal)
 - `account balance = SUM(its entries)`; recomputed, never stored.
 - No entry is ever updated or deleted; corrections are new transactions.
 - Each money-moving transition produces exactly one `ledger_transaction`, idempotent on
-  `(transfer_id, transition)`.
+  `(transfer_id, transition)`. Enforced by a `UNIQUE(transfer_id, transition)` constraint on
+  `ledger_transactions`; a conflicting insert is a no-op (`ON CONFLICT DO NOTHING`), so retried
+  workers are safe.
 - **Conservation:** across a completed transfer, cash gained = `fee_revenue − provider_fees`.
 
 ## Float exposure & the ceiling
@@ -134,6 +154,11 @@ Examples charge Bridge's fee **on top** (`provider_fees` debit at `SUBMITTED`). 
 **nets** its fee inside the send, the same `provider_fees` account is used — only the recognition
 timing shifts. Finalize from a **sample Bridge quote API response**, which also feeds the Reg E
 disclosure numbers (tracked in `pre-implementation-todo.md`).
+
+**No rate lock.** Bridge gives only an indicative rate, so the actual USD cost to deliver is known at
+execution (`SUBMITTED`), not at quote time. We quote the customer a firm rate (`source_rate` minus a
+buffer) and absorb the difference: the variance between the quoted send and Bridge's actual USD cost
+books to `fx_slippage`. The buffer in the customer rate funds it; a favorable move lands as a credit.
 
 ## Reconciliation
 
