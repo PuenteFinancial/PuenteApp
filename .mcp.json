@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "supabase": {
-      "command": "npx",
-      "args": ["-y", "@supabase/mcp-server-supabase@latest", "--read-only", "--project-ref=namdkmsmdkmdffgscqgd"]
+      "command": "node_modules/.bin/mcp-server-supabase",
+      "args": ["--read-only", "--project-ref=namdkmsmdkmdffgscqgd"]
     }
   }
 }
