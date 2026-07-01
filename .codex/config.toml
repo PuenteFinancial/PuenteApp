@@ -1,2 +1,3 @@
 [mcp_servers.supabase]
-url = "https://mcp.supabase.com/mcp"
+command = "node_modules/.bin/mcp-server-supabase"
+args = ["--read-only", "--project-ref=namdkmsmdkmdffgscqgd"]
