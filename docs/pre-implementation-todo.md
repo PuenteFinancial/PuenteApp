@@ -41,11 +41,12 @@ Everything to settle or build before we write feature code. We tackle these one 
 - [ ] **Consent capture** — TCPA (SMS), E-SIGN (e-sign consent), privacy; each with its own timestamp.
 
 ## Infra & ops setup
+- [ ] **Funding processor** — choose the ACH (+ debit card) processor; Stripe & Dwolla declined us (startup). Shortlist: **Plaid Transfer** (ACH/bank only), **Moov** (ACH + card, one integration), **Etogy** (card + ACH — vet stability/compliance). Apply in parallel; lead with "Bridge is the MTL." Wrap behind a **`FundingProcessor` interface** (swappable). Confirm quasi-cash / money-transfer MCC approval before relying on card funding.
 - [ ] Paid Supabase + PITR; separate staging & prod projects.
 - [ ] Railway services: API + worker; cron for reconciliation.
 - [ ] Secrets via Doppler across all envs.
 - [ ] Sentry + end-to-end trace IDs; alerts on stuck/failed transfers.
-- [ ] Reconciliation job — ledger vs Stripe funding vs Bridge payout.
+- [ ] Reconciliation job — ledger vs funding processor vs Bridge payout.
 - [ ] Admin/ops console — view transfers, resolve stuck payout, process refund/cancel.
 - [ ] Fraud & exposure guardrails — **float ceiling (cap aggregate fronted `funding_receivable`)**, amount caps, velocity limits, first-transaction holds.
 
