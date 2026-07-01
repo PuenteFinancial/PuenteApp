@@ -129,11 +129,12 @@ slippage (see ledger `fx_slippage`).
   `provider_fee_amount_minor` *(estimated at quote; actual booked at `SUBMITTED` — Bridge doesn't lock)*
 - `funding_source_type` TEXT — `ach` | `card` | (`loc` later) — **the abstraction hook**
 - `funding_cleared` BOOLEAN default false — the gate flag
+- `disclosure_accepted_at` timestamptz — when the sender accepted the Reg E prepayment disclosure (gates funding; set at `confirm`)
 - `payment_at` timestamptz — when the sender paid (starts the cancellation clock)
 - `cancelable_until` timestamptz — `payment_at + 30 min`; cancelable = `state = FUNDED AND now() < cancelable_until`
 - `idempotency_key` TEXT UNIQUE — for the Bridge submission
 - `provider_transfer_ref` TEXT — Bridge transfer id
-- `stripe_payment_ref` TEXT
+- `funding_payment_ref` TEXT — funding processor payment id
 - `completed_at` timestamptz
 - **RLS:** owner **reads** own; **all writes service-role only** (clients never mutate transfer state).
 
