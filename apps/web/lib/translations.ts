@@ -27,8 +27,8 @@ export type Translations = {
     calc: {
       to: string
       you: string; they: string
-      rate: string; fee: string; flat: string
-      total: string; note: string; cta: string
+      rate: string
+      note: string; cta: string
     }
   }
   how: {
@@ -80,7 +80,7 @@ const en: Translations = {
     cta1: 'Sign up',
     cta2: 'See how it works',
     elig: 'Works with your ITIN or SSN.',
-    notes: ['$5 flat fee', 'Real exchange rate', 'Built for newcomers'],
+    notes: ['Real exchange rate', 'Built for newcomers'],
   },
   phone: {
     greeting: 'Hi,', name: 'María',
@@ -93,12 +93,12 @@ const en: Translations = {
   remit: {
     eyebrow: 'Remittances',
     h2: 'Money home, the moment you tap send.',
-    sub: 'One flat $5 fee. The real exchange rate, no markup. And every transfer you send also builds your U.S. credit history.',
+    sub: 'The real exchange rate, no markup. And every transfer you send also builds your U.S. credit history.',
     calc: {
       to: 'Sending to',
       you: 'You send', they: 'They receive',
-      rate: '1 USD = 17.20 MXN', fee: 'Fee', flat: '$5.00 flat',
-      total: 'Total to pay', note: 'Real mid-market rate · no markup',
+      rate: '1 USD = 17.20 MXN',
+      note: 'Real mid-market rate · no markup',
       cta: 'Sign up',
     },
   },
@@ -107,7 +107,7 @@ const en: Translations = {
     h2: [['Build credit ', 'without thinking about it.']],
     sub: 'Sending money home is something you already do. With Puente, every on-time payment helps build your U.S. credit history — automatically.',
     steps: [
-      { t: 'Send money home', d: 'Send like you always do — $5 flat, at the real exchange rate, arriving in seconds.' },
+      { t: 'Send money home', d: 'Send like you always do — at the real exchange rate, arriving in seconds.' },
       { t: 'We report your on-time payments', d: 'Puente reports your payments to the major U.S. credit bureaus on your behalf.' },
       { t: 'Your credit history grows', d: 'On-time payments build a stronger U.S. credit profile over time — no card, no debt.' },
     ],
@@ -140,7 +140,7 @@ const en: Translations = {
       refLabel: 'Share your invite link and skip ahead',
       copy: 'Copy', copied: 'Copied!',
       wa: 'Share on WhatsApp',
-      waText: 'I just joined the Puente waitlist — send money home for a $5 flat fee and build credit. Join me:',
+      waText: 'I just joined the Puente waitlist — send money home and build credit. Join me:',
     },
     steps: [
       { h: 'Tell us about yourself' },
@@ -167,7 +167,7 @@ const es: Translations = {
     cta1: 'Regístrate',
     cta2: 'Mira cómo funciona',
     elig: 'Funciona con tu ITIN o SSN.',
-    notes: ['Tarifa fija de $5', 'Tipo de cambio real', 'Hecha para ti'],
+    notes: ['Tipo de cambio real', 'Hecha para ti'],
   },
   phone: {
     greeting: 'Buenas,', name: 'María',
@@ -180,12 +180,12 @@ const es: Translations = {
   remit: {
     eyebrow: 'Remesas',
     h2: 'Dinero a casa, en el momento en que tocas enviar.',
-    sub: 'Una tarifa fija de $5. El tipo de cambio real, sin sobreprecio. Y cada transferencia que envías también construye tu historial crediticio en EE. UU.',
+    sub: 'El tipo de cambio real, sin sobreprecio. Y cada transferencia que envías también construye tu historial crediticio en EE. UU.',
     calc: {
       to: 'Enviar a',
       you: 'Tú envías', they: 'Ellos reciben',
-      rate: '1 USD = 17.20 MXN', fee: 'Tarifa', flat: '$5.00 fija',
-      total: 'Total a pagar', note: 'Tipo de cambio real · sin sobreprecio',
+      rate: '1 USD = 17.20 MXN',
+      note: 'Tipo de cambio real · sin sobreprecio',
       cta: 'Regístrate',
     },
   },
@@ -194,7 +194,7 @@ const es: Translations = {
     h2: [['Crea crédito ', 'sin siquiera pensarlo.']],
     sub: 'Enviar dinero a casa es algo que ya haces. Con Puente, cada pago a tiempo ayuda a construir tu historial crediticio en EE. UU. — automáticamente.',
     steps: [
-      { t: 'Envía dinero a casa', d: 'Envía como siempre — $5 fijos, al tipo de cambio real, llegando en segundos.' },
+      { t: 'Envía dinero a casa', d: 'Envía como siempre — al tipo de cambio real, llegando en segundos.' },
       { t: 'Reportamos tus pagos a tiempo', d: 'Puente reporta tus pagos a los principales burós de crédito de EE. UU. por ti.' },
       { t: 'Tu historial de crédito crece', d: 'Los pagos a tiempo construyen un mejor perfil de crédito con el tiempo — sin tarjeta, sin deudas.' },
     ],
@@ -227,7 +227,7 @@ const es: Translations = {
       refLabel: 'Comparte tu enlace de invitación y avanza',
       copy: 'Copiar', copied: '¡Copiado!',
       wa: 'Compartir por WhatsApp',
-      waText: 'Me uní a la lista de Puente — envía dinero a casa con tarifa fija de $5 y crea crédito. Únete:',
+      waText: 'Me uní a la lista de Puente — envía dinero a casa y crea crédito. Únete:',
     },
     steps: [
       { h: 'Cuéntanos sobre ti' },
