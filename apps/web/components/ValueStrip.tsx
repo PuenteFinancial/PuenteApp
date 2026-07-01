@@ -3,8 +3,6 @@
 import { useLanguage } from '@/components/LanguageProvider'
 
 const ICONS = [
-  /* dollar */
-  <svg key="fee" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>,
   /* trending up */
   <svg key="rate" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>,
   /* id card */
@@ -15,7 +13,7 @@ const ICONS = [
 
 export default function ValueStrip() {
   const { t } = useLanguage()
-  const items = [t.hero.notes[0], t.hero.notes[1], t.hero.elig, t.hero.notes[2]]
+  const items = [t.hero.notes[0], t.hero.elig, t.hero.notes[1]]
 
   return (
     <div className="vstrip">

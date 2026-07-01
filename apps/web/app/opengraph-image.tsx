@@ -79,14 +79,13 @@ export default function Image() {
             fontWeight: 400,
             display: 'flex', maxWidth: 720,
           }}>
-            Send money home for $5 flat at the real exchange rate — and build your U.S. credit history with every payment.
+            Send money home at the real exchange rate — and build your U.S. credit history with every payment.
           </div>
         </div>
 
         {/* Bottom chips */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           {[
-            '$5 flat fee',
             'Real exchange rate',
             'Works with your ITIN or SSN.',
             'Built for newcomers',

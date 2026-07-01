@@ -2,12 +2,11 @@
 
 import { useState, useEffect } from 'react'
 import { useLanguage } from '@/components/LanguageProvider'
-import { FX_RATE, FX_FEE } from '@/lib/fx'
+import { FX_RATE } from '@/lib/fx'
 import { COUNTRIES } from '@/lib/countries'
 
 const CALC_COUNTRIES = COUNTRIES.filter((c) => c.inCalc)
 const fmtInt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 })
-const usd = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const CHIPS = [100, 200, 500, 1000]
 
 export default function Calculator() {
@@ -26,7 +25,6 @@ export default function Calculator() {
 
   const numAmt = Number(amt) || 0
   const receive = Math.round(numAmt * rate)
-  const total = numAmt + FX_FEE
   const [c1, c2, c3] = country.flagColors ?? ['var(--cielo)', '#fff', 'var(--mar)']
 
   return (
@@ -119,10 +117,6 @@ export default function Calculator() {
         </span>
       </div>
 
-      <div className="calc-foot">
-        <span>{c.fee} <b>{c.flat}</b></span>
-        <span>{c.total} <b>${usd.format(total)}</b></span>
-      </div>
       <div className="calc-note">
         <span className="pip" />{c.note}
       </div>
