@@ -1,6 +1,6 @@
 # Data Model / ERD — USD → MXN Remittance MVP
 
-**Date:** 2026-06-26
+**Date:** 2026-07-02
 **Status:** v1 draft for review
 **Pairs with:** `transfer-state-machine.md`, `ledger-rules.md`
 
@@ -57,6 +57,7 @@ App-level user record; `auth.users` (Supabase-managed) holds phone/email/auth.
 - `status` TEXT — `active` | `suspended` | `closed`
 - `kyc_status` TEXT — `none` | `pending` | `approved` | `rejected` (denormalized from latest kyc_record)
 - `risk_tier` TEXT — `trusted` | `standard` | `elevated` (drives the funding gate later)
+- `provider_customer_ref` TEXT UNIQUE — Bridge customer id; set after KYC approval; used as `on_behalf_of` on transfers. Nullable until created.
 - **RLS:** owner reads/updates own row.
 
 ### consents  *(append-only)*
@@ -102,6 +103,8 @@ One recipient → many destinations (bank, wallet, cash, card), varying by count
   `{network, recipient_doc_ref}` cash)
 - `label` TEXT — user nickname
 - `status` TEXT — `active` | `archived`
+- `provider_account_ref` TEXT UNIQUE — Bridge external account id; set when the destination is registered with Bridge as an external account. A transfer's destination references this id. Nullable until registered.
+- `verification_status` TEXT DEFAULT `'unverified'` — `unverified` | `verified` | `failed`; Bridge Verification-of-Payee / name-match result. Gate payout submission if not `verified`. Set alongside `provider_account_ref`.
 - **RLS:** owner-scoped (via recipient).
 
 ### quotes  *(Puente's firm, time-boxed offer — Bridge does not lock rates)*
@@ -216,6 +219,13 @@ Immutable snapshot of exactly what the user was shown.
 
 > **Float ceiling** is not a table — it's derived live as `SUM(funding_receivable)` and enforced in
 > the app against a config value (env/settings). See ledger-rules + state machine.
+
+> **Bridge wallet id** is not stored in the schema. The stablecoin leg (USD→USDC→USD) is Bridge's
+> internal implementation detail — our transfers specify `payment_rail: ach_push` on the source and
+> `payment_rail: ach` + `external_account_id` on the destination; Bridge routes through USDC
+> invisibly. If we ever use a Bridge wallet directly as a source or destination (e.g. for a float
+> account), the wallet id belongs in app config (env var), not a schema column — same reasoning as
+> the float ceiling.
 
 ## RLS posture summary
 
