@@ -1,0 +1,3 @@
+setup:
+  - project: puente-web
+    config: dev

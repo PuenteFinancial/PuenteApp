@@ -7,10 +7,15 @@ const envSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   ALLOWED_ORIGINS: z
     .string()
-    .default('http://localhost:8081')
+    .default('http://localhost:3000,http://localhost:8081')
     .transform((s) => s.split(',')),
   SUPABASE_URL: z.string().url(),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  SUPABASE_SECRET_KEY: z.string().min(1),
+  SUPABASE_PUBLISHABLE_KEY: z.string().min(1),
+  SUPABASE_JWKS_URL: z.string().url(),
+  TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
+  TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
+  TWILIO_PHONE_NUMBER: z.string().min(1).optional(),
   SENTRY_DSN: z.string().url().optional(),
 })
 

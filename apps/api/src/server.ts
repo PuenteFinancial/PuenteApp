@@ -7,6 +7,7 @@ import rateLimit from '@fastify/rate-limit'
 import { env } from './config/env.js'
 import { auditPlugin } from './plugins/audit.js'
 import { healthRoute } from './routes/v1/health.js'
+import { waitlistRoute } from './routes/v1/waitlist.js'
 
 const server = Fastify({
   logger: {
@@ -27,6 +28,7 @@ await server.register(rateLimit, {
 })
 await server.register(auditPlugin)
 await server.register(healthRoute, { prefix: '/v1' })
+await server.register(waitlistRoute, { prefix: '/v1' })
 
 try {
   await server.listen({ port: env.PORT, host: env.HOST })
