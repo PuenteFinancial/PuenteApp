@@ -1,6 +1,5 @@
 import { createHash } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
-import { getSupabaseClient } from '@/lib/supabase'
 import { getPostHogClient } from '@/lib/posthog-server'
 
 // Hash phone so PostHog never holds raw PII — same phone always hashes to same ID
@@ -14,7 +13,19 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json()
-    const { first_name, phone, email, monthly_send_amount, destination_country, remittance_provider, remit_frequency, remit_years, knows_credit_score, credit_score_range, lang } = body
+    const {
+      first_name,
+      phone,
+      email,
+      monthly_send_amount,
+      destination_country,
+      remittance_provider,
+      remit_frequency,
+      remit_years,
+      knows_credit_score,
+      credit_score_range,
+      lang,
+    } = body
 
     if (!first_name?.trim()) {
       return NextResponse.json({ error: 'First name is required' }, { status: 400 })
@@ -26,33 +37,52 @@ export async function POST(req: NextRequest) {
     const url = new URL(req.url)
     const referer = req.headers.get('referer')
     const utm_source_referer = referer
-      ? (() => { try { return new URL(referer).searchParams.get('utm_source') } catch { return null } })()
+      ? (() => {
+          try {
+            return new URL(referer).searchParams.get('utm_source')
+          } catch {
+            return null
+          }
+        })()
       : null
 
-    const supabase = getSupabaseClient()
-    const { error } = await supabase.from('waitlist').insert({
-      first_name: first_name.trim(),
-      phone: phone.trim(),
-      email: email?.trim() || null,
-      monthly_send_amount: monthly_send_amount || null,
-      destination_country: destination_country || null,
-      remittance_provider: remittance_provider || null,
-      remit_frequency: remit_frequency || null,
-      remit_years: remit_years || null,
-      knows_credit_score: knows_credit_score || null,
-      credit_score_range: credit_score_range || null,
-      language_preference: lang || 'en',
-      utm_source: url.searchParams.get('utm_source') ?? utm_source_referer,
-      utm_medium: url.searchParams.get('utm_medium'),
-      utm_campaign: url.searchParams.get('utm_campaign'),
-      user_agent: req.headers.get('user-agent'),
+    const apiUrl = process.env.INTERNAL_API_URL
+    if (!apiUrl) throw new Error('INTERNAL_API_URL is not configured')
+
+    const apiRes = await fetch(`${apiUrl}/v1/waitlist`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        first_name: first_name.trim(),
+        phone: phone.trim(),
+        ...(email?.trim() && { email: email.trim() }),
+        ...(monthly_send_amount && { monthly_send_amount }),
+        ...(destination_country && { destination_country }),
+        ...(remittance_provider && { remittance_provider }),
+        ...(remit_frequency && { remit_frequency }),
+        ...(remit_years && { remit_years }),
+        ...(knows_credit_score && { knows_credit_score }),
+        ...(credit_score_range && { credit_score_range }),
+        language_preference: lang || 'en',
+        ...(url.searchParams.get('utm_source') ?? utm_source_referer
+          ? { utm_source: url.searchParams.get('utm_source') ?? utm_source_referer }
+          : {}),
+        ...(url.searchParams.get('utm_medium') && {
+          utm_medium: url.searchParams.get('utm_medium'),
+        }),
+        ...(url.searchParams.get('utm_campaign') && {
+          utm_campaign: url.searchParams.get('utm_campaign'),
+        }),
+        ...(req.headers.get('user-agent') && { user_agent: req.headers.get('user-agent') }),
+      }),
     })
 
     const phoneHash = hashPhone(phone)
     const phId = distinctId ?? phoneHash
 
-    if (error) {
-      console.error('Supabase insert error:', error.message)
+    if (!apiRes.ok) {
+      const errBody = await apiRes.json().catch(() => ({})) as { error?: string }
+      console.error('Waitlist API error:', errBody)
       const ph = getPostHogClient()
       ph.capture({
         distinctId: phId,
@@ -61,7 +91,7 @@ export async function POST(req: NextRequest) {
           destination_country,
           monthly_send_amount,
           language: lang || 'en',
-          error: error.message,
+          error: errBody?.error ?? 'Unknown',
           $session_id: sessionId ?? undefined,
         },
       })
