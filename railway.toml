@@ -1,5 +1,4 @@
 [build]
-builder = "NIXPACKS"
 buildCommand = "pnpm turbo build --filter=@puente/api"
 
 [deploy]
