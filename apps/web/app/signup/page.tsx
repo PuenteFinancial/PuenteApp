@@ -4,7 +4,7 @@ import SignupFlow from '@/components/SignupFlow'
 
 export const metadata: Metadata = {
   title: 'Sign Up — Puente Financial',
-  description: 'Create your Puente account. Send money home for $5 flat and build your U.S. credit history.',
+  description: 'Create your Puente account. Send money home and build your U.S. credit history.',
 }
 
 export default function SignupPage() {

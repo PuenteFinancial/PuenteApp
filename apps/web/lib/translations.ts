@@ -93,12 +93,12 @@ const en: Translations = {
   remit: {
     eyebrow: 'Remittances',
     h2: 'Money home, the moment you tap send.',
-    sub: 'The real exchange rate, no markup. And every transfer you send also builds your U.S. credit history.',
+    sub: 'Send at the real exchange rate. And every transfer you send also builds your U.S. credit history.',
     calc: {
       to: 'Sending to',
       you: 'You send', they: 'They receive',
       rate: '1 USD = 17.20 MXN',
-      note: 'Real mid-market rate · no markup',
+      note: 'Real mid-market rate',
       cta: 'Sign up',
     },
   },

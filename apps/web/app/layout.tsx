@@ -32,7 +32,7 @@ export const viewport: Viewport = {
 export const metadata: Metadata = {
   title: 'Puente Financial — Send money home. Build U.S. credit doing it.',
   description:
-    'Send money home for $5 flat at the real exchange rate — and build your U.S. credit history with every payment. One app, built for newcomers.',
+    'Send money home at the real exchange rate — and build your U.S. credit history with every payment. One app, built for newcomers.',
   metadataBase: new URL('https://www.puentefinancial.com'),
   icons: {
     icon: [
