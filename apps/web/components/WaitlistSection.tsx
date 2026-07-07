@@ -20,7 +20,7 @@ export default function WaitlistSection() {
             </li>
           ))}
         </ul>
-        <a className="btn btn--accent btn--lg" href="/signup">{s.cta}</a>
+        <a className="btn btn--accent btn--lg" href="/waitlist">{s.cta}</a>
       </div>
     </section>
   )

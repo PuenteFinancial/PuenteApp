@@ -6,8 +6,12 @@ import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
 import { env } from './config/env.js'
 import { auditPlugin } from './plugins/audit.js'
+import { authPlugin } from './plugins/auth.js'
 import { healthRoute } from './routes/v1/health.js'
 import { waitlistRoute } from './routes/v1/waitlist.js'
+import { authRoute } from './routes/v1/auth.js'
+import { usersRoute } from './routes/v1/users.js'
+import { webhooksRoute } from './routes/v1/webhooks.js'
 
 const server = Fastify({
   logger: {
@@ -27,8 +31,12 @@ await server.register(rateLimit, {
   timeWindow: '1 minute',
 })
 await server.register(auditPlugin)
+await server.register(authPlugin)
 await server.register(healthRoute, { prefix: '/v1' })
 await server.register(waitlistRoute, { prefix: '/v1' })
+await server.register(authRoute, { prefix: '/v1' })
+await server.register(usersRoute, { prefix: '/v1' })
+await server.register(webhooksRoute, { prefix: '/v1' })
 
 try {
   await server.listen({ port: env.PORT, host: env.HOST })

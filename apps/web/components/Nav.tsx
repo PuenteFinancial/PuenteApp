@@ -31,7 +31,7 @@ export default function Nav() {
           </div>
           <div className="nav-right">
             <LanguageToggle />
-            <a className="btn btn--accent btn--sm" href="/signup">{t.nav.cta}</a>
+            <a className="btn btn--accent btn--sm" href="/waitlist">{t.nav.cta}</a>
             <button className="nav-menu-btn" onClick={() => setOpen(true)} aria-label="Open menu">
               <span />
               <span />
@@ -51,7 +51,7 @@ export default function Nav() {
         </button>
         <a href="#remittances" onClick={close}>{t.nav.remit}</a>
         <a href="#how" onClick={close}>{t.nav.how}</a>
-        <a className="btn btn--accent" href="/signup" style={{ marginTop: 16 }}>{t.nav.cta}</a>
+        <a className="btn btn--accent" href="/waitlist" style={{ marginTop: 16 }}>{t.nav.cta}</a>
       </div>
     </>
   )

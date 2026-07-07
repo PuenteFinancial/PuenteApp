@@ -1,3 +1,5 @@
+import type { KycStatus } from './kyc.js'
+
 export type PreferredLanguage = 'en' | 'es'
 
 export type UserStatus = 'waitlist' | 'active' | 'suspended'
@@ -11,6 +13,9 @@ export interface User {
   preferredLanguage: PreferredLanguage
   status: UserStatus
   fcraConsentAt: string | null   // ISO timestamp — null = consent not given
+  bridgeCustomerId: string | null
+  kycStatus: KycStatus
+  emailVerifiedAt: string | null
   createdAt: string
   updatedAt: string
 }

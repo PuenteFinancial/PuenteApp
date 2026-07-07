@@ -121,7 +121,7 @@ export default function Calculator() {
         <span className="pip" />{c.note}
       </div>
 
-      <a className="btn btn--accent" href="/signup">{c.cta}</a>
+      <a className="btn btn--accent" href="/waitlist">{c.cta}</a>
     </div>
   )
 }
