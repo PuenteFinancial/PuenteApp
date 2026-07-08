@@ -41,15 +41,20 @@ beforeEach(() => {
 })
 
 describe('POST /v1/webhooks/bridge', () => {
-  it('updates kyc_status on customer.kyc_status_updated with a valid signature', async () => {
+  it('updates kyc_status on customer.updated.status_transitioned with a valid signature', async () => {
     const eqSpy = vi.fn(async () => ({ error: null }))
     const updateSpy = vi.fn(() => ({ eq: eqSpy }))
     from.mockReturnValue({ update: updateSpy })
     const app = await buildApp()
 
+    // Real Bridge payload shape: status lives on event_object.status with a
+    // top-level event_object_status duplicate
     const body = JSON.stringify({
-      event_type: 'customer.kyc_status_updated',
-      event_object: { id: 'cust_abc', kyc_status: 'under_review' },
+      event_type: 'customer.updated.status_transitioned',
+      event_object_id: 'cust_abc',
+      event_object_status: 'under_review',
+      event_object: { id: 'cust_abc', status: 'under_review' },
+      event_object_changes: { status: ['not_started', 'under_review'] },
     })
 
     const res = await supertest(app.server)
@@ -71,7 +76,7 @@ describe('POST /v1/webhooks/bridge', () => {
     const app = await buildApp()
 
     const body = JSON.stringify({
-      event_type: 'customer.kyc_status_updated',
+      event_type: 'customer.updated.status_transitioned',
       event_object: { id: 'cust_abc', kyc_status: 'approved' },
     })
 
@@ -86,11 +91,54 @@ describe('POST /v1/webhooks/bridge', () => {
     await app.close()
   })
 
+  it('clears the customer link and resets kyc_status on customer.deleted', async () => {
+    const eqSpy = vi.fn(async () => ({ error: null }))
+    const updateSpy = vi.fn(() => ({ eq: eqSpy }))
+    from.mockReturnValue({ update: updateSpy })
+    const app = await buildApp()
+
+    const body = JSON.stringify({
+      event_type: 'customer.deleted',
+      event_object_id: 'cust_abc',
+      event_object: { id: 'cust_abc' },
+    })
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/bridge')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', signHeader(body))
+      .send(body)
+
+    expect(res.status).toBe(200)
+    expect(updateSpy).toHaveBeenCalledWith({ bridge_customer_id: null, kyc_status: 'not_started' })
+    expect(eqSpy).toHaveBeenCalledWith('bridge_customer_id', 'cust_abc')
+    await app.close()
+  })
+
+  it('returns 500 when the customer.deleted unlink fails so Bridge retries', async () => {
+    from.mockReturnValue(updateResult({ error: { code: '500' } }))
+    const app = await buildApp()
+
+    const body = JSON.stringify({
+      event_type: 'customer.deleted',
+      event_object: { id: 'cust_abc' },
+    })
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/bridge')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', signHeader(body))
+      .send(body)
+
+    expect(res.status).toBe(500)
+    await app.close()
+  })
+
   it('rejects a signature from the wrong key with 400 and never touches the DB', async () => {
     const { privateKey: wrongKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
     const app = await buildApp()
     const body = JSON.stringify({
-      event_type: 'customer.kyc_status_updated',
+      event_type: 'customer.updated.status_transitioned',
       event_object: { id: 'cust_abc', kyc_status: 'approved' },
     })
 
@@ -108,7 +156,7 @@ describe('POST /v1/webhooks/bridge', () => {
   it('rejects a signature over different body content', async () => {
     const app = await buildApp()
     const body = JSON.stringify({
-      event_type: 'customer.kyc_status_updated',
+      event_type: 'customer.updated.status_transitioned',
       event_object: { id: 'cust_abc', kyc_status: 'approved' },
     })
     const tampered = body.replace('approved', 'rejected')
@@ -164,8 +212,8 @@ describe('POST /v1/webhooks/bridge', () => {
   it('acknowledges unhandled event types without DB writes', async () => {
     const app = await buildApp()
     const body = JSON.stringify({
-      event_type: 'customer.created',
-      event_object: { id: 'cust_abc' },
+      event_type: 'kyc_link.updated.status_transitioned',
+      event_object: { id: 'kyc_link_abc' },
     })
 
     const res = await supertest(app.server)
@@ -182,7 +230,7 @@ describe('POST /v1/webhooks/bridge', () => {
   it('acknowledges unmapped kyc statuses without DB writes', async () => {
     const app = await buildApp()
     const body = JSON.stringify({
-      event_type: 'customer.kyc_status_updated',
+      event_type: 'customer.updated.status_transitioned',
       event_object: { id: 'cust_abc', kyc_status: 'weird_new_status' },
     })
 
@@ -202,7 +250,7 @@ describe('POST /v1/webhooks/bridge', () => {
     const app = await buildApp()
 
     const body = JSON.stringify({
-      event_type: 'customer.kyc_status_updated',
+      event_type: 'customer.updated.status_transitioned',
       event_object: { id: 'cust_abc', kyc_status: 'approved' },
     })
 

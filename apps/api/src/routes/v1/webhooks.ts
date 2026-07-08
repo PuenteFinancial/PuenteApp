@@ -21,12 +21,25 @@ const BRIDGE_KYC_STATUS_MAP: Record<string, KycStatus> = {
 
 interface BridgeWebhookEvent {
   event_type?: string
+  event_object_id?: string
+  event_object_status?: string
   event_object?: {
     id?: string
     kyc_status?: string
     status?: string
   }
 }
+
+// Bridge customer event types that carry the current status. Verified against
+// Bridge's event-structure docs and production deliveries — there is no
+// "customer.kyc_status_updated" event; status changes arrive as
+// customer.updated.status_transitioned (customer.created/updated also carry
+// the current status, so processing them is an idempotent no-op or catch-up).
+const CUSTOMER_STATUS_EVENT_TYPES = new Set([
+  'customer.created',
+  'customer.updated',
+  'customer.updated.status_transitioned',
+])
 
 // Bridge signature freshness window (their docs: reject events older than 10 min)
 const SIGNATURE_MAX_AGE_MS = 10 * 60 * 1000
@@ -135,7 +148,7 @@ export async function webhooksRoute(server: FastifyInstance) {
       }
 
       const eventType = event.event_type ?? 'unknown'
-      const bridgeCustomerId = event.event_object?.id
+      const bridgeCustomerId = event.event_object?.id ?? event.event_object_id
 
       // Route is public so the audit plugin skips it — log explicitly.
       // Bridge customer id only, never PII.
@@ -144,8 +157,30 @@ export async function webhooksRoute(server: FastifyInstance) {
         'bridge webhook received',
       )
 
-      if (eventType === 'customer.kyc_status_updated' && bridgeCustomerId) {
-        const bridgeStatus = event.event_object?.kyc_status ?? event.event_object?.status
+      // A customer deleted in Bridge (support action, dashboard cleanup) must
+      // not leave a dangling reference — a stale bridge_customer_id makes
+      // every subsequent kyc_link request 404. Clear it so the next ToS
+      // acceptance creates a fresh customer.
+      if (eventType === 'customer.deleted' && bridgeCustomerId) {
+        const { error } = await supabaseAdmin
+          .from('users')
+          .update({ bridge_customer_id: null, kyc_status: 'not_started' })
+          .eq('bridge_customer_id', bridgeCustomerId)
+
+        if (error) {
+          server.log.error(
+            { webhook: 'bridge', bridgeCustomerId, supabaseError: error.code },
+            'bridge customer unlink failed',
+          )
+          // 500 so Bridge retries the delivery
+          return reply.status(500).send({ error: 'Failed to process webhook' })
+        }
+        return { received: true }
+      }
+
+      if (CUSTOMER_STATUS_EVENT_TYPES.has(eventType) && bridgeCustomerId) {
+        const bridgeStatus =
+          event.event_object?.kyc_status ?? event.event_object?.status ?? event.event_object_status
         const kycStatus = bridgeStatus ? BRIDGE_KYC_STATUS_MAP[bridgeStatus] : undefined
 
         if (!kycStatus) {
