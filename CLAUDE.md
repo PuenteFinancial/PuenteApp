@@ -104,9 +104,9 @@ feature/* ──PR──▶ main ──auto──▶ staging
 Workflows in `.github/workflows/`:
 - `ci.yml` — typecheck, lint, test, `next build` (web). Runs on every PR and push to main. Uses Turborepo remote cache (requires `TURBO_TOKEN` + `TURBO_TEAM` GitHub secrets).
 - `secret-scan.yml` — Gitleaks secret scanning. Runs on every PR and push to main.
-- `deploy.yml` — Railway API deploy. Disabled (`if: false`) until Railway is connected.
+- `deploy.yml` — Railway API deploy. LIVE: runs automatically after CI succeeds on main.
 - `claude.yml` — Claude PR assistant (responds to `@claude` in PRs/issues).
-- `claude-code-review.yml` — Claude auto-reviews every PR.
+- PR auto-review is handled by the Claude GitHub App (the custom `claude-code-review.yml` workflow was removed in #9).
 - `claude-compliance.review.yml` — Claude security + compliance review on financial/auth paths.
 
 The `next build` step in CI catches Vercel deploy failures before they happen. env vars are
