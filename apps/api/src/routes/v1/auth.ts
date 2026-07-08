@@ -126,6 +126,33 @@ export async function authRoute(server: FastifyInstance) {
         )
       }
 
+      // Durable per-sign-in record (risk substrate — no UI). Browser traffic
+      // arrives via the Next.js proxy, so the real client IP/UA ride in
+      // x-client-ip / x-client-ua; request.ip is the fallback for direct
+      // callers. The route is public, so a direct caller can spoof headers —
+      // they only mislabel their own sign-in, acceptable for risk data.
+      // Non-fatal — a failed write must not block sign-in. Log the error code
+      // only: IP/UA live in the table, never in logs, and a failed inet parse
+      // would echo the value into error.message.
+      const forwardedIp = request.headers['x-client-ip']
+      const forwardedUa = request.headers['x-client-ua']
+      const userAgent =
+        (typeof forwardedUa === 'string' ? forwardedUa : request.headers['user-agent']) || null
+      const { error: signInEventError } = await supabaseAdmin.from('sign_in_events').insert({
+        user_id: data.user.id,
+        ip: (typeof forwardedIp === 'string' ? forwardedIp : request.ip) || null,
+        // real UAs are <300 chars; cap so a hostile caller can't pad rows
+        user_agent: userAgent?.slice(0, 512) ?? null,
+        auth_method: 'sms_otp',
+      })
+
+      if (signInEventError) {
+        server.log.warn(
+          { userId: data.user.id, supabaseError: signInEventError.code },
+          'sign_in_events insert failed',
+        )
+      }
+
       return {
         accessToken: data.session.access_token,
         refreshToken: data.session.refresh_token,
