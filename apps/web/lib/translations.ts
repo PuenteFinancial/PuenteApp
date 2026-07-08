@@ -68,6 +68,14 @@ export type Translations = {
     back: string
   }
   footer: { tagline: string; rights: string; note: string }
+  onboarding: {
+    signup: { title: string; sub: string; phone: string; phonePh: string; smsConsent: string; cta: string; sending: string; error: string }
+    verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resent: string; error: string }
+    profile: { title: string; sub: string; firstName: string; lastName: string; email: string; emailNote: string; cta: string; saving: string; error: string }
+    kyc: { title: string; body: string; dataNotice: string; cta: string; starting: string; error: string }
+    pending: { title: string; body: string; emailNote: string }
+    dashboard: { title: string; body: string }
+  }
 }
 
 const en: Translations = {
@@ -155,6 +163,61 @@ const en: Translations = {
     rights: '© 2026 Puente Financial, Inc.',
     note: 'Concept in validation — not yet available.',
   },
+  onboarding: {
+    signup: {
+      title: 'Create your account',
+      sub: 'Enter your mobile number and we’ll text you a verification code.',
+      phone: 'Mobile number',
+      phonePh: '(555) 555-5555',
+      // NEEDS LEGAL REVIEW (EN + ES): TCPA consent language
+      smsConsent:
+        'I agree to receive automated text messages from Puente Financial at this number, including verification codes and account notices. Message and data rates may apply. Consent is not a condition of using Puente.',
+      cta: 'Send code',
+      sending: 'Sending…',
+      error: 'We couldn’t send the code. Check the number and try again.',
+    },
+    verify: {
+      title: 'Enter your code',
+      sub: 'We sent a 6-digit code to your phone.',
+      code: 'Verification code',
+      cta: 'Verify',
+      verifying: 'Verifying…',
+      resend: 'Resend code',
+      resent: 'Code sent again',
+      error: 'That code didn’t work. Try again or resend it.',
+    },
+    profile: {
+      title: 'Tell us about you',
+      sub: 'Use your legal name — it must match your ID for identity verification.',
+      firstName: 'First name',
+      lastName: 'Last name',
+      email: 'Email',
+      emailNote: 'We’ll send you a verification email — you can keep going in the meantime.',
+      cta: 'Continue',
+      saving: 'Saving…',
+      error: 'We couldn’t save your info. Please try again.',
+    },
+    // NEEDS LEGAL REVIEW (ES): identity-verification requirement wording
+    kyc: {
+      title: 'Verify your identity',
+      body: 'Federal law requires us to verify your identity before you can send money. Our secure partner Bridge handles this — it takes about 2 minutes. Have your ID handy.',
+      // NEEDS LEGAL REVIEW (EN + ES): GLBA data-sharing disclosure
+      dataNotice:
+        'When you continue, we’ll share your name and email with Bridge (bridge.xyz), a licensed money transmitter that verifies your identity and processes transfers. Bridge will collect the rest — date of birth, address, SSN or ITIN, and an ID photo — directly from you.',
+      cta: 'Verify my identity',
+      starting: 'Starting…',
+      error: 'We couldn’t start verification. Please try again.',
+    },
+    pending: {
+      title: 'Your identity is being verified',
+      body: 'This usually takes a few minutes but can take up to 1 business day.',
+      emailNote: 'We’ll email you as soon as you’re approved.',
+    },
+    dashboard: {
+      title: 'You’re verified',
+      body: 'Sending money is coming soon. We’ll let you know the moment it’s live.',
+    },
+  },
 }
 
 const es: Translations = {
@@ -241,6 +304,61 @@ const es: Translations = {
     tagline: 'Envía dinero a casa y crea crédito en EE. UU. al hacerlo. Una sola app, hecha para nuestra comunidad.',
     rights: '© 2026 Puente Financial, Inc.',
     note: 'Concepto en validación — aún no disponible.',
+  },
+  onboarding: {
+    signup: {
+      title: 'Crea tu cuenta',
+      sub: 'Ingresa tu número de celular y te enviaremos un código de verificación por SMS.',
+      phone: 'Número de celular',
+      phonePh: '(555) 555-5555',
+      // NEEDS LEGAL REVIEW (EN + ES): texto de consentimiento TCPA
+      smsConsent:
+        'Acepto recibir mensajes de texto automatizados de Puente Financial en este número, incluidos códigos de verificación y avisos de cuenta. Pueden aplicar tarifas de mensajes y datos. El consentimiento no es una condición para usar Puente.',
+      cta: 'Enviar código',
+      sending: 'Enviando…',
+      error: 'No pudimos enviar el código. Revisa el número e inténtalo de nuevo.',
+    },
+    verify: {
+      title: 'Ingresa tu código',
+      sub: 'Enviamos un código de 6 dígitos a tu teléfono.',
+      code: 'Código de verificación',
+      cta: 'Verificar',
+      verifying: 'Verificando…',
+      resend: 'Reenviar código',
+      resent: 'Código reenviado',
+      error: 'Ese código no funcionó. Inténtalo de nuevo o reenvíalo.',
+    },
+    profile: {
+      title: 'Cuéntanos sobre ti',
+      sub: 'Usa tu nombre legal — debe coincidir con tu identificación para la verificación de identidad.',
+      firstName: 'Nombre',
+      lastName: 'Apellido',
+      email: 'Correo electrónico',
+      emailNote: 'Te enviaremos un correo de verificación — puedes continuar mientras tanto.',
+      cta: 'Continuar',
+      saving: 'Guardando…',
+      error: 'No pudimos guardar tu información. Inténtalo de nuevo.',
+    },
+    // NEEDS LEGAL REVIEW (ES): texto sobre el requisito de verificación de identidad
+    kyc: {
+      title: 'Verifica tu identidad',
+      body: 'La ley federal nos exige verificar tu identidad antes de que puedas enviar dinero. Nuestro socio seguro Bridge se encarga de esto — toma unos 2 minutos. Ten tu identificación a la mano.',
+      // NEEDS LEGAL REVIEW (EN + ES): aviso de compartición de datos (GLBA)
+      dataNotice:
+        'Al continuar, compartiremos tu nombre y correo electrónico con Bridge (bridge.xyz), un transmisor de dinero con licencia que verifica tu identidad y procesa las transferencias. Bridge te pedirá el resto — fecha de nacimiento, dirección, SSN o ITIN y una foto de tu identificación — directamente a ti.',
+      cta: 'Verificar mi identidad',
+      starting: 'Iniciando…',
+      error: 'No pudimos iniciar la verificación. Inténtalo de nuevo.',
+    },
+    pending: {
+      title: 'Estamos verificando tu identidad',
+      body: 'Normalmente toma unos minutos, pero puede tardar hasta 1 día hábil.',
+      emailNote: 'Te enviaremos un correo en cuanto estés aprobado.',
+    },
+    dashboard: {
+      title: 'Estás verificado',
+      body: 'Muy pronto podrás enviar dinero. Te avisaremos en cuanto esté disponible.',
+    },
   },
 }
 

@@ -4,6 +4,7 @@ export async function healthRoute(server: FastifyInstance) {
   server.get(
     '/health',
     {
+      config: { public: true },
       schema: {
         response: {
           200: {

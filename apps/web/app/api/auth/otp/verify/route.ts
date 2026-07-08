@@ -1,0 +1,44 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { apiFetch, SESSION_COOKIE } from '@/lib/session'
+
+export async function POST(req: NextRequest) {
+  try {
+    const { phone, token } = await req.json()
+    if (typeof phone !== 'string' || !phone.trim() || typeof token !== 'string' || !token.trim()) {
+      return NextResponse.json({ error: 'Phone and code are required' }, { status: 400 })
+    }
+
+    const apiRes = await apiFetch('/v1/auth/otp/verify', null, {
+      method: 'POST',
+      body: JSON.stringify({ phone: phone.trim(), token: token.trim() }),
+    })
+
+    if (apiRes.status === 401) {
+      return NextResponse.json({ error: 'Invalid or expired code' }, { status: 401 })
+    }
+    if (!apiRes.ok) {
+      console.error('OTP verify failed with status', apiRes.status)
+      return NextResponse.json({ error: 'Failed to verify code' }, { status: 502 })
+    }
+
+    const { accessToken, expiresIn } = (await apiRes.json()) as {
+      accessToken: string
+      expiresIn: number
+    }
+
+    // Access token goes straight into the httpOnly cookie — it never
+    // reaches client-side JavaScript.
+    const res = NextResponse.json({ ok: true })
+    res.cookies.set(SESSION_COOKIE, accessToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      maxAge: expiresIn,
+    })
+    return res
+  } catch (err) {
+    console.error('OTP verify error:', err instanceof Error ? err.message : 'Unknown error')
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  }
+}

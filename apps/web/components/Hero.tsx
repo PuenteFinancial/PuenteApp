@@ -20,7 +20,7 @@ export default function Hero() {
           </h1>
           <p className="lede">{t.hero.sub}</p>
           <div className="hero-cta">
-            <a className="btn btn--accent btn--lg" href="/signup">{t.hero.cta1}</a>
+            <a className="btn btn--accent btn--lg" href="/waitlist">{t.hero.cta1}</a>
             <a className="btn btn--ghost-light btn--lg" href="#remittances">{t.hero.cta2} →</a>
           </div>
           <span className="hero-elig">

@@ -58,7 +58,7 @@ export default function HowItWorksSection() {
                 {h.elig}
               </span>
             </div>
-            <a className="btn btn--ink btn--lg" href="/signup">{h.cta}</a>
+            <a className="btn btn--ink btn--lg" href="/waitlist">{h.cta}</a>
           </div>
         </div>
       </div>
