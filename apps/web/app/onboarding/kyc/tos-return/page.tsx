@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { apiFetch, getSessionToken } from '@/lib/session'
+import { apiFetch, getSessionToken, requestOrigin } from '@/lib/session'
 
 // Bridge redirects here after the user accepts its Terms of Service.
 // No UI — exchange the signed agreement for a hosted KYC link and go there.
@@ -12,16 +12,20 @@ export default async function TosReturnPage({
   if (!token) redirect('/signup')
 
   const { signed_agreement_id: signedAgreementId } = await searchParams
-  if (!signedAgreementId) redirect('/onboarding/kyc')
+  if (!signedAgreementId) redirect('/onboarding/kyc?error=1')
 
+  const origin = await requestOrigin()
   const res = await apiFetch('/v1/users/me/kyc-link', token, {
     method: 'POST',
-    body: JSON.stringify({ signed_agreement_id: signedAgreementId }),
+    body: JSON.stringify({
+      signed_agreement_id: signedAgreementId,
+      ...(origin ? { origin } : {}),
+    }),
   })
 
   if (!res.ok) {
     console.error('KYC link request failed with status', res.status)
-    redirect('/onboarding/kyc')
+    redirect('/onboarding/kyc?error=1')
   }
 
   const { url } = (await res.json()) as { url: string }
@@ -37,12 +41,12 @@ export default async function TosReturnPage({
     host = parsed.hostname
     protocol = parsed.protocol
   } catch {
-    redirect('/onboarding/kyc')
+    redirect('/onboarding/kyc?error=1')
   }
   if (protocol !== 'https:' || (!ALLOWED_HOSTS.includes(host) && !host.endsWith('.bridge.xyz'))) {
     // host only — never log the full URL (contains the inquiry/reference ids)
     console.error(`KYC link returned an unexpected redirect host: ${host}`)
-    redirect('/onboarding/kyc')
+    redirect('/onboarding/kyc?error=1')
   }
 
   redirect(url)

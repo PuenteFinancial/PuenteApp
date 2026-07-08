@@ -14,6 +14,7 @@ vi.mock('../../services/supabase.js', () => ({
 }))
 
 const createBridgeCustomer = vi.fn()
+const createTosLink = vi.fn()
 const getKycLink = vi.fn()
 
 vi.mock('../../services/bridge.js', async () => {
@@ -23,6 +24,7 @@ vi.mock('../../services/bridge.js', async () => {
   return {
     BridgeApiError: actual.BridgeApiError,
     createBridgeCustomer: (...args: unknown[]) => createBridgeCustomer(...args),
+    createTosLink: (...args: unknown[]) => createTosLink(...args),
     getKycLink: (...args: unknown[]) => getKycLink(...args),
   }
 })
@@ -81,7 +83,79 @@ beforeEach(() => {
   from.mockReset()
   updateUserById.mockClear()
   createBridgeCustomer.mockReset()
+  createTosLink.mockReset()
   getKycLink.mockReset()
+})
+
+describe('POST /v1/users/me/tos-link', () => {
+  it('returns a session-scoped Bridge ToS url', async () => {
+    createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/tos-link')
+      .set('Authorization', 'Bearer test-token')
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body.url).toContain('session_token=tok')
+    expect(createTosLink).toHaveBeenCalledWith(
+      'http://localhost:3000/onboarding/kyc/tos-return',
+    )
+    await app.close()
+  })
+
+  it('honors an allowlisted origin for the return redirect', async () => {
+    createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/tos-link')
+      .set('Authorization', 'Bearer test-token')
+      .send({ origin: 'http://localhost:8081' })
+
+    expect(res.status).toBe(200)
+    expect(createTosLink).toHaveBeenCalledWith(
+      'http://localhost:8081/onboarding/kyc/tos-return',
+    )
+    await app.close()
+  })
+
+  it('falls back to the canonical origin when the origin is not allowlisted', async () => {
+    createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/tos-link')
+      .set('Authorization', 'Bearer test-token')
+      .send({ origin: 'https://evil.example' })
+
+    expect(res.status).toBe(200)
+    expect(createTosLink).toHaveBeenCalledWith(
+      'http://localhost:3000/onboarding/kyc/tos-return',
+    )
+    await app.close()
+  })
+
+  it('returns 401 without a token', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server).post('/v1/users/me/tos-link')
+    expect(res.status).toBe(401)
+    await app.close()
+  })
+
+  it('returns 502 when Bridge errors', async () => {
+    createTosLink.mockRejectedValue(new BridgeApiError(500, { code: 'server_error' }))
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/tos-link')
+      .set('Authorization', 'Bearer test-token')
+      .send({})
+
+    expect(res.status).toBe(502)
+    await app.close()
+  })
 })
 
 describe('GET /v1/users/me', () => {
