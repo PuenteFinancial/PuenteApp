@@ -10,13 +10,19 @@ export const metadata: Metadata = {
   robots: { index: false },
 }
 
-export default async function KycPage() {
+export default async function KycPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>
+}) {
   const token = await getSessionToken()
   if (!token) redirect('/signup')
 
+  const { error } = await searchParams
+
   return (
     <OnboardingShell>
-      <KycStart />
+      <KycStart initialError={Boolean(error)} />
     </OnboardingShell>
   )
 }

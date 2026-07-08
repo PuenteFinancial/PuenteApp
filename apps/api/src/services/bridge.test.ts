@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { createBridgeCustomer, getKycLink, BridgeApiError } from './bridge.js'
+import { createBridgeCustomer, createTosLink, getKycLink, BridgeApiError } from './bridge.js'
 
 const fetchMock = vi.fn()
 vi.stubGlobal('fetch', fetchMock)
@@ -71,6 +71,43 @@ describe('createBridgeCustomer', () => {
     expect((err as BridgeApiError).body).toEqual({ code: 'invalid_email' })
     // message must not leak the response body (may contain PII)
     expect((err as BridgeApiError).message).not.toContain('invalid_email')
+  })
+})
+
+describe('createTosLink', () => {
+  it('POSTs with an idempotency key and appends redirect_uri to the returned url', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok_1' }),
+    )
+
+    const result = await createTosLink('https://puentefinancial.com/onboarding/kyc/tos-return')
+
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.bridge.test/v0/customers/tos_links')
+    expect(init.method).toBe('POST')
+    expect(init.headers['Idempotency-Key']).toMatch(/[0-9a-f-]{36}/)
+    expect(result.url).toBe(
+      'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok_1&redirect_uri=https%3A%2F%2Fpuentefinancial.com%2Fonboarding%2Fkyc%2Ftos-return',
+    )
+  })
+
+  it('handles the enveloped { data: { url } } response shape', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { data: { url: 'https://compliance.bridge.xyz/accept-terms-of-service?session_token=tok_2' } }),
+    )
+    const result = await createTosLink('https://x.test/return')
+    expect(result.url).toContain('session_token=tok_2')
+    expect(result.url).toContain('redirect_uri=https%3A%2F%2Fx.test%2Freturn')
+  })
+
+  it('throws BridgeApiError when no url is returned', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, {}))
+    await expect(createTosLink('https://x.test/return')).rejects.toBeInstanceOf(BridgeApiError)
+  })
+
+  it('throws BridgeApiError on non-2xx', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401, { code: 'invalid_credentials' }))
+    await expect(createTosLink('https://x.test/return')).rejects.toBeInstanceOf(BridgeApiError)
   })
 })
 

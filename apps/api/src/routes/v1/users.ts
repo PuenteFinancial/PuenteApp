@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
-import { createBridgeCustomer, getKycLink, BridgeApiError } from '../../services/bridge.js'
+import { createBridgeCustomer, createTosLink, getKycLink, BridgeApiError } from '../../services/bridge.js'
 
 const USER_COLUMNS = 'id, first_name, last_name, email, kyc_status, bridge_customer_id'
 
@@ -128,6 +128,38 @@ export async function usersRoute(server: FastifyInstance) {
         })
 
       return toApiUser(data as UserRow)
+    },
+  )
+
+  server.post(
+    '/users/me/tos-link',
+    {
+      schema: {
+        response: {
+          200: {
+            type: 'object',
+            properties: { url: { type: 'string' } },
+          },
+          502: {
+            type: 'object',
+            properties: { error: { type: 'string' } },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const userId = request.user!.id
+      try {
+        const { url } = await createTosLink(`${env.ALLOWED_ORIGINS[0]}/onboarding/kyc/tos-return`)
+        return { url }
+      } catch (err) {
+        if (err instanceof BridgeApiError) {
+          const bridgeCode = (err.body as { code?: string } | null)?.code
+          server.log.error({ userId, bridgeStatus: err.status, bridgeCode }, 'bridge tos link failed')
+          return reply.status(502).send({ error: 'Identity verification is unavailable, try again shortly' })
+        }
+        throw err
+      }
     },
   )
 

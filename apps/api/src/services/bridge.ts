@@ -51,6 +51,25 @@ export async function createBridgeCustomer(data: {
   return { id: customer.id }
 }
 
+// ToS URLs must be generated per-session through the API — a statically
+// constructed dashboard link yields a signed_agreement_id that Bridge
+// rejects at customer creation.
+export async function createTosLink(redirectUri: string): Promise<{ url: string }> {
+  const response = (await bridgeFetch('/v0/customers/tos_links', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': crypto.randomUUID() },
+  })) as { url?: string; data?: { url?: string } }
+
+  const url = response.url ?? response.data?.url
+  if (!url) {
+    throw new BridgeApiError(502, { code: 'tos_link_missing_url' })
+  }
+
+  const tosUrl = new URL(url)
+  tosUrl.searchParams.set('redirect_uri', redirectUri)
+  return { url: tosUrl.toString() }
+}
+
 export async function getKycLink(
   customerId: string,
   redirectUri: string,

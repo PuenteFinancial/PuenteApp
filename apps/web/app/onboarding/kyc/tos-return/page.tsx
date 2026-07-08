@@ -12,7 +12,7 @@ export default async function TosReturnPage({
   if (!token) redirect('/signup')
 
   const { signed_agreement_id: signedAgreementId } = await searchParams
-  if (!signedAgreementId) redirect('/onboarding/kyc')
+  if (!signedAgreementId) redirect('/onboarding/kyc?error=1')
 
   const res = await apiFetch('/v1/users/me/kyc-link', token, {
     method: 'POST',
@@ -21,7 +21,7 @@ export default async function TosReturnPage({
 
   if (!res.ok) {
     console.error('KYC link request failed with status', res.status)
-    redirect('/onboarding/kyc')
+    redirect('/onboarding/kyc?error=1')
   }
 
   const { url } = (await res.json()) as { url: string }
@@ -42,7 +42,7 @@ export default async function TosReturnPage({
   if (protocol !== 'https:' || (!ALLOWED_HOSTS.includes(host) && !host.endsWith('.bridge.xyz'))) {
     // host only — never log the full URL (contains the inquiry/reference ids)
     console.error(`KYC link returned an unexpected redirect host: ${host}`)
-    redirect('/onboarding/kyc')
+    redirect('/onboarding/kyc?error=1')
   }
 
   redirect(url)
