@@ -70,6 +70,26 @@ export async function createTosLink(redirectUri: string): Promise<{ url: string 
   return { url: tosUrl.toString() }
 }
 
+// rejection_reasons[].reason is Bridge's customer-facing explanation;
+// developer_reason is internal detail and is dropped here so it can never
+// reach a client or a log line.
+export async function getBridgeCustomer(customerId: string): Promise<{
+  status: string | undefined
+  rejectionReasons: string[]
+}> {
+  const customer = (await bridgeFetch(`/v0/customers/${customerId}`)) as {
+    status?: string
+    rejection_reasons?: Array<{ reason?: string; developer_reason?: string }>
+  }
+
+  return {
+    status: customer.status,
+    rejectionReasons: (customer.rejection_reasons ?? [])
+      .map((r) => r.reason)
+      .filter((reason): reason is string => Boolean(reason)),
+  }
+}
+
 export async function getKycLink(
   customerId: string,
   redirectUri: string,

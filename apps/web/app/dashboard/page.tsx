@@ -18,6 +18,7 @@ export default async function DashboardPage() {
   if (!res.ok) redirect('/signup')
 
   const { kycStatus } = (await res.json()) as { kycStatus: string }
+  if (kycStatus === 'rejected') redirect('/onboarding/rejected')
   if (kycStatus !== 'approved') redirect('/onboarding/pending')
 
   return (
