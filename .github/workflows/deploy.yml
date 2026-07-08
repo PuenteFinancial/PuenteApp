@@ -12,12 +12,12 @@ jobs:
   deploy-api:
     name: Deploy API to Railway
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') && (secrets.RAILWAY_TOKEN != '' || secrets.RAILWAY_API_TOKEN != '') }}
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN != '' && secrets.RAILWAY_TOKEN || secrets.RAILWAY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v7
       - name: Install Railway CLI
         run: npm install -g @railway/cli
       - name: Deploy to Railway
         run: railway up --ci
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
