@@ -28,11 +28,51 @@ interface BridgeWebhookEvent {
   }
 }
 
-function verifySignature(rawBody: Buffer, signatureHeader: string, secret: string): boolean {
-  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex')
-  const received = Buffer.from(signatureHeader)
-  const computed = Buffer.from(expected)
-  return received.length === computed.length && crypto.timingSafeEqual(received, computed)
+// Bridge signature freshness window (their docs: reject events older than 10 min)
+const SIGNATURE_MAX_AGE_MS = 10 * 60 * 1000
+
+// Header shape: "t=<ms-timestamp>,v0=<base64 signature>". Split each part at
+// the FIRST '=' only — base64 padding contains '=' characters.
+function parseSignatureHeader(header: string): { t: string; v0: string } | null {
+  let t: string | undefined
+  let v0: string | undefined
+  for (const part of header.split(',')) {
+    const idx = part.indexOf('=')
+    if (idx === -1) return null
+    const key = part.slice(0, idx).trim()
+    const value = part.slice(idx + 1)
+    if (key === 't') t = value
+    else if (key === 'v0') v0 = value
+  }
+  if (!t || !v0) return null
+  return { t, v0 }
+}
+
+function verifySignature(rawBody: Buffer, signatureHeader: string, publicKeyPem: string): boolean {
+  const parsed = parseSignatureHeader(signatureHeader)
+  if (!parsed) return false
+
+  const timestamp = Number(parsed.t)
+  if (!Number.isFinite(timestamp)) return false
+  if (Date.now() - timestamp > SIGNATURE_MAX_AGE_MS) return false
+
+  // Bridge signs RSA-PKCS1v15 over sha256(sha256("{t}.{body}")). The outer
+  // sha256 happens inside RSA-SHA256 verification, so hash exactly once here.
+  // Use the timestamp string as received — re-serializing could alter it.
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${parsed.t}.`)
+    .update(rawBody)
+    .digest()
+
+  const verifier = crypto.createVerify('RSA-SHA256')
+  verifier.update(digest)
+  try {
+    return verifier.verify(publicKeyPem, parsed.v0, 'base64')
+  } catch {
+    // malformed base64 or unparseable key must reject, not crash
+    return false
+  }
 }
 
 export async function webhooksRoute(server: FastifyInstance) {
@@ -71,8 +111,8 @@ export async function webhooksRoute(server: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      if (!env.BRIDGE_WEBHOOK_SECRET) {
-        server.log.error('bridge webhook received but BRIDGE_WEBHOOK_SECRET is not set')
+      if (!env.BRIDGE_WEBHOOK_PUBLIC_KEY) {
+        server.log.error('bridge webhook received but BRIDGE_WEBHOOK_PUBLIC_KEY is not set')
         return reply.status(503).send({ error: 'Webhook not configured' })
       }
 
@@ -81,7 +121,7 @@ export async function webhooksRoute(server: FastifyInstance) {
       if (
         typeof signature !== 'string' ||
         !Buffer.isBuffer(rawBody) ||
-        !verifySignature(rawBody, signature, env.BRIDGE_WEBHOOK_SECRET)
+        !verifySignature(rawBody, signature, env.BRIDGE_WEBHOOK_PUBLIC_KEY)
       ) {
         server.log.warn({ audit: true, webhook: 'bridge' }, 'invalid webhook signature')
         return reply.status(400).send({ error: 'Invalid signature' })

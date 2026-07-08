@@ -3,8 +3,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import supertest from 'supertest'
 import Fastify from 'fastify'
 
-const SECRET = 'whsec_test'
-process.env.BRIDGE_WEBHOOK_SECRET = SECRET
+// Real RSA keypair so tests exercise the exact scheme Bridge uses:
+// RSA-PKCS1v15 over sha256(sha256("{t}.{body}"))
+const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
+const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString()
+
+process.env.BRIDGE_WEBHOOK_PUBLIC_KEY = publicKeyPem
 
 const from = vi.fn()
 
@@ -14,8 +18,11 @@ vi.mock('../../services/supabase.js', () => ({
 
 const { webhooksRoute } = await import('./webhooks.js')
 
-function sign(body: string, secret = SECRET) {
-  return crypto.createHmac('sha256', secret).update(body).digest('hex')
+function signHeader(body: string, timestamp: number = Date.now(), key: crypto.KeyObject = privateKey) {
+  const digest = crypto.createHash('sha256').update(`${timestamp}.${body}`).digest()
+  const signer = crypto.createSign('RSA-SHA256')
+  signer.update(digest)
+  return `t=${timestamp},v0=${signer.sign(key, 'base64')}`
 }
 
 function updateResult(result: { error: unknown }) {
@@ -48,7 +55,7 @@ describe('POST /v1/webhooks/bridge', () => {
     const res = await supertest(app.server)
       .post('/v1/webhooks/bridge')
       .set('Content-Type', 'application/json')
-      .set('X-Webhook-Signature', sign(body))
+      .set('X-Webhook-Signature', signHeader(body))
       .send(body)
 
     expect(res.status).toBe(200)
@@ -71,7 +78,7 @@ describe('POST /v1/webhooks/bridge', () => {
     const res = await supertest(app.server)
       .post('/v1/webhooks/bridge')
       .set('Content-Type', 'application/json')
-      .set('X-Webhook-Signature', sign(body))
+      .set('X-Webhook-Signature', signHeader(body))
       .send(body)
 
     expect(res.status).toBe(200)
@@ -79,7 +86,8 @@ describe('POST /v1/webhooks/bridge', () => {
     await app.close()
   })
 
-  it('rejects an invalid signature with 400 and never touches the DB', async () => {
+  it('rejects a signature from the wrong key with 400 and never touches the DB', async () => {
+    const { privateKey: wrongKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 })
     const app = await buildApp()
     const body = JSON.stringify({
       event_type: 'customer.kyc_status_updated',
@@ -89,7 +97,7 @@ describe('POST /v1/webhooks/bridge', () => {
     const res = await supertest(app.server)
       .post('/v1/webhooks/bridge')
       .set('Content-Type', 'application/json')
-      .set('X-Webhook-Signature', sign(body, 'wrong-secret'))
+      .set('X-Webhook-Signature', signHeader(body, Date.now(), wrongKey))
       .send(body)
 
     expect(res.status).toBe(400)
@@ -97,15 +105,58 @@ describe('POST /v1/webhooks/bridge', () => {
     await app.close()
   })
 
-  it('rejects a missing signature header with 400', async () => {
+  it('rejects a signature over different body content', async () => {
     const app = await buildApp()
+    const body = JSON.stringify({
+      event_type: 'customer.kyc_status_updated',
+      event_object: { id: 'cust_abc', kyc_status: 'approved' },
+    })
+    const tampered = body.replace('approved', 'rejected')
 
     const res = await supertest(app.server)
       .post('/v1/webhooks/bridge')
       .set('Content-Type', 'application/json')
-      .send(JSON.stringify({ event_type: 'x' }))
+      .set('X-Webhook-Signature', signHeader(body))
+      .send(tampered)
 
     expect(res.status).toBe(400)
+    expect(from).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('rejects a stale timestamp (replay protection)', async () => {
+    const app = await buildApp()
+    const body = JSON.stringify({ event_type: 'x' })
+    const elevenMinutesAgo = Date.now() - 11 * 60 * 1000
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/bridge')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', signHeader(body, elevenMinutesAgo))
+      .send(body)
+
+    expect(res.status).toBe(400)
+    await app.close()
+  })
+
+  it('rejects missing or malformed signature headers with 400', async () => {
+    const app = await buildApp()
+    const body = JSON.stringify({ event_type: 'x' })
+
+    const noHeader = await supertest(app.server)
+      .post('/v1/webhooks/bridge')
+      .set('Content-Type', 'application/json')
+      .send(body)
+    expect(noHeader.status).toBe(400)
+
+    for (const bad of ['garbage', 't=123', 'v0=abc', 't=notanumber,v0=abc']) {
+      const res = await supertest(app.server)
+        .post('/v1/webhooks/bridge')
+        .set('Content-Type', 'application/json')
+        .set('X-Webhook-Signature', bad)
+        .send(body)
+      expect(res.status).toBe(400)
+    }
     expect(from).not.toHaveBeenCalled()
     await app.close()
   })
@@ -120,7 +171,7 @@ describe('POST /v1/webhooks/bridge', () => {
     const res = await supertest(app.server)
       .post('/v1/webhooks/bridge')
       .set('Content-Type', 'application/json')
-      .set('X-Webhook-Signature', sign(body))
+      .set('X-Webhook-Signature', signHeader(body))
       .send(body)
 
     expect(res.status).toBe(200)
@@ -138,7 +189,7 @@ describe('POST /v1/webhooks/bridge', () => {
     const res = await supertest(app.server)
       .post('/v1/webhooks/bridge')
       .set('Content-Type', 'application/json')
-      .set('X-Webhook-Signature', sign(body))
+      .set('X-Webhook-Signature', signHeader(body))
       .send(body)
 
     expect(res.status).toBe(200)
@@ -158,32 +209,33 @@ describe('POST /v1/webhooks/bridge', () => {
     const res = await supertest(app.server)
       .post('/v1/webhooks/bridge')
       .set('Content-Type', 'application/json')
-      .set('X-Webhook-Signature', sign(body))
+      .set('X-Webhook-Signature', signHeader(body))
       .send(body)
 
     expect(res.status).toBe(500)
     await app.close()
   })
 
-  it('returns 503 when the webhook secret is not configured', async () => {
+  it('returns 503 when the webhook public key is not configured', async () => {
     vi.resetModules()
-    delete process.env.BRIDGE_WEBHOOK_SECRET
+    delete process.env.BRIDGE_WEBHOOK_PUBLIC_KEY
     try {
       const { webhooksRoute: freshRoute } = await import('./webhooks.js')
       const app = Fastify({ logger: false })
       await app.register(freshRoute, { prefix: '/v1' })
       await app.ready()
 
+      const body = JSON.stringify({ event_type: 'x' })
       const res = await supertest(app.server)
         .post('/v1/webhooks/bridge')
         .set('Content-Type', 'application/json')
-        .set('X-Webhook-Signature', 'anything')
-        .send(JSON.stringify({ event_type: 'x' }))
+        .set('X-Webhook-Signature', signHeader(body))
+        .send(body)
 
       expect(res.status).toBe(503)
       await app.close()
     } finally {
-      process.env.BRIDGE_WEBHOOK_SECRET = SECRET
+      process.env.BRIDGE_WEBHOOK_PUBLIC_KEY = publicKeyPem
     }
   })
 })

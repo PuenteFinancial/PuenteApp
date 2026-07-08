@@ -15,9 +15,14 @@ const envSchema = z.object({
   SUPABASE_JWKS_URL: z.string().url(),
   BRIDGE_API_KEY: z.string().min(1),
   BRIDGE_API_BASE: z.string().url().default('https://api.bridge.xyz'),
-  // Issued by Bridge when the webhook endpoint is registered post-deploy —
-  // webhook route returns 503 until it is set
-  BRIDGE_WEBHOOK_SECRET: z.string().min(1).optional(),
+  // PEM public key issued by Bridge when the webhook endpoint is registered
+  // post-deploy — webhook route returns 503 until it is set. Escaped \n
+  // sequences are normalized so the PEM can live in a single-line env var.
+  BRIDGE_WEBHOOK_PUBLIC_KEY: z
+    .string()
+    .min(1)
+    .transform((v) => v.replace(/\\n/g, '\n'))
+    .optional(),
   TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
   TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
   TWILIO_PHONE_NUMBER: z.string().min(1).optional(),
