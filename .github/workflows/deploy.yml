@@ -5,15 +5,19 @@ on:
     workflows: ["CI"]
     types: [completed]
     branches: [main]
+  # manual trigger for testing the deploy without a merge
+  workflow_dispatch:
 
 jobs:
   deploy-api:
     name: Deploy API to Railway
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v7
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
       - name: Deploy to Railway
-        uses: railwayapp/railway-github-action@v2
-        with:
-          railway_token: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --ci
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
