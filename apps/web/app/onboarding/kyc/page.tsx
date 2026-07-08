@@ -1,6 +1,6 @@
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
-import { getSessionToken } from '@/lib/session'
+import { apiFetch, getSessionToken } from '@/lib/session'
 import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import KycStart from '@/components/onboarding/KycStart'
 
@@ -17,6 +17,14 @@ export default async function KycPage({
 }) {
   const token = await getSessionToken()
   if (!token) redirect('/signup')
+
+  // Already-verified users have nothing to do here (fetch failure → render
+  // as before rather than dead-ending)
+  const res = await apiFetch('/v1/users/me', token)
+  if (res.ok) {
+    const { kycStatus } = (await res.json()) as { kycStatus: string }
+    if (kycStatus === 'approved') redirect('/dashboard')
+  }
 
   const { error } = await searchParams
 

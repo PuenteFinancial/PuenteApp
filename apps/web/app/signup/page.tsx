@@ -3,8 +3,8 @@ import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import PhoneForm from '@/components/onboarding/PhoneForm'
 
 export const metadata: Metadata = {
-  title: 'Sign Up — Puente Financial',
-  description: 'Create your Puente account. Send money home and build your U.S. credit history.',
+  title: 'Sign In or Sign Up — Puente Financial',
+  description: 'Sign in to Puente or create your account. Send money home and build your U.S. credit history.',
   robots: { index: false },
 }
 

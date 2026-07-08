@@ -18,8 +18,19 @@ site_url = "http://localhost:3000"
 jwt_expiry = 3600
 enable_signup = true
 
+[auth.sms]
+enable_signup = true
+
+# Local-only fixed OTP so the phone flow works without Twilio
+# (see PRD: use Supabase test phone numbers for tester work)
+[auth.sms.test_otp]
+15005550006 = "123456"
+
+# Local-only: GoTrue requires an enabled SMS provider for phone auth to be
+# on at all. The dummy creds are never used — test_otp numbers above bypass
+# the provider entirely, and real numbers fail (no local SMS by design).
 [auth.sms.twilio]
-enabled = false
-account_sid = "env(TWILIO_ACCOUNT_SID)"
-message_service_sid = "env(TWILIO_PHONE_NUMBER)"
-auth_token = "env(TWILIO_AUTH_TOKEN)"
+enabled = true
+account_sid = "local-dev-unused"
+message_service_sid = "local-dev-unused"
+auth_token = "local-dev-unused"
