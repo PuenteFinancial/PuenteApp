@@ -199,7 +199,8 @@ export async function usersRoute(server: FastifyInstance) {
         return { url }
       } catch (err) {
         if (err instanceof BridgeApiError) {
-          server.log.error({ userId, bridgeStatus: err.status }, 'bridge request failed')
+          const bridgeCode = (err.body as { code?: string } | null)?.code
+          server.log.error({ userId, bridgeStatus: err.status, bridgeCode }, 'bridge request failed')
           return reply.status(502).send({ error: 'Identity verification is unavailable, try again shortly' })
         }
         throw err
