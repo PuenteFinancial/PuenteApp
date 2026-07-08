@@ -12,5 +12,6 @@ export default async function KycReturnPage() {
 
   const { kycStatus } = (await res.json()) as { kycStatus: string }
   if (kycStatus === 'approved') redirect('/dashboard')
+  if (kycStatus === 'rejected') redirect('/onboarding/rejected')
   redirect('/onboarding/pending')
 }

@@ -74,6 +74,11 @@ export type Translations = {
     profile: { title: string; sub: string; firstName: string; lastName: string; email: string; emailNote: string; cta: string; saving: string; error: string }
     kyc: { title: string; body: string; dataNotice: string; cta: string; starting: string; error: string }
     pending: { title: string; body: string; emailNote: string }
+    rejected: {
+      title: string; body: string; reasonLabel: string
+      retryCta: string; retrying: string; retryError: string
+      exhaustedBody: string; supportCta: string
+    }
     dashboard: { title: string; body: string }
   }
 }
@@ -212,6 +217,20 @@ const en: Translations = {
       title: 'Your identity is being verified',
       body: 'This usually takes a few minutes but can take up to 1 business day.',
       emailNote: 'We’ll email you as soon as you’re approved.',
+    },
+    // NEEDS LEGAL REVIEW (EN + ES): identity-verification outcome wording.
+    // Must never read as a credit or account denial (no adverse-action
+    // implication) — this is strictly about identity verification.
+    // reasonLabel prefixes Bridge's reason strings, which arrive in English.
+    rejected: {
+      title: 'We couldn’t verify your identity',
+      body: 'Some of the information or documents you provided couldn’t be confirmed. You can try again — it only takes a few minutes.',
+      reasonLabel: 'What happened:',
+      retryCta: 'Try again',
+      retrying: 'Starting…',
+      retryError: 'We couldn’t restart verification. Please try again.',
+      exhaustedBody: 'We weren’t able to verify your identity after several tries. Contact us and we’ll help you sort it out.',
+      supportCta: 'Contact support',
     },
     dashboard: {
       title: 'You’re verified',
@@ -354,6 +373,20 @@ const es: Translations = {
       title: 'Estamos verificando tu identidad',
       body: 'Normalmente toma unos minutos, pero puede tardar hasta 1 día hábil.',
       emailNote: 'Te enviaremos un correo en cuanto estés aprobado.',
+    },
+    // NEEDS LEGAL REVIEW (EN + ES): resultado de verificación de identidad.
+    // Nunca debe leerse como una denegación de crédito o de cuenta — trata
+    // estrictamente de la verificación de identidad.
+    // Las razones de Bridge llegan en inglés y se muestran tal cual.
+    rejected: {
+      title: 'No pudimos verificar tu identidad',
+      body: 'Parte de la información o los documentos que proporcionaste no se pudieron confirmar. Puedes intentarlo de nuevo — solo toma unos minutos.',
+      reasonLabel: 'Qué pasó (detalle del proveedor de verificación, en inglés):',
+      retryCta: 'Intentar de nuevo',
+      retrying: 'Iniciando…',
+      retryError: 'No pudimos reiniciar la verificación. Inténtalo de nuevo.',
+      exhaustedBody: 'No pudimos verificar tu identidad después de varios intentos. Contáctanos y te ayudaremos a resolverlo.',
+      supportCta: 'Contactar soporte',
     },
     dashboard: {
       title: 'Estás verificado',

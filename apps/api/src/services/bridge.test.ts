@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { createBridgeCustomer, createTosLink, getKycLink, BridgeApiError } from './bridge.js'
+import {
+  createBridgeCustomer,
+  createTosLink,
+  getBridgeCustomer,
+  getKycLink,
+  BridgeApiError,
+} from './bridge.js'
 
 const fetchMock = vi.fn()
 vi.stubGlobal('fetch', fetchMock)
@@ -108,6 +114,42 @@ describe('createTosLink', () => {
   it('throws BridgeApiError on non-2xx', async () => {
     fetchMock.mockResolvedValue(jsonResponse(401, { code: 'invalid_credentials' }))
     await expect(createTosLink('https://x.test/return')).rejects.toBeInstanceOf(BridgeApiError)
+  })
+})
+
+describe('getBridgeCustomer', () => {
+  it('GETs the customer and maps customer-facing rejection reasons', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        id: 'cust_abc',
+        status: 'rejected',
+        rejection_reasons: [
+          { reason: 'ID photo could not be read', developer_reason: 'ocr_confidence_low' },
+          { developer_reason: 'internal_only_no_customer_reason' },
+          { reason: 'Address document expired' },
+        ],
+      }),
+    )
+
+    const result = await getBridgeCustomer('cust_abc')
+
+    const [url] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.bridge.test/v0/customers/cust_abc')
+    expect(result).toEqual({
+      status: 'rejected',
+      rejectionReasons: ['ID photo could not be read', 'Address document expired'],
+    })
+  })
+
+  it('returns empty reasons when rejection_reasons is missing', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { id: 'cust_abc', status: 'active' }))
+    const result = await getBridgeCustomer('cust_abc')
+    expect(result).toEqual({ status: 'active', rejectionReasons: [] })
+  })
+
+  it('throws BridgeApiError on non-2xx', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404, { code: 'not_found' }))
+    await expect(getBridgeCustomer('cust_missing')).rejects.toBeInstanceOf(BridgeApiError)
   })
 })
 

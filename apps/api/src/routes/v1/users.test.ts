@@ -15,6 +15,7 @@ vi.mock('../../services/supabase.js', () => ({
 
 const createBridgeCustomer = vi.fn()
 const createTosLink = vi.fn()
+const getBridgeCustomer = vi.fn()
 const getKycLink = vi.fn()
 
 vi.mock('../../services/bridge.js', async () => {
@@ -25,6 +26,7 @@ vi.mock('../../services/bridge.js', async () => {
     BridgeApiError: actual.BridgeApiError,
     createBridgeCustomer: (...args: unknown[]) => createBridgeCustomer(...args),
     createTosLink: (...args: unknown[]) => createTosLink(...args),
+    getBridgeCustomer: (...args: unknown[]) => getBridgeCustomer(...args),
     getKycLink: (...args: unknown[]) => getKycLink(...args),
   }
 })
@@ -71,6 +73,28 @@ function updateResult(result: { error: unknown }) {
   return { update: vi.fn(() => ({ eq: vi.fn(async () => result) })) }
 }
 
+// update().eq().eq().select().single() — the guarded retry-count increment
+function guardedUpdateReturningResult(result: { data: unknown; error: unknown }) {
+  const update = vi.fn(() => ({
+    eq: vi.fn(() => ({
+      eq: vi.fn(() => ({ select: vi.fn(() => ({ single: vi.fn(async () => result) })) })),
+    })),
+  }))
+  return { update }
+}
+
+// update().eq().eq() — the guarded retry-count refund
+function guardedUpdateResult(result: { error: unknown }) {
+  const update = vi.fn(() => ({ eq: vi.fn(() => ({ eq: vi.fn(async () => result) })) }))
+  return { update }
+}
+
+const rejectedRow = {
+  kyc_status: 'rejected',
+  bridge_customer_id: 'cust_rejected',
+  kyc_retry_count: 1,
+}
+
 async function buildApp() {
   const app = Fastify({ logger: false })
   await app.register(mockAuth)
@@ -84,6 +108,7 @@ beforeEach(() => {
   updateUserById.mockClear()
   createBridgeCustomer.mockReset()
   createTosLink.mockReset()
+  getBridgeCustomer.mockReset()
   getKycLink.mockReset()
 })
 
@@ -243,6 +268,241 @@ describe('PATCH /v1/users/me', () => {
     const res = await supertest(app.server)
       .patch('/v1/users/me')
       .send({ firstName: 'Ana', lastName: 'User', email: 'test@example.com' })
+    expect(res.status).toBe(401)
+    await app.close()
+  })
+})
+
+describe('GET /v1/users/me/kyc-rejection', () => {
+  it('returns Bridge rejection reasons and retries remaining', async () => {
+    from.mockReturnValueOnce(selectResult({ data: rejectedRow, error: null }))
+    getBridgeCustomer.mockResolvedValue({
+      status: 'rejected',
+      rejectionReasons: ['ID photo could not be read'],
+    })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/users/me/kyc-rejection')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      reasons: ['ID photo could not be read'],
+      retriesRemaining: 2,
+    })
+    expect(getBridgeCustomer).toHaveBeenCalledWith('cust_rejected')
+    await app.close()
+  })
+
+  it('degrades to empty reasons when Bridge errors', async () => {
+    from.mockReturnValueOnce(selectResult({ data: rejectedRow, error: null }))
+    getBridgeCustomer.mockRejectedValue(new BridgeApiError(500, { code: 'server_error' }))
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/users/me/kyc-rejection')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ reasons: [], retriesRemaining: 2 })
+    await app.close()
+  })
+
+  it('returns empty reasons without calling Bridge when no customer exists', async () => {
+    from.mockReturnValueOnce(
+      selectResult({ data: { ...rejectedRow, bridge_customer_id: null }, error: null }),
+    )
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/users/me/kyc-rejection')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ reasons: [], retriesRemaining: 2 })
+    expect(getBridgeCustomer).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('returns 409 when the user is not rejected', async () => {
+    from.mockReturnValueOnce(
+      selectResult({ data: { ...rejectedRow, kyc_status: 'pending' }, error: null }),
+    )
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/users/me/kyc-rejection')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(409)
+    expect(getBridgeCustomer).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('returns 404 when the user row is missing', async () => {
+    from.mockReturnValueOnce(selectResult({ data: null, error: { code: 'PGRST116' } }))
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/users/me/kyc-rejection')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(404)
+    await app.close()
+  })
+
+  it('returns 401 without a token', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server).get('/v1/users/me/kyc-rejection')
+    expect(res.status).toBe(401)
+    await app.close()
+  })
+})
+
+describe('POST /v1/users/me/kyc-link/retry', () => {
+  it('consumes a retry and returns a fresh KYC url', async () => {
+    const bump = guardedUpdateReturningResult({ data: { kyc_retry_count: 2 }, error: null })
+    from
+      .mockReturnValueOnce(selectResult({ data: rejectedRow, error: null }))
+      .mockReturnValueOnce(bump)
+    getKycLink.mockResolvedValue({ url: 'https://bridge.example/kyc/retry' })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ url: 'https://bridge.example/kyc/retry' })
+    expect(bump.update).toHaveBeenCalledWith({ kyc_retry_count: 2 })
+    expect(getKycLink).toHaveBeenCalledWith(
+      'cust_rejected',
+      'http://localhost:3000/onboarding/kyc/return',
+    )
+    await app.close()
+  })
+
+  it('falls back to the canonical origin when the origin is not allowlisted', async () => {
+    from
+      .mockReturnValueOnce(selectResult({ data: rejectedRow, error: null }))
+      .mockReturnValueOnce(guardedUpdateReturningResult({ data: { kyc_retry_count: 2 }, error: null }))
+    getKycLink.mockResolvedValue({ url: 'https://bridge.example/kyc/retry' })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({ origin: 'https://evil.example' })
+
+    expect(res.status).toBe(200)
+    expect(getKycLink).toHaveBeenCalledWith(
+      'cust_rejected',
+      'http://localhost:3000/onboarding/kyc/return',
+    )
+    await app.close()
+  })
+
+  it('returns 409 when the user is not rejected', async () => {
+    from.mockReturnValueOnce(
+      selectResult({ data: { ...rejectedRow, kyc_status: 'pending' }, error: null }),
+    )
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(getKycLink).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('returns 409 when there is no Bridge customer', async () => {
+    from.mockReturnValueOnce(
+      selectResult({ data: { ...rejectedRow, bridge_customer_id: null }, error: null }),
+    )
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(getKycLink).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('returns 429 once the retry ceiling is reached', async () => {
+    from.mockReturnValueOnce(
+      selectResult({ data: { ...rejectedRow, kyc_retry_count: 3 }, error: null }),
+    )
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({})
+
+    expect(res.status).toBe(429)
+    expect(getKycLink).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('returns 409 when the guarded increment matches no row', async () => {
+    from
+      .mockReturnValueOnce(selectResult({ data: rejectedRow, error: null }))
+      .mockReturnValueOnce(guardedUpdateReturningResult({ data: null, error: { code: 'PGRST116' } }))
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({})
+
+    expect(res.status).toBe(409)
+    expect(getKycLink).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('refunds the retry and returns 502 when Bridge errors', async () => {
+    const refund = guardedUpdateResult({ error: null })
+    from
+      .mockReturnValueOnce(selectResult({ data: rejectedRow, error: null }))
+      .mockReturnValueOnce(guardedUpdateReturningResult({ data: { kyc_retry_count: 2 }, error: null }))
+      .mockReturnValueOnce(refund)
+    getKycLink.mockRejectedValue(new BridgeApiError(500, { code: 'server_error' }))
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({})
+
+    expect(res.status).toBe(502)
+    expect(refund.update).toHaveBeenCalledWith({ kyc_retry_count: 1 })
+    await app.close()
+  })
+
+  it('returns 404 when the user row is missing', async () => {
+    from.mockReturnValueOnce(selectResult({ data: null, error: { code: 'PGRST116' } }))
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({})
+
+    expect(res.status).toBe(404)
+    await app.close()
+  })
+
+  it('returns 401 without a token', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server).post('/v1/users/me/kyc-link/retry')
     expect(res.status).toBe(401)
     await app.close()
   })
