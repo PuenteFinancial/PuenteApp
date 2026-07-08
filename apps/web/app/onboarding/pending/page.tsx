@@ -1,6 +1,6 @@
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
-import { apiFetch, getSessionToken } from '@/lib/session'
+import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import StatusCard from '@/components/onboarding/StatusCard'
 
@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 
 export default async function PendingPage() {
   const token = await getSessionToken()
-  if (!token) redirect('/signup')
+  if (!token) redirect(refreshRedirectPath('/onboarding/pending'))
 
   // "Verifying your identity" is a lie for rejected/approved users — route
   // them to their real state. A failed fetch keeps rendering pending rather

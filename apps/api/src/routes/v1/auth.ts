@@ -11,6 +11,10 @@ interface OtpVerifyBody {
   token: string
 }
 
+interface RefreshBody {
+  refreshToken: string
+}
+
 export async function authRoute(server: FastifyInstance) {
   server.post<{ Body: OtpSendBody }>(
     '/auth/otp/send',
@@ -120,6 +124,57 @@ export async function authRoute(server: FastifyInstance) {
           { userId: data.user.id, supabaseError: consentError.code },
           'sms consent timestamp write failed',
         )
+      }
+
+      return {
+        accessToken: data.session.access_token,
+        refreshToken: data.session.refresh_token,
+        expiresIn: data.session.expires_in,
+        userId: data.user.id,
+      }
+    },
+  )
+
+  server.post<{ Body: RefreshBody }>(
+    '/auth/refresh',
+    {
+      // Public by definition: the caller's access token is already expired.
+      config: { public: true },
+      schema: {
+        body: {
+          type: 'object',
+          required: ['refreshToken'],
+          properties: {
+            refreshToken: { type: 'string', minLength: 1 },
+          },
+          additionalProperties: false,
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              accessToken: { type: 'string' },
+              refreshToken: { type: 'string' },
+              expiresIn: { type: 'number' },
+              userId: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      // Session-minting GoTrue call — must stay on supabaseAuth, never
+      // supabaseAdmin (see services/supabase.ts). Refresh tokens rotate and
+      // are single-use; GoTrue's reuse-interval grace absorbs concurrent-tab
+      // races, so one attempt is enough.
+      const { data, error } = await supabaseAuth.auth.refreshSession({
+        refresh_token: request.body.refreshToken,
+      })
+
+      if (error || !data.session || !data.user) {
+        // log status only — never the token
+        server.log.info({ authError: error?.status }, 'session refresh rejected')
+        return reply.status(401).send({ error: 'Invalid or expired session' })
       }
 
       return {

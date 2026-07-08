@@ -1,6 +1,6 @@
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
-import { apiFetch, getSessionToken } from '@/lib/session'
+import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import ProfileForm from '@/components/onboarding/ProfileForm'
 
@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 
 export default async function ProfilePage() {
   const token = await getSessionToken()
-  if (!token) redirect('/signup')
+  if (!token) redirect(refreshRedirectPath('/onboarding/profile'))
 
   // Returning users must see their saved profile, not a blank form that
   // would overwrite it. A missing row (404) legitimately means blank.

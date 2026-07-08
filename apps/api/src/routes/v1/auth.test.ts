@@ -4,6 +4,7 @@ import Fastify from 'fastify'
 
 const signInWithOtp = vi.fn()
 const verifyOtp = vi.fn()
+const refreshSession = vi.fn()
 const consentIs = vi.fn(async () => ({ error: null }))
 const upsert = vi.fn(
   async (..._args: unknown[]): Promise<{ error: { code: string } | null }> => ({ error: null }),
@@ -23,6 +24,7 @@ vi.mock('../../services/supabase.js', () => ({
     auth: {
       signInWithOtp: (...args: unknown[]) => signInWithOtp(...args),
       verifyOtp: (...args: unknown[]) => verifyOtp(...args),
+      refreshSession: (...args: unknown[]) => refreshSession(...args),
     },
   },
 }))
@@ -43,6 +45,7 @@ describe('auth OTP routes', () => {
   beforeEach(() => {
     signInWithOtp.mockReset()
     verifyOtp.mockReset()
+    refreshSession.mockReset()
     from.mockClear()
     consentIs.mockClear()
     upsert.mockClear()
@@ -169,6 +172,55 @@ describe('auth OTP routes', () => {
         .send({ phone: '15555555555' })
       expect(res.status).toBe(400)
       expect(verifyOtp).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('POST /v1/auth/refresh', () => {
+    it('exchanges a refresh token for a new session', async () => {
+      refreshSession.mockResolvedValue({
+        data: {
+          session: {
+            access_token: 'access-new',
+            refresh_token: 'refresh-new',
+            expires_in: 3600,
+          },
+          user: { id: 'user-123' },
+        },
+        error: null,
+      })
+
+      const res = await supertest(app.server)
+        .post('/v1/auth/refresh')
+        .send({ refreshToken: 'refresh-old' })
+
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({
+        accessToken: 'access-new',
+        refreshToken: 'refresh-new',
+        expiresIn: 3600,
+        userId: 'user-123',
+      })
+      // rotation: the old token is spent, the response carries its successor
+      expect(refreshSession).toHaveBeenCalledWith({ refresh_token: 'refresh-old' })
+    })
+
+    it('returns 401 for an invalid or expired refresh token', async () => {
+      refreshSession.mockResolvedValue({
+        data: { session: null, user: null },
+        error: { status: 400 },
+      })
+
+      const res = await supertest(app.server)
+        .post('/v1/auth/refresh')
+        .send({ refreshToken: 'refresh-spent' })
+
+      expect(res.status).toBe(401)
+    })
+
+    it('returns 400 when refreshToken is missing', async () => {
+      const res = await supertest(app.server).post('/v1/auth/refresh').send({})
+      expect(res.status).toBe(400)
+      expect(refreshSession).not.toHaveBeenCalled()
     })
   })
 })

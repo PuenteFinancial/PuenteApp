@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { apiFetch, getSessionToken, requestOrigin } from '@/lib/session'
+import { apiFetch, getSessionToken, refreshRedirectPath, requestOrigin } from '@/lib/session'
 
 // Bridge redirects here after the user accepts its Terms of Service.
 // No UI — exchange the signed agreement for a hosted KYC link and go there.
@@ -8,10 +8,18 @@ export default async function TosReturnPage({
 }: {
   searchParams: Promise<{ signed_agreement_id?: string }>
 }) {
-  const token = await getSessionToken()
-  if (!token) redirect('/signup')
-
   const { signed_agreement_id: signedAgreementId } = await searchParams
+
+  // The Bridge ToS flow can outlive the ~1 h session — carry the signed
+  // agreement through the refresh so the user doesn't have to restart KYC.
+  const token = await getSessionToken()
+  if (!token) {
+    const self = signedAgreementId
+      ? `/onboarding/kyc/tos-return?signed_agreement_id=${encodeURIComponent(signedAgreementId)}`
+      : '/onboarding/kyc/tos-return'
+    redirect(refreshRedirectPath(self))
+  }
+
   if (!signedAgreementId) redirect('/onboarding/kyc?error=1')
 
   const origin = await requestOrigin()
