@@ -84,7 +84,7 @@ Every entry point converges here: post-OTP verify, landing-page "Sign in," and a
 
 **Today:** httpOnly cookie holds the Supabase access token with `maxAge = expiresIn` (~1 h). No refresh token is stored. Past the hour, the next server-rendered page bounces to `/signup`.
 
-**Decision needed (recommendation follows):** store the Supabase **refresh token in a second httpOnly cookie** (`puente_refresh`, `path=/api/auth`), add a `POST /api/auth/refresh` proxy that exchanges it via the API (`POST /v1/auth/refresh` → `supabase.auth.refreshSession`), and have `apiFetch`-consuming server pages attempt one refresh before redirecting to `/signup`. Target session: **30 days rolling** (Supabase default refresh-token behavior), re-OTP after that.
+**Decision (2026-07-08):** store the Supabase **refresh token in a second httpOnly cookie** (`puente_refresh`, `path=/api/auth`), add a `POST /api/auth/refresh` proxy that exchanges it via the API (`POST /v1/auth/refresh` → `supabase.auth.refreshSession`), and have `apiFetch`-consuming server pages attempt one refresh before redirecting to `/signup`. Target session: **30 days rolling** (Supabase default refresh-token behavior), re-OTP after that.
 
 Rationale: remittance users return weekly-to-monthly to send money; forcing SMS OTP every hour burns Twilio spend and goodwill. Financial-app norm is a durable session with re-auth for sensitive actions — we can add step-up OTP on money movement when remittance lands.
 
@@ -109,11 +109,9 @@ Constraint: refresh tokens are rotating and single-use in Supabase — the proxy
 
 **Today:** pending screen says "we'll email you as soon as you're approved" — nothing sends email.
 
-**Decision needed:** two options —
-- **A (ship now):** change the copy to "check back here — verification usually takes a few minutes." Zero infra. *Recommended for this phase.*
-- **B (later):** send approval/rejection emails from the webhook handler on status transition (provider decision — Resend vs Supabase SMTP; en/es templates; GLBA-adjacent content review).
-
-Recommendation: **A now**, revisit B alongside remittance notifications (receipts, transfer status) so email infra is built once. Also: make the pending page poll `GET /users/me` on a 30 s interval (or on tab focus) and route on status change, so "check back" mostly happens by itself.
+**Decision (2026-07-08):** fix the copy now, defer real email.
+- **Now:** change the copy to "check back here — verification usually takes a few minutes," and make the pending page poll `GET /users/me` on a 30 s interval (or on tab focus) and route on status change, so "check back" mostly happens by itself.
+- **Deferred:** approval/rejection emails from the webhook handler on status transition — revisit alongside remittance notifications (receipts, transfer status) so email infra (provider choice, en/es templates, GLBA-adjacent content review) is built once.
 
 ---
 
