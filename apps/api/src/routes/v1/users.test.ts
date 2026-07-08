@@ -95,10 +95,45 @@ describe('POST /v1/users/me/tos-link', () => {
     const res = await supertest(app.server)
       .post('/v1/users/me/tos-link')
       .set('Authorization', 'Bearer test-token')
+      .send({})
 
     expect(res.status).toBe(200)
     expect(res.body.url).toContain('session_token=tok')
-    expect(createTosLink).toHaveBeenCalledWith(expect.stringContaining('/onboarding/kyc/tos-return'))
+    expect(createTosLink).toHaveBeenCalledWith(
+      'http://localhost:3000/onboarding/kyc/tos-return',
+    )
+    await app.close()
+  })
+
+  it('honors an allowlisted origin for the return redirect', async () => {
+    createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/tos-link')
+      .set('Authorization', 'Bearer test-token')
+      .send({ origin: 'http://localhost:8081' })
+
+    expect(res.status).toBe(200)
+    expect(createTosLink).toHaveBeenCalledWith(
+      'http://localhost:8081/onboarding/kyc/tos-return',
+    )
+    await app.close()
+  })
+
+  it('falls back to the canonical origin when the origin is not allowlisted', async () => {
+    createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/tos-link')
+      .set('Authorization', 'Bearer test-token')
+      .send({ origin: 'https://evil.example' })
+
+    expect(res.status).toBe(200)
+    expect(createTosLink).toHaveBeenCalledWith(
+      'http://localhost:3000/onboarding/kyc/tos-return',
+    )
     await app.close()
   })
 
@@ -116,6 +151,7 @@ describe('POST /v1/users/me/tos-link', () => {
     const res = await supertest(app.server)
       .post('/v1/users/me/tos-link')
       .set('Authorization', 'Bearer test-token')
+      .send({})
 
     expect(res.status).toBe(502)
     await app.close()

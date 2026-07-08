@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { apiFetch, getSessionToken } from '@/lib/session'
+import { apiFetch, getSessionToken, requestOrigin } from '@/lib/session'
 
 export async function POST() {
   const token = await getSessionToken()
@@ -8,7 +8,11 @@ export async function POST() {
   }
 
   try {
-    const apiRes = await apiFetch('/v1/users/me/tos-link', token, { method: 'POST' })
+    const origin = await requestOrigin()
+    const apiRes = await apiFetch('/v1/users/me/tos-link', token, {
+      method: 'POST',
+      body: JSON.stringify(origin ? { origin } : {}),
+    })
     const body = await apiRes.json().catch(() => ({}))
     return NextResponse.json(body, { status: apiRes.status })
   } catch (err) {

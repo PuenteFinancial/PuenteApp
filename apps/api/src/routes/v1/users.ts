@@ -43,8 +43,23 @@ interface UpdateMeBody {
   email: string
 }
 
+interface TosLinkBody {
+  origin?: string
+}
+
 interface KycLinkBody {
   signed_agreement_id: string
+  origin?: string
+}
+
+// Bridge redirects the browser back to the web app after ToS/KYC, so the
+// redirect must target the origin the user is actually on (localhost web vs
+// Expo, staging vs prod). Only allowlisted origins are honored — anything
+// else falls back to the canonical first entry.
+function resolveWebOrigin(origin?: string): string {
+  if (origin && env.ALLOWED_ORIGINS.includes(origin)) return origin
+  // splitting a non-empty env var always yields at least one entry
+  return env.ALLOWED_ORIGINS[0]!
 }
 
 export async function usersRoute(server: FastifyInstance) {
@@ -131,10 +146,17 @@ export async function usersRoute(server: FastifyInstance) {
     },
   )
 
-  server.post(
+  server.post<{ Body: TosLinkBody }>(
     '/users/me/tos-link',
     {
       schema: {
+        body: {
+          type: 'object',
+          properties: {
+            origin: { type: 'string' },
+          },
+          additionalProperties: false,
+        },
         response: {
           200: {
             type: 'object',
@@ -149,8 +171,9 @@ export async function usersRoute(server: FastifyInstance) {
     },
     async (request, reply) => {
       const userId = request.user!.id
+      const webOrigin = resolveWebOrigin(request.body?.origin)
       try {
-        const { url } = await createTosLink(`${env.ALLOWED_ORIGINS[0]}/onboarding/kyc/tos-return`)
+        const { url } = await createTosLink(`${webOrigin}/onboarding/kyc/tos-return`)
         return { url }
       } catch (err) {
         if (err instanceof BridgeApiError) {
@@ -172,6 +195,7 @@ export async function usersRoute(server: FastifyInstance) {
           required: ['signed_agreement_id'],
           properties: {
             signed_agreement_id: { type: 'string', minLength: 1 },
+            origin: { type: 'string' },
           },
           additionalProperties: false,
         },
@@ -226,7 +250,7 @@ export async function usersRoute(server: FastifyInstance) {
 
         const { url } = await getKycLink(
           bridgeCustomerId,
-          `${env.ALLOWED_ORIGINS[0]}/onboarding/kyc/return`,
+          `${resolveWebOrigin(request.body.origin)}/onboarding/kyc/return`,
         )
         return { url }
       } catch (err) {
