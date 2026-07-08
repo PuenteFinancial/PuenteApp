@@ -1,13 +1,15 @@
 import { redirect } from 'next/navigation'
-import { apiFetch, getSessionToken } from '@/lib/session'
+import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 
 // The single post-sign-in router. Every entry point converges here — the
 // OTP verify form, the landing-page sign-in, and any page that finds a
 // valid session in the wrong place. Routing lives server-side so a stale
 // client bundle can never run yesterday's rules.
 export default async function ContinuePage() {
+  // No session cookie usually means it expired (~1 h) — try a silent
+  // refresh before giving up; the handler falls through to /signup.
   const token = await getSessionToken()
-  if (!token) redirect('/signup')
+  if (!token) redirect(refreshRedirectPath('/continue'))
 
   const res = await apiFetch('/v1/users/me', token)
 

@@ -1,6 +1,6 @@
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
-import { apiFetch, getSessionToken } from '@/lib/session'
+import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import StatusCard from '@/components/onboarding/StatusCard'
 
@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 
 export default async function DashboardPage() {
   const token = await getSessionToken()
-  if (!token) redirect('/signup')
+  if (!token) redirect(refreshRedirectPath('/dashboard'))
 
   const res = await apiFetch('/v1/users/me', token)
   if (!res.ok) redirect('/signup')

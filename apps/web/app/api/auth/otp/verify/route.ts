@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { apiFetch, SESSION_COOKIE } from '@/lib/session'
+import {
+  apiFetch,
+  SESSION_COOKIE,
+  REFRESH_COOKIE,
+  REFRESH_COOKIE_PATH,
+  REFRESH_MAX_AGE,
+} from '@/lib/session'
 
 export async function POST(req: NextRequest) {
   try {
@@ -21,13 +27,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to verify code' }, { status: 502 })
     }
 
-    const { accessToken, expiresIn } = (await apiRes.json()) as {
+    const { accessToken, refreshToken, expiresIn } = (await apiRes.json()) as {
       accessToken: string
+      refreshToken: string
       expiresIn: number
     }
 
-    // Access token goes straight into the httpOnly cookie — it never
-    // reaches client-side JavaScript.
+    // Both tokens go straight into httpOnly cookies — they never reach
+    // client-side JavaScript.
     const res = NextResponse.json({ ok: true })
     res.cookies.set(SESSION_COOKIE, accessToken, {
       httpOnly: true,
@@ -35,6 +42,13 @@ export async function POST(req: NextRequest) {
       sameSite: 'lax',
       path: '/',
       maxAge: expiresIn,
+    })
+    res.cookies.set(REFRESH_COOKIE, refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: REFRESH_COOKIE_PATH,
+      maxAge: REFRESH_MAX_AGE,
     })
     return res
   } catch (err) {
