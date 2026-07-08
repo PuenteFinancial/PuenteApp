@@ -14,9 +14,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Phone and code are required' }, { status: 400 })
     }
 
+    // The API only sees this server's address — forward the real client
+    // IP/UA for the sign_in_events risk record. Headers, never URL params.
+    const clientIp =
+      req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      req.headers.get('x-real-ip') ||
+      null
+    const clientUa = req.headers.get('user-agent')
+
     const apiRes = await apiFetch('/v1/auth/otp/verify', null, {
       method: 'POST',
       body: JSON.stringify({ phone: phone.trim(), token: token.trim() }),
+      headers: {
+        ...(clientIp ? { 'x-client-ip': clientIp } : {}),
+        ...(clientUa ? { 'x-client-ua': clientUa } : {}),
+      },
     })
 
     if (apiRes.status === 401) {

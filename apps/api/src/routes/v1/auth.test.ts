@@ -9,16 +9,24 @@ const consentIs = vi.fn(async () => ({ error: null }))
 const upsert = vi.fn(
   async (..._args: unknown[]): Promise<{ error: { code: string } | null }> => ({ error: null }),
 )
-const from = vi.fn((..._args: unknown[]) => ({
-  update: vi.fn(() => ({ eq: vi.fn(() => ({ is: consentIs })) })),
-  upsert: (...args: unknown[]) => upsert(...args),
-}))
+const signInInsert = vi.fn(
+  async (..._args: unknown[]): Promise<{ error: { code: string } | null }> => ({ error: null }),
+)
+const from = vi.fn((table: string) => {
+  if (table === 'sign_in_events') {
+    return { insert: (...args: unknown[]) => signInInsert(...args) }
+  }
+  return {
+    update: vi.fn(() => ({ eq: vi.fn(() => ({ is: consentIs })) })),
+    upsert: (...args: unknown[]) => upsert(...args),
+  }
+})
 
 vi.mock('../../services/supabase.js', () => ({
   // DB access is service-role; session-minting GoTrue calls live on a
   // separate client so they can't pollute the admin client's identity
   supabaseAdmin: {
-    from: (...args: unknown[]) => from(...args),
+    from: (table: string) => from(table),
   },
   supabaseAuth: {
     auth: {
@@ -50,6 +58,8 @@ describe('auth OTP routes', () => {
     consentIs.mockClear()
     upsert.mockClear()
     upsert.mockResolvedValue({ error: null })
+    signInInsert.mockClear()
+    signInInsert.mockResolvedValue({ error: null })
   })
 
   describe('POST /v1/auth/otp/send', () => {
@@ -152,6 +162,83 @@ describe('auth OTP routes', () => {
       expect(res.body.accessToken).toBe('access-abc')
     })
 
+    it('records a sign_in_events row with the forwarded client IP and UA', async () => {
+      verifyOtp.mockResolvedValue({
+        data: {
+          session: {
+            access_token: 'access-abc',
+            refresh_token: 'refresh-abc',
+            expires_in: 3600,
+          },
+          user: { id: 'user-123', phone: '15555555555' },
+        },
+        error: null,
+      })
+
+      const res = await supertest(app.server)
+        .post('/v1/auth/otp/verify')
+        .set('x-client-ip', '203.0.113.7')
+        .set('x-client-ua', 'Mozilla/5.0 (iPhone)')
+        .send({ phone: '15555555555', token: '123456' })
+
+      expect(res.status).toBe(200)
+      expect(signInInsert).toHaveBeenCalledWith({
+        user_id: 'user-123',
+        ip: '203.0.113.7',
+        user_agent: 'Mozilla/5.0 (iPhone)',
+        auth_method: 'sms_otp',
+      })
+    })
+
+    it('falls back to the socket IP and UA header when nothing is forwarded', async () => {
+      verifyOtp.mockResolvedValue({
+        data: {
+          session: {
+            access_token: 'access-abc',
+            refresh_token: 'refresh-abc',
+            expires_in: 3600,
+          },
+          user: { id: 'user-123', phone: '15555555555' },
+        },
+        error: null,
+      })
+
+      const res = await supertest(app.server)
+        .post('/v1/auth/otp/verify')
+        .set('User-Agent', 'direct-caller/1.0')
+        .send({ phone: '15555555555', token: '123456' })
+
+      expect(res.status).toBe(200)
+      expect(signInInsert).toHaveBeenCalledWith({
+        user_id: 'user-123',
+        ip: expect.any(String), // supertest's loopback socket address
+        user_agent: 'direct-caller/1.0',
+        auth_method: 'sms_otp',
+      })
+    })
+
+    it('still returns tokens when the sign_in_events insert fails', async () => {
+      verifyOtp.mockResolvedValue({
+        data: {
+          session: {
+            access_token: 'access-abc',
+            refresh_token: 'refresh-abc',
+            expires_in: 3600,
+          },
+          user: { id: 'user-123', phone: '15555555555' },
+        },
+        error: null,
+      })
+      signInInsert.mockResolvedValue({ error: { code: '22P02' } })
+
+      const res = await supertest(app.server)
+        .post('/v1/auth/otp/verify')
+        .send({ phone: '15555555555', token: '123456' })
+
+      expect(res.status).toBe(200)
+      expect(res.body.accessToken).toBe('access-abc')
+    })
+
     it('returns 401 for an invalid code', async () => {
       verifyOtp.mockResolvedValue({
         data: { session: null, user: null },
@@ -164,6 +251,7 @@ describe('auth OTP routes', () => {
 
       expect(res.status).toBe(401)
       expect(from).not.toHaveBeenCalled()
+      expect(signInInsert).not.toHaveBeenCalled()
     })
 
     it('returns 400 when token is missing', async () => {
