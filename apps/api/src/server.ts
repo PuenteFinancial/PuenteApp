@@ -20,7 +20,11 @@ const server = Fastify({
   },
 })
 
-Sentry.setupFastifyErrorHandler(server)
+Sentry.setupFastifyErrorHandler(server, {
+  // 4xx are client mistakes (validation failures, bad tokens) — public
+  // endpoints see these constantly and they'd drown out real faults
+  shouldHandleError: (_error, _request, reply) => reply.statusCode >= 500,
+})
 await server.register(helmet)
 await server.register(cors, {
   origin: env.ALLOWED_ORIGINS,
