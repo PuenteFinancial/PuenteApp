@@ -26,8 +26,10 @@ export default async function TosReturnPage({
 
   const { url } = (await res.json()) as { url: string }
 
-  // Only follow redirects to Bridge — a compromised or misbehaving upstream
-  // must not be able to send users to an arbitrary site
+  // Only follow redirects to Bridge or its KYC vendor Persona — a compromised
+  // or misbehaving upstream must not be able to send users to an arbitrary
+  // site. Bridge's hosted KYC URLs live on bridge.withpersona.com.
+  const ALLOWED_HOSTS = ['bridge.xyz', 'bridge.withpersona.com']
   let host = ''
   let protocol = ''
   try {
@@ -37,8 +39,9 @@ export default async function TosReturnPage({
   } catch {
     redirect('/onboarding/kyc')
   }
-  if (protocol !== 'https:' || (host !== 'bridge.xyz' && !host.endsWith('.bridge.xyz'))) {
-    console.error('KYC link returned an unexpected redirect host')
+  if (protocol !== 'https:' || (!ALLOWED_HOSTS.includes(host) && !host.endsWith('.bridge.xyz'))) {
+    // host only — never log the full URL (contains the inquiry/reference ids)
+    console.error(`KYC link returned an unexpected redirect host: ${host}`)
     redirect('/onboarding/kyc')
   }
 
