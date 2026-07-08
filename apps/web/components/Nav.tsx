@@ -28,6 +28,7 @@ export default function Nav() {
           <div className="nav-links">
             <a href="#remittances">{t.nav.remit}</a>
             <a href="#how">{t.nav.how}</a>
+            <a href="/signup">{t.nav.signIn}</a>
           </div>
           <div className="nav-right">
             <LanguageToggle />
@@ -51,6 +52,7 @@ export default function Nav() {
         </button>
         <a href="#remittances" onClick={close}>{t.nav.remit}</a>
         <a href="#how" onClick={close}>{t.nav.how}</a>
+        <a href="/signup" onClick={close}>{t.nav.signIn}</a>
         <a className="btn btn--accent" href="/waitlist" style={{ marginTop: 16 }}>{t.nav.cta}</a>
       </div>
     </>

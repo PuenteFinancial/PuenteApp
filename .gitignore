@@ -37,8 +37,9 @@ coverage/
 .vscode/
 .idea/
 
-# Supabase CLI temp files (linked project, version cache)
+# Supabase CLI temp files (linked project, version cache, local branches)
 supabase/.temp
+supabase/.branches
 
 # Turborepo
 .turbo

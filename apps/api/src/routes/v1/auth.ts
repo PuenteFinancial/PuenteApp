@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import { supabaseAdmin } from '../../services/supabase.js'
+import { supabaseAdmin, supabaseAuth } from '../../services/supabase.js'
 
 interface OtpSendBody {
   phone: string
@@ -36,7 +36,7 @@ export async function authRoute(server: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const { error } = await supabaseAdmin.auth.signInWithOtp({
+      const { error } = await supabaseAuth.auth.signInWithOtp({
         phone: request.body.phone,
         options: { channel: 'sms' },
       })
@@ -79,7 +79,7 @@ export async function authRoute(server: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      const { data, error } = await supabaseAdmin.auth.verifyOtp({
+      const { data, error } = await supabaseAuth.auth.verifyOtp({
         phone: request.body.phone,
         token: request.body.token,
         type: 'sms',
@@ -87,6 +87,23 @@ export async function authRoute(server: FastifyInstance) {
 
       if (error || !data.session || !data.user) {
         return reply.status(401).send({ error: 'Invalid or expired code' })
+      }
+
+      // The users row normally exists via the on-auth-user-created trigger,
+      // but rows deleted out-of-band (or predating the trigger) left every
+      // profile save 500ing. Self-heal here. ignoreDuplicates is load-bearing:
+      // an existing row must never have its kyc_status or profile reset.
+      // Non-fatal — a failed write must not block sign-in.
+      const { error: upsertError } = await supabaseAdmin.from('users').upsert(
+        { id: data.user.id, phone: data.user.phone, kyc_status: 'not_started' },
+        { onConflict: 'id', ignoreDuplicates: true },
+      )
+
+      if (upsertError) {
+        server.log.warn(
+          { userId: data.user.id, supabaseError: upsertError.code },
+          'users row self-heal upsert failed',
+        )
       }
 
       // TCPA consent was collected on the signup form before the OTP was

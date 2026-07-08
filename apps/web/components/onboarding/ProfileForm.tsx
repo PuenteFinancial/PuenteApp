@@ -4,14 +4,22 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useLanguage } from '@/components/LanguageProvider'
 
-export default function ProfileForm() {
+export default function ProfileForm({
+  initialFirstName = '',
+  initialLastName = '',
+  initialEmail = '',
+}: {
+  initialFirstName?: string
+  initialLastName?: string
+  initialEmail?: string
+}) {
   const { t } = useLanguage()
   const s = t.onboarding.profile
   const router = useRouter()
 
-  const [firstName, setFirstName] = useState('')
-  const [lastName, setLastName] = useState('')
-  const [email, setEmail] = useState('')
+  const [firstName, setFirstName] = useState(initialFirstName)
+  const [lastName, setLastName] = useState(initialLastName)
+  const [email, setEmail] = useState(initialEmail)
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle')
 
   const handleSubmit = async (e: React.FormEvent) => {

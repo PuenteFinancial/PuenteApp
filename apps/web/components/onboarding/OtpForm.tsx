@@ -39,7 +39,8 @@ export default function OtpForm() {
       if (!res.ok) throw new Error('Failed')
 
       sessionStorage.removeItem(SIGNUP_PHONE_KEY)
-      router.push('/onboarding/profile')
+      // /continue routes by server-side state — never assume a fresh signup
+      router.push('/continue')
     } catch {
       setStatus('error')
     }

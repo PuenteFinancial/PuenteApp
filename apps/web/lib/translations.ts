@@ -2,7 +2,7 @@ export type Lang = 'en' | 'es'
 
 export type Translations = {
   announce: { pre: string; link: string }
-  nav: { remit: string; how: string; cta: string }
+  nav: { remit: string; how: string; cta: string; signIn: string }
   hero: {
     eyebrow: string
     h1: [string, string][]
@@ -85,7 +85,7 @@ export type Translations = {
 
 const en: Translations = {
   announce: { pre: 'Early access is open.', link: 'Sign up' },
-  nav: { remit: 'Remittances', how: 'How it works', cta: 'Sign up' },
+  nav: { remit: 'Remittances', how: 'How it works', cta: 'Sign up', signIn: 'Sign in' },
   hero: {
     eyebrow: 'Remittances + credit building',
     h1: [['Send', 'money.'], ['Build', 'credit.']],
@@ -170,7 +170,9 @@ const en: Translations = {
   },
   onboarding: {
     signup: {
-      title: 'Create your account',
+      // Single door: this flow signs in returning users too — the copy
+      // must not tell them they're creating an account
+      title: 'Sign in or create your account',
       sub: 'Enter your mobile number and we’ll text you a verification code.',
       phone: 'Mobile number',
       phonePh: '(555) 555-5555',
@@ -241,7 +243,7 @@ const en: Translations = {
 
 const es: Translations = {
   announce: { pre: 'El acceso anticipado está abierto.', link: 'Regístrate' },
-  nav: { remit: 'Remesas', how: 'Cómo funciona', cta: 'Regístrate' },
+  nav: { remit: 'Remesas', how: 'Cómo funciona', cta: 'Regístrate', signIn: 'Iniciar sesión' },
   hero: {
     eyebrow: 'Remesas + historial de crédito',
     h1: [['Envía', 'dinero.'], ['Crea', 'crédito.']],
@@ -326,7 +328,9 @@ const es: Translations = {
   },
   onboarding: {
     signup: {
-      title: 'Crea tu cuenta',
+      // Puerta única: este flujo también inicia sesión para usuarios que
+      // regresan — el texto no debe decirles que están creando una cuenta
+      title: 'Inicia sesión o crea tu cuenta',
       sub: 'Ingresa tu número de celular y te enviaremos un código de verificación por SMS.',
       phone: 'Número de celular',
       phonePh: '(555) 555-5555',
