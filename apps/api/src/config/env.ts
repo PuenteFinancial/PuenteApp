@@ -9,6 +9,13 @@ const envSchema = z.object({
     .string()
     .default('http://localhost:3000,http://localhost:8081')
     .transform((s) => s.split(',')),
+  // How many proxy hops sit in front of the API (Railway edge = 1). Drives
+  // trustProxy so request.ip = the rightmost X-Forwarded-For entry, i.e. the
+  // address the trusted proxy actually saw. NEVER set trustProxy: true —
+  // the leftmost XFF entries are client-controlled, so trusting the whole
+  // chain lets callers rotate fake IPs past per-IP rate limits. 0 = trust
+  // no proxy (request.ip = socket peer).
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
   SUPABASE_URL: z.string().url(),
   SUPABASE_SECRET_KEY: z.string().min(1),
   SUPABASE_PUBLISHABLE_KEY: z.string().min(1),
