@@ -14,7 +14,7 @@ export default function StatusCard({ variant }: { variant: 'pending' | 'dashboar
           {s.title}
         </h1>
         <p style={{ fontSize: 15, color: 'var(--muted)', margin: '0 0 8px', lineHeight: 1.6 }}>{s.body}</p>
-        <p style={{ fontSize: 15, color: 'var(--muted)', margin: 0, lineHeight: 1.6 }}>{s.emailNote}</p>
+        <p style={{ fontSize: 15, color: 'var(--muted)', margin: 0, lineHeight: 1.6 }}>{s.autoNote}</p>
       </div>
     )
   }

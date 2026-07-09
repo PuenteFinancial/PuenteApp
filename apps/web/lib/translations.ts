@@ -73,7 +73,7 @@ export type Translations = {
     verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resent: string; error: string }
     profile: { title: string; sub: string; firstName: string; lastName: string; email: string; emailNote: string; cta: string; saving: string; error: string }
     kyc: { title: string; body: string; dataNotice: string; cta: string; starting: string; error: string }
-    pending: { title: string; body: string; emailNote: string }
+    pending: { title: string; body: string; autoNote: string }
     rejected: {
       title: string; body: string; reasonLabel: string
       retryCta: string; retrying: string; retryError: string
@@ -218,7 +218,7 @@ const en: Translations = {
     pending: {
       title: 'Your identity is being verified',
       body: 'This usually takes a few minutes but can take up to 1 business day.',
-      emailNote: 'We’ll email you as soon as you’re approved.',
+      autoNote: 'This page updates automatically — no need to refresh.',
     },
     // NEEDS LEGAL REVIEW (EN + ES): identity-verification outcome wording.
     // Must never read as a credit or account denial (no adverse-action
@@ -376,7 +376,7 @@ const es: Translations = {
     pending: {
       title: 'Estamos verificando tu identidad',
       body: 'Normalmente toma unos minutos, pero puede tardar hasta 1 día hábil.',
-      emailNote: 'Te enviaremos un correo en cuanto estés aprobado.',
+      autoNote: 'Esta página se actualiza automáticamente — no necesitas recargarla.',
     },
     // NEEDS LEGAL REVIEW (EN + ES): resultado de verificación de identidad.
     // Nunca debe leerse como una denegación de crédito o de cuenta — trata
