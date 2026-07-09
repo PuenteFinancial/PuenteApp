@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import StatusCard from '@/components/onboarding/StatusCard'
+import PendingPoller from '@/components/onboarding/PendingPoller'
 
 export const metadata: Metadata = {
   title: 'Verification In Progress — Puente Financial',
@@ -27,6 +28,7 @@ export default async function PendingPage() {
   return (
     <OnboardingShell>
       <StatusCard variant="pending" />
+      <PendingPoller />
     </OnboardingShell>
   )
 }
