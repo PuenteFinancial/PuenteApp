@@ -18,6 +18,11 @@ const server = Fastify({
     level: env.LOG_LEVEL,
     ...(env.NODE_ENV === 'development' && { transport: { target: 'pino-pretty' } }),
   },
+  // Railway's edge appends the real client IP as the RIGHTMOST X-Forwarded-For
+  // entry; a hop count trusts exactly that. Without this, request.ip is the
+  // proxy's address and every user shares the same rate-limit bucket. See
+  // TRUST_PROXY_HOPS in config/env.ts for why `true` would be a bypass.
+  trustProxy: env.TRUST_PROXY_HOPS === 0 ? false : env.TRUST_PROXY_HOPS,
 })
 
 Sentry.setupFastifyErrorHandler(server, {
