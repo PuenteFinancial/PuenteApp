@@ -1,0 +1,47 @@
+name: Promote to Production
+
+# The one deliberate action that moves production. Fast-forwards the
+# `production` branch to `main`; Railway prod and Vercel prod track
+# `production`, so web + API deploy together. Merging to `main` only ever
+# reaches staging — nothing goes live until this runs and is approved.
+#
+# Part 2 (migrations pipeline) inserts a prod `supabase db push` step here,
+# before the fast-forward, so schema always lands before the code that
+# needs it — covered by the same approval.
+
+on:
+  workflow_dispatch:
+
+# Never two promotes in flight at once
+concurrency: promote-production
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Fast-forward production to main
+    runs-on: ubuntu-latest
+    # Gated: requires approval in the Actions UI (production environment
+    # protection rule — required reviewer).
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Show what this promote ships
+        run: |
+          BASE=$(git rev-parse --short origin/production 2>/dev/null || echo "none")
+          echo "## Promoting to production" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "production: \`$BASE\` → main: \`$(git rev-parse --short origin/main)\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$BASE" != "none" ]; then
+            git log --oneline origin/production..origin/main >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Plain push (no force) = fast-forward only. If production has somehow
+      # diverged from main's history, this fails loudly instead of rewriting.
+      - name: Fast-forward production to main
+        run: git push origin origin/main:refs/heads/production
