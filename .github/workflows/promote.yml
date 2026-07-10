@@ -41,6 +41,22 @@ jobs:
             git log --oneline origin/production..origin/main >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      # Schema before code: prod migrations apply before the branch moves,
+      # so new code never deploys ahead of the columns it needs. If this
+      # fails, the promote stops and production (branch + DB) is untouched
+      # beyond any migrations that already applied — safe to re-run, since
+      # db push only applies what's still pending. PROD_DB_URL is a
+      # Production *environment* secret: only this approval-gated job can
+      # read it. Session pooler URL (runners are IPv4-only).
+      - name: Apply pending migrations to production DB
+        env:
+          PROD_DB_URL: ${{ secrets.PROD_DB_URL }}
+        run: supabase db push --db-url "$PROD_DB_URL"
+
       # Plain push (no force) = fast-forward only. If production has somehow
       # diverged from main's history, this fails loudly instead of rewriting.
       - name: Fast-forward production to main
