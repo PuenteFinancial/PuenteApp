@@ -1,0 +1,65 @@
+name: Migrations
+
+# Staging half of the migrations pipeline. Production applies happen inside
+# the Promote workflow (same approval as the code deploy, schema first).
+#
+# - PR touching supabase/migrations/**  → dry-run against staging (preview
+#   of what would apply; catches drift/ordering problems before merge)
+# - merge to main                       → apply to staging for real, so the
+#   staging DB always matches the staging app
+#
+# DB URLs are Supabase *session pooler* connection strings (GitHub runners
+# are IPv4-only; the direct db.<ref> host is IPv6).
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["supabase/migrations/**"]
+  push:
+    branches: [main]
+    paths: ["supabase/migrations/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: migrations-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: Dry-run against staging
+    # Fork PRs get no secrets on a public repo — skip instead of failing
+    if: >-
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Preview pending migrations (staging)
+        env:
+          STAGING_DB_URL: ${{ secrets.STAGING_DB_URL }}
+        run: supabase db push --db-url "$STAGING_DB_URL" --dry-run
+
+  apply-staging:
+    name: Apply to staging
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Apply pending migrations (staging)
+        env:
+          STAGING_DB_URL: ${{ secrets.STAGING_DB_URL }}
+        run: supabase db push --db-url "$STAGING_DB_URL"
