@@ -196,8 +196,10 @@ buffer) and absorb the difference: the variance between the quoted send and Brid
 books to `fx_slippage`. The buffer in the customer rate funds it; a favorable move lands as a credit.
 Mechanically (sandbox spike 2026-07-13): the payout fixes `destination.amount` in MXN — the recipient
 gets exactly the disclosed amount — and Bridge draws a *variable* USDC amount from the treasury
-wallet; the difference between that draw and the quoted USD cost is the `fx_slippage` entry, booked
-when the payout receipt arrives.
+wallet. The actual draw is returned **synchronously in the transfer-create response**
+(`source.amount`), so the slippage vs. the quoted cost is known at submission and books inside the
+`SUBMITTED` batch itself (draw the actual from `bridge_wallet_float`; the delta vs. the quoted send
+principal debits/credits `fx_slippage`) — no later true-up entry needed.
 
 ## Reconciliation
 
