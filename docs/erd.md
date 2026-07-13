@@ -233,15 +233,16 @@ stored response; same key + different body → `idempotency_conflict`.
 > **Float ceiling** is not a table — it's derived live as `SUM(funding_receivable)` and enforced in
 > the app against a config value (env/settings). See ledger-rules + state machine.
 
-> **Bridge wallet id** is not stored in the schema. **Open question (from the PoC + Bridge research
-> 2026-07-10):** whether one Bridge transfer can carry USD/ACH source → MXN/SPEI destination with
-> Bridge orchestrating the stablecoin sandwich internally, or whether it must be two legs through a
-> Puente treasury wallet (the PoC's USD→USD move required the explicit two-leg wallet path). The
-> instant-payout requirement likely means a **pre-funded treasury wallet** (payout leg fires
-> immediately from wallet USDC; Stripe-collected funds replenish it) — in that topology one Puente
-> transfer maps to one Bridge *payout* transfer plus batch replenishment transfers. Either way the
-> wallet id belongs in app config (env var), not a schema column — same reasoning as the float
-> ceiling. Resolve in sandbox before implementing the worker.
+> **Bridge wallet id** is not stored in the schema. **RESOLVED 2026-07-13 (sandbox spike):** Bridge
+> has no one-transfer fiat→SPEI route — `ach_push`/`ach`/`wire` USD sources × `spei` MXN destination
+> all return `route not supported`. Puente assembles the stablecoin sandwich itself via a
+> **pre-funded treasury wallet**: the payout leg is ONE Bridge transfer (wallet USDC → MXN SPEI;
+> verified in sandbox, `201` → `funds_received` in seconds), and replenishment (USD → USDC onramp,
+> proven in the prod PoC) is a separate batch process — so **one Puente transfer maps to one Bridge
+> payout transfer**, never two. Payouts fix `destination.amount` (MXN) so the recipient receives
+> exactly the disclosed amount (Reg E); the variable USDC draw is where FX variance lands (see
+> ledger `fx_slippage`). Bridge minimum: destination ≥ $2.00 USD equivalent. The wallet id lives in
+> app config (env var), not a schema column — same reasoning as the float ceiling.
 
 ## RLS posture summary
 

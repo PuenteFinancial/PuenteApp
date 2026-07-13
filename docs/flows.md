@@ -89,10 +89,17 @@ payment_processed`, with failure states off to the side.
 | `undeliverable`, `error`, `canceled` | `SUBMITTED`/`IN_FLIGHT → PAYOUT_FAILED` → refund flow |
 | `returned`, `refunded`, `refund_in_flight` | `PAYOUT_FAILED` path — Bridge returning principal (ledger: Bridge-returns post) |
 | `refund_failed` | `PAYOUT_FAILED` + **ops alert** — principal stuck at Bridge (stuck-transfer runbook) |
-| `in_review` | **no state change**; transfer stays `SUBMITTED`/`IN_FLIGHT`, ops alert if > 1h (Bridge-side AML hold — *open question: confirm semantics with Bridge*) |
+| `in_review` | **no state change**; transfer stays `SUBMITTED`/`IN_FLIGHT`. Observed in sandbox (2026-07-13) as a routine *transient initial state* on payout creation, resolving to `funds_received` in seconds — so alert only when it **persists** (> 1h), which indicates a real Bridge-side review/AML hold |
 
 Missed webhooks are backstopped by reconciliation (cron polls `GET /v0/transfers` for
 non-terminal transfers — see reconciliation runbook).
+
+**Payout topology (resolved 2026-07-13, sandbox spike):** one Puente transfer = **one** Bridge
+transfer — the payout leg from the pre-funded treasury wallet (`bridge_wallet` USDC source →
+`spei` MXN destination with `destination.amount` fixed). Wallet replenishment (USD → USDC onramp)
+is a separate batch process outside any user transfer. Bridge offers no one-transfer fiat→SPEI
+route (verified: `ach_push`/`ach`/`wire` all rejected). See the ERD note and ledger
+`bridge_wallet_float` postings.
 
 ## 3. Error resolution (Reg E §1005.33) — dispute
 

@@ -35,6 +35,7 @@ All accounts are company-level (one row each). Per-transfer attribution is via `
 | Account | Type | Normal balance | Meaning |
 |---|---|---|---|
 | `cash_clearing` | asset | debit | Float / cash on hand (our Stripe/bank balance). |
+| `bridge_wallet_float` | asset | debit | USDC pre-funded in the Bridge treasury wallet — cash at a different location. Payouts draw from it; batch replenishments top it up. |
 | `funding_receivable` | asset | debit | ACH initiated but not cleared — money owed to us by the sender's bank. |
 | `due_from_bridge` | asset | debit | Funds sent to Bridge, delivery not yet confirmed (in-transit window). |
 | `transfer_payable` | liability | credit | Our obligation to complete the transfer (owed until delivered). |
@@ -59,10 +60,14 @@ FUNDED  (ACH initiated — recognize obligation + fee against a receivable)
   CR transfer_payable        98
   CR fee_revenue              2
 
-SUBMITTED  (pay Bridge $98 + $0.50 fee from float; obligation stays open)
+SUBMITTED  (payout drawn from the pre-funded treasury wallet; obligation stays open)
   DR due_from_bridge         98
   DR provider_fees            0.50
-  CR cash_clearing           98.50
+  CR bridge_wallet_float     98.50
+
+WALLET REPLENISHMENT  (independent batch event, not per-transfer — top up the treasury wallet)
+  DR bridge_wallet_float    500
+  CR cash_clearing          500
 
 COMPLETED  (Bridge confirms delivery)
   DR transfer_payable        98     ← obligation discharged
@@ -167,16 +172,20 @@ we do **not** use it: Stripe collects `total_amount` including our fee, so `deve
   `DR cash_clearing / CR transfer_payable + fee_revenue` directly), and the reversal risk is a
   **chargeback**, not an ACH return (books to `loss_funding_reversed` the same way). Define fully
   before enabling card funding; ACH-only for MVP.
-- **Bridge treasury-wallet float.** If the payout topology uses a pre-funded USDC treasury wallet
-  (see ERD open question), cash at Bridge is a distinct location: add a `bridge_wallet_float` asset
-  account (debit-normal). Replenishment posts `DR bridge_wallet_float / CR cash_clearing`; payout
-  submission then posts `DR due_from_bridge / CR bridge_wallet_float` instead of crediting
-  `cash_clearing`. Decide when the one-transfer-vs-two-legs question is resolved in sandbox.
+- ~~**Bridge treasury-wallet float.**~~ **ADOPTED 2026-07-13** — the sandbox spike confirmed the
+  pre-funded-wallet topology (no one-transfer fiat→SPEI route exists). `bridge_wallet_float` is now
+  in the chart of accounts and the SUBMITTED/replenishment postings above. USDC is treated as USD
+  at par in the ledger (it's a cash location, not a currency position); any de-peg variance books
+  to `fx_slippage`.
 
 **No rate lock.** Bridge gives only an indicative rate, so the actual USD cost to deliver is known at
 execution (`SUBMITTED`), not at quote time. We quote the customer a firm rate (`source_rate` minus a
 buffer) and absorb the difference: the variance between the quoted send and Bridge's actual USD cost
 books to `fx_slippage`. The buffer in the customer rate funds it; a favorable move lands as a credit.
+Mechanically (sandbox spike 2026-07-13): the payout fixes `destination.amount` in MXN — the recipient
+gets exactly the disclosed amount — and Bridge draws a *variable* USDC amount from the treasury
+wallet; the difference between that draw and the quoted USD cost is the `fx_slippage` entry, booked
+when the payout receipt arrives.
 
 ## Reconciliation
 

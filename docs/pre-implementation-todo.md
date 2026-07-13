@@ -25,7 +25,7 @@ Everything to settle or build before we write feature code. We tackle these one 
 ## Design artifacts (the "before code" docs)
 All four core docs **reviewed for cross-consistency 2026-07-10** (states, accounts, transitions, and
 endpoint maps align). Open items below.
-- [x] **ERD / data model** — `docs/erd.md`, reviewed. `idempotency_keys` table added 2026-07-10. Pending: explicit constraint names (in skill checklist); **open question:** 1-vs-2 Bridge transfers per Puente transfer / pre-funded treasury wallet (resolve in sandbox — noted in ERD).
+- [x] **ERD / data model** — `docs/erd.md`, reviewed. `idempotency_keys` table added 2026-07-10. Topology question **resolved 2026-07-13** (sandbox spike): pre-funded treasury wallet; one Puente transfer = one Bridge payout transfer; `bridge_wallet_float` adopted in ledger. Pending: explicit constraint names (in skill checklist).
 - [x] **Transfer state machine** — `docs/transfer-state-machine.md`, reviewed.
 - [x] **Double-entry ledger rules** — `docs/ledger-rules.md`, reviewed. Pending: Bridge fee treatment (PoC key rotated — pull `receipt` objects with a fresh key); card-funding postings + possible `bridge_wallet_float` account (flagged in doc).
 - [x] **API contract** — `docs/api-contract.md`, reviewed (Moov→Stripe, dispute-state scope tightened). Pending: field-level Zod schemas; finalize fee numbers after Bridge receipt sample.
