@@ -38,7 +38,7 @@ endpoint maps align). Open items below.
 
 ## Compliance (design now, finish before launch)
 - [ ] **Reg E disclosures** — prepayment disclosure (FX rate, fees, MXN received) + receipt; EN + ES, human-translated.
-- [ ] **Confirm Bridge fee / FX-spread structure** — get a sample quote API response; blocks exact Reg E disclosure numbers and the ledger `provider_fees` booking.
+- [x] **Confirm Bridge fee / FX-spread structure** — RESOLVED 2026-07-13 from production PoC receipts: no explicit Bridge fees (all 0.0, netted-model receipts); Bridge monetizes via FX spread (`buy_rate` vs midmarket). Quotes price off `buy_rate`; `provider_fees` mainly carries Stripe costs (see ledger-rules.md). Remaining: observe real USD→MXN spread at the first pilot send.
 - [ ] **Error-resolution process** (Reg E §1005.33) — unadopted proposal in `docs/runbooks/proposals/error-resolution.md`; process undecided, needs counsel review.
 - [ ] **Cancellation handling** within the open window (wired into the state machine).
 - [ ] **Confirm OFAC / KYC division with Bridge** — who screens, what data we pass, where the handoff sits.

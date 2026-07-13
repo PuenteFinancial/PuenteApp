@@ -153,17 +153,29 @@ Outstanding fronted float = `SUM(funding_receivable)` not yet cleared. The **flo
 push the total past the configured ceiling. The number comes straight from this account — no extra
 bookkeeping.
 
-## Provider-fee placement (pending Bridge confirmation)
+## Provider-fee placement — RESOLVED 2026-07-13 (production PoC receipts)
 
-Examples charge Bridge's fee **on top** (`provider_fees` debit at `SUBMITTED`). If Bridge instead
-**nets** its fee inside the send, the same `provider_fees` account is used — only the recognition
-timing shifts. Finalize from a **sample Bridge quote API response**, which also feeds the Reg E
-disclosure numbers (tracked in `pre-implementation-todo.md`). *2026-07-10: the PoC moved real money
-end-to-end, but its API key has since been rotated — pull the completed transfers' `receipt` objects
-with a fresh key to close this.* Note Bridge also supports `developer_fee` /
-`developer_fee_percent` on transfer creation (Bridge collects Puente's fee inside the transfer) —
-we do **not** use it: Stripe collects `total_amount` including our fee, so `developer_fee: "0"` and
-`fee_revenue` books at `FUNDED` as shown.
+Both production PoC legs (ACH→USDC onramp `9f1acb84…`, USDC→ACH payout `b3746f1a…`) returned
+receipts with `developer_fee`, `exchange_fee`, and `gas_fee` all **0.0** and
+`final_amount = initial_amount`: **Bridge charges no explicit fees on these routes — its take on
+cross-currency is the FX spread** (`buy_rate` vs `midmarket_rate`; ~0.5% observed on the sandbox
+USD→MXN rate). Receipt math is `final_amount = initial_amount − fees`, i.e. any fees are **netted
+inside the transfer**, so if explicit Bridge fees ever appear (pricing change, `developer_fee`
+use), they book to `provider_fees` within the transfer's own posting, with `final_amount` as what
+arrives at the destination.
+
+Consequences:
+- `provider_fees` stays in the chart primarily for **Stripe's** funding fees (ACH/card), plus any
+  future Bridge line items. The worked example's $0.50 Bridge fee is illustrative only.
+- Quotes must be built from Bridge's **`buy_rate`** (the executable side), not `midmarket_rate` —
+  Bridge's spread is already inside `buy_rate`. The ERD's `source_rate` = buy_rate at quote time;
+  customer rate = buy_rate − our buffer.
+- `fx_slippage` therefore measures execution drift from the quoted buy_rate only; Bridge's spread
+  is a rate input, not slippage.
+- We do **not** use `developer_fee` (Bridge collecting Puente's fee inside the transfer): Stripe
+  collects `total_amount` including our fee, so `developer_fee: "0"` and `fee_revenue` books at
+  `FUNDED` as shown.
+- Remaining: observe the real USD→MXN spread and any MXN-leg fee lines at the first pilot send.
 
 ## Pending posting rules (flagged in review 2026-07-10)
 
