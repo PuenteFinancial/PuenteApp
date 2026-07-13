@@ -10,6 +10,10 @@ updates:
       timezone: America/Denver
     rebase-strategy: auto
     open-pull-requests-limit: 5
+    # Only propose versions published at least 3 days ago — pnpm's
+    # minimumReleaseAge policy (24h) rejects anything fresher at install time
+    cooldown:
+      default-days: 3
     groups:
       # Batch minor/patch bumps into one PR per group to reduce noise
       expo:
@@ -25,9 +29,12 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
     ignore:
-      # Major versions require manual migration — Dependabot will still open standalone PRs for them
-      - dependency-name: "expo"
+      # Expo SDK majors require manual migration (covers expo, expo-router,
+      # expo-constants, etc. — companion packages jump majors with the SDK)
+      - dependency-name: "expo*"
         update-types: ["version-update:semver-major"]
+      # Pinned exactly by the Expo SDK; moves only via `npx expo install` during SDK upgrades
+      - dependency-name: "react-native-screens"
 
   # GitHub Actions
   - package-ecosystem: github-actions
