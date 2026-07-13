@@ -1,6 +1,6 @@
 # Puente — Pre-Implementation To-Do
 
-**Date:** 2026-06-25 (updated 2026-06-29)
+**Date:** 2026-06-25 (updated 2026-07-10)
 **Scope:** USD → MXN remittance MVP (one send-money flow). Lending is a separate stack (cofounder owns it).
 
 Status legend: **drafted** → reviewed → approved → implemented
@@ -23,30 +23,35 @@ Everything to settle or build before we write feature code. We tackle these one 
 - [x] **Limits:** No Puente-imposed limits for MVP (5 trusted users). Keep limit fields in the data model as config for later. Note: Bridge's own AML monitoring + BSA thresholds (e.g., CTR at $10k) still apply underneath us regardless.
 
 ## Design artifacts (the "before code" docs)
-- [x] **ERD / data model** — drafted in `docs/erd.md`. Pending: explicit constraint names; `idempotency_keys` table (in skill checklist).
-- [x] **Transfer state machine** — drafted in `docs/transfer-state-machine.md`. Pending review.
-- [x] **Double-entry ledger rules** — drafted in `docs/ledger-rules.md`. Pending: Bridge fee treatment; FX/slippage amounts once sample Bridge quote available.
-- [x] **API contract** — drafted in `docs/api-contract.md`. Pending: field-level Zod schemas; finalize after Bridge quote sample.
-- [ ] **Flow / sequence diagrams** — send-money happy path, payout webhook, error resolution, cancel/refund.
-- [ ] **Architecture diagram** — mobile, API, worker, Supabase, Railway, Bridge, Stripe, Twilio, PostHog, Sentry.
+All four core docs **reviewed for cross-consistency 2026-07-10** (states, accounts, transitions, and
+endpoint maps align). Open items below.
+- [x] **ERD / data model** — `docs/erd.md`, reviewed. `idempotency_keys` table added 2026-07-10. Pending: explicit constraint names (in skill checklist); **open question:** 1-vs-2 Bridge transfers per Puente transfer / pre-funded treasury wallet (resolve in sandbox — noted in ERD).
+- [x] **Transfer state machine** — `docs/transfer-state-machine.md`, reviewed.
+- [x] **Double-entry ledger rules** — `docs/ledger-rules.md`, reviewed. Pending: Bridge fee treatment (PoC key rotated — pull `receipt` objects with a fresh key); card-funding postings + possible `bridge_wallet_float` account (flagged in doc).
+- [x] **API contract** — `docs/api-contract.md`, reviewed (Moov→Stripe, dispute-state scope tightened). Pending: field-level Zod schemas; finalize fee numbers after Bridge receipt sample.
+- [x] **Flow / sequence diagrams** — `docs/flows.md` (send-money happy path, payout webhook, error resolution, cancel/refund) — 2026-07-10.
+- [x] **Architecture diagram** — `docs/architecture.md` — 2026-07-10.
+- [x] **Engineering runbooks** — `docs/runbooks/` (deploy & promote, migrations, local dev, secrets) — 2026-07-10.
+- [ ] **Ops process runbooks** — unreviewed drafts in `docs/runbooks/proposals/` (error resolution, stuck transfer, funding reversal, reconciliation); the processes themselves are **not yet decided** — review/adopt/rewrite before launch.
 - [x] **`Money` type** in `packages/shared` — integer minor units + currency, no float constructors. Tests written.
+- [x] **Bridge production PoC** — real USD moved personal bank → Bridge wallet (USDC) → business bank via `scratch/bridge-smoke/bridge-poc.js`; both legs confirmed delivered (2026-07-10). Proves: customer/external-account/wallet flow, two-leg USD routing, deposit instructions, transfer states.
 
 ## Compliance (design now, finish before launch)
 - [ ] **Reg E disclosures** — prepayment disclosure (FX rate, fees, MXN received) + receipt; EN + ES, human-translated.
 - [ ] **Confirm Bridge fee / FX-spread structure** — get a sample quote API response; blocks exact Reg E disclosure numbers and the ledger `provider_fees` booking.
-- [ ] **Error-resolution process** (Reg E §1005.33) — intake + investigation path.
+- [ ] **Error-resolution process** (Reg E §1005.33) — unadopted proposal in `docs/runbooks/proposals/error-resolution.md`; process undecided, needs counsel review.
 - [ ] **Cancellation handling** within the open window (wired into the state machine).
 - [ ] **Confirm OFAC / KYC division with Bridge** — who screens, what data we pass, where the handoff sits.
 - [ ] **Paper the Bridge MTL relationship** — states covered, our agent/platform role, SAR ownership, error-resolution responsibility.
 - [ ] **Consent capture** — TCPA (SMS), E-SIGN (e-sign consent), privacy; each with its own timestamp.
 
 ## Infra & ops setup
-- [ ] **Funding processor** — choose the ACH (+ debit card) processor; Stripe & Dwolla declined us (startup). Shortlist: **Plaid Transfer** (ACH/bank only), **Moov** (ACH + card, one integration), **Etogy** (card + ACH — vet stability/compliance). Apply in parallel; lead with "Bridge is the MTL." Wrap behind a **`FundingProcessor` interface** (swappable). Confirm quasi-cash / money-transfer MCC approval before relying on card funding.
+- [x] **Funding processor — RESOLVED 2026-07-10: Stripe.** Initially declined, now unblocked — Stripe handles USD intake (ACH first, card second); Bridge is the remittance rail and MTL holder; Puente never touches funds. Still wrapped behind the **`FundingProcessor` interface** (swappable). Remaining: confirm quasi-cash / money-transfer MCC approval before relying on card funding.
 - [ ] Paid Supabase + PITR; separate staging & prod projects.
 - [ ] Railway services: API + worker; cron for reconciliation.
 - [ ] Secrets via Doppler across all envs.
 - [ ] Sentry + end-to-end trace IDs; alerts on stuck/failed transfers.
-- [ ] Reconciliation job — ledger vs funding processor vs Bridge payout.
+- [ ] Reconciliation job — ledger vs funding processor vs Bridge payout. Unadopted design sketch in `docs/runbooks/proposals/reconciliation.md`; decide the process, then build the cron with the worker.
 - [ ] Admin/ops console — view transfers, resolve stuck payout, process refund/cancel.
 - [ ] Fraud & exposure guardrails — **float ceiling (cap aggregate fronted `funding_receivable`)**, amount caps, velocity limits, first-transaction holds.
 - [x] **Rate-limit keying behind proxies** — implemented 2026-07-09 (`TRUST_PROXY_HOPS`, default 1; semantics pinned in `apps/api/src/config/trust-proxy.test.ts`). Remaining (Joshua, dashboards): confirm Supabase per-phone SMS OTP limits/cooldown + Twilio spend cap; after staging deploy, confirm audit-log `ip` matches a real client IP (bump `TRUST_PROXY_HOPS` if not). Original context: `apps/api/src/server.ts` has no `trustProxy`, so `@fastify/rate-limit` keys on the proxy's address — users share buckets (collateral limiting) and per-client limits are meaningless. Fix: `trustProxy: 1` (trust exactly the Railway edge hop) after empirically confirming chain depth on staging. **Never `trustProxy: true`** — the leftmost `X-Forwarded-For` is client-controlled, so trusting the whole chain lets an attacker rotate fake XFF values for unlimited fresh buckets (a bypass, strictly worse). **Do not key the limiter on `x-client-ip`** (the slice-4 sign-in-events header): the routes are public and the header is spoofable; only safe behind a shared-secret internal header (Doppler) proving the request came from our web tier — build only if actually needed. The control that protects Twilio SMS spend is per-**phone**, not per-IP: confirm GoTrue's built-in per-phone OTP limits/cooldown are configured + a Twilio spend cap is set — that may resolve most of this. Note `@fastify/rate-limit`'s in-memory store resets per deploy/replica (fine at current scale; no Redis). `trustProxy` also changes the IP recorded by the audit plugin and the `sign_in_events` fallback — desirable, but re-verify tests. Security-reviewer before merge.

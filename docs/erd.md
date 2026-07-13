@@ -111,7 +111,8 @@ One recipient → many destinations (bank, wallet, cash, card), varying by count
 Bridge gives only an *indicative* rate, but Reg E requires a firm number to the customer — so the
 quote is **our** commitment. We quote `source_rate` minus an FX buffer and absorb near-instant
 slippage (see ledger `fx_slippage`).
-- `user_id` FK, `payout_destination_id` FK (nullable until chosen)
+- `user_id` FK, `payout_destination_id` FK (nullable in schema for future rate-browsing; the v1 API
+  requires it at quote creation — see api-contract)
 - `send_amount_minor` / `send_currency` (USD)
 - `receive_amount_minor` / `receive_currency` (destination ccy — metadata)
 - `fx_rate` NUMERIC — customer-facing rate (source minus buffer)
@@ -211,6 +212,18 @@ Immutable snapshot of exactly what the user was shown.
 - `effective_from` / `effective_to` timestamptz — effective-dating for audit
 - **RLS:** owner reads own; service writes.
 
+### idempotency_keys  *(client-request idempotency — separate from the Bridge submission key on `transfers`)*
+Backs the `Idempotency-Key` header on the money-moving POSTs (see api-contract). A replay returns the
+stored response; same key + different body → `idempotency_conflict`.
+- `key` TEXT — the client-supplied key
+- `user_id` FK → profiles
+- `endpoint` TEXT — e.g. `POST /v1/transfers`
+- **UNIQUE(user_id, endpoint, key)**
+- `request_hash` TEXT — hash of the canonical request body (detects same-key-different-body)
+- `response_status` INT, `response_body` JSONB — snapshot returned on replay
+- `expires_at` timestamptz — ~24h; purged by a scheduled job
+- **RLS:** service-role only.
+
 ### audit_log  *(append-only)*
 - `actor_user_id` (null for system), `actor_type` TEXT, `action` TEXT
 - `entity_type` TEXT, `entity_id` UUID
@@ -220,12 +233,15 @@ Immutable snapshot of exactly what the user was shown.
 > **Float ceiling** is not a table — it's derived live as `SUM(funding_receivable)` and enforced in
 > the app against a config value (env/settings). See ledger-rules + state machine.
 
-> **Bridge wallet id** is not stored in the schema. The stablecoin leg (USD→USDC→USD) is Bridge's
-> internal implementation detail — our transfers specify `payment_rail: ach_push` on the source and
-> `payment_rail: ach` + `external_account_id` on the destination; Bridge routes through USDC
-> invisibly. If we ever use a Bridge wallet directly as a source or destination (e.g. for a float
-> account), the wallet id belongs in app config (env var), not a schema column — same reasoning as
-> the float ceiling.
+> **Bridge wallet id** is not stored in the schema. **Open question (from the PoC + Bridge research
+> 2026-07-10):** whether one Bridge transfer can carry USD/ACH source → MXN/SPEI destination with
+> Bridge orchestrating the stablecoin sandwich internally, or whether it must be two legs through a
+> Puente treasury wallet (the PoC's USD→USD move required the explicit two-leg wallet path). The
+> instant-payout requirement likely means a **pre-funded treasury wallet** (payout leg fires
+> immediately from wallet USDC; Stripe-collected funds replenish it) — in that topology one Puente
+> transfer maps to one Bridge *payout* transfer plus batch replenishment transfers. Either way the
+> wallet id belongs in app config (env var), not a schema column — same reasoning as the float
+> ceiling. Resolve in sandbox before implementing the worker.
 
 ## RLS posture summary
 

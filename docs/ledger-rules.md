@@ -153,7 +153,25 @@ bookkeeping.
 Examples charge Bridge's fee **on top** (`provider_fees` debit at `SUBMITTED`). If Bridge instead
 **nets** its fee inside the send, the same `provider_fees` account is used — only the recognition
 timing shifts. Finalize from a **sample Bridge quote API response**, which also feeds the Reg E
-disclosure numbers (tracked in `pre-implementation-todo.md`).
+disclosure numbers (tracked in `pre-implementation-todo.md`). *2026-07-10: the PoC moved real money
+end-to-end, but its API key has since been rotated — pull the completed transfers' `receipt` objects
+with a fresh key to close this.* Note Bridge also supports `developer_fee` /
+`developer_fee_percent` on transfer creation (Bridge collects Puente's fee inside the transfer) —
+we do **not** use it: Stripe collects `total_amount` including our fee, so `developer_fee: "0"` and
+`fee_revenue` books at `FUNDED` as shown.
+
+## Pending posting rules (flagged in review 2026-07-10)
+
+- **Card funding (rail #2).** The worked examples assume ACH. Card capture is instant — no
+  `funding_receivable` window; funds land in Stripe balance at `FUNDED` (likely
+  `DR cash_clearing / CR transfer_payable + fee_revenue` directly), and the reversal risk is a
+  **chargeback**, not an ACH return (books to `loss_funding_reversed` the same way). Define fully
+  before enabling card funding; ACH-only for MVP.
+- **Bridge treasury-wallet float.** If the payout topology uses a pre-funded USDC treasury wallet
+  (see ERD open question), cash at Bridge is a distinct location: add a `bridge_wallet_float` asset
+  account (debit-normal). Replenishment posts `DR bridge_wallet_float / CR cash_clearing`; payout
+  submission then posts `DR due_from_bridge / CR bridge_wallet_float` instead of crediting
+  `cash_clearing`. Decide when the one-transfer-vs-two-legs question is resolved in sandbox.
 
 **No rate lock.** Bridge gives only an indicative rate, so the actual USD cost to deliver is known at
 execution (`SUBMITTED`), not at quote time. We quote the customer a firm rate (`source_rate` minus a
