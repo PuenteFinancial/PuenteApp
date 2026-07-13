@@ -127,9 +127,9 @@ KYC result arrives via the Sumsub webhook (below), not a client call.
 | POST | `/v1/transfers/:id/confirm` | ✓ | **required** | Record disclosure acceptance → initiate funding via `FundingProcessor`. Server refuses without recorded acceptance. Returns processor-neutral funding details. |
 | GET | `/v1/transfers` | ✓ | — | List (owner-scoped). |
 | GET | `/v1/transfers/:id` | ✓ | — | Status, snapshotted terms, disclosure. |
-| POST | `/v1/transfers/:id/cancel` | ✓ | yes | Only valid in `FUNDED` within the window; server re-checks state under a row lock. Else `transfer_not_cancelable`. |
+| POST | `/v1/transfers/:id/cancel` | ✓ | **required** | Only valid in `FUNDED` within the window; server re-checks state under a row lock. Else `transfer_not_cancelable`. |
 | GET | `/v1/transfers/:id/receipt` | ✓ | — | Reg E receipt. |
-| POST | `/v1/transfers/:id/disputes` | ✓ | — | Open error resolution (`UNDER_REVIEW`). Body `{ type, description }`. |
+| POST | `/v1/transfers/:id/disputes` | ✓ | — | Open error resolution. Body `{ type, description }`. Moves the transfer to `UNDER_REVIEW` only from `FUNDED`/`SUBMITTED`/`IN_FLIGHT`/`COMPLETED` (per state machine); a dispute on an already-terminal transfer (`REFUNDED`, `PAYMENT_FAILED`, …) is recorded in `disputes` without a state change. |
 | GET | `/v1/transfers/:id/disputes` | ✓ | — | List. |
 
 **`POST /v1/transfers`** — create + disclose (no funding yet)
@@ -158,7 +158,7 @@ Errors: `quote_expired`, `kyc_required`, `limit_exceeded` (user limit / float ce
   "id": "uuid",
   "state": "PENDING_PAYMENT",
   "disclosure_accepted_at": "2026-06-26T19:40:00Z",
-  "funding": { "provider": "moov", "method": "ach",
+  "funding": { "provider": "stripe", "method": "ach",
                "...": "processor-neutral fields the client needs to complete payment" }
 }
 ```
@@ -170,7 +170,7 @@ processor's SDK; the **funding webhook** drives `FUNDED`.
 
 | Method | Path | Drives |
 |---|---|---|
-| POST | `/v1/webhooks/funding` | `FUNDED` (payment captured/initiated), `PAYMENT_FAILED`, `funding_cleared` (ACH settled), `FUNDING_REVERSED` (ACH return / chargeback). From the funding processor (e.g. Moov). |
+| POST | `/v1/webhooks/funding` | `FUNDED` (payment captured/initiated), `PAYMENT_FAILED`, `funding_cleared` (ACH settled), `FUNDING_REVERSED` (ACH return / chargeback). From the funding processor (**Stripe** — confirmed 2026-07-10). |
 | POST | `/v1/webhooks/bridge` | `IN_FLIGHT`, `COMPLETED`, `PAYOUT_FAILED`. |
 | POST | `/v1/webhooks/sumsub` | KYC result → updates `kyc_records` + `profile.kyc_status`. |
 
@@ -191,7 +191,7 @@ Each: verify signature → write `payment_events` (dedupe on `(source, external_
 | Bridge webhook: delivered | `IN_FLIGHT → COMPLETED` |
 | Bridge webhook: failed | `SUBMITTED/IN_FLIGHT → PAYOUT_FAILED → REFUNDED` |
 | Funding webhook: ACH return | `COMPLETED → FUNDING_REVERSED` |
-| `POST /transfers/:id/disputes` | any → `UNDER_REVIEW` |
+| `POST /transfers/:id/disputes` | `FUNDED`/`SUBMITTED`/`IN_FLIGHT`/`COMPLETED` → `UNDER_REVIEW` (terminal states: dispute recorded, no transition) |
 
 ## Cross-cutting (per CLAUDE.md)
 
