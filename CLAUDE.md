@@ -70,28 +70,33 @@ Turborepo runs tasks in dependency order and caches outputs by hashing inputs.
 
 ```
 feature/* ──PR──▶ main ──auto──▶ staging
-                                    │
-                              tag v* or manual
-                                    │
-                                    ▼
-                               production
+                    │
+        Promote workflow (dispatch + approval:
+        prod migrations, then fast-forward)
+                    │
+                    ▼
+          production (branch) ──auto──▶ Railway prod + Vercel prod
 ```
 
 | | Local | Preview (per-PR) | Staging | Production |
 |---|---|---|---|---|
-| Web | localhost:3000 | Vercel preview URL | Vercel (main branch) | Vercel (prod) |
+| Web | localhost:3000 | Vercel preview URL | Vercel (main branch) | Vercel (production branch) |
 | API | localhost:3001 | → staging API | Railway staging | Railway prod |
 | DB | supabase start | → staging DB | Supabase staging project | Supabase prod project |
 | Mobile | Expo Go / dev build | — | EAS preview build | EAS production build |
 
-- `main` merges auto-deploy to staging. Production is promoted deliberately (tag or workflow dispatch).
+- `main` merges auto-deploy to staging (and auto-apply migrations to the staging DB).
+- Production moves only via the **Promote** workflow (`promote.yml`, workflow_dispatch, approval-gated):
+  applies pending prod migrations first, then fast-forward-only pushes `production` to `main`.
+  Vercel prod + Railway prod track the `production` branch. See `docs/runbooks/deploy-and-promote.md`.
 - Preview PRs point at the staging API + DB — no ephemeral API per PR at this stage.
-- Two separate Supabase projects: migrations run against staging first, then prod.
-- Secrets managed via Doppler, synced to Vercel / Railway / GitHub Actions / EAS.
+- Two separate Supabase projects: migrations run against staging first, then prod (`docs/runbooks/migrations.md`).
+- Secrets managed via Doppler, synced to Vercel / Railway / GitHub Actions / EAS (`docs/runbooks/secrets.md`).
 
 ## Branch model & protection
 
-- `main` is the only long-lived branch. Feature work lives in short-lived branches merged via PR.
+- Long-lived branches: `main` (staging) and `production` (what's live; moved only by the Promote
+  workflow, fast-forward-only, never pushed directly). Feature work lives in short-lived branches merged via PR.
 - Branch protection on `main`:
   - 0 required reviews (solo — restore to 1 when a collaborator joins)
   - Required status checks: `Typecheck, Lint, Test` + `Gitleaks`
@@ -104,6 +109,8 @@ feature/* ──PR──▶ main ──auto──▶ staging
 Workflows in `.github/workflows/`:
 - `ci.yml` — typecheck, lint, test, `next build` (web). Runs on every PR and push to main. Uses Turborepo remote cache (requires `TURBO_TOKEN` + `TURBO_TEAM` GitHub secrets).
 - `secret-scan.yml` — Gitleaks secret scanning. Runs on every PR and push to main.
+- `migrations.yml` — staging half of the migrations pipeline: PR touching `supabase/migrations/**` → staging dry-run; merge to main → apply to staging. Prod applies happen inside Promote.
+- `promote.yml` — Promote to Production (workflow_dispatch, `production` environment approval): prod migrations, then fast-forward `production` to `main`.
 - API deploys are handled by Railway's native GitHub integration (builds on every push to main; health-check-gated cutover). There is no deploy workflow in Actions — branch protection ensures main is always CI-green before merge.
 - `claude.yml` — Claude PR assistant (responds to `@claude` in PRs/issues).
 - PR auto-review is handled by the Claude GitHub App (the custom `claude-code-review.yml` workflow was removed in #9).
