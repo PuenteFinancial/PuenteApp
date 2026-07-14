@@ -175,6 +175,11 @@ Consequences:
 - We do **not** use `developer_fee` (Bridge collecting Puente's fee inside the transfer): Stripe
   collects `total_amount` including our fee, so `developer_fee: "0"` and `fee_revenue` books at
   `FUNDED` as shown.
+- **Account-level pricing (confirmed 2026-07-13):** Bridge bills **bps on volume** at the account
+  level (rate per the Bridge agreement) — a periodic invoice-style `provider_fees` expense, not a
+  per-transfer receipt line (receipts stay zero). Book it when invoiced; optionally accrue
+  per-transfer once volume matters. Unit economics per transfer:
+  `fee_revenue − (Bridge FX spread inside buy_rate + bps accrual + Stripe funding fee)`.
 - Remaining: observe the real USD→MXN spread and any MXN-leg fee lines at the first pilot send.
 
 ## Pending posting rules (flagged in review 2026-07-10)
