@@ -79,8 +79,11 @@ ACH CLEARS  (independent later event — funding actually lands)
 ```
 
 End state for this transfer: `funding_receivable` 0, `transfer_payable` 0, `due_from_bridge` 0,
-`fee_revenue` +2, `provider_fees` +0.50, `cash_clearing` net **+1.50**. Conservation check:
-`cash +1.50 = fee_revenue 2 − provider_fees 0.50`. ✓
+`fee_revenue` +2, `provider_fees` +0.50, and **cash across its two locations net +1.50**
+(with the $500 replenishment batch included: `cash_clearing` −400, `bridge_wallet_float` +401.50 —
+cash is split across locations since the wallet adoption; their sum is the cash position).
+Conservation check: `cash +1.50 = fee_revenue 2 − provider_fees 0.50`. ✓ (Pinned by the
+worked-example test in `apps/api/src/services/ledger.db.test.ts`.)
 
 Note the exposure the design surfaces: between `SUBMITTED` and `ACH CLEARS`, you're **−$98.50 of float
 against an open `funding_receivable`** — that gap is your ACH exposure, sitting on the balance sheet.
