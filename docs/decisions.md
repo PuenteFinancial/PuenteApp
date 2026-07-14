@@ -6,6 +6,23 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-13 · Payout topology: pre-funded treasury wallet, one Bridge transfer per Puente
+transfer.** Sandbox spike proved Bridge has no one-transfer fiat→SPEI route (`ach_push`/`ach`/`wire`
+→ `spei` all rejected), and the wallet-USDC → MXN-SPEI payout leg works (`201` → `funds_received`
+in seconds). So Puente assembles the stablecoin sandwich: payouts draw from a pre-funded USDC
+treasury wallet with `destination.amount` fixed in MXN (recipient gets exactly the disclosed
+amount; FX variance lands on our side as `fx_slippage`); replenishment is a separate batch onramp.
+`bridge_wallet_float` added to the chart of accounts. **Status: active.**
+
+**2026-07-13 · Send-money UI ships on web first.** Auth, sessions, KYC, and `/continue` routing are
+already live on web; mobile follows once the flow is proven with the five trusted users.
+**Status: active.**
+
+**2026-07-13 · KYC stays Bridge-hosted (Persona) for the remittance MVP.** Closes the open
+re-decision below: it's live, the SPEI endorsement flow is wired, and Sumsub adds an integration
+project with zero MVP benefit. Revisit when lending or non-Bridge rails need their own identity
+layer. **Status: active.**
+
 **2026-07-10 · Stripe is the funding processor.** Stripe initially declined us (startup, money
 transmission adjacency); that's resolved — Stripe handles USD intake (ACH first, card later), Bridge
 remains the regulated rail, Puente never touches funds. Still wrapped behind the `FundingProcessor`
@@ -33,7 +50,7 @@ worse than no trust. Railway appends the real client IP as the *rightmost* XFF e
 hosted KYC links (which required server-minted session-scoped ToS URLs, #41). **Status: OPEN —
 superseded in practice, needs an explicit re-decision** for the remittance MVP: keep Bridge-hosted
 (simpler, one vendor) or move to Sumsub behind `IdentityVerifier` (the lending stack will need its
-own answer anyway).
+own answer anyway). **Update 2026-07-13: resolved — Bridge-hosted for MVP (entry above).**
 
 **2026-07-02 · Identity = phone number, forever.** One Supabase account per phone via SMS OTP; there
 is no account merge or phone change flow. A shared test phone means a shared account — the cause of

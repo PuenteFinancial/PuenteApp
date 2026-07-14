@@ -25,7 +25,7 @@ Everything to settle or build before we write feature code. We tackle these one 
 ## Design artifacts (the "before code" docs)
 All four core docs **reviewed for cross-consistency 2026-07-10** (states, accounts, transitions, and
 endpoint maps align). Open items below.
-- [x] **ERD / data model** — `docs/erd.md`, reviewed. `idempotency_keys` table added 2026-07-10. Pending: explicit constraint names (in skill checklist); **open question:** 1-vs-2 Bridge transfers per Puente transfer / pre-funded treasury wallet (resolve in sandbox — noted in ERD).
+- [x] **ERD / data model** — `docs/erd.md`, reviewed. `idempotency_keys` table added 2026-07-10. Topology question **resolved 2026-07-13** (sandbox spike): pre-funded treasury wallet; one Puente transfer = one Bridge payout transfer; `bridge_wallet_float` adopted in ledger. Pending: explicit constraint names (in skill checklist).
 - [x] **Transfer state machine** — `docs/transfer-state-machine.md`, reviewed.
 - [x] **Double-entry ledger rules** — `docs/ledger-rules.md`, reviewed. Pending: Bridge fee treatment (PoC key rotated — pull `receipt` objects with a fresh key); card-funding postings + possible `bridge_wallet_float` account (flagged in doc).
 - [x] **API contract** — `docs/api-contract.md`, reviewed (Moov→Stripe, dispute-state scope tightened). Pending: field-level Zod schemas; finalize fee numbers after Bridge receipt sample.
@@ -38,7 +38,7 @@ endpoint maps align). Open items below.
 
 ## Compliance (design now, finish before launch)
 - [ ] **Reg E disclosures** — prepayment disclosure (FX rate, fees, MXN received) + receipt; EN + ES, human-translated.
-- [ ] **Confirm Bridge fee / FX-spread structure** — get a sample quote API response; blocks exact Reg E disclosure numbers and the ledger `provider_fees` booking.
+- [x] **Confirm Bridge fee / FX-spread structure** — RESOLVED 2026-07-13 from production PoC receipts: no explicit Bridge fees (all 0.0, netted-model receipts); Bridge monetizes via FX spread (`buy_rate` vs midmarket). Quotes price off `buy_rate`; `provider_fees` mainly carries Stripe costs (see ledger-rules.md). Remaining: observe real USD→MXN spread at the first pilot send.
 - [ ] **Error-resolution process** (Reg E §1005.33) — unadopted proposal in `docs/runbooks/proposals/error-resolution.md`; process undecided, needs counsel review.
 - [ ] **Cancellation handling** within the open window (wired into the state machine).
 - [ ] **Confirm OFAC / KYC division with Bridge** — who screens, what data we pass, where the handoff sits.
