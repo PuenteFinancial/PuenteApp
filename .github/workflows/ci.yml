@@ -47,3 +47,45 @@ jobs:
           NEXT_TELEMETRY_DISABLED: 1
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
           TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+
+  # Integration tests that need a real Postgres (ledger DB triggers, RLS,
+  # append-only enforcement). Separate job so `check` stays fast and
+  # Docker flakes don't block lint/typecheck feedback.
+  db-test:
+    name: DB Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: supabase/setup-cli@v3
+
+      - name: Start local Supabase (db + API gateway only)
+        run: supabase start -x studio,imgproxy,inbucket,realtime,storage,edge-runtime,functions,vector,analytics,meta
+
+      - name: Grant table privileges to API roles
+        # Local-CLI quirk: migrations apply without the grants the hosted
+        # platform adds automatically (docs/runbooks/local-dev.md step 3).
+        run: |
+          psql postgresql://postgres:postgres@127.0.0.1:54322/postgres \
+            -c "grant select, insert, update, delete on all tables in schema public to service_role, authenticated, anon;"
+
+      - name: Run API tests against the local stack
+        run: |
+          eval "$(supabase status -o env)"
+          export SUPABASE_SECRET_KEY="$SERVICE_ROLE_KEY"
+          pnpm turbo run test --filter=@puente/api
+        env:
+          RUN_DB_TESTS: '1'
+          SUPABASE_URL: http://127.0.0.1:54321
+          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+          TURBO_TEAM: ${{ secrets.TURBO_TEAM }}

@@ -15,7 +15,8 @@
     },
     "test": {
       "dependsOn": ["^build"],
-      "outputs": ["coverage/**"]
+      "outputs": ["coverage/**"],
+      "env": ["RUN_DB_TESTS", "SUPABASE_URL", "SUPABASE_SECRET_KEY", "TEST_DB_URL"]
     }
   }
 }

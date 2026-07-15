@@ -153,13 +153,13 @@ slippage (see ledger `fx_slippage`).
 ## Ledger  (see ledger-rules.md for posting logic)
 
 ### ledger_accounts
-- `code` TEXT UNIQUE — `cash_clearing` | `funding_receivable` | `due_from_bridge` |
-  `transfer_payable` | `refunds_payable` | `fee_revenue` | `provider_fees` | `fx_slippage` |
-  `loss_funding_reversed`
+- `code` TEXT UNIQUE — `cash_clearing` | `bridge_wallet_float` | `funding_receivable` |
+  `due_from_bridge` | `transfer_payable` | `refunds_payable` | `fee_revenue` | `provider_fees` |
+  `fx_slippage` | `loss_funding_reversed` (ledger-rules.md chart is authoritative)
 - `name` TEXT — human label
 - `type` TEXT — `asset` | `liability` | `revenue` | `expense`
 - `normal_balance` TEXT — `debit` | `credit` (explicit, prevents posting mistakes)
-- `currency` TEXT — USD
+- `currency` CHAR(3) — USD (as built: `char(3)` + `^[A-Z]{3}$` check, per financial-schema-checklist)
 - `owner_scope` TEXT — `platform` for now (per-user accounts arrive with wallets/LOC)
 - **RLS:** service-role only.
 
