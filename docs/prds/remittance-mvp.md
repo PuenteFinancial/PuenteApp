@@ -208,8 +208,19 @@ polling fallback for sandbox/dev.
 
 - `funding_cleared` gate wired as config, default off (instant payout).
 - Treasury wallet pre-funded manually for MVP (runbook step); replenishment posting exists from
-  slice 1.
+  slice 1. Treasury wallet is owned by the **Puente Financial business customer** (KYB in
+  progress as of 2026-07-15), not a personal customer. Shared-wallet cross-customer sourcing
+  verified in sandbox 2026-07-15 (business wallet → `on_behalf_of` individual → delivered).
+- **Stamp `client_reference_id` = our transfer UUID on every Bridge transfer** — makes
+  Bridge-side records joinable to ours for reconciliation (verified accepted in sandbox).
+- Sandbox-verified constraints to build against (2026-07-15): concurrent payouts serialize at
+  Bridge (loser gets a synchronous 400, no transfer created — retry after replenishment);
+  Bridge payouts are never cancelable after creation (Reg E cancel window must close at
+  `FUNDED → SUBMITTED`); same Idempotency-Key with different body → Bridge 422; MXN destination
+  minimum $2.00 USD equivalent.
 - End-to-end in **sandbox** here (API-driven); the real-money send waits for slice 7.
+- Open question for Bridge (deferred): where do funds land when a SPEI payout fails
+  post-submission (`returned`/`undeliverable`)? Handle those webhook states defensively.
 - security-reviewer before merge.
 
 ---
