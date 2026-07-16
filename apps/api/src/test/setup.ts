@@ -7,3 +7,4 @@ process.env.SUPABASE_PUBLISHABLE_KEY ??= 'sb_publishable_test'
 process.env.SUPABASE_JWKS_URL ??= 'https://test-project.supabase.co/auth/v1/.well-known/jwks.json'
 process.env.BRIDGE_API_KEY ??= 'bridge_test_key'
 process.env.BRIDGE_API_BASE ??= 'https://api.bridge.test'
+process.env.DETAILS_ENCRYPTION_KEY ??= Buffer.alloc(32, 7).toString('base64')
