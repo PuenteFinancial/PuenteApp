@@ -37,11 +37,13 @@ export function encryptString(plaintext: string, aad: string): string {
 
 export function decryptString(payload: string, aad: string): string {
   try {
-    const segments = payload.split('.')
-    if (segments.length !== 4 || segments[0] !== VERSION) throw new Error('bad format')
-    const iv = Buffer.from(segments[1], 'base64url')
-    const ciphertext = Buffer.from(segments[2], 'base64url')
-    const tag = Buffer.from(segments[3], 'base64url')
+    const [version, ivSegment, ctSegment, tagSegment, ...rest] = payload.split('.')
+    if (version !== VERSION || !ivSegment || !ctSegment || !tagSegment || rest.length > 0) {
+      throw new Error('bad format')
+    }
+    const iv = Buffer.from(ivSegment, 'base64url')
+    const ciphertext = Buffer.from(ctSegment, 'base64url')
+    const tag = Buffer.from(tagSegment, 'base64url')
     if (iv.length !== IV_BYTES || tag.length !== TAG_BYTES) throw new Error('bad lengths')
     const decipher = createDecipheriv('aes-256-gcm', env.DETAILS_ENCRYPTION_KEY, iv)
     decipher.setAAD(Buffer.from(aad, 'utf8'))

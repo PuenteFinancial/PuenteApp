@@ -37,9 +37,8 @@ describe('encryptString / decryptString', () => {
 describe('decryptString rejection', () => {
   const tamper = (payload: string, segmentIndex: number): string => {
     const segments = payload.split('.')
-    const segment = segments[segmentIndex]
-    const bytes = Buffer.from(segment, 'base64url')
-    bytes[0] ^= 0xff
+    const bytes = Buffer.from(segments[segmentIndex]!, 'base64url')
+    bytes[0] = bytes[0]! ^ 0xff
     segments[segmentIndex] = bytes.toString('base64url')
     return segments.join('.')
   }

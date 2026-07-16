@@ -10,8 +10,8 @@ export function isValidClabe(value: string): boolean {
   if (!/^[0-9]{18}$/.test(value)) return false
   let sum = 0
   for (let i = 0; i < 17; i++) {
-    sum += (Number(value[i]) * WEIGHTS[i % 3]) % 10
+    sum += ((value.charCodeAt(i) - 48) * WEIGHTS[i % 3]!) % 10
   }
   const checkDigit = (10 - (sum % 10)) % 10
-  return checkDigit === Number(value[17])
+  return checkDigit === value.charCodeAt(17) - 48
 }
