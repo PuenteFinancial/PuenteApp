@@ -185,6 +185,12 @@ export async function destinationsRoute(server: FastifyInstance) {
             { userId, recipientId: recipient.id, bridgeStatus: err.status, bridgeCode },
             'bridge external account create failed',
           )
+          // Bridge dedupes identical CLABEs per customer (sandbox-verified
+          // 2026-07-16): re-adding a previously registered account — even an
+          // archived one — 400s with this code rather than minting a new id.
+          if (bridgeCode === 'duplicate_external_account') {
+            return reply.status(409).send({ error: 'This account is already saved' })
+          }
           if (err.status < 500) {
             return reply
               .status(422)

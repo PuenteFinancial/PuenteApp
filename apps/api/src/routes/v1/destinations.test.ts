@@ -260,6 +260,26 @@ describe('POST /v1/recipients/:id/destinations', () => {
     await app.close()
   })
 
+  it('maps Bridge duplicate_external_account to 409 (Bridge dedupes CLABEs per customer)', async () => {
+    from
+      .mockReturnValueOnce(chain({ data: approvedUser }))
+      .mockReturnValueOnce(chain({ data: recipientRow }))
+    createExternalAccount.mockRejectedValue(
+      new BridgeApiError(400, { code: 'duplicate_external_account' }),
+    )
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+      .set('Authorization', 'Bearer test-token')
+      .send(validBody)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toContain('already saved')
+    expect(from).toHaveBeenCalledTimes(2)
+    await app.close()
+  })
+
   it('maps Bridge 5xx to 502 and never inserts', async () => {
     from
       .mockReturnValueOnce(chain({ data: approvedUser }))

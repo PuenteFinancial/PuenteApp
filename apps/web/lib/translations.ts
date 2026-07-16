@@ -111,6 +111,7 @@ export type Translations = {
     errors: {
       invalidClabe: string
       bankRejected: string
+      alreadySaved: string
       providerDown: string
       generic: string
     }
@@ -304,6 +305,7 @@ const en: Translations = {
     errors: {
       invalidClabe: 'That CLABE doesn’t look right — check the 18-digit number.',
       bankRejected: 'The bank rejected this account. Verify the CLABE with your recipient.',
+      alreadySaved: 'This account is already saved.',
       providerDown: 'We couldn’t reach our payout provider. Try again in a moment.',
       generic: 'Something went wrong. Please try again.',
     },
@@ -497,6 +499,7 @@ const es: Translations = {
     errors: {
       invalidClabe: 'Esa CLABE no parece correcta — revisa el número de 18 dígitos.',
       bankRejected: 'El banco rechazó esta cuenta. Verifica la CLABE con tu destinatario.',
+      alreadySaved: 'Esta cuenta ya está guardada.',
       providerDown: 'No pudimos conectar con nuestro proveedor de pagos. Inténtalo en un momento.',
       generic: 'Algo salió mal. Inténtalo de nuevo.',
     },

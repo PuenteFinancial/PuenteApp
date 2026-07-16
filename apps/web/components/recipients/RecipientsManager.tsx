@@ -23,8 +23,11 @@ export interface RecipientWithDestinations {
 
 // Maps API failures to translated copy — API error strings are English-only
 // and never shown raw.
-function errorKeyFor(status: number): 'invalidClabe' | 'bankRejected' | 'providerDown' | 'generic' {
+function errorKeyFor(
+  status: number,
+): 'invalidClabe' | 'bankRejected' | 'alreadySaved' | 'providerDown' | 'generic' {
   if (status === 400) return 'invalidClabe'
+  if (status === 409) return 'alreadySaved'
   if (status === 422) return 'bankRejected'
   if (status === 502) return 'providerDown'
   return 'generic'
