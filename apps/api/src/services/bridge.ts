@@ -90,6 +90,32 @@ export async function getBridgeCustomer(customerId: string): Promise<{
   }
 }
 
+// Registers a recipient's MXN CLABE account with Bridge so payouts (slice 5)
+// can reference it. Names arrive already structured (first/last verbatim —
+// last_name carries both Mexican surnames); nothing here derives or splits.
+// A 201 means "registered", not "verified" — Bridge validates the CLABE
+// check digit but performs no Verification-of-Payee for MXN.
+export async function createExternalAccount(
+  customerId: string,
+  data: { firstName: string; lastName: string; clabe: string },
+): Promise<{ id: string }> {
+  const account = (await bridgeFetch(`/v0/customers/${customerId}/external_accounts`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': crypto.randomUUID() },
+    body: JSON.stringify({
+      currency: 'mxn',
+      account_owner_name: `${data.firstName} ${data.lastName}`,
+      account_owner_type: 'individual',
+      first_name: data.firstName,
+      last_name: data.lastName,
+      account_type: 'clabe',
+      clabe: { account_number: data.clabe },
+    }),
+  })) as { id: string }
+
+  return { id: account.id }
+}
+
 export async function getKycLink(
   customerId: string,
   redirectUri: string,

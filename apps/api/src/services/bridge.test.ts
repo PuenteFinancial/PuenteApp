@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   createBridgeCustomer,
+  createExternalAccount,
   createTosLink,
   getBridgeCustomer,
   getKycLink,
@@ -114,6 +115,54 @@ describe('createTosLink', () => {
   it('throws BridgeApiError on non-2xx', async () => {
     fetchMock.mockResolvedValue(jsonResponse(401, { code: 'invalid_credentials' }))
     await expect(createTosLink('https://x.test/return')).rejects.toBeInstanceOf(BridgeApiError)
+  })
+})
+
+describe('createExternalAccount', () => {
+  const input = {
+    firstName: 'María del Carmen',
+    lastName: 'García López',
+    clabe: '646180003000000006',
+  }
+
+  it('POSTs the sandbox-verified CLABE payload with names passed verbatim', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, { id: 'ea_123' }))
+
+    const result = await createExternalAccount('cust_abc', input)
+
+    expect(result).toEqual({ id: 'ea_123' })
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.bridge.test/v0/customers/cust_abc/external_accounts')
+    expect(init.method).toBe('POST')
+    expect(init.headers['Api-Key']).toBe('bridge_test_key')
+    expect(init.headers['Idempotency-Key']).toMatch(/[0-9a-f-]{36}/)
+    expect(JSON.parse(init.body)).toEqual({
+      currency: 'mxn',
+      account_owner_name: 'María del Carmen García López',
+      account_owner_type: 'individual',
+      first_name: 'María del Carmen',
+      last_name: 'García López',
+      account_type: 'clabe',
+      clabe: { account_number: '646180003000000006' },
+    })
+  })
+
+  it('uses a fresh idempotency key per call', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, { id: 'ea_123' }))
+    await createExternalAccount('cust_abc', input)
+    await createExternalAccount('cust_abc', input)
+    const keys = fetchMock.mock.calls.map(([, init]) => init.headers['Idempotency-Key'])
+    expect(keys[0]).not.toBe(keys[1])
+  })
+
+  it('throws BridgeApiError on non-2xx without leaking the body in the message', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(400, { code: 'invalid_clabe' }))
+
+    const err = await createExternalAccount('cust_abc', input).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(BridgeApiError)
+    expect((err as BridgeApiError).status).toBe(400)
+    expect((err as BridgeApiError).message).not.toContain('invalid_clabe')
   })
 })
 
