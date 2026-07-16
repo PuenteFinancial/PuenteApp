@@ -1,0 +1,46 @@
+name: Claude Token Health
+
+# Weekly canary for CLAUDE_CODE_OAUTH_TOKEN — the credential behind the
+# Security & Compliance review and @claude mentions. Without this, a dead
+# token is only discovered when a PR touches financial paths (found out the
+# hard way on PR #68, 2026-07-16: token died silently, review failed in 2s).
+# This exercises the exact secret in the exact context weekly and opens an
+# issue on failure so expiry becomes an email, not a mid-PR surprise.
+
+on:
+  schedule:
+    - cron: "0 14 * * 1" # Mondays 14:00 UTC (~8am MT)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Exercise the token
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: "This is a credential health check. Reply with exactly: OK"
+          claude_args: "--max-turns 1"
+
+      - name: Open issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search 'CLAUDE_CODE_OAUTH_TOKEN in:title' --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" \
+              --body "Still failing as of $(date -u +%Y-%m-%dT%H:%MZ). Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "CLAUDE_CODE_OAUTH_TOKEN is dead — re-mint it" \
+              --body "$(printf 'The weekly Claude token health check failed, which almost always means the OAuth token expired or was revoked.\n\nFix (2 commands, ~1 minute):\n\n```\nclaude setup-token   # browser auth, prints a token\ngh secret set CLAUDE_CODE_OAUTH_TOKEN --repo %s\n```\n\nThen re-run this workflow to confirm green and close this issue.\n\nAffected until fixed: Security & Compliance PR review, @claude mentions.\n\nFailing run: %s/%s/actions/runs/%s' "$GITHUB_REPOSITORY" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          fi
