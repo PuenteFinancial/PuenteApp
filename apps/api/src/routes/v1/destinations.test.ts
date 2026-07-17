@@ -221,7 +221,7 @@ describe('POST /v1/recipients/:id/destinations', () => {
       .send(body)
 
     expect(res.status).toBe(400)
-    expect(res.body.error).toContain('not yet supported')
+    expect(res.body.error.message).toContain('not yet supported')
     expect(createExternalAccount).not.toHaveBeenCalled()
     await app.close()
   })
@@ -357,7 +357,7 @@ describe('POST /v1/recipients/:id/destinations', () => {
         .send(validBody)
 
       expect(res.status).toBe(409)
-      expect(res.body.error).toContain('already saved')
+      expect(res.body.error.message).toContain('already saved')
       await app.close()
     })
 
@@ -486,7 +486,7 @@ describe('POST /v1/recipients/:id/destinations', () => {
       .send(validBody)
 
     expect(res.status).toBe(409)
-    expect(res.body.error).toContain('already saved')
+    expect(res.body.error.message).toContain('already saved')
     await app.close()
   })
 

@@ -8,6 +8,7 @@ import { env } from './config/env.js'
 import { assertEncryptionKeyUsable } from './utils/encryption.js'
 import { auditPlugin } from './plugins/audit.js'
 import { authPlugin } from './plugins/auth.js'
+import { errorHandlerPlugin } from './plugins/error-handler.js'
 import { healthRoute } from './routes/v1/health.js'
 import { waitlistRoute } from './routes/v1/waitlist.js'
 import { authRoute } from './routes/v1/auth.js'
@@ -46,7 +47,16 @@ await server.register(cors, {
 await server.register(rateLimit, {
   max: 100,
   timeWindow: '1 minute',
+  errorResponseBuilder: (request, context) => ({
+    error: {
+      code: 'rate_limited',
+      message: `Rate limit exceeded, retry in ${context.after}`,
+      requestId: request.id,
+    },
+  }),
 })
+
+await server.register(errorHandlerPlugin)
 await server.register(auditPlugin)
 await server.register(authPlugin)
 await server.register(healthRoute, { prefix: '/v1' })

@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import type { KycStatus } from '@puente/shared'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
+import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 // Bridge statuses we don't recognize fall through unmapped and are only logged
 const BRIDGE_KYC_STATUS_MAP: Record<string, KycStatus> = {
@@ -108,25 +109,16 @@ export async function webhooksRoute(server: FastifyInstance) {
             type: 'object',
             properties: { received: { type: 'boolean' } },
           },
-          400: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
-          500: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
-          503: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
+          400: errorResponseSchema,
+          500: errorResponseSchema,
+          503: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
       if (!env.BRIDGE_WEBHOOK_PUBLIC_KEY) {
         server.log.error('bridge webhook received but BRIDGE_WEBHOOK_PUBLIC_KEY is not set')
-        return reply.status(503).send({ error: 'Webhook not configured' })
+        return sendError(reply, 503, 'not_configured', 'Webhook not configured')
       }
 
       const signature = request.headers['x-webhook-signature']
@@ -137,14 +129,14 @@ export async function webhooksRoute(server: FastifyInstance) {
         !verifySignature(rawBody, signature, env.BRIDGE_WEBHOOK_PUBLIC_KEY)
       ) {
         server.log.warn({ audit: true, webhook: 'bridge' }, 'invalid webhook signature')
-        return reply.status(400).send({ error: 'Invalid signature' })
+        return sendError(reply, 400, 'validation_error', 'Invalid signature')
       }
 
       let event: BridgeWebhookEvent
       try {
         event = JSON.parse(rawBody.toString('utf8')) as BridgeWebhookEvent
       } catch {
-        return reply.status(400).send({ error: 'Invalid payload' })
+        return sendError(reply, 400, 'validation_error', 'Invalid payload')
       }
 
       const eventType = event.event_type ?? 'unknown'
@@ -173,7 +165,7 @@ export async function webhooksRoute(server: FastifyInstance) {
             'bridge customer unlink failed',
           )
           // 500 so Bridge retries the delivery
-          return reply.status(500).send({ error: 'Failed to process webhook' })
+          return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
         }
         return { received: true }
       }
@@ -207,7 +199,7 @@ export async function webhooksRoute(server: FastifyInstance) {
             'kyc status update failed',
           )
           // 500 so Bridge retries the delivery
-          return reply.status(500).send({ error: 'Failed to process webhook' })
+          return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
         }
       }
 

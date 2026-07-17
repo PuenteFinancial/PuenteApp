@@ -2,6 +2,7 @@ import fp from 'fastify-plugin'
 import type { FastifyInstance } from 'fastify'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { env } from '../config/env.js'
+import { sendError } from '../utils/errors.js'
 
 export const authPlugin = fp(async (server: FastifyInstance) => {
   // JWKS is fetched lazily and cached by jose — create once, not per request
@@ -12,7 +13,7 @@ export const authPlugin = fp(async (server: FastifyInstance) => {
 
     const header = request.headers.authorization
     if (!header || !header.startsWith('Bearer ')) {
-      return reply.code(401).send({ error: 'Unauthorized' })
+      return sendError(reply, 401, 'unauthorized', 'Unauthorized')
     }
 
     try {
@@ -20,7 +21,7 @@ export const authPlugin = fp(async (server: FastifyInstance) => {
       if (!payload.sub) throw new Error('token has no sub claim')
       request.user = { id: payload.sub }
     } catch {
-      return reply.code(401).send({ error: 'Unauthorized' })
+      return sendError(reply, 401, 'unauthorized', 'Unauthorized')
     }
   })
 })

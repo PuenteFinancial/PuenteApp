@@ -26,17 +26,16 @@ input + response schema validation; authenticated routes write an audit-log entr
   duplicate quote is harmless). Keyed per
   endpoint + user, stored ~24h: a replay returns the original result; the same key with a different
   body → `idempotency_conflict`.
-- **Errors:** uniform envelope — stable `code`, human `message`, a `request_id` for support/tracing,
-  and `details` carrying field-level issues on `validation_error`:
+- **Errors:** uniform envelope — stable `code` (clients branch on this, never on message text),
+  human `message`, a `requestId` for support/tracing, and `details` carrying field-level issues
+  on `validation_error`. **Live on every route since the error-envelope PR (2026-07-17).**
   ```json
   { "error": { "code": "validation_error", "message": "Invalid request.",
-      "request_id": "req_01H...",
-      "details": [ { "path": "totalAmount.amountMinor", "issue": "must be a positive integer" } ] } }
+      "requestId": "req-1a2b3c",
+      "details": [ { "path": "body/totalAmount/amountMinor", "issue": "must be >= 1" } ] } }
   ```
-  *Status:* shipped routes (slices 1–3) currently return the simpler `{ "error": "<message>" }`
-  body; migrating them to this envelope is deferred cross-cutting work, tracked for a dedicated
-  slice — new routes follow the shipped style until then. The `code` column below still names the
-  canonical condition each response maps to.
+  Convention: wrong-**state** conditions (archived resource, illegal transition) are `409 conflict`;
+  wrong-**input** is `400 validation_error`.
 - **Exchange rate:** `fx_rate` is a **decimal string** with fixed scale (e.g. `"17.3400"`), never a
   float — it feeds money math, so it's computed in decimal/integer arithmetic, never IEEE-754.
 - **Lists:** cursor pagination — `?limit=&cursor=`, response `{ data: [...], next_cursor }`.
@@ -60,7 +59,11 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 409 | `idempotency_conflict` | Idempotency-Key reused with different body |
 | 409 | `quote_expired` | Quote past `expires_at` |
 | 409 | `transfer_not_cancelable` | Not in `FUNDED` / past cancel window |
+| 422 | `provider_rejected` | Upstream provider rejected the request (e.g. bank refused the account) |
 | 429 | `rate_limited` | Throttled |
+| 500 | `internal_error` | Unexpected failure; details never leak — use `requestId` |
+| 502 | `provider_unavailable` | Upstream provider (Bridge/KYC) unreachable |
+| 503 | `not_configured` | Endpoint disabled pending configuration (e.g. webhook secret unset) |
 | 503 | `rate_unavailable` | Bridge indicative rate unavailable |
 
 ## Auth & onboarding
@@ -126,8 +129,8 @@ KYC result arrives via the Sumsub webhook (below), not a client call.
 }
 ```
 403 (`kyc_required`) if sender not approved. 503 (`rate_unavailable`) if the Bridge indicative
-rate can't be fetched or fails validation. 400 for archived/wrong-corridor destinations and
-amounts too small to price. POST is rate-limited (10/min/user) on top of the global limiter.
+rate can't be fetched or fails validation. 409 (`conflict`) for archived destinations/recipients;
+400 (`validation_error`) for wrong-corridor destinations and amounts too small to price. POST is rate-limited (10/min/user) on top of the global limiter.
 No `Idempotency-Key` — a duplicate quote is harmless. `sourceRate`/`fxRateAt` are stored for
 reconciliation but never cross the wire.
 

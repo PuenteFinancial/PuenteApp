@@ -210,14 +210,22 @@ describe('POST /v1/quotes', () => {
     await app.close()
   })
 
-  it('400s on archived destinations, archived recipients, and non-MXN corridors', async () => {
+  it('409s archived destinations/recipients (state conflict); 400s non-MXN corridors (bad input)', async () => {
     const variants = [
-      { ...ownedDestination, status: 'archived' },
-      { ...ownedDestination, recipients: { user_id: 'user-123', status: 'archived' } },
-      { ...ownedDestination, currency: 'USD' },
+      { destination: { ...ownedDestination, status: 'archived' }, status: 409, code: 'conflict' },
+      {
+        destination: { ...ownedDestination, recipients: { user_id: 'user-123', status: 'archived' } },
+        status: 409,
+        code: 'conflict',
+      },
+      {
+        destination: { ...ownedDestination, currency: 'USD' },
+        status: 400,
+        code: 'validation_error',
+      },
     ]
     const app = await buildApp()
-    for (const destination of variants) {
+    for (const { destination, status, code } of variants) {
       from.mockReset()
       getExchangeRate.mockReset()
       from
@@ -229,7 +237,9 @@ describe('POST /v1/quotes', () => {
         .set('Authorization', 'Bearer test-token')
         .send(validBody)
 
-      expect(res.status, JSON.stringify(destination)).toBe(400)
+      expect(res.status, JSON.stringify(destination)).toBe(status)
+      expect(res.body.error.code).toBe(code)
+      expect(typeof res.body.error.requestId).toBe('string')
       expect(getExchangeRate).not.toHaveBeenCalled()
     }
     await app.close()
