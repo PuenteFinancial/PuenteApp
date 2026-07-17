@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { supabaseAdmin } from '../../services/supabase.js'
+import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 export const RECIPIENT_COLUMNS =
   'id, first_name, last_name, relationship, country, status, created_at, updated_at'
@@ -42,11 +43,6 @@ export const recipientResponseSchema = {
   },
 } as const
 
-const errorResponseSchema = {
-  type: 'object',
-  properties: { error: { type: 'string' } },
-} as const
-
 // The whole /v1/recipients surface is post-KYC: recipient rows are PII we
 // only hold for onboarded senders. Returns the user's bridge_customer_id
 // for the destination-create path; replies 403 and returns null otherwise.
@@ -61,14 +57,12 @@ export async function requireApprovedUser(
     .single()
 
   if (error || !data) {
-    await reply.status(404).send({ error: 'User not found' })
+    await sendError(reply, 404, 'not_found', 'User not found')
     return null
   }
   const user = data as { kyc_status: string; bridge_customer_id: string | null }
   if (user.kyc_status !== 'approved') {
-    await reply
-      .status(403)
-      .send({ error: 'Complete identity verification first' })
+    await sendError(reply, 403, 'kyc_required', 'Complete identity verification first')
     return null
   }
   return { bridgeCustomerId: user.bridge_customer_id }
@@ -157,7 +151,7 @@ export async function recipientsRoute(server: FastifyInstance) {
 
       if (error || !data) {
         server.log.error({ userId, supabaseError: error?.code }, 'recipient insert failed')
-        return reply.status(500).send({ error: 'Failed to save recipient' })
+        return sendError(reply, 500, 'internal_error', 'Failed to save recipient')
       }
 
       return reply.status(201).send(toApiRecipient(data as RecipientRow))
@@ -197,7 +191,7 @@ export async function recipientsRoute(server: FastifyInstance) {
       if (request.query.cursor) {
         cursor = decodeCursor(request.query.cursor)
         if (!cursor) {
-          return reply.status(400).send({ error: 'Invalid cursor' })
+          return sendError(reply, 400, 'validation_error', 'Invalid cursor')
         }
       }
 
@@ -219,7 +213,7 @@ export async function recipientsRoute(server: FastifyInstance) {
       const { data, error } = await query
       if (error || !data) {
         server.log.error({ userId, supabaseError: error?.code }, 'recipient list failed')
-        return reply.status(500).send({ error: 'Failed to load recipients' })
+        return sendError(reply, 500, 'internal_error', 'Failed to load recipients')
       }
 
       const rows = data as RecipientRow[]
@@ -256,7 +250,7 @@ export async function recipientsRoute(server: FastifyInstance) {
       // Scoped by user_id: a foreign id 404s identically to a missing one,
       // never confirming another owner's row exists.
       if (error || !data) {
-        return reply.status(404).send({ error: 'Recipient not found' })
+        return sendError(reply, 404, 'not_found', 'Recipient not found')
       }
       return toApiRecipient(data as RecipientRow)
     },
@@ -303,7 +297,7 @@ export async function recipientsRoute(server: FastifyInstance) {
         relationship === undefined &&
         status === undefined
       ) {
-        return reply.status(400).send({ error: 'No updatable fields provided' })
+        return sendError(reply, 400, 'validation_error', 'No updatable fields provided')
       }
 
       if (!(await requireApprovedUser(userId, reply))) return
@@ -320,7 +314,7 @@ export async function recipientsRoute(server: FastifyInstance) {
           .eq('user_id', userId)
           .single()
         if (!owned) {
-          return reply.status(404).send({ error: 'Recipient not found' })
+          return sendError(reply, 404, 'not_found', 'Recipient not found')
         }
         const { error: cascadeError } = await supabaseAdmin
           .from('payout_destinations')
@@ -332,7 +326,7 @@ export async function recipientsRoute(server: FastifyInstance) {
             { userId, supabaseError: cascadeError.code },
             'destination cascade-archive failed',
           )
-          return reply.status(500).send({ error: 'Failed to update recipient' })
+          return sendError(reply, 500, 'internal_error', 'Failed to update recipient')
         }
       }
 
@@ -350,7 +344,7 @@ export async function recipientsRoute(server: FastifyInstance) {
         .single()
 
       if (error || !data) {
-        return reply.status(404).send({ error: 'Recipient not found' })
+        return sendError(reply, 404, 'not_found', 'Recipient not found')
       }
       return toApiRecipient(data as RecipientRow)
     },

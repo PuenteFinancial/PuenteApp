@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { supabaseAdmin, supabaseAuth } from '../../services/supabase.js'
+import { sendError } from '../../utils/errors.js'
 
 interface OtpSendBody {
   phone: string
@@ -48,7 +49,7 @@ export async function authRoute(server: FastifyInstance) {
       if (error) {
         // log status only — never the phone number
         server.log.error({ authError: error.status }, 'otp send failed')
-        return reply.status(500).send({ error: 'Failed to send code' })
+        return sendError(reply, 500, 'internal_error', 'Failed to send code')
       }
 
       return { message: 'OTP sent' }
@@ -90,7 +91,7 @@ export async function authRoute(server: FastifyInstance) {
       })
 
       if (error || !data.session || !data.user) {
-        return reply.status(401).send({ error: 'Invalid or expired code' })
+        return sendError(reply, 401, 'unauthorized', 'Invalid or expired code')
       }
 
       // The users row normally exists via the on-auth-user-created trigger,
@@ -201,7 +202,7 @@ export async function authRoute(server: FastifyInstance) {
       if (error || !data.session || !data.user) {
         // log status only — never the token
         server.log.info({ authError: error?.status }, 'session refresh rejected')
-        return reply.status(401).send({ error: 'Invalid or expired session' })
+        return sendError(reply, 401, 'unauthorized', 'Invalid or expired session')
       }
 
       return {

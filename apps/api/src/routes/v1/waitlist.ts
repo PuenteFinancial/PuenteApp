@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { supabaseAdmin } from '../../services/supabase.js'
+import { sendError } from '../../utils/errors.js'
 
 interface WaitlistBody {
   first_name: string
@@ -94,7 +95,7 @@ export async function waitlistRoute(server: FastifyInstance) {
 
       if (error) {
         server.log.error({ supabaseError: error.message }, 'waitlist insert failed')
-        return reply.status(500).send({ error: 'Failed to join waitlist' })
+        return sendError(reply, 500, 'internal_error', 'Failed to join waitlist')
       }
 
       return { success: true }

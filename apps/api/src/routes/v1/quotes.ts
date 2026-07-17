@@ -9,6 +9,7 @@ import {
   QuoteAmountError,
 } from '../../services/quotes.js'
 import { requireApprovedUser } from './recipients.js'
+import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 // source_rate / fx_rate_at are reconciliation-only and deliberately excluded:
 // they never cross the wire.
@@ -83,11 +84,6 @@ const quoteResponseSchema = {
   },
 } as const
 
-const errorResponseSchema = {
-  type: 'object',
-  properties: { error: { type: 'string' } },
-} as const
-
 interface CreateQuoteBody {
   payoutDestinationId: string
   totalAmount: { amountMinor: number; currency: 'USD' }
@@ -138,6 +134,7 @@ export async function quotesRoute(server: FastifyInstance) {
           400: errorResponseSchema,
           403: errorResponseSchema,
           404: errorResponseSchema,
+          409: errorResponseSchema,
           429: errorResponseSchema,
           503: errorResponseSchema,
         },
@@ -160,14 +157,14 @@ export async function quotesRoute(server: FastifyInstance) {
         .single()
 
       if (!destinationData) {
-        return reply.status(404).send({ error: 'Payout destination not found' })
+        return sendError(reply, 404, 'not_found', 'Payout destination not found')
       }
       const destination = destinationData as unknown as OwnedDestinationRow
       if (destination.status !== 'active' || destination.recipients.status !== 'active') {
-        return reply.status(400).send({ error: 'Payout destination is archived' })
+        return sendError(reply, 409, 'conflict', 'Payout destination is archived')
       }
       if (destination.currency !== 'MXN') {
-        return reply.status(400).send({ error: 'Only MXN payouts are supported' })
+        return sendError(reply, 400, 'validation_error', 'Only MXN payouts are supported')
       }
 
       let buyRate: string
@@ -180,7 +177,7 @@ export async function quotesRoute(server: FastifyInstance) {
         } else {
           server.log.error({ userId }, 'bridge rate request failed')
         }
-        return reply.status(503).send({ error: 'Exchange rate is unavailable, try again shortly' })
+        return sendError(reply, 503, 'rate_unavailable', 'Exchange rate is unavailable, try again shortly')
       }
       const fxRateAt = new Date()
 
@@ -197,15 +194,13 @@ export async function quotesRoute(server: FastifyInstance) {
         })
       } catch (err) {
         if (err instanceof QuoteAmountError) {
-          return reply.status(400).send({ error: err.message })
+          return sendError(reply, 400, 'validation_error', err.message)
         }
         if (err instanceof InvalidBuyRateError) {
           // Malformed provider data is a provider outage from the caller's
           // perspective; log the shape problem, never the failed math inputs.
           server.log.error({ userId }, 'bridge buy_rate failed validation')
-          return reply
-            .status(503)
-            .send({ error: 'Exchange rate is unavailable, try again shortly' })
+          return sendError(reply, 503, 'rate_unavailable', 'Exchange rate is unavailable, try again shortly')
         }
         throw err
       }
@@ -235,7 +230,7 @@ export async function quotesRoute(server: FastifyInstance) {
 
       if (error || !data) {
         server.log.error({ userId, supabaseError: error?.code }, 'quote insert failed')
-        return reply.status(500).send({ error: 'Failed to create quote' })
+        return sendError(reply, 500, 'internal_error', 'Failed to create quote')
       }
 
       return reply.status(201).send(toApiQuote(data as unknown as QuoteRow))
@@ -268,7 +263,7 @@ export async function quotesRoute(server: FastifyInstance) {
         .single()
 
       if (error || !data) {
-        return reply.status(404).send({ error: 'Quote not found' })
+        return sendError(reply, 404, 'not_found', 'Quote not found')
       }
 
       // Expiry is derived on read — the row is not rewritten; slice 4 flips

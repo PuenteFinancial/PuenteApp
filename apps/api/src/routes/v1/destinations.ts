@@ -4,6 +4,7 @@ import { createExternalAccount, listExternalAccounts, BridgeApiError } from '../
 import { isValidClabe } from '../../utils/clabe.js'
 import { encryptString } from '../../utils/encryption.js'
 import { requireApprovedUser } from './recipients.js'
+import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 const DESTINATION_COLUMNS =
   'id, recipient_id, method, currency, details, label, status, verification_status, created_at, updated_at'
@@ -60,10 +61,6 @@ const destinationResponseSchema = {
   },
 } as const
 
-const errorResponseSchema = {
-  type: 'object',
-  properties: { error: { type: 'string' } },
-} as const
 
 interface CreateDestinationBody {
   method: 'bank_account' | 'wallet' | 'cash_pickup' | 'debit_card'
@@ -137,9 +134,7 @@ export async function destinationsRoute(server: FastifyInstance) {
       const approved = await requireApprovedUser(userId, reply)
       if (!approved) return
       if (!approved.bridgeCustomerId) {
-        return reply
-          .status(403)
-          .send({ error: 'Complete identity verification before adding payout details' })
+        return sendError(reply, 403, 'kyc_required', 'Complete identity verification before adding payout details')
       }
 
       // 2. Owner-scoped recipient load.
@@ -151,25 +146,23 @@ export async function destinationsRoute(server: FastifyInstance) {
         .single()
 
       if (!recipientData) {
-        return reply.status(404).send({ error: 'Recipient not found' })
+        return sendError(reply, 404, 'not_found', 'Recipient not found')
       }
       const recipient = recipientData as RecipientOwnerRow
       if (recipient.status === 'archived') {
-        return reply.status(409).send({ error: 'Recipient is archived' })
+        return sendError(reply, 409, 'conflict', 'Recipient is archived')
       }
 
       // 3. (country, method) gate — MVP supports MX bank deposits only.
       const { method, currency, label } = request.body
       if (recipient.country !== 'MX' || method !== 'bank_account' || currency !== 'MXN') {
-        return reply
-          .status(400)
-          .send({ error: 'This payout method is not yet supported for this country' })
+        return sendError(reply, 400, 'validation_error', 'This payout method is not yet supported for this country')
       }
 
       // 4. CLABE validation — never echo the submitted value back.
       const clabe = request.body.details.clabe
       if (!clabe || !isValidClabe(clabe)) {
-        return reply.status(400).send({ error: 'Invalid CLABE — check the 18-digit number' })
+        return sendError(reply, 400, 'validation_error', 'Invalid CLABE — check the 18-digit number')
       }
 
       // 5. Register with Bridge BEFORE persisting anything: a failure leaves
@@ -205,15 +198,13 @@ export async function destinationsRoute(server: FastifyInstance) {
                 { userId, recipientId: recipient.id },
                 'bridge external account list failed during adoption',
               )
-              return reply
-                .status(502)
-                .send({ error: 'Payout provider is unavailable, try again shortly' })
+              return sendError(reply, 502, 'provider_unavailable', 'Payout provider is unavailable, try again shortly')
             }
             // Bridge only exposes last_4, so require an unambiguous match —
             // on a collision fall back to the conservative 409
             const matches = accounts.filter((a) => a.clabeLast4 === clabe.slice(-4))
             if (matches.length !== 1) {
-              return reply.status(409).send({ error: 'This account is already saved' })
+              return sendError(reply, 409, 'conflict', 'This account is already saved')
             }
             const adoptedId = matches[0]!.id
 
@@ -234,7 +225,7 @@ export async function destinationsRoute(server: FastifyInstance) {
               if (!revivable) {
                 // genuinely saved already — either active here, or it lives
                 // under a different recipient of the same user
-                return reply.status(409).send({ error: 'This account is already saved' })
+                return sendError(reply, 409, 'conflict', 'This account is already saved')
               }
               // archive + re-add reactivation: revive the archived row
               const { data: revived, error: reviveError } = await supabaseAdmin
@@ -249,7 +240,7 @@ export async function destinationsRoute(server: FastifyInstance) {
                   { userId, recipientId: recipient.id, supabaseError: reviveError?.code },
                   'destination revive failed',
                 )
-                return reply.status(500).send({ error: 'Failed to save payout destination' })
+                return sendError(reply, 500, 'internal_error', 'Failed to save payout destination')
               }
               return reply.status(201).send(toApiDestination(revived as DestinationRow))
             }
@@ -257,20 +248,14 @@ export async function destinationsRoute(server: FastifyInstance) {
             // no local row: heal the orphan by inserting with the adopted id
             bridgeAccountId = adoptedId
           } else if (err.status < 500) {
-            return reply
-              .status(422)
-              .send({ error: 'The bank rejected this account — verify the CLABE with your recipient' })
+            return sendError(reply, 422, 'provider_rejected', 'The bank rejected this account — verify the CLABE with your recipient')
           } else {
-            return reply
-              .status(502)
-              .send({ error: 'Payout provider is unavailable, try again shortly' })
+            return sendError(reply, 502, 'provider_unavailable', 'Payout provider is unavailable, try again shortly')
           }
         } else {
           // fetch network failures (TypeError) must not surface as a raw 500
           server.log.error({ userId, recipientId: recipient.id }, 'bridge request failed')
-          return reply
-            .status(502)
-            .send({ error: 'Payout provider is unavailable, try again shortly' })
+          return sendError(reply, 502, 'provider_unavailable', 'Payout provider is unavailable, try again shortly')
         }
       }
 
@@ -294,7 +279,7 @@ export async function destinationsRoute(server: FastifyInstance) {
 
       if (error || !data) {
         if (error?.code === '23505') {
-          return reply.status(409).send({ error: 'This account is already saved' })
+          return sendError(reply, 409, 'conflict', 'This account is already saved')
         }
         // The Bridge account now has no DB row — orphaned by policy (slice 8
         // reconciliation treats unmatched externals as expected noise).
@@ -308,7 +293,7 @@ export async function destinationsRoute(server: FastifyInstance) {
           },
           'destination insert failed after bridge registration',
         )
-        return reply.status(500).send({ error: 'Failed to save payout destination' })
+        return sendError(reply, 500, 'internal_error', 'Failed to save payout destination')
       }
 
       return reply.status(201).send(toApiDestination(data as DestinationRow))
@@ -347,7 +332,7 @@ export async function destinationsRoute(server: FastifyInstance) {
         .single()
 
       if (!recipient) {
-        return reply.status(404).send({ error: 'Recipient not found' })
+        return sendError(reply, 404, 'not_found', 'Recipient not found')
       }
 
       const { data, error } = await supabaseAdmin
@@ -359,7 +344,7 @@ export async function destinationsRoute(server: FastifyInstance) {
 
       if (error || !data) {
         server.log.error({ userId, supabaseError: error?.code }, 'destination list failed')
-        return reply.status(500).send({ error: 'Failed to load payout destinations' })
+        return sendError(reply, 500, 'internal_error', 'Failed to load payout destinations')
       }
 
       return { data: (data as DestinationRow[]).map(toApiDestination) }
@@ -403,7 +388,7 @@ export async function destinationsRoute(server: FastifyInstance) {
       // removeAdditional strips unknown fields after minProperties passes —
       // a body of only stripped fields (e.g. { details }) arrives empty.
       if (label === undefined && status === undefined) {
-        return reply.status(400).send({ error: 'No updatable fields provided' })
+        return sendError(reply, 400, 'validation_error', 'No updatable fields provided')
       }
 
       if (!(await requireApprovedUser(userId, reply))) return
@@ -417,7 +402,7 @@ export async function destinationsRoute(server: FastifyInstance) {
         .single()
 
       if (!owned) {
-        return reply.status(404).send({ error: 'Payout destination not found' })
+        return sendError(reply, 404, 'not_found', 'Payout destination not found')
       }
 
       // user_id lives one join away, so the write can't re-check the owner
@@ -436,7 +421,7 @@ export async function destinationsRoute(server: FastifyInstance) {
 
       if (error || !data) {
         server.log.error({ userId, supabaseError: error?.code }, 'destination update failed')
-        return reply.status(500).send({ error: 'Failed to update payout destination' })
+        return sendError(reply, 500, 'internal_error', 'Failed to update payout destination')
       }
       return toApiDestination(data as DestinationRow)
     },

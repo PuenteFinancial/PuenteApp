@@ -8,6 +8,7 @@ import {
   getKycLink,
   BridgeApiError,
 } from '../../services/bridge.js'
+import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 const USER_COLUMNS = 'id, first_name, last_name, email, kyc_status, bridge_customer_id'
 
@@ -84,10 +85,7 @@ export async function usersRoute(server: FastifyInstance) {
       schema: {
         response: {
           200: userResponseSchema,
-          404: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
+          404: errorResponseSchema,
         },
       },
     },
@@ -100,7 +98,7 @@ export async function usersRoute(server: FastifyInstance) {
         .single()
 
       if (error || !data) {
-        return reply.status(404).send({ error: 'User not found' })
+        return sendError(reply, 404, 'not_found', 'User not found')
       }
 
       return toApiUser(data as UserRow)
@@ -141,7 +139,7 @@ export async function usersRoute(server: FastifyInstance) {
 
       if (error || !data) {
         server.log.error({ userId, supabaseError: error?.code }, 'profile update failed')
-        return reply.status(500).send({ error: 'Failed to update profile' })
+        return sendError(reply, 500, 'internal_error', 'Failed to update profile')
       }
 
       // Triggers Supabase's email verification flow. Non-blocking by design:
@@ -177,10 +175,7 @@ export async function usersRoute(server: FastifyInstance) {
             type: 'object',
             properties: { url: { type: 'string' } },
           },
-          502: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
+          502: errorResponseSchema,
         },
       },
     },
@@ -194,7 +189,7 @@ export async function usersRoute(server: FastifyInstance) {
         if (err instanceof BridgeApiError) {
           const bridgeCode = (err.body as { code?: string } | null)?.code
           server.log.error({ userId, bridgeStatus: err.status, bridgeCode }, 'bridge tos link failed')
-          return reply.status(502).send({ error: 'Identity verification is unavailable, try again shortly' })
+          return sendError(reply, 502, 'provider_unavailable', 'Identity verification is unavailable, try again shortly')
         }
         throw err
       }
@@ -213,14 +208,8 @@ export async function usersRoute(server: FastifyInstance) {
               retriesRemaining: { type: 'number' },
             },
           },
-          404: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
-          409: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
+          404: errorResponseSchema,
+          409: errorResponseSchema,
         },
       },
     },
@@ -233,12 +222,12 @@ export async function usersRoute(server: FastifyInstance) {
         .single()
 
       if (error || !data) {
-        return reply.status(404).send({ error: 'User not found' })
+        return sendError(reply, 404, 'not_found', 'User not found')
       }
 
       const user = data as KycRetryRow
       if (user.kyc_status !== 'rejected') {
-        return reply.status(409).send({ error: 'Identity verification is not in a rejected state' })
+        return sendError(reply, 409, 'conflict', 'Identity verification is not in a rejected state')
       }
 
       // Reason strings can reference the user's documents — they go to the
@@ -278,22 +267,10 @@ export async function usersRoute(server: FastifyInstance) {
             type: 'object',
             properties: { url: { type: 'string' } },
           },
-          404: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
-          409: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
-          429: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
-          502: {
-            type: 'object',
-            properties: { error: { type: 'string' } },
-          },
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          429: errorResponseSchema,
+          502: errorResponseSchema,
         },
       },
     },
@@ -306,15 +283,15 @@ export async function usersRoute(server: FastifyInstance) {
         .single()
 
       if (error || !data) {
-        return reply.status(404).send({ error: 'User not found' })
+        return sendError(reply, 404, 'not_found', 'User not found')
       }
 
       const user = data as KycRetryRow
       if (user.kyc_status !== 'rejected' || !user.bridge_customer_id) {
-        return reply.status(409).send({ error: 'Identity verification cannot be retried right now' })
+        return sendError(reply, 409, 'conflict', 'Identity verification cannot be retried right now')
       }
       if (user.kyc_retry_count >= KYC_MAX_RETRIES) {
-        return reply.status(429).send({ error: 'Retry limit reached, contact support' })
+        return sendError(reply, 429, 'rate_limited', 'Retry limit reached, contact support')
       }
 
       // Consume the retry before issuing the link. The kyc_retry_count guard
@@ -328,7 +305,7 @@ export async function usersRoute(server: FastifyInstance) {
         .single()
 
       if (bumpError || !bumped) {
-        return reply.status(409).send({ error: 'Identity verification cannot be retried right now' })
+        return sendError(reply, 409, 'conflict', 'Identity verification cannot be retried right now')
       }
 
       try {
@@ -353,7 +330,7 @@ export async function usersRoute(server: FastifyInstance) {
 
           const bridgeCode = (err.body as { code?: string } | null)?.code
           server.log.error({ userId, bridgeStatus: err.status, bridgeCode }, 'bridge request failed')
-          return reply.status(502).send({ error: 'Identity verification is unavailable, try again shortly' })
+          return sendError(reply, 502, 'provider_unavailable', 'Identity verification is unavailable, try again shortly')
         }
         throw err
       }
@@ -391,12 +368,12 @@ export async function usersRoute(server: FastifyInstance) {
         .single()
 
       if (error || !data) {
-        return reply.status(404).send({ error: 'User not found' })
+        return sendError(reply, 404, 'not_found', 'User not found')
       }
 
       const user = data as UserRow
       if (!user.first_name || !user.last_name || !user.email) {
-        return reply.status(400).send({ error: 'Complete your profile before identity verification' })
+        return sendError(reply, 400, 'validation_error', 'Complete your profile before identity verification')
       }
 
       try {
@@ -418,7 +395,7 @@ export async function usersRoute(server: FastifyInstance) {
 
           if (saveError) {
             server.log.error({ userId, supabaseError: saveError.code }, 'bridge customer save failed')
-            return reply.status(500).send({ error: 'Failed to start identity verification' })
+            return sendError(reply, 500, 'internal_error', 'Failed to start identity verification')
           }
         }
 
@@ -431,7 +408,7 @@ export async function usersRoute(server: FastifyInstance) {
         if (err instanceof BridgeApiError) {
           const bridgeCode = (err.body as { code?: string } | null)?.code
           server.log.error({ userId, bridgeStatus: err.status, bridgeCode }, 'bridge request failed')
-          return reply.status(502).send({ error: 'Identity verification is unavailable, try again shortly' })
+          return sendError(reply, 502, 'provider_unavailable', 'Identity verification is unavailable, try again shortly')
         }
         throw err
       }
