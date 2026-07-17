@@ -9,6 +9,7 @@ import { assertEncryptionKeyUsable } from './utils/encryption.js'
 import { auditPlugin } from './plugins/audit.js'
 import { authPlugin } from './plugins/auth.js'
 import { errorHandlerPlugin } from './plugins/error-handler.js'
+import { idempotencyPlugin } from './plugins/idempotency.js'
 import { healthRoute } from './routes/v1/health.js'
 import { waitlistRoute } from './routes/v1/waitlist.js'
 import { authRoute } from './routes/v1/auth.js'
@@ -59,6 +60,7 @@ await server.register(rateLimit, {
 await server.register(errorHandlerPlugin)
 await server.register(auditPlugin)
 await server.register(authPlugin)
+await server.register(idempotencyPlugin)
 await server.register(healthRoute, { prefix: '/v1' })
 await server.register(waitlistRoute, { prefix: '/v1' })
 await server.register(authRoute, { prefix: '/v1' })
