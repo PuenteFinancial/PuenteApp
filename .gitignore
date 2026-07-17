@@ -17,6 +17,7 @@ build/
 # Personal Claude Code notes (not shared)
 CLAUDE.local.md
 .claude/settings.local.json
+.claude/launch.json
 
 # Logs
 *.log
