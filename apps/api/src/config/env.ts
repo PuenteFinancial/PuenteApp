@@ -46,6 +46,20 @@ const envSchema = z.object({
   QUOTE_FEE_BPS: z.coerce.number().int().min(0).max(9999).default(100),
   QUOTE_FX_BUFFER_BPS: z.coerce.number().int().min(0).max(9999).default(50),
   QUOTE_EXPIRY_SECONDS: z.coerce.number().int().min(60).max(86400).default(900),
+  // Funding (slice 4). 'stripe' joins the enum in slice 4b when keys exist.
+  FUNDING_PROCESSOR: z.enum(['mock']).default('mock'),
+  // Webhook HMAC secret for the mock processor. ABSENT IN PRODUCTION on
+  // purpose — its absence 503s the funding webhook and confirm, which is the
+  // production lock against mock funding. Doppler sets it dev/staging only.
+  MOCK_FUNDING_WEBHOOK_SECRET: z.string().min(16).optional(),
+  // funding_cleared gate policy — recorded this slice, never gated on until
+  // the risk engine flips it. NOT z.coerce.boolean(): that parses 'false' as
+  // true; the enum-transform is exact.
+  WAIT_FOR_CLEARING: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  CANCEL_WINDOW_MINUTES: z.coerce.number().int().min(1).max(1440).default(30),
   TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
   TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
   TWILIO_PHONE_NUMBER: z.string().min(1).optional(),
