@@ -243,6 +243,23 @@ describe('POST /v1/recipients/:id/destinations', () => {
     await app.close()
   })
 
+  it('400s at the schema on a whitespace-only label, before Bridge or any query', async () => {
+    // '  ' passes minLength:1 but trims to '' at insert time — without the
+    // schema pattern this failed the DB check only AFTER the Bridge account
+    // was created, orphaning it and 409ing every retry via Bridge dedupe
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+      .set('Authorization', 'Bearer test-token')
+      .send({ ...validBody, label: '   ' })
+
+    expect(res.status).toBe(400)
+    expect(createExternalAccount).not.toHaveBeenCalled()
+    expect(from).not.toHaveBeenCalled()
+    await app.close()
+  })
+
   it('maps Bridge 4xx to 422 and never inserts', async () => {
     from
       .mockReturnValueOnce(chain({ data: approvedUser }))
@@ -383,7 +400,9 @@ describe('GET /v1/recipients/:id/destinations', () => {
 describe('PATCH /v1/destinations/:id', () => {
   it('archives via the flat path with ownership traversal', async () => {
     const users = chain({ data: approvedUser })
-    const owned = chain({ data: { id: DESTINATION_ID, recipients: { user_id: 'user-123' } } })
+    const owned = chain({
+      data: { id: DESTINATION_ID, recipient_id: RECIPIENT_ID, recipients: { user_id: 'user-123' } },
+    })
     const update = chain({ data: { ...destinationRow, status: 'archived' } })
     from.mockReturnValueOnce(users).mockReturnValueOnce(owned).mockReturnValueOnce(update)
     const app = await buildApp()
@@ -396,6 +415,8 @@ describe('PATCH /v1/destinations/:id', () => {
     expect(res.status).toBe(200)
     expect(res.body.status).toBe('archived')
     expect(owned['eq']).toHaveBeenCalledWith('recipients.user_id', 'user-123')
+    // the write itself is pinned to the verified parent, not just the id
+    expect(update['eq']).toHaveBeenCalledWith('recipient_id', RECIPIENT_ID)
     await app.close()
   })
 
@@ -418,6 +439,10 @@ describe('PATCH /v1/destinations/:id', () => {
     ['details change', { details: { clabe: CLABE } }],
     ['empty body', {}],
     ['method change', { method: 'wallet' }],
+    // archival is one-way — un-archiving would let a destination become
+    // payable under an archived recipient
+    ['un-archive attempt', { status: 'active' }],
+    ['whitespace-only label', { label: '   ' }],
   ])('400s on %s (schema rejects)', async (_name, body) => {
     const app = await buildApp()
     const res = await supertest(app.server)

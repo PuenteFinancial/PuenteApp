@@ -74,7 +74,8 @@ interface CreateDestinationBody {
 
 interface UpdateDestinationBody {
   label?: string
-  status?: 'active' | 'archived'
+  // one-way: see the status schema comment on the PATCH route
+  status?: 'archived'
 }
 
 interface RecipientOwnerRow {
@@ -111,7 +112,10 @@ export async function destinationsRoute(server: FastifyInstance) {
               properties: { clabe: { type: 'string' } },
               additionalProperties: false,
             },
-            label: { type: 'string', minLength: 1, maxLength: 100 },
+            // pattern rejects whitespace-only values the handler would trim
+            // to '' — which would otherwise fail the DB check only AFTER the
+            // Bridge account is created, orphaning it
+            label: { type: 'string', minLength: 1, maxLength: 100, pattern: '\\S' },
           },
           additionalProperties: false,
         },
@@ -314,8 +318,11 @@ export async function destinationsRoute(server: FastifyInstance) {
           properties: {
             // details/CLABE are immutable: a new account = archive + re-add,
             // which re-registers with Bridge
-            label: { type: 'string', minLength: 1, maxLength: 100 },
-            status: { type: 'string', enum: ['active', 'archived'] },
+            label: { type: 'string', minLength: 1, maxLength: 100, pattern: '\\S' },
+            // one-way: un-archiving is forbidden so a destination can never
+            // become payable under an archived recipient — reactivation is
+            // archive + re-add, matching the recipient-archive cascade design
+            status: { type: 'string', enum: ['archived'] },
           },
           additionalProperties: false,
         },
@@ -341,7 +348,7 @@ export async function destinationsRoute(server: FastifyInstance) {
       // Flat path — ownership traverses destination → recipient → user.
       const { data: owned } = await supabaseAdmin
         .from('payout_destinations')
-        .select('id, recipients!inner(user_id)')
+        .select('id, recipient_id, recipients!inner(user_id)')
         .eq('id', request.params.id)
         .eq('recipients.user_id', userId)
         .single()
@@ -350,6 +357,9 @@ export async function destinationsRoute(server: FastifyInstance) {
         return reply.status(404).send({ error: 'Payout destination not found' })
       }
 
+      // user_id lives one join away, so the write can't re-check the owner
+      // directly — pinning the verified recipient_id is the closest
+      // belt-and-suspenders equivalent of recipients.ts's .eq('user_id')
       const { data, error } = await supabaseAdmin
         .from('payout_destinations')
         .update({
@@ -357,6 +367,7 @@ export async function destinationsRoute(server: FastifyInstance) {
           ...(status !== undefined && { status }),
         })
         .eq('id', request.params.id)
+        .eq('recipient_id', (owned as { recipient_id: string }).recipient_id)
         .select(DESTINATION_COLUMNS)
         .single()
 

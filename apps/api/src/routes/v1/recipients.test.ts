@@ -143,6 +143,11 @@ describe('POST /v1/recipients', () => {
     ['3-letter country', { ...validBody, country: 'MEX' }],
     ['missing lastName', { firstName: 'A', relationship: 'mother', country: 'MX' }],
     ['empty firstName', { ...validBody, firstName: '' }],
+    // whitespace-only passes minLength:1 but trims to '' at insert — the
+    // schema pattern turns what was a DB-constraint 500 into a clean 400
+    ['whitespace-only firstName', { ...validBody, firstName: '   ' }],
+    ['whitespace-only lastName', { ...validBody, lastName: '\t ' }],
+    ['whitespace-only relationship', { ...validBody, relationship: '  ' }],
   ])('400s on %s without touching the DB', async (_name, body) => {
     const app = await buildApp()
     const res = await supertest(app.server)
@@ -318,6 +323,7 @@ describe('PATCH /v1/recipients/:id', () => {
     ['empty body', {}],
     ['country change', { country: 'US' }],
     ['unknown status', { status: 'deleted' }],
+    ['whitespace-only firstName', { firstName: '   ' }],
   ])('400s on %s', async (_name, body) => {
     const app = await buildApp()
     const res = await supertest(app.server)

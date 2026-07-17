@@ -108,6 +108,7 @@ export type Translations = {
     archive: string
     confirmArchive: string
     archived: string
+    archiveFailed: string
     errors: {
       invalidClabe: string
       bankRejected: string
@@ -302,6 +303,7 @@ const en: Translations = {
     archive: 'Archive',
     confirmArchive: 'Tap again to confirm',
     archived: 'Archived',
+    archiveFailed: "Couldn't archive — try again",
     errors: {
       invalidClabe: 'That CLABE doesn’t look right — check the 18-digit number.',
       bankRejected: 'The bank rejected this account. Verify the CLABE with your recipient.',
@@ -496,6 +498,7 @@ const es: Translations = {
     archive: 'Archivar',
     confirmArchive: 'Toca de nuevo para confirmar',
     archived: 'Archivado',
+    archiveFailed: 'No se pudo archivar — intenta de nuevo',
     errors: {
       invalidClabe: 'Esa CLABE no parece correcta — revisa el número de 18 dígitos.',
       bankRejected: 'El banco rechazó esta cuenta. Verifica la CLABE con tu destinatario.',

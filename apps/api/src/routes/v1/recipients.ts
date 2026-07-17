@@ -124,9 +124,9 @@ export async function recipientsRoute(server: FastifyInstance) {
           type: 'object',
           required: ['firstName', 'lastName', 'relationship', 'country'],
           properties: {
-            firstName: { type: 'string', minLength: 1, maxLength: 100 },
-            lastName: { type: 'string', minLength: 1, maxLength: 100 },
-            relationship: { type: 'string', minLength: 1, maxLength: 100 },
+            firstName: { type: 'string', minLength: 1, maxLength: 100, pattern: '\\S' },
+            lastName: { type: 'string', minLength: 1, maxLength: 100, pattern: '\\S' },
+            relationship: { type: 'string', minLength: 1, maxLength: 100, pattern: '\\S' },
             country: { type: 'string', pattern: '^[A-Z]{2}$' },
           },
           additionalProperties: false,
@@ -275,9 +275,9 @@ export async function recipientsRoute(server: FastifyInstance) {
           type: 'object',
           minProperties: 1,
           properties: {
-            firstName: { type: 'string', minLength: 1, maxLength: 100 },
-            lastName: { type: 'string', minLength: 1, maxLength: 100 },
-            relationship: { type: 'string', minLength: 1, maxLength: 100 },
+            firstName: { type: 'string', minLength: 1, maxLength: 100, pattern: '\\S' },
+            lastName: { type: 'string', minLength: 1, maxLength: 100, pattern: '\\S' },
+            relationship: { type: 'string', minLength: 1, maxLength: 100, pattern: '\\S' },
             // country is immutable: destinations were validated against it
             status: { type: 'string', enum: ['active', 'archived'] },
           },

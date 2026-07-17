@@ -204,31 +204,47 @@ function AddClabeForm({ recipientId, onDone }: { recipientId: string; onDone: ()
 
 // Archive needs a second click to confirm — no modal primitive exists in the
 // app, and click-twice matches its inline-form conventions.
-function ArchiveButton({ onArchive }: { onArchive: () => Promise<void> }) {
+function ArchiveButton({ onArchive }: { onArchive: () => Promise<boolean> }) {
   const { t } = useLanguage()
   const s = t.recipients
   const [armed, setArmed] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(false)
 
   const handleClick = async () => {
     if (!armed) {
       setArmed(true)
+      setFailed(false)
       return
     }
     setBusy(true)
-    await onArchive()
+    const ok = await onArchive()
+    // on success the row disappears via router.refresh(); only the failure
+    // path needs the button usable again
+    if (!ok) {
+      setBusy(false)
+      setArmed(false)
+      setFailed(true)
+    }
   }
 
   return (
-    <button
-      type="button"
-      className="btn btn--ghost btn--sm"
-      disabled={busy}
-      onClick={handleClick}
-      onBlur={() => setArmed(false)}
-    >
-      {armed ? s.confirmArchive : s.archive}
-    </button>
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+      {failed && (
+        <span role="alert" style={{ color: 'var(--color-error)', fontSize: 13 }}>
+          {s.archiveFailed}
+        </span>
+      )}
+      <button
+        type="button"
+        className="btn btn--ghost btn--sm"
+        disabled={busy}
+        onClick={handleClick}
+        onBlur={() => setArmed(false)}
+      >
+        {armed ? s.confirmArchive : s.archive}
+      </button>
+    </span>
   )
 }
 
@@ -248,23 +264,25 @@ export default function RecipientsManager({
     router.refresh()
   }
 
-  const archiveRecipient = async (id: string) => {
-    await fetch(`/api/recipients/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'archived' }),
-    })
-    router.refresh()
+  // returns success so ArchiveButton can recover its state on failure
+  const archive = async (path: string): Promise<boolean> => {
+    let ok = false
+    try {
+      const res = await fetch(path, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'archived' }),
+      })
+      ok = res.ok
+    } catch {
+      ok = false
+    }
+    if (ok) router.refresh()
+    return ok
   }
 
-  const archiveDestination = async (id: string) => {
-    await fetch(`/api/destinations/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'archived' }),
-    })
-    router.refresh()
-  }
+  const archiveRecipient = (id: string) => archive(`/api/recipients/${id}`)
+  const archiveDestination = (id: string) => archive(`/api/destinations/${id}`)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
