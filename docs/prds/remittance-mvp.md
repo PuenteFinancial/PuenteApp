@@ -29,7 +29,8 @@ required before anyone but Joshua uses it.
 5. **Payout + async layer** — pg-boss worker, `funding_cleared` gate, Bridge payout, webhooks + polling.
 6. **Cancel/refund + receipts** — 30-min cancel window, refund postings, Reg E receipt.
 7. **Web send UI + pilot send** — the dashboard send flow end-to-end, then the real ~$20 send.
-8. **Ops floor** — reconciliation cron, stuck-transfer alerts, float ceiling.
+8. **Ops floor** — reconciliation cron, stuck-transfer alerts, float ceiling, per-user
+   exposure cap + velocity checks.
 
 ### Decisions locked
 
@@ -49,8 +50,12 @@ required before anyone but Joshua uses it.
   (ledger-rules.md "Pending") and MCC confirmation.
 - **Instant payout** (2026-06-25 decision): don't wait for ACH to clear. The `funding_cleared`
   gate ships as a config flag, default off.
-- **No Puente-imposed limits** for MVP. The **float ceiling** is the one guardrail that ships
-  (slice 8; config value, checked at `FUNDED → SUBMITTED`).
+- **Per-user limits and velocity checks are required for MVP** (2026-07-17, reversing the
+  earlier "no Puente-imposed limits" call). The instant-front policy makes them load-bearing,
+  not risk-engine polish: ACH has no balance check at initiation, and a sender's bank balance
+  doesn't reflect in-flight debits — only our ledger knows the in-flight exposure. They ship in
+  slice 8 alongside the **float ceiling** (config values, authoritative check at
+  `FUNDED → SUBMITTED`) — see §10 for the controls and rationale.
 
 ### Where reality diverges from the design docs
 
@@ -75,7 +80,8 @@ The design docs predate the onboarding build. Deltas, so nobody re-litigates the
 - No card funding, no LOC — `funding_source_type` stays the abstraction hook.
 - No lending anything (separate stack).
 - No admin console — runbook-driven scripts are acceptable at 5 users (slice 8 decides the minimum).
-- No per-user limits enforcement, velocity checks, or first-transaction holds.
+- No first-transaction holds or amount tiers — deferred to the risk engine. (Per-user limits
+  and velocity checks are **no longer** non-goals — in scope since 2026-07-17, slice 8, §10.)
 - No email infrastructure — status via in-app polling (same decision as lifecycle slice 5);
   receipts viewable in the dashboard, email delivery deferred.
 - No corridors beyond USD → MXN bank deposit (SPEI). No cash pickup, no wallets.
@@ -258,8 +264,26 @@ history list. en + es throughout.
 Before anyone but Joshua sends: daily reconciliation job (ledger vs. Stripe vs. Bridge via
 `payment_events` + external refs — **adopt or rewrite the proposal runbook first**, it's
 undecided), Sentry alert on transfers stuck in a non-terminal state past a threshold, the **float
-ceiling** at `FUNDED → SUBMITTED` reading `getAccountBalance('funding_receivable')`, and the
-minimal ops capability the runbooks require (scripts over console).
+ceiling** at `FUNDED → SUBMITTED` reading `getAccountBalance('funding_receivable')`, the
+**per-user exposure controls** below, and the minimal ops capability the runbooks require
+(scripts over console).
+
+### Per-user exposure controls (added 2026-07-17)
+
+Why these are MVP-required and not risk-engine polish: ACH has no balance check at initiation,
+and the sender's bank balance doesn't reflect in-flight debits — a user with $500 can send $500
+three times, all accepted; the first clears, the rest bounce R01 **after** the MXN is irrevocably
+delivered. An external balance check (e.g. Plaid) doesn't fix this — the balance reads $500 every
+time. Only our ledger knows the in-flight exposure, and honest users can trip this by accident.
+
+- **Per-user outstanding-uncleared cap** — block when the SUM of the user's not-yet-cleared
+  `funding_receivable` entries would exceed a config value. Same query shape as the float
+  ceiling, filtered by user: `funding_receivable` ledger entries carry `transfer_id`
+  attribution. Pilot-simple variant: **one in-flight transfer per user** until its ACH clears.
+- **Velocity checks** — count and amount per rolling window (config values).
+- **Enforcement points:** transfer creation (or quote creation) for UX, so users get a clear
+  error early; the `FUNDED → SUBMITTED` gate as the **authoritative backstop** — the same
+  checkpoint as the float ceiling, matching transfer-state-machine.md "Limits & holds".
 
 ---
 
