@@ -134,6 +134,34 @@ export async function listExternalAccounts(
   }))
 }
 
+// Indicative FX rate — Bridge offers no rate lock (rates refresh ~30s). The
+// buy_rate is the executable side quotes are priced from (docs/ledger-rules.md).
+// Rates stay strings end-to-end; parsing/validation happens in services/quotes.ts.
+export async function getExchangeRate(
+  from: string,
+  to: string,
+): Promise<{
+  midmarketRate: string
+  buyRate: string
+  sellRate: string
+  updatedAt: string
+}> {
+  const params = new URLSearchParams({ from, to })
+  const rates = (await bridgeFetch(`/v0/exchange_rates?${params.toString()}`)) as {
+    midmarket_rate: string
+    buy_rate: string
+    sell_rate: string
+    updated_at: string
+  }
+
+  return {
+    midmarketRate: rates.midmarket_rate,
+    buyRate: rates.buy_rate,
+    sellRate: rates.sell_rate,
+    updatedAt: rates.updated_at,
+  }
+}
+
 export async function getKycLink(
   customerId: string,
   redirectUri: string,

@@ -77,7 +77,10 @@ describe.skipIf(!runDb)('recipients + payout_destinations (integration, local Su
   })
 
   beforeEach(async () => {
-    await db.query('truncate table public.payout_destinations, public.recipients')
+    // quotes references payout_destinations (slice 3), so it must truncate too
+    await db.query(
+      'truncate table public.quotes, public.payout_destinations, public.recipients',
+    )
   })
 
   describe('row level security', () => {

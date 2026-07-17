@@ -68,7 +68,7 @@ export async function requireApprovedUser(
   if (user.kyc_status !== 'approved') {
     await reply
       .status(403)
-      .send({ error: 'Complete identity verification before managing recipients' })
+      .send({ error: 'Complete identity verification first' })
     return null
   }
   return { bridgeCustomerId: user.bridge_customer_id }

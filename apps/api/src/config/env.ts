@@ -38,6 +38,14 @@ const envSchema = z.object({
     .min(1)
     .transform((v) => v.replace(/\\n/g, '\n'))
     .optional(),
+  // Quote pricing knobs (slice 3). Fee = flat + bps of send (residual rule in
+  // services/quotes.ts); buffer is subtracted from Bridge buy_rate; expiry is
+  // our firm-offer window. Bounds keep a fat-fingered env var from quoting a
+  // zero/negative rate or a never-expiring offer.
+  QUOTE_FEE_FLAT_MINOR: z.coerce.number().int().min(0).default(0),
+  QUOTE_FEE_BPS: z.coerce.number().int().min(0).max(9999).default(100),
+  QUOTE_FX_BUFFER_BPS: z.coerce.number().int().min(0).max(9999).default(50),
+  QUOTE_EXPIRY_SECONDS: z.coerce.number().int().min(60).max(86400).default(900),
   TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
   TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
   TWILIO_PHONE_NUMBER: z.string().min(1).optional(),

@@ -4,6 +4,7 @@ import {
   createExternalAccount,
   createTosLink,
   getBridgeCustomer,
+  getExchangeRate,
   getKycLink,
   listExternalAccounts,
   BridgeApiError,
@@ -254,5 +255,38 @@ describe('getKycLink', () => {
     await expect(getKycLink('cust_missing', 'https://x.test/return')).rejects.toBeInstanceOf(
       BridgeApiError,
     )
+  })
+})
+
+describe('getExchangeRate', () => {
+  const rateBody = {
+    midmarket_rate: '20.00025',
+    buy_rate: '20.100251',
+    sell_rate: '19.900249',
+    updated_at: '2026-07-17T14:00:00.000Z',
+  }
+
+  it('GETs the pair and passes rate strings through untouched', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, rateBody))
+
+    const result = await getExchangeRate('usd', 'mxn')
+
+    expect(result).toEqual({
+      midmarketRate: '20.00025',
+      buyRate: '20.100251',
+      sellRate: '19.900249',
+      updatedAt: '2026-07-17T14:00:00.000Z',
+    })
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.bridge.test/v0/exchange_rates?from=usd&to=mxn')
+    expect(init.method ?? 'GET').toBe('GET')
+    expect(init.headers['Api-Key']).toBe('bridge_test_key')
+    // GETs must not carry an idempotency key (Bridge rejects it on non-POST)
+    expect(init.headers['Idempotency-Key']).toBeUndefined()
+  })
+
+  it('throws BridgeApiError on non-2xx', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(503, { code: 'rate_unavailable' }))
+    await expect(getExchangeRate('usd', 'mxn')).rejects.toBeInstanceOf(BridgeApiError)
   })
 })

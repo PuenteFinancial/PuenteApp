@@ -14,6 +14,7 @@ import { authRoute } from './routes/v1/auth.js'
 import { usersRoute } from './routes/v1/users.js'
 import { recipientsRoute } from './routes/v1/recipients.js'
 import { destinationsRoute } from './routes/v1/destinations.js'
+import { quotesRoute } from './routes/v1/quotes.js'
 import { webhooksRoute } from './routes/v1/webhooks.js'
 
 // Fail boot on a bad DETAILS_ENCRYPTION_KEY — otherwise a wrong key stays
@@ -54,6 +55,7 @@ await server.register(authRoute, { prefix: '/v1' })
 await server.register(usersRoute, { prefix: '/v1' })
 await server.register(recipientsRoute, { prefix: '/v1' })
 await server.register(destinationsRoute, { prefix: '/v1' })
+await server.register(quotesRoute, { prefix: '/v1' })
 await server.register(webhooksRoute, { prefix: '/v1' })
 
 try {
