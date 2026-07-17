@@ -20,6 +20,14 @@ const envSchema = z.object({
   SUPABASE_SECRET_KEY: z.string().min(1),
   SUPABASE_PUBLISHABLE_KEY: z.string().min(1),
   SUPABASE_JWKS_URL: z.string().url(),
+  // 32-byte base64 key for AES-256-GCM encryption of payout_destinations.details
+  // (generate: openssl rand -base64 32). Decoded once here so the rest of the
+  // app only ever sees a validated Buffer.
+  DETAILS_ENCRYPTION_KEY: z
+    .string()
+    .min(1)
+    .transform((v) => Buffer.from(v, 'base64'))
+    .refine((b) => b.length === 32, 'must be 32 bytes of base64'),
   BRIDGE_API_KEY: z.string().min(1),
   BRIDGE_API_BASE: z.string().url().default('https://api.bridge.xyz'),
   // PEM public key issued by Bridge when the webhook endpoint is registered

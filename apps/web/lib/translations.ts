@@ -79,7 +79,43 @@ export type Translations = {
       retryCta: string; retrying: string; retryError: string
       exhaustedBody: string; supportCta: string
     }
-    dashboard: { title: string; body: string }
+    dashboard: { title: string; body: string; recipientsCta: string }
+  }
+  recipients: {
+    title: string
+    sub: string
+    empty: string
+    addRecipient: string
+    firstName: string
+    lastName: string
+    lastNameNote: string
+    relationship: string
+    relationshipPh: string
+    country: string
+    countryMx: string
+    save: string
+    saving: string
+    cancel: string
+    addAccount: string
+    bankAccount: string
+    label: string
+    labelPh: string
+    clabe: string
+    clabeConfirm: string
+    clabeNote: string
+    clabeMismatch: string
+    accountEnding: string
+    archive: string
+    confirmArchive: string
+    archived: string
+    archiveFailed: string
+    errors: {
+      invalidClabe: string
+      bankRejected: string
+      alreadySaved: string
+      providerDown: string
+      generic: string
+    }
   }
 }
 
@@ -237,6 +273,43 @@ const en: Translations = {
     dashboard: {
       title: 'You’re verified',
       body: 'Sending money is coming soon. We’ll let you know the moment it’s live.',
+      recipientsCta: 'Manage recipients',
+    },
+  },
+  recipients: {
+    title: 'Your recipients',
+    sub: 'The people you send money to, and where it arrives.',
+    empty: 'No recipients yet. Add the first person you want to send money to.',
+    addRecipient: 'Add a recipient',
+    firstName: 'First name(s)',
+    lastName: 'Last name(s)',
+    lastNameNote: 'Include both last names exactly as they appear on their bank account.',
+    relationship: 'Relationship',
+    relationshipPh: 'Mother, brother, friend…',
+    country: 'Country',
+    countryMx: 'Mexico',
+    save: 'Save',
+    saving: 'Saving…',
+    cancel: 'Cancel',
+    addAccount: 'Add bank account',
+    bankAccount: 'Bank account',
+    label: 'Nickname (optional)',
+    labelPh: 'BBVA account',
+    clabe: 'CLABE (18 digits)',
+    clabeConfirm: 'Confirm CLABE',
+    clabeNote: 'Ask your recipient for their 18-digit CLABE — money sent to a wrong but valid account number can’t be recovered.',
+    clabeMismatch: 'The CLABE numbers don’t match.',
+    accountEnding: '····{last4}',
+    archive: 'Archive',
+    confirmArchive: 'Tap again to confirm',
+    archived: 'Archived',
+    archiveFailed: "Couldn't archive — try again",
+    errors: {
+      invalidClabe: 'That CLABE doesn’t look right — check the 18-digit number.',
+      bankRejected: 'The bank rejected this account. Verify the CLABE with your recipient.',
+      alreadySaved: 'This account is already saved.',
+      providerDown: 'We couldn’t reach our payout provider. Try again in a moment.',
+      generic: 'Something went wrong. Please try again.',
     },
   },
 }
@@ -395,6 +468,43 @@ const es: Translations = {
     dashboard: {
       title: 'Estás verificado',
       body: 'Muy pronto podrás enviar dinero. Te avisaremos en cuanto esté disponible.',
+      recipientsCta: 'Administrar destinatarios',
+    },
+  },
+  recipients: {
+    title: 'Tus destinatarios',
+    sub: 'Las personas a quienes envías dinero, y dónde les llega.',
+    empty: 'Aún no tienes destinatarios. Agrega a la primera persona a la que quieras enviar dinero.',
+    addRecipient: 'Agregar destinatario',
+    firstName: 'Nombre(s)',
+    lastName: 'Apellidos',
+    lastNameNote: 'Incluye ambos apellidos tal como aparecen en su cuenta bancaria.',
+    relationship: 'Parentesco',
+    relationshipPh: 'Mamá, hermano, amiga…',
+    country: 'País',
+    countryMx: 'México',
+    save: 'Guardar',
+    saving: 'Guardando…',
+    cancel: 'Cancelar',
+    addAccount: 'Agregar cuenta bancaria',
+    bankAccount: 'Cuenta bancaria',
+    label: 'Alias (opcional)',
+    labelPh: 'Cuenta BBVA',
+    clabe: 'CLABE (18 dígitos)',
+    clabeConfirm: 'Confirma la CLABE',
+    clabeNote: 'Pídele a tu destinatario su CLABE de 18 dígitos — el dinero enviado a una cuenta equivocada pero válida no se puede recuperar.',
+    clabeMismatch: 'Las CLABE no coinciden.',
+    accountEnding: '····{last4}',
+    archive: 'Archivar',
+    confirmArchive: 'Toca de nuevo para confirmar',
+    archived: 'Archivado',
+    archiveFailed: 'No se pudo archivar — intenta de nuevo',
+    errors: {
+      invalidClabe: 'Esa CLABE no parece correcta — revisa el número de 18 dígitos.',
+      bankRejected: 'El banco rechazó esta cuenta. Verifica la CLABE con tu destinatario.',
+      alreadySaved: 'Esta cuenta ya está guardada.',
+      providerDown: 'No pudimos conectar con nuestro proveedor de pagos. Inténtalo en un momento.',
+      generic: 'Algo salió mal. Inténtalo de nuevo.',
     },
   },
 }

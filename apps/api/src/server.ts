@@ -5,13 +5,20 @@ import cors from '@fastify/cors'
 import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
 import { env } from './config/env.js'
+import { assertEncryptionKeyUsable } from './utils/encryption.js'
 import { auditPlugin } from './plugins/audit.js'
 import { authPlugin } from './plugins/auth.js'
 import { healthRoute } from './routes/v1/health.js'
 import { waitlistRoute } from './routes/v1/waitlist.js'
 import { authRoute } from './routes/v1/auth.js'
 import { usersRoute } from './routes/v1/users.js'
+import { recipientsRoute } from './routes/v1/recipients.js'
+import { destinationsRoute } from './routes/v1/destinations.js'
 import { webhooksRoute } from './routes/v1/webhooks.js'
+
+// Fail boot on a bad DETAILS_ENCRYPTION_KEY — otherwise a wrong key stays
+// invisible until the first payout decrypt.
+assertEncryptionKeyUsable()
 
 const server = Fastify({
   logger: {
@@ -45,6 +52,8 @@ await server.register(healthRoute, { prefix: '/v1' })
 await server.register(waitlistRoute, { prefix: '/v1' })
 await server.register(authRoute, { prefix: '/v1' })
 await server.register(usersRoute, { prefix: '/v1' })
+await server.register(recipientsRoute, { prefix: '/v1' })
+await server.register(destinationsRoute, { prefix: '/v1' })
 await server.register(webhooksRoute, { prefix: '/v1' })
 
 try {
