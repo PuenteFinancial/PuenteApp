@@ -16,9 +16,11 @@ input + response schema validation; authenticated routes write an audit-log entr
 - **Money shape:** every amount is `{ "amountMinor": <int>, "currency": "<ISO-4217>" }`. Integer minor
   units, never floats. USD ledger positions carry `"currency": "USD"`; display-only MXN destination
   amounts carry `"currency": "MXN"` and are never ledger positions.
-- **Amount semantics on quotes / transfers:** `total_amount` = what the sender is debited;
-  `send_amount` = principal delivered to the recipient; `fee_amount` = Puente's fee.
-  Invariant: `total_amount = send_amount + fee_amount`.
+- **Amount semantics on quotes / transfers:** `totalAmount` = what the sender is debited;
+  `sendAmount` = principal delivered to the recipient; `feeAmount` = Puente's fee.
+  Invariant: `totalAmount = sendAmount + feeAmount`.
+- **Wire casing:** JSON fields are **camelCase** (the shipped slices 1–3 convention, matching
+  `@puente/shared` types). DB columns stay snake_case; routes map at the boundary.
 - **Idempotency:** the money-moving POSTs — `POST /v1/transfers`, `POST /v1/transfers/:id/confirm`,
   and `POST /v1/transfers/:id/cancel` — require an `Idempotency-Key` header (**not** `/quotes` — a
   duplicate quote is harmless). Keyed per
@@ -29,8 +31,12 @@ input + response schema validation; authenticated routes write an audit-log entr
   ```json
   { "error": { "code": "validation_error", "message": "Invalid request.",
       "request_id": "req_01H...",
-      "details": [ { "path": "total_amount.amountMinor", "issue": "must be a positive integer" } ] } }
+      "details": [ { "path": "totalAmount.amountMinor", "issue": "must be a positive integer" } ] } }
   ```
+  *Status:* shipped routes (slices 1–3) currently return the simpler `{ "error": "<message>" }`
+  body; migrating them to this envelope is deferred cross-cutting work, tracked for a dedicated
+  slice — new routes follow the shipped style until then. The `code` column below still names the
+  canonical condition each response maps to.
 - **Exchange rate:** `fx_rate` is a **decimal string** with fixed scale (e.g. `"17.3400"`), never a
   float — it feeds money math, so it's computed in decimal/integer arithmetic, never IEEE-754.
 - **Lists:** cursor pagination — `?limit=&cursor=`, response `{ data: [...], next_cursor }`.
@@ -101,23 +107,29 @@ KYC result arrives via the Sumsub webhook (below), not a client call.
 | POST | `/v1/quotes` | ✓ | Create a firm, time-boxed offer. |
 | GET | `/v1/quotes/:id` | ✓ | Fetch (incl. `expires_at`, `status`). |
 
-**`POST /v1/quotes`**
+**`POST /v1/quotes`** *(as shipped — slice 3)*
 ```jsonc
-// request — total_amount is the full amount the sender will be debited
-{ "payout_destination_id": "uuid", "total_amount": { "amountMinor": 20000, "currency": "USD" } }
-// response 201
+// request — totalAmount is the full amount the sender will be debited
+{ "payoutDestinationId": "uuid", "totalAmount": { "amountMinor": 20000, "currency": "USD" } }
+// response 201 — worked example at the config defaults (1% fee, 50 bps buffer, buy_rate 20.100251)
 {
   "id": "uuid",
-  "total_amount":   { "amountMinor": 20000, "currency": "USD" },  // echoed; = send_amount + fee_amount
-  "send_amount":    { "amountMinor": 19800, "currency": "USD" },  // principal delivered to recipient
-  "fee_amount":     { "amountMinor": 200,   "currency": "USD" },  // Puente's fee
-  "receive_amount": { "amountMinor": 340000, "currency": "MXN" }, // display/Reg E only
-  "fx_rate": "17.3400",        // decimal string; customer-facing (source minus buffer)
-  "expires_at": "2026-06-26T19:45:00Z",
-  "status": "active"
+  "payoutDestinationId": "uuid",
+  "totalAmount":   { "amountMinor": 20000,  "currency": "USD" },  // = sendAmount + feeAmount, exactly
+  "sendAmount":    { "amountMinor": 19801,  "currency": "USD" },  // principal delivered to recipient
+  "feeAmount":     { "amountMinor": 199,    "currency": "USD" },  // Puente's fee (residual: flat + bps, sub-cent rounds up)
+  "receiveAmount": { "amountMinor": 396014, "currency": "MXN" },  // display/Reg E only
+  "fxRate": "19.9997",         // decimal string, fixed 4 dp; customer-facing (buy_rate minus buffer)
+  "expiresAt": "2026-07-17T14:15:00Z",
+  "status": "active",          // active | expired | consumed; expiry is derived on read
+  "createdAt": "2026-07-17T14:00:00Z"
 }
 ```
-`kyc_required` if sender not approved. `rate_unavailable` if Bridge indicative rate can't be fetched.
+403 (`kyc_required`) if sender not approved. 503 (`rate_unavailable`) if the Bridge indicative
+rate can't be fetched or fails validation. 400 for archived/wrong-corridor destinations and
+amounts too small to price. POST is rate-limited (10/min/user) on top of the global limiter.
+No `Idempotency-Key` — a duplicate quote is harmless. `sourceRate`/`fxRateAt` are stored for
+reconciliation but never cross the wire.
 
 ## Transfers  (the state machine)
 
