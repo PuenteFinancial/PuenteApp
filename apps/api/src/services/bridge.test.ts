@@ -5,6 +5,7 @@ import {
   createTosLink,
   getBridgeCustomer,
   getKycLink,
+  listExternalAccounts,
   BridgeApiError,
 } from './bridge.js'
 
@@ -163,6 +164,39 @@ describe('createExternalAccount', () => {
     expect(err).toBeInstanceOf(BridgeApiError)
     expect((err as BridgeApiError).status).toBe(400)
     expect((err as BridgeApiError).message).not.toContain('invalid_clabe')
+  })
+})
+
+describe('listExternalAccounts', () => {
+  it('GETs the list and maps ids with clabe last4', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        count: 2,
+        data: [
+          { id: 'ea_1', clabe: { last_4: '0006' } },
+          { id: 'ea_2' }, // non-clabe account (e.g. us bank) has no clabe key
+        ],
+      }),
+    )
+
+    const result = await listExternalAccounts('cust_abc')
+
+    const [url] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.bridge.test/v0/customers/cust_abc/external_accounts')
+    expect(result).toEqual([
+      { id: 'ea_1', clabeLast4: '0006' },
+      { id: 'ea_2', clabeLast4: null },
+    ])
+  })
+
+  it('returns [] when data is missing', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { count: 0 }))
+    expect(await listExternalAccounts('cust_abc')).toEqual([])
+  })
+
+  it('throws BridgeApiError on non-2xx', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(500, null))
+    await expect(listExternalAccounts('cust_abc')).rejects.toBeInstanceOf(BridgeApiError)
   })
 })
 

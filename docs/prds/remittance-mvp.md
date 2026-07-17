@@ -221,6 +221,14 @@ polling fallback for sandbox/dev.
 - End-to-end in **sandbox** here (API-driven); the real-money send waits for slice 7.
 - Open question for Bridge (deferred): where do funds land when a SPEI payout fails
   post-submission (`returned`/`undeliverable`)? Handle those webhook states defensively.
+- **Payability gate must join the recipient (deferred from slice 2, Codex review 2026-07-17):**
+  destination-create and recipient-archive are separate non-transactional writes, so a race can
+  leave an `active` destination under an `archived` recipient. The gate that matters is at payout
+  time: require `payout_destinations.status = 'active'` **AND** `recipients.status = 'active'`
+  **AND** `provider_account_ref IS NOT NULL` in the same query. Optional hardening (nice-to-have
+  here or later): DB trigger on destination insert taking `FOR KEY SHARE` on the recipient row +
+  moving the archive cascade into a single transactional function (flip ordering: recipient
+  first — safe once atomic).
 - security-reviewer before merge.
 
 ---

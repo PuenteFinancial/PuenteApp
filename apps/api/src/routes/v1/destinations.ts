@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { supabaseAdmin } from '../../services/supabase.js'
-import { createExternalAccount, BridgeApiError } from '../../services/bridge.js'
+import { createExternalAccount, listExternalAccounts, BridgeApiError } from '../../services/bridge.js'
 import { isValidClabe } from '../../utils/clabe.js'
 import { encryptString } from '../../utils/encryption.js'
 import { requireApprovedUser } from './recipients.js'
@@ -190,25 +190,88 @@ export async function destinationsRoute(server: FastifyInstance) {
             'bridge external account create failed',
           )
           // Bridge dedupes identical CLABEs per customer (sandbox-verified
-          // 2026-07-16): re-adding a previously registered account — even an
-          // archived one — 400s with this code rather than minting a new id.
+          // 2026-07-16): re-adding a previously registered account — even a
+          // locally archived one — 400s with this code rather than minting a
+          // new id. A blind 409 here would dead-end two legitimate retries:
+          // a resubmit after a lost response / failed insert (Bridge has the
+          // account, we have no row), and the documented archive-then-re-add
+          // reactivation flow. Adopt the existing Bridge account instead.
           if (bridgeCode === 'duplicate_external_account') {
-            return reply.status(409).send({ error: 'This account is already saved' })
-          }
-          if (err.status < 500) {
+            let accounts: Awaited<ReturnType<typeof listExternalAccounts>>
+            try {
+              accounts = await listExternalAccounts(approved.bridgeCustomerId)
+            } catch {
+              server.log.error(
+                { userId, recipientId: recipient.id },
+                'bridge external account list failed during adoption',
+              )
+              return reply
+                .status(502)
+                .send({ error: 'Payout provider is unavailable, try again shortly' })
+            }
+            // Bridge only exposes last_4, so require an unambiguous match —
+            // on a collision fall back to the conservative 409
+            const matches = accounts.filter((a) => a.clabeLast4 === clabe.slice(-4))
+            if (matches.length !== 1) {
+              return reply.status(409).send({ error: 'This account is already saved' })
+            }
+            const adoptedId = matches[0]!.id
+
+            const { data: existing } = await supabaseAdmin
+              .from('payout_destinations')
+              .select('id, recipient_id, status')
+              .eq('provider_account_ref', adoptedId)
+              .maybeSingle()
+            const existingRow = existing as {
+              id: string
+              recipient_id: string
+              status: string
+            } | null
+
+            if (existingRow) {
+              const revivable =
+                existingRow.recipient_id === recipient.id && existingRow.status === 'archived'
+              if (!revivable) {
+                // genuinely saved already — either active here, or it lives
+                // under a different recipient of the same user
+                return reply.status(409).send({ error: 'This account is already saved' })
+              }
+              // archive + re-add reactivation: revive the archived row
+              const { data: revived, error: reviveError } = await supabaseAdmin
+                .from('payout_destinations')
+                .update({ status: 'active', label: label?.trim() ?? null })
+                .eq('id', existingRow.id)
+                .eq('recipient_id', recipient.id)
+                .select(DESTINATION_COLUMNS)
+                .single()
+              if (reviveError || !revived) {
+                server.log.error(
+                  { userId, recipientId: recipient.id, supabaseError: reviveError?.code },
+                  'destination revive failed',
+                )
+                return reply.status(500).send({ error: 'Failed to save payout destination' })
+              }
+              return reply.status(201).send(toApiDestination(revived as DestinationRow))
+            }
+
+            // no local row: heal the orphan by inserting with the adopted id
+            bridgeAccountId = adoptedId
+          } else if (err.status < 500) {
             return reply
               .status(422)
               .send({ error: 'The bank rejected this account — verify the CLABE with your recipient' })
+          } else {
+            return reply
+              .status(502)
+              .send({ error: 'Payout provider is unavailable, try again shortly' })
           }
+        } else {
+          // fetch network failures (TypeError) must not surface as a raw 500
+          server.log.error({ userId, recipientId: recipient.id }, 'bridge request failed')
           return reply
             .status(502)
             .send({ error: 'Payout provider is unavailable, try again shortly' })
         }
-        // fetch network failures (TypeError) must not surface as a raw 500
-        server.log.error({ userId, recipientId: recipient.id }, 'bridge request failed')
-        return reply
-          .status(502)
-          .send({ error: 'Payout provider is unavailable, try again shortly' })
       }
 
       // 6. Persist. verification_status stays at its 'unverified' default —

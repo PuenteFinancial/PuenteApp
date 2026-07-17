@@ -14,6 +14,7 @@ vi.mock('../../services/supabase.js', () => ({
 }))
 
 const createExternalAccount = vi.fn()
+const listExternalAccounts = vi.fn()
 
 vi.mock('../../services/bridge.js', async () => {
   const actual = await vi.importActual<typeof import('../../services/bridge.js')>(
@@ -22,6 +23,7 @@ vi.mock('../../services/bridge.js', async () => {
   return {
     BridgeApiError: actual.BridgeApiError,
     createExternalAccount: (...args: unknown[]) => createExternalAccount(...args),
+    listExternalAccounts: (...args: unknown[]) => listExternalAccounts(...args),
   }
 })
 
@@ -47,6 +49,7 @@ function chain(result: { data?: unknown; error?: unknown }) {
     b[m] = vi.fn(() => b)
   }
   b['single'] = vi.fn(async () => resolved)
+  b['maybeSingle'] = vi.fn(async () => resolved)
   b.then = (resolve) => resolve(resolved)
   return b
 }
@@ -95,6 +98,7 @@ async function buildApp() {
 beforeEach(() => {
   from.mockReset()
   createExternalAccount.mockReset()
+  listExternalAccounts.mockReset()
 })
 
 describe('POST /v1/recipients/:id/destinations', () => {
@@ -277,24 +281,162 @@ describe('POST /v1/recipients/:id/destinations', () => {
     await app.close()
   })
 
-  it('maps Bridge duplicate_external_account to 409 (Bridge dedupes CLABEs per customer)', async () => {
-    from
-      .mockReturnValueOnce(chain({ data: approvedUser }))
-      .mockReturnValueOnce(chain({ data: recipientRow }))
-    createExternalAccount.mockRejectedValue(
-      new BridgeApiError(400, { code: 'duplicate_external_account' }),
-    )
-    const app = await buildApp()
+  describe('duplicate_external_account adoption', () => {
+    const duplicateError = new BridgeApiError(400, { code: 'duplicate_external_account' })
+    const bridgeAccounts = [{ id: 'ea_existing', clabeLast4: CLABE.slice(-4) }]
 
-    const res = await supertest(app.server)
-      .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
-      .set('Authorization', 'Bearer test-token')
-      .send(validBody)
+    it('adopts the existing Bridge account and inserts when no local row exists (orphan heal)', async () => {
+      const users = chain({ data: approvedUser })
+      const recipients = chain({ data: recipientRow })
+      const lookup = chain({ data: null })
+      const insert = chain({ data: { ...destinationRow } })
+      from
+        .mockReturnValueOnce(users)
+        .mockReturnValueOnce(recipients)
+        .mockReturnValueOnce(lookup)
+        .mockReturnValueOnce(insert)
+      createExternalAccount.mockRejectedValue(duplicateError)
+      listExternalAccounts.mockResolvedValue(bridgeAccounts)
+      const app = await buildApp()
 
-    expect(res.status).toBe(409)
-    expect(res.body.error).toContain('already saved')
-    expect(from).toHaveBeenCalledTimes(2)
-    await app.close()
+      const res = await supertest(app.server)
+        .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+        .set('Authorization', 'Bearer test-token')
+        .send(validBody)
+
+      expect(res.status).toBe(201)
+      expect(lookup['eq']).toHaveBeenCalledWith('provider_account_ref', 'ea_existing')
+      expect(insert['insert']).toHaveBeenCalledWith(
+        expect.objectContaining({ provider_account_ref: 'ea_existing' }),
+      )
+      await app.close()
+    })
+
+    it('revives a locally archived row for the same recipient (archive + re-add reactivation)', async () => {
+      const users = chain({ data: approvedUser })
+      const recipients = chain({ data: recipientRow })
+      const lookup = chain({
+        data: { id: DESTINATION_ID, recipient_id: RECIPIENT_ID, status: 'archived' },
+      })
+      const revive = chain({ data: { ...destinationRow, status: 'active' } })
+      from
+        .mockReturnValueOnce(users)
+        .mockReturnValueOnce(recipients)
+        .mockReturnValueOnce(lookup)
+        .mockReturnValueOnce(revive)
+      createExternalAccount.mockRejectedValue(duplicateError)
+      listExternalAccounts.mockResolvedValue(bridgeAccounts)
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+        .set('Authorization', 'Bearer test-token')
+        .send(validBody)
+
+      expect(res.status).toBe(201)
+      expect(res.body.status).toBe('active')
+      expect(revive['update']).toHaveBeenCalledWith({ status: 'active', label: 'BBVA' })
+      expect(revive['eq']).toHaveBeenCalledWith('recipient_id', RECIPIENT_ID)
+      await app.close()
+    })
+
+    it('409s when the local row is already active (true duplicate)', async () => {
+      from
+        .mockReturnValueOnce(chain({ data: approvedUser }))
+        .mockReturnValueOnce(chain({ data: recipientRow }))
+        .mockReturnValueOnce(
+          chain({ data: { id: DESTINATION_ID, recipient_id: RECIPIENT_ID, status: 'active' } }),
+        )
+      createExternalAccount.mockRejectedValue(duplicateError)
+      listExternalAccounts.mockResolvedValue(bridgeAccounts)
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+        .set('Authorization', 'Bearer test-token')
+        .send(validBody)
+
+      expect(res.status).toBe(409)
+      expect(res.body.error).toContain('already saved')
+      await app.close()
+    })
+
+    it("409s when the row lives under the user's other recipient, even if archived", async () => {
+      from
+        .mockReturnValueOnce(chain({ data: approvedUser }))
+        .mockReturnValueOnce(chain({ data: recipientRow }))
+        .mockReturnValueOnce(
+          chain({
+            data: { id: DESTINATION_ID, recipient_id: 'other-recipient', status: 'archived' },
+          }),
+        )
+      createExternalAccount.mockRejectedValue(duplicateError)
+      listExternalAccounts.mockResolvedValue(bridgeAccounts)
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+        .set('Authorization', 'Bearer test-token')
+        .send(validBody)
+
+      expect(res.status).toBe(409)
+      await app.close()
+    })
+
+    it('409s conservatively when no listed account matches the CLABE last4', async () => {
+      from
+        .mockReturnValueOnce(chain({ data: approvedUser }))
+        .mockReturnValueOnce(chain({ data: recipientRow }))
+      createExternalAccount.mockRejectedValue(duplicateError)
+      listExternalAccounts.mockResolvedValue([{ id: 'ea_other', clabeLast4: '9999' }])
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+        .set('Authorization', 'Bearer test-token')
+        .send(validBody)
+
+      expect(res.status).toBe(409)
+      expect(from).toHaveBeenCalledTimes(2)
+      await app.close()
+    })
+
+    it('409s conservatively on an ambiguous last4 collision', async () => {
+      from
+        .mockReturnValueOnce(chain({ data: approvedUser }))
+        .mockReturnValueOnce(chain({ data: recipientRow }))
+      createExternalAccount.mockRejectedValue(duplicateError)
+      listExternalAccounts.mockResolvedValue([
+        { id: 'ea_1', clabeLast4: CLABE.slice(-4) },
+        { id: 'ea_2', clabeLast4: CLABE.slice(-4) },
+      ])
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+        .set('Authorization', 'Bearer test-token')
+        .send(validBody)
+
+      expect(res.status).toBe(409)
+      await app.close()
+    })
+
+    it('502s when the adoption list call itself fails', async () => {
+      from
+        .mockReturnValueOnce(chain({ data: approvedUser }))
+        .mockReturnValueOnce(chain({ data: recipientRow }))
+      createExternalAccount.mockRejectedValue(duplicateError)
+      listExternalAccounts.mockRejectedValue(new BridgeApiError(503, null))
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+        .set('Authorization', 'Bearer test-token')
+        .send(validBody)
+
+      expect(res.status).toBe(502)
+      await app.close()
+    })
   })
 
   it('maps Bridge 5xx to 502 and never inserts', async () => {

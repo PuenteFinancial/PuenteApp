@@ -116,6 +116,24 @@ export async function createExternalAccount(
   return { id: account.id }
 }
 
+// Used to adopt an already-registered account when a create hits Bridge's
+// per-customer CLABE dedupe (duplicate_external_account) — e.g. a lost
+// response or failed DB insert on a prior attempt. Bridge only returns the
+// CLABE's last 4 (clabe.last_4), so matching is by last4; the full number
+// never comes back over the wire.
+export async function listExternalAccounts(
+  customerId: string,
+): Promise<Array<{ id: string; clabeLast4: string | null }>> {
+  const response = (await bridgeFetch(`/v0/customers/${customerId}/external_accounts`)) as {
+    data?: Array<{ id: string; clabe?: { last_4?: string } }>
+  }
+
+  return (response.data ?? []).map((account) => ({
+    id: account.id,
+    clabeLast4: account.clabe?.last_4 ?? null,
+  }))
+}
+
 export async function getKycLink(
   customerId: string,
   redirectUri: string,
