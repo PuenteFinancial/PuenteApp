@@ -1,0 +1,27 @@
+name: Debug Claude CI auth
+
+# Temporary probe (delete after use): reproduces the compliance-review
+# failure without claude-code-action, so the real API error prints
+# unredacted. Same runner, same secret, same model — no redaction layer.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Probe with OAuth token (raw output)
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          claude --version
+          set +e
+          claude -p "reply with exactly: OK" --model claude-sonnet-5 --output-format stream-json --verbose 2>&1 | tail -60
+          echo "probe exit code: $?"
