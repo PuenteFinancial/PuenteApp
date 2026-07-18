@@ -10,7 +10,8 @@
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dev:e2e": "node --env-file=.env.e2e.local --import tsx src/server.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

@@ -9,7 +9,7 @@ exception. No secret ever lands in git, client code, or logs (Gitleaks enforces 
 
 | Store | Configs / scope | Contents |
 |---|---|---|
-| Doppler `puente-api` | `dev_main`, `stg_main`, `prd_main` → synced to Railway envs | Supabase URL/keys, Bridge keys (sandbox in stg, live in prd), Twilio, CRS, Sentry, `TRUST_PROXY_HOPS`, `BRIDGE_WEBHOOK_PUBLIC_KEY` |
+| Doppler `puente-api` | `dev_main`, `stg_main`, `prd_main` → synced to Railway envs | Supabase URL/keys, Bridge keys (sandbox in stg, live in prd), Twilio, CRS, Sentry, `TRUST_PROXY_HOPS`, `BRIDGE_WEBHOOK_PUBLIC_KEY`, `MOCK_FUNDING_WEBHOOK_SECRET` (**dev + stg ONLY, never prd** — its absence 503s the funding webhook + confirm, which is the production lock against mock funding; generate `openssl rand -hex 24`) |
 | Doppler `puente-web` | 3 configs → synced to Vercel | `INTERNAL_API_URL` + PostHog tokens (public), ~3 vars each |
 | GitHub Actions — repo secrets | all workflows | `STAGING_DB_URL` (session-pooler string), `TURBO_TOKEN`, `TURBO_TEAM=puente-financial` |
 | GitHub Actions — `production` environment secret | readable **only** inside the approval-gated Promote job | `PROD_DB_URL` (session-pooler string) |
