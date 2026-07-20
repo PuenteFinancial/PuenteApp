@@ -3,6 +3,12 @@ import type { FastifyInstance } from 'fastify'
 import type { KycStatus } from '@puente/shared'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
+import { getFundingProcessor } from '../../services/funding/index.js'
+import {
+  fundedLedgerEntries,
+  transitionTransfer,
+  TransferRpcError,
+} from '../../services/transfers.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 // Bridge statuses we don't recognize fall through unmapped and are only logged
@@ -201,6 +207,168 @@ export async function webhooksRoute(server: FastifyInstance) {
           // 500 so Bridge retries the delivery
           return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
         }
+      }
+
+      return { received: true }
+    },
+  )
+
+  // Funding processor webhook — drives PENDING_PAYMENT → FUNDED (with the
+  // first real ledger posting) and → PAYMENT_FAILED. The processor interface
+  // owns signature + payload shape, so the Stripe adapter (slice 4b) slots in
+  // without touching this route. Exactly-once effects come from the
+  // transition guard + the ledger's (transfer_id, transition) uniqueness —
+  // payment_events dedupe arrives in slice 5.
+  server.post(
+    '/webhooks/funding',
+    {
+      config: { public: true },
+      schema: {
+        response: {
+          200: {
+            type: 'object',
+            properties: { received: { type: 'boolean' } },
+          },
+          400: errorResponseSchema,
+          500: errorResponseSchema,
+          503: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      // THE production lock: the mock secret is never set in prod, so this
+      // endpoint (and mock funding with it) cannot exist there.
+      if (!env.MOCK_FUNDING_WEBHOOK_SECRET) {
+        server.log.error('funding webhook received but MOCK_FUNDING_WEBHOOK_SECRET is not set')
+        return sendError(reply, 503, 'not_configured', 'Webhook not configured')
+      }
+
+      const processor = getFundingProcessor()
+      const signature = request.headers['funding-signature']
+      const rawBody = request.body as Buffer
+      if (
+        typeof signature !== 'string' ||
+        !Buffer.isBuffer(rawBody) ||
+        !processor.verifySignature(rawBody, signature)
+      ) {
+        server.log.warn({ audit: true, webhook: 'funding' }, 'invalid webhook signature')
+        return sendError(reply, 400, 'validation_error', 'Invalid signature')
+      }
+
+      const event = processor.parseEvent(rawBody)
+      if (!event) {
+        return sendError(reply, 400, 'validation_error', 'Invalid payload')
+      }
+
+      // Public route — audit plugin skips it; log explicitly. Ids only, no PII.
+      server.log.info(
+        {
+          audit: true,
+          webhook: 'funding',
+          eventId: event.eventId,
+          eventType: event.type,
+          transferId: event.transferRef,
+        },
+        'funding webhook received',
+      )
+
+      if (event.type === 'funding_cleared') {
+        // A flag, not a state: recorded for the WAIT_FOR_CLEARING policy, the
+        // one sanctioned guarded UPDATE outside the transition RPC.
+        const { error } = await supabaseAdmin
+          .from('transfers')
+          .update({ funding_cleared: true })
+          .eq('id', event.transferRef)
+        if (error) {
+          server.log.error(
+            { webhook: 'funding', transferId: event.transferRef, supabaseError: error.code },
+            'funding_cleared update failed',
+          )
+          return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
+        }
+        return { received: true }
+      }
+
+      if (event.type === 'funding_reversed') {
+        // Post-COMPLETED handling (loss booking, recovery) needs the slice-5/6
+        // machinery — normalize + record the delivery now, act later.
+        server.log.warn(
+          { audit: true, webhook: 'funding', transferId: event.transferRef, eventId: event.eventId },
+          'funding_reversed received — handling deferred to slice 5/6',
+        )
+        return { received: true }
+      }
+
+      // funding_succeeded | funding_failed → state transition
+      const { data: transferData } = await supabaseAdmin
+        .from('transfers')
+        .select('id, state, send_amount_minor, fee_amount_minor')
+        .eq('id', event.transferRef)
+        .single()
+      const transfer = transferData as {
+        id: string
+        state: string
+        send_amount_minor: number
+        fee_amount_minor: number
+      } | null
+
+      if (!transfer) {
+        // signature was valid, so this is our own processor talking about a
+        // transfer we don't have — ack (a retry cannot fix it) but log loudly
+        server.log.error(
+          { webhook: 'funding', transferId: event.transferRef, eventId: event.eventId },
+          'funding event for unknown transfer',
+        )
+        return { received: true }
+      }
+
+      const toState = event.type === 'funding_succeeded' ? 'FUNDED' : 'PAYMENT_FAILED'
+      if (transfer.state === toState) {
+        return { received: true } // replayed delivery — already handled
+      }
+
+      try {
+        if (event.type === 'funding_succeeded') {
+          const paymentAt = new Date()
+          await transitionTransfer({
+            transferId: transfer.id,
+            fromState: 'PENDING_PAYMENT',
+            toState: 'FUNDED',
+            actor: 'webhook:funding',
+            reason: 'funding captured/initiated',
+            metadata: { eventId: event.eventId, paymentRef: event.paymentRef },
+            ledgerDescription: 'transfer FUNDED — funding initiated',
+            ledgerEntries: fundedLedgerEntries(transfer),
+            paymentAt,
+            cancelableUntil: new Date(paymentAt.getTime() + env.CANCEL_WINDOW_MINUTES * 60_000),
+            fundingPaymentRef: event.paymentRef,
+          })
+        } else {
+          await transitionTransfer({
+            transferId: transfer.id,
+            fromState: 'PENDING_PAYMENT',
+            toState: 'PAYMENT_FAILED',
+            actor: 'webhook:funding',
+            reason: event.reason ?? 'funding failed',
+            metadata: { eventId: event.eventId, paymentRef: event.paymentRef },
+            // no ledger batch: no funds were ever collected
+          })
+        }
+      } catch (err) {
+        if (err instanceof TransferRpcError && err.code === 'transition_conflict') {
+          // stale delivery: the transfer has already moved past this event
+          server.log.warn(
+            { webhook: 'funding', transferId: transfer.id, eventId: event.eventId },
+            'stale funding event for advanced transfer',
+          )
+          return { received: true }
+        }
+        server.log.error(
+          { webhook: 'funding', transferId: transfer.id, eventId: event.eventId },
+          'funding transition failed',
+        )
+        // 500 so the provider redelivers into a clean row
+        return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
       }
 
       return { received: true }

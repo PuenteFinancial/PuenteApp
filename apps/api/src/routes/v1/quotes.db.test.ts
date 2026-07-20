@@ -95,7 +95,14 @@ describe.skipIf(!runDb)('quotes (integration, local Supabase)', () => {
   })
 
   beforeEach(async () => {
-    await db.query('truncate table public.quotes, public.payout_destinations, public.recipients')
+    // TRUNCATE must name every table referencing the ones being cleared —
+    // since slice 4 that includes the transfers chain and ledger tables.
+    await db.query(
+      `truncate table public.ledger_entries, public.ledger_transactions,
+       public.idempotency_keys, public.disputes, public.disclosures,
+       public.transfer_transitions, public.transfers,
+       public.quotes, public.payout_destinations, public.recipients`,
+    )
   })
 
   describe('row level security', () => {

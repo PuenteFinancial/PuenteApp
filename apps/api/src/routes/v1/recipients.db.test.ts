@@ -77,9 +77,13 @@ describe.skipIf(!runDb)('recipients + payout_destinations (integration, local Su
   })
 
   beforeEach(async () => {
-    // quotes references payout_destinations (slice 3), so it must truncate too
+    // TRUNCATE must name every table referencing the ones being cleared —
+    // quotes (slice 3) plus the transfers chain and ledger tables (slice 4).
     await db.query(
-      'truncate table public.quotes, public.payout_destinations, public.recipients',
+      `truncate table public.ledger_entries, public.ledger_transactions,
+       public.idempotency_keys, public.disputes, public.disclosures,
+       public.transfer_transitions, public.transfers,
+       public.quotes, public.payout_destinations, public.recipients`,
     )
   })
 

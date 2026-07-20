@@ -9,6 +9,7 @@ import { assertEncryptionKeyUsable } from './utils/encryption.js'
 import { auditPlugin } from './plugins/audit.js'
 import { authPlugin } from './plugins/auth.js'
 import { errorHandlerPlugin } from './plugins/error-handler.js'
+import { idempotencyPlugin } from './plugins/idempotency.js'
 import { healthRoute } from './routes/v1/health.js'
 import { waitlistRoute } from './routes/v1/waitlist.js'
 import { authRoute } from './routes/v1/auth.js'
@@ -16,6 +17,7 @@ import { usersRoute } from './routes/v1/users.js'
 import { recipientsRoute } from './routes/v1/recipients.js'
 import { destinationsRoute } from './routes/v1/destinations.js'
 import { quotesRoute } from './routes/v1/quotes.js'
+import { transfersRoute } from './routes/v1/transfers.js'
 import { webhooksRoute } from './routes/v1/webhooks.js'
 
 // Fail boot on a bad DETAILS_ENCRYPTION_KEY — otherwise a wrong key stays
@@ -59,6 +61,7 @@ await server.register(rateLimit, {
 await server.register(errorHandlerPlugin)
 await server.register(auditPlugin)
 await server.register(authPlugin)
+await server.register(idempotencyPlugin)
 await server.register(healthRoute, { prefix: '/v1' })
 await server.register(waitlistRoute, { prefix: '/v1' })
 await server.register(authRoute, { prefix: '/v1' })
@@ -66,6 +69,7 @@ await server.register(usersRoute, { prefix: '/v1' })
 await server.register(recipientsRoute, { prefix: '/v1' })
 await server.register(destinationsRoute, { prefix: '/v1' })
 await server.register(quotesRoute, { prefix: '/v1' })
+await server.register(transfersRoute, { prefix: '/v1' })
 await server.register(webhooksRoute, { prefix: '/v1' })
 
 try {

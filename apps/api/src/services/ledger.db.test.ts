@@ -42,12 +42,49 @@ const CHART = {
 describe.skipIf(!runDb)('ledger core (integration, local Supabase)', () => {
   let db: Client
 
+  // Since slice 4, ledger_transactions.transfer_id is a real FK — postings
+  // against T1 need an actual transfers row (and its quote/destination chain).
+  const LEDGER_USER = '00000000-0000-4000-8000-00000000002a'
+
   beforeAll(async () => {
     db = new Client({ connectionString: DB_URL })
     await db.connect()
+    await db.query(
+      `insert into auth.users (id, phone) values ($1, '15550000021') on conflict (id) do nothing`,
+      [LEDGER_USER],
+    )
+    const recipient = await db.query(
+      `insert into public.recipients (user_id, first_name, last_name, relationship, country)
+       values ($1, 'Ana', 'García López', 'mother', 'MX') returning id`,
+      [LEDGER_USER],
+    )
+    const destination = await db.query(
+      `insert into public.payout_destinations (recipient_id, method, currency, details)
+       values ($1, 'bank_account', 'MXN', '{}') returning id`,
+      [recipient.rows[0].id],
+    )
+    const quote = await db.query(
+      `insert into public.quotes (user_id, payout_destination_id, send_amount_minor, send_currency,
+         receive_amount_minor, receive_currency, fee_amount_minor, fee_currency,
+         fx_rate, source_rate, fx_rate_at, expires_at, status)
+       values ($1, $2, 19801, 'USD', 396014, 'MXN', 199, 'USD', 19.9997, 20.100251, now(),
+         now() + interval '15 minutes', 'consumed') returning id`,
+      [LEDGER_USER, destination.rows[0].id],
+    )
+    await db.query(
+      `insert into public.transfers (id, user_id, payout_destination_id, quote_id,
+         send_amount_minor, send_currency, receive_amount_minor, receive_currency,
+         fee_amount_minor, fee_currency, fx_rate, fx_rate_at, idempotency_key)
+       values ($1, $2, $3, $4, 19801, 'USD', 396014, 'MXN', 199, 'USD', 19.9997, now(), $5)
+       on conflict (id) do nothing`,
+      [T1, LEDGER_USER, destination.rows[0].id, quote.rows[0].id, `ledger-test-${T1}`],
+    )
   })
 
   afterAll(async () => {
+    await db.query('truncate table public.ledger_entries, public.ledger_transactions')
+    await db.query('delete from public.transfers where id = $1', [T1])
+    await db.query('delete from auth.users where id = $1', [LEDGER_USER])
     await db.end()
   })
 
