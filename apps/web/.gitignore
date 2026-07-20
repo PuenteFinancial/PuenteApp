@@ -1,5 +1,5 @@
-# claude code local config
-.claude/
+# claude code local config (skills are shared and tracked)
+.claude/settings.local.json
 
 # dependencies
 /node_modules
