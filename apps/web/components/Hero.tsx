@@ -28,7 +28,7 @@ export default function Hero() {
             {t.hero.elig}
           </span>
           <div className="hero-note">
-            {t.hero.notes.map((note, i) => (
+            {t.hero.notes.slice(0, 1).map((note, i) => (
               <span key={i}>
                 <span className="dot" />
                 {note}
