@@ -213,6 +213,15 @@ inside the SUBMITTED batch per ledger-rules), `IN_FLIGHT`/`COMPLETED`/`PAYOUT_FA
 polling fallback for sandbox/dev.
 
 - `funding_cleared` gate wired as config, default off (instant payout).
+- **FX submission backstop (decided 2026-07-18, required):** before the `FUNDED → SUBMITTED`
+  Bridge call, the worker checks quote age and rate drift
+  (`|live buy_rate − source_rate| / source_rate` vs `FX_MAX_DRIFT_BPS`, ~150–200 default;
+  `source_rate` joins via `transfers.quote_id`). Tripped → do NOT submit; stay `FUNDED`,
+  Sentry alert, ops chooses manual release (accept known slippage) or cancel + **full refund**
+  (always Reg E-clean — Wise's model). Caps the unbounded-slippage tail on transfers stuck
+  behind a float-ceiling trip / dry treasury / downed worker. Fires ~never by design; the
+  50 bps buffer prices the normal 15-min quote window. (A pre-quote volatility pause was
+  considered and deferred to slice 8.)
 - Treasury wallet pre-funded manually for MVP (runbook step); replenishment posting exists from
   slice 1. Treasury wallet is owned by the **Puente Financial business customer** (KYB in
   progress as of 2026-07-15), not a personal customer. Shared-wallet cross-customer sourcing
@@ -244,6 +253,18 @@ polling fallback for sandbox/dev.
 `POST /v1/transfers/:id/cancel` (FUNDED-only, `payment_at + 30 min` window, row-lock re-check,
 CANCELED → REFUNDED postings incl. Stripe refund — full amount incl. fee per Reg E),
 `GET /v1/transfers/:id/receipt` + receipt `disclosures` row on COMPLETED.
+
+Cancellation semantics from the 2026-07-18 Reg E review (§1005.34 + commentary):
+- The reg's extinguishing event is funds **picked up or deposited**, not "submitted": a cancel
+  request landing post-`SUBMITTED`/pre-`COMPLETED` (a seconds-wide sliver on SPEI) routes to the
+  refund/error-resolution path, never a flat denial.
+- The 30-min clock runs from payment **authorization** (confirm), per official commentary; our
+  `cancelable_until` (set at FUNDED) opens and closes later — customer-favorable, therefore
+  compliant. A cancel while still `PENDING_PAYMENT` (post-confirm, pre-webhook) = void the
+  payment intent.
+- Refund = total incl. fees and taxes within **3 business days** of the request.
+- Counsel item (already flagged in transfer-state-machine.md): disclosure says "submitted for
+  payout" where the reg says "picked up or deposited" — reconcile wording before launch.
 
 ---
 
