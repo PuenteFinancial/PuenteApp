@@ -13,7 +13,7 @@
     "@supabase/mcp-server-supabase": "0.8.2",
     "@typescript-eslint/eslint-plugin": "^8.63.0",
     "@typescript-eslint/parser": "^8.63.0",
-    "eslint": "^10.5.0",
+    "eslint": "^10.7.0",
     "prettier": "^3.9.5",
     "turbo": "^2.10.4",
     "typescript": "^6.0.3"
