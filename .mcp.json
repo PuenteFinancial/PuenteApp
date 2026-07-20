@@ -2,7 +2,10 @@
   "mcpServers": {
     "supabase": {
       "command": "node_modules/.bin/mcp-server-supabase",
-      "args": ["--read-only", "--project-ref=namdkmsmdkmdffgscqgd"]
+      "args": ["--read-only", "--project-ref=namdkmsmdkmdffgscqgd"],
+      "env": {
+        "SUPABASE_ACCESS_TOKEN": "${SUPABASE_ACCESS_TOKEN}"
+      }
     }
   }
 }
