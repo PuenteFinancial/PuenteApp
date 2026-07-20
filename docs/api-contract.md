@@ -147,50 +147,66 @@ reconciliation but never cross the wire.
 | POST | `/v1/transfers/:id/disputes` | ✓ | — | Open error resolution. Body `{ type, description }`. Moves the transfer to `UNDER_REVIEW` only from `FUNDED`/`SUBMITTED`/`IN_FLIGHT`/`COMPLETED` (per state machine); a dispute on an already-terminal transfer (`REFUNDED`, `PAYMENT_FAILED`, …) is recorded in `disputes` without a state change. |
 | GET | `/v1/transfers/:id/disputes` | ✓ | — | List. |
 
-**`POST /v1/transfers`** — create + disclose (no funding yet)
+**`POST /v1/transfers`** — create + disclose (no funding yet). *(Shipped 2026-07-17, slice 4.)*
 ```jsonc
-// request   (header: Idempotency-Key: <uuid>)
-{ "quote_id": "uuid" }
-// response 201
+// request   (header: Idempotency-Key required)
+{ "quoteId": "uuid" }
+// response 201 — real slice-4 numbers: $200.00 total at buy 20.100251 − 50 bps
 {
   "id": "uuid",
+  "quoteId": "uuid",
+  "payoutDestinationId": "uuid",
   "state": "PENDING_PAYMENT",
-  "total_amount":  { "amountMinor": 20000, "currency": "USD" },  // = send_amount + fee_amount
-  "send_amount":   { "amountMinor": 19800, "currency": "USD" },  // principal to recipient
-  "fee_amount":    { "amountMinor": 200, "currency": "USD" },
-  "receive_amount": { "amountMinor": 340000, "currency": "MXN" },
-  "disclosure": { "id": "uuid", "type": "prepayment", "locale": "es", "presented_at": "..." }
+  "totalAmount":   { "amountMinor": 20000, "currency": "USD" },  // = sendAmount + feeAmount
+  "sendAmount":    { "amountMinor": 19801, "currency": "USD" },  // principal to recipient
+  "feeAmount":     { "amountMinor": 199, "currency": "USD" },
+  "receiveAmount": { "amountMinor": 396014, "currency": "MXN" },
+  "fxRate": "19.9997",
+  "fundingSourceType": "ach",
+  "fundingCleared": false,
+  "disclosure": { "id": "uuid", "type": "prepayment", "locale": "es", "presentedAt": "..." }
 }
 ```
-Errors: `quote_expired`, `kyc_required`, `limit_exceeded` (user limit / float ceiling), `idempotency_conflict`.
+Errors: `quote_expired` (409), `conflict` (409 — quote already used / destination archived since
+quoting), `kyc_required` (403), `not_found` (404), `idempotency_conflict` (409),
+`not_configured` (503 — funding processor unavailable). `limit_exceeded` arrives with the
+slice-8 per-user caps. Rate-limited 10/min/user. The disclosure content (en + es, built from the
+quote snapshot, incl. cancellation right and the §1005.33(h) wrong-account warning) is stored
+append-only on `disclosures`; the response carries the summary.
 
 **`POST /v1/transfers/:id/confirm`** — accept disclosure + initiate funding
 ```jsonc
-// request   (header: Idempotency-Key: <uuid>)
-{ "disclosure_id": "uuid", "accepted": true }
+// request   (header: Idempotency-Key required)
+{ "disclosureId": "uuid", "accepted": true }   // accepted is literally `true`; declining = not confirming
 // response 200
 {
   "id": "uuid",
   "state": "PENDING_PAYMENT",
-  "disclosure_accepted_at": "2026-06-26T19:40:00Z",
-  "funding": { "provider": "stripe", "method": "ach",
-               "...": "processor-neutral fields the client needs to complete payment" }
+  "disclosureAcceptedAt": "2026-07-17T19:40:00Z",
+  "funding": { "provider": "mock", "method": "ach", "clientFields": {} }
 }
 ```
-Server refuses with `conflict` if the disclosure isn't accepted or the transfer is already confirmed,
-and `quote_expired` if the quote/disclosure lapsed. The client completes payment via the funding
-processor's SDK; the **funding webhook** drives `FUNDED`.
+Server refuses with `conflict` (409) if the transfer is past `PENDING_PAYMENT` or already
+confirmed, 400 if `disclosureId` doesn't match, and `quote_expired` (409) past the original
+quote's `expires_at` — **the firm-offer window applies at confirm** (decided 2026-07-17): the
+disclosed rate is never staler than the quote window; re-quote on timeout. A retry after a failed
+initiation (acceptance recorded, no funding ref) re-initiates. `clientFields` carries whatever
+the active processor's client SDK needs (Stripe: a client_secret; mock: empty); the **funding
+webhook** drives `FUNDED`.
 
 ## Webhooks  (public, signature-verified, idempotent)
 
 | Method | Path | Drives |
 |---|---|---|
-| POST | `/v1/webhooks/funding` | `FUNDED` (payment captured/initiated), `PAYMENT_FAILED`, `funding_cleared` (ACH settled), `FUNDING_REVERSED` (ACH return / chargeback). From the funding processor (**Stripe** — confirmed 2026-07-10). |
-| POST | `/v1/webhooks/bridge` | `IN_FLIGHT`, `COMPLETED`, `PAYOUT_FAILED`. |
-| POST | `/v1/webhooks/sumsub` | KYC result → updates `kyc_records` + `profile.kyc_status`. |
+| POST | `/v1/webhooks/funding` | `FUNDED` (payment captured/initiated), `PAYMENT_FAILED`, `funding_cleared` flag (ACH settled), `FUNDING_REVERSED` (ack + log only until slice 5/6). From the active `FundingProcessor` — **mock** today (Stripe-shaped HMAC signature), **Stripe** in slice 4b. 503 `not_configured` unless the processor's webhook secret is set — the mock secret is never provisioned in production (the lock). |
+| POST | `/v1/webhooks/bridge` | `IN_FLIGHT`, `COMPLETED`, `PAYOUT_FAILED` (slice 5). Today: KYC customer status. |
 
-Each: verify signature → write `payment_events` (dedupe on `(source, external_event_id)`) → return
-`200` → enqueue worker job → job posts the ledger transaction + writes a `transfer_transition`.
+Slice-4 posture: no worker/queue yet, so the funding webhook transitions **synchronously** via
+`transition_transfer` (state + transition row + ledger batch in one DB transaction; 500 on
+failure so the provider redelivers into a clean row). Exactly-once comes from the transition
+guard + the ledger's `(transfer_id, transition)` uniqueness; `payment_events` dedupe + the async
+worker + the 30-min stale-`PENDING_PAYMENT` sweep arrive in slice 5 (a stuck `PENDING_PAYMENT`
+row has no postings and no funds moved — a dead row, not lost money).
 
 ## Endpoint → state transition map
 
