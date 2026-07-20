@@ -60,6 +60,30 @@ const envSchema = z.object({
     .default('false')
     .transform((v) => v === 'true'),
   CANCEL_WINDOW_MINUTES: z.coerce.number().int().min(1).max(1440).default(30),
+  // Direct Postgres connection for pg-boss (worker only — the API stays
+  // PostgREST-only). Must be the Supabase SESSION-mode pooler (port 5432),
+  // never transaction mode (6543) — pg-boss needs session semantics.
+  // Optional here so the API boots without it; the worker asserts at startup.
+  DATABASE_URL: z.string().min(1).optional(),
+  // Bridge treasury wallet (USDC source for payouts). Worker asserts at
+  // startup; the API never submits payouts so it can boot without it.
+  BRIDGE_TREASURY_WALLET_ID: z.string().min(1).optional(),
+  // Crude aggregate float ceiling (slice-5 decision 4): payout submission
+  // pauses while the funding_receivable balance is at or above this cap,
+  // self-healing as the balance drains — no hold reason is set. The submit
+  // job requires it in the worker; unset elsewhere is fine.
+  FLOAT_CEILING_MINOR: z.coerce.number().int().min(0).optional(),
+  // FX submission backstop: max |live buy_rate − quote source_rate| drift in
+  // basis points before the submit job holds the transfer (fx_drift). 10000
+  // bps = 100% — anything beyond that is a config typo, not a market move.
+  FX_MAX_DRIFT_BPS: z.coerce.number().int().min(0).max(10000).default(200),
+  // FX submission backstop: max quote age before the submit job holds the
+  // transfer (fx_drift). Fires only on transfers stuck for hours.
+  FX_MAX_QUOTE_AGE_MINUTES: z.coerce.number().int().min(1).default(240),
+  // Cadence of the payout.poll Bridge reconciliation cron. 300 in prod;
+  // set 60 in dev via env. Floor of 10 keeps a fat-fingered value from
+  // hammering the Bridge API.
+  WORKER_POLL_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(300),
   TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
   TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
   TWILIO_PHONE_NUMBER: z.string().min(1).optional(),
