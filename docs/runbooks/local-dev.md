@@ -1,8 +1,38 @@
 # Runbook — Local Development
 
-**Date:** 2026-07-10 · **Status:** live process (stack verified 2026-07-08)
+**Date:** 2026-07-20 · **Status:** live process (stack verified 2026-07-08)
 
 Two supported setups. **Default: point local apps at staging** — safe, zero Docker.
+
+## New collaborator setup
+
+Toolchain (all pinned by the repo):
+
+1. **Node 22** — `.node-version` is picked up by mise/fnm/nvm.
+2. **pnpm** — `corepack enable`; the `packageManager` field in root `package.json` pins the version.
+3. `pnpm install` at the repo root (also installs the Supabase MCP server binary `.mcp.json` uses).
+4. No Docker needed for Setup A below.
+
+Accounts + secrets (ask Joshua for invites; nothing secret is in git):
+
+- **Doppler** — source of truth for secrets (`doppler setup`, then run the API via
+  `doppler run -- pnpm dev`). See `secrets.md`.
+- **Supabase org** — then create your own personal access token and export it in your shell as
+  `SUPABASE_ACCESS_TOKEN`; the checked-in `.mcp.json` reads it from the environment (read-only,
+  pinned to staging).
+- **PostHog** org; **Sentry** if triaging errors. Vercel team access is optional — per-PR preview
+  deploys appear at `landingpage-git-<branch>-puente-financial.vercel.app` (note: previews sit
+  behind Vercel Authentication, so anonymous requests may get an SSO redirect).
+- Env files to create (see the `.env.example` next to each): `apps/web/.env.local`
+  (`INTERNAL_API_URL` + PostHog public vars — nothing secret) and `apps/api/.env`
+  (staging + Bridge **sandbox** values, from Doppler `dev_main`).
+
+The Claude Code harness ships with the clone: `CLAUDE.md`, hooks + permissions
+(`.claude/settings.json`), dev-server launch config (`.claude/launch.json`), skills, reviewer
+agents, and `.mcp.json`. `.claude/settings.local.json` is personal, per machine.
+
+Day-one smoke test: start the API (Setup A), start web, hit `localhost:3000`, submit a marked
+waitlist entry, confirm the row lands in **puente-staging**.
 
 ## Setup A — local apps → staging cloud (default)
 
