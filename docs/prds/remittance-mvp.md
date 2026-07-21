@@ -277,6 +277,15 @@ history list. en + es throughout.
 
 - Ends with the **real pilot send**: ~$20, production, Joshua → own Mexican test recipient.
   Observe the real USD→MXN spread and receipt lines (open item in ledger-rules) and record them.
+  **Specifically resolve the buy_rate-vs-execution question** (decisions.md 2026-07-21): compare
+  Bridge's actual USDC draw against the `exchange_rates` `buy_rate` we quoted; if there's a
+  systematic spread, move it out of `fx_slippage` into pricing (`QUOTE_FX_BUFFER_BPS`) / a
+  provider-cost account. Sandbox can't answer this — its rate feed is frozen.
+- **Pre-real-money verification carried over from slice 5** (all validated in sandbox, need a real
+  pass here): real Bridge `transfer.*` webhook delivery + signature against the prod endpoint
+  driving `SUBMITTED → COMPLETED` (slice-5 e2e used synthetic webhooks; the sandbox transfer stalls
+  at `funds_received`); stand up the **prod worker service** (`railway.worker.toml`, `prd_main`
+  synced) — deferred here because the mock-funding lock keeps prod inert until real funding.
 - compliance-reviewer (disclosure presentation is consent-adjacent).
 
 ---

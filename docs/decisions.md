@@ -6,6 +6,23 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-21 · Bridge execution rate vs quoted `buy_rate` — an unresolved pricing question, must
+be answered before slice-7 real money.** The slice-5 sandbox e2e drove a full payout and the
+`SUBMITTED` ledger batch posted an ~8¢ debit to `fx_slippage` on a $4.95 send (`D` = actual USDC
+draw − quoted send principal). Investigation: Bridge's own receipt reports **zero fees**
+(`developer_fee`/`exchange_fee`/`gas_fee` all `0.0`), and direct probes at different amounts
+executed at a **constant 19.6721 MXN/USDC** (3.05 USDC→60 MXN, 6.10→120 MXN — perfectly
+proportional), a fixed ~2% below the `exchange_rates` `buy_rate` (20.10) we quote off. So the delta
+is **not a fee and not random drift — it's a systematic rate gap.** The *mechanism* is correct
+(`submittedLedgerEntries` captures `A − S`, nets to zero), but the sandbox rate feed is frozen
+(`updated_at` April 2026) so the magnitude is a mock artifact and proves nothing about production.
+**Open question:** in prod, does Bridge execute at the `buy_rate` we quote off, or at a worse rate?
+If a real spread exists, every transfer under-collects ~1–2% and `fx_slippage` is silently
+absorbing a **provider cost that belongs in pricing** (`QUOTE_FX_BUFFER_BPS`) and arguably a
+separate `provider_fees`-style account — not slippage. **Status: open** — validate with real rates
+during the slice-7 pilot ("observe the real spread" item, §9); decide the quote basis + account
+mapping then. [remittance-mvp.md](prds/remittance-mvp.md) §9, ledger-rules.md.
+
 **2026-07-20 · Immediate payout — no 30-minute hold; the Reg E tail is accepted.** Submit to
 Bridge as soon as a transfer is `FUNDED`; `cancelable_until` is disclosure metadata, not a
 submission gate. Research (12 CFR §1005.34 + CFPB official interpretations, primary sources): the

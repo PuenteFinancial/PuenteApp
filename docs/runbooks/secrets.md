@@ -40,6 +40,12 @@ consumers are the two pipeline secrets above.
   JWT rotation is separate (Doppler). Prod DB password rotated 2026-07-10 ✅.
 - **Doppler → Railway:** confirm the service redeployed after a sync; Railway does not restart on
   every var change.
+- **`DATABASE_URL` goes to BOTH Railway services (API + worker), not just the worker.** It's the
+  Supabase **session-mode** pooler string (port 5432, never transaction mode 6543 — pg-boss needs
+  session semantics). The worker asserts it at startup; the **API needs it too** so money-moving
+  webhooks (funding-success, Bridge `transfer.*`) enqueue jobs immediately. Without it on the API,
+  enqueues fail and recovery falls back to `payout.sweep` — correct, but adds ~1 min (payouts) to
+  ~5 min (payment events) of latency. Discovered running the slice-5 sandbox e2e (2026-07-21).
 
 ## Outstanding rotations (as of 2026-07-10)
 
