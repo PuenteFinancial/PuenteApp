@@ -14,7 +14,7 @@ export default function PrivacyPage() {
         </Link>
 
         <h1 className="text-4xl font-bold text-gray-900 mb-2">Privacy Policy</h1>
-        <p className="text-sm text-gray-500 mb-10">Last updated: May 29, 2026</p>
+        <p className="text-sm text-gray-500 mb-10">Last updated: July 21, 2026</p>
 
         <div className="prose prose-gray max-w-none space-y-8 text-gray-700 leading-relaxed">
           <section>
@@ -36,7 +36,38 @@ export default function PrivacyPage() {
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold text-gray-900 mb-3">3. Data Storage</h2>
+            <h2 className="text-xl font-semibold text-gray-900 mb-3">3. SMS / Text Messaging</h2>
+            <p>
+              When you create an account or sign in to the Puente Financial mobile app, we send a
+              one-time verification code (OTP) by text message to the mobile number you provide, to
+              confirm it belongs to you. By entering your number and requesting a code, you consent
+              to receive these transactional SMS messages from Puente Financial.
+            </p>
+            <ul className="list-disc pl-6 space-y-2 mt-3">
+              <li>
+                <strong>Message frequency:</strong> You receive a message only when you request a
+                verification code; frequency varies with how often you sign in.
+              </li>
+              <li>
+                <strong>Message and data rates may apply,</strong> depending on your mobile carrier
+                and plan.
+              </li>
+              <li>
+                <strong>Opt-out:</strong> Reply STOP to any message to opt out of SMS, or HELP for
+                help. Because these codes are required to access your account, opting out may prevent
+                you from signing in.
+              </li>
+              <li>
+                <strong>No sharing of mobile data:</strong> Mobile phone numbers collected for SMS
+                verification are never sold or shared with third parties or affiliates for marketing
+                or promotional purposes. We share them only with our SMS delivery provider, and only
+                to send your verification codes.
+              </li>
+            </ul>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-semibold text-gray-900 mb-3">4. Data Storage</h2>
             <p>
               Your information is stored securely using Supabase, a SOC 2 compliant database
               platform. We retain your data for as long as necessary to operate our waitlist and
@@ -45,7 +76,7 @@ export default function PrivacyPage() {
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold text-gray-900 mb-3">4. Your Rights</h2>
+            <h2 className="text-xl font-semibold text-gray-900 mb-3">5. Your Rights</h2>
             <p>
               You may request that we delete your information at any time by emailing us at{' '}
               <a href="mailto:privacy@puentefinancial.com" className="text-blue-600 hover:underline">
@@ -56,7 +87,7 @@ export default function PrivacyPage() {
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold text-gray-900 mb-3">5. Contact</h2>
+            <h2 className="text-xl font-semibold text-gray-900 mb-3">6. Contact</h2>
             <p>
               For any questions about this policy, please contact us at{' '}
               <a href="mailto:privacy@puentefinancial.com" className="text-blue-600 hover:underline">
