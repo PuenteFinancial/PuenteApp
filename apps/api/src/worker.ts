@@ -11,11 +11,16 @@ import { env } from './config/env.js'
 import {
   getBoss,
   ensureQueues,
+  JOB_PAYOUT_SUBMIT,
+  JOB_PAYOUT_SWEEP,
   JOB_RECONCILE_PENDING,
   JOB_IDEMPOTENCY_PURGE,
+  type PayoutSubmitPayload,
 } from './services/queue.js'
 import { reconcilePendingTransfers } from './jobs/reconcile-pending.js'
 import { purgeExpiredIdempotencyKeys } from './jobs/purge-idempotency.js'
+import { submitPayout } from './jobs/payout-submit.js'
+import { sweepPayouts } from './jobs/payout-sweep.js'
 
 // Fail fast on missing worker-only env — a worker that boots without these
 // would sit healthy-looking while every payout job errors. (Both are optional
@@ -52,11 +57,28 @@ await ensureQueues()
 
 await boss.work(JOB_RECONCILE_PENDING, handle(JOB_RECONCILE_PENDING, reconcilePendingTransfers))
 await boss.work(JOB_IDEMPOTENCY_PURGE, handle(JOB_IDEMPOTENCY_PURGE, purgeExpiredIdempotencyKeys))
+await boss.work(JOB_PAYOUT_SWEEP, handle(JOB_PAYOUT_SWEEP, sweepPayouts))
+// Payload jobs arrive as a batch (size 1 by default); each transfer submits
+// independently — a rejection fails the whole batch job, and pg-boss applies
+// the queue's retry policy per job, so batches must stay size 1.
+await boss.work<PayoutSubmitPayload>(JOB_PAYOUT_SUBMIT, async (jobs) => {
+  for (const job of jobs) {
+    try {
+      const submitted = await submitPayout(job.data.transferId)
+      console.log(`worker: ${JOB_PAYOUT_SUBMIT} transfer handled (submitted=${submitted})`)
+    } catch (err) {
+      Sentry.captureException(err)
+      console.error(`worker: ${JOB_PAYOUT_SUBMIT} failed`, err)
+      throw err
+    }
+  }
+})
 
 // Housekeeping crons (slice-5 decision 8) — they double as the deploy smoke
-// test. payout.sweep / payout.poll are scheduled in PR 2/3, not here.
+// test — plus the 1-min payout sweep (PR 2). payout.poll is scheduled in PR 3.
 await boss.schedule(JOB_RECONCILE_PENDING, '*/5 * * * *')
 await boss.schedule(JOB_IDEMPOTENCY_PURGE, '0 4 * * *')
+await boss.schedule(JOB_PAYOUT_SWEEP, '* * * * *')
 
 // Minimal health endpoint for Railway — no Fastify, the worker serves no API.
 const server = http.createServer((req, res) => {

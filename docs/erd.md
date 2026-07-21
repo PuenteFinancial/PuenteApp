@@ -135,7 +135,7 @@ slippage (see ledger `fx_slippage`).
 - `funding_cleared` BOOLEAN default false — the gate flag
 - `disclosure_accepted_at` timestamptz — when the sender accepted the Reg E prepayment disclosure (gates funding; set at `confirm`)
 - `payment_at` timestamptz — when the sender paid (starts the cancellation clock)
-- `cancelable_until` timestamptz — `payment_at + 30 min`; cancelable = `state = FUNDED AND now() < cancelable_until`
+- `cancelable_until` timestamptz — `payment_at + 30 min`; disclosure metadata only since slice 5 (immediate payout) — cancelable = `state = FUNDED AND submit_attempted_at IS NULL` (see transfer-state-machine.md)
 - `idempotency_key` TEXT UNIQUE — for the Bridge submission
 - `provider_transfer_ref` TEXT — Bridge transfer id
 - `funding_payment_ref` TEXT — funding processor payment id

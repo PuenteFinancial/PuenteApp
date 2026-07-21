@@ -10,6 +10,12 @@ export class BridgeApiError extends Error {
     super(`Bridge API request failed with status ${status}`)
     this.name = 'BridgeApiError'
   }
+
+  // Contract B alias: payout callers branch on a numeric statusCode
+  // (400 → retry, 422/other 4xx → hold).
+  get statusCode(): number {
+    return this.status
+  }
 }
 
 async function bridgeFetch(path: string, init: RequestInit = {}): Promise<unknown> {
@@ -160,6 +166,92 @@ export async function getExchangeRate(
     sellRate: rates.sell_rate,
     updatedAt: rates.updated_at,
   }
+}
+
+export interface CreateBridgePayoutInput {
+  idempotencyKey: string // = transfers.idempotency_key
+  clientReferenceId: string // = transfer UUID
+  onBehalfOf: string // sender's bridge_customer_id
+  sourceWalletId: string // env.BRIDGE_TREASURY_WALLET_ID
+  destinationExternalAccountId: string // payout_destinations.provider_account_ref
+  destinationAmountMxn: string // decimal string, exactly 2dp, from receive_amount_minor
+}
+
+export interface BridgePayoutResult {
+  bridgeTransferId: string
+  state: string // raw Bridge state
+  sourceAmount: string // actual USDC draw, decimal string — caller does strict decimal→minor
+}
+
+// Every field must come from immutable transfer terms — no clocks, no
+// randomness, no derived values — and the key order is fixed, so a retry
+// serializes byte-identically (Bridge 422s on same-Idempotency-Key/
+// different-body).
+function buildPayoutBody(input: CreateBridgePayoutInput): string {
+  return JSON.stringify({
+    on_behalf_of: input.onBehalfOf,
+    client_reference_id: input.clientReferenceId,
+    developer_fee: '0',
+    source: {
+      payment_rail: 'bridge_wallet',
+      currency: 'usdc',
+      bridge_wallet_id: input.sourceWalletId,
+    },
+    destination: {
+      payment_rail: 'spei',
+      currency: 'mxn',
+      external_account_id: input.destinationExternalAccountId,
+      // Fixed receive amount: the customer was quoted an exact MXN figure;
+      // Bridge computes the USDC draw and reports it as source.amount.
+      amount: input.destinationAmountMxn,
+    },
+  })
+}
+
+// The id is the only field a caller cannot proceed without; state/source.amount
+// are passed through raw (empty string if absent) — the submit job's strict
+// decimal parser rejects malformed amounts before any minor-unit conversion.
+function parseTransferResponse(response: unknown): BridgePayoutResult {
+  const transfer = response as {
+    id?: string
+    state?: string
+    source?: { amount?: string }
+  }
+  if (!transfer.id) {
+    throw new BridgeApiError(502, { code: 'bridge_transfer_missing_id' })
+  }
+  return {
+    bridgeTransferId: transfer.id,
+    state: transfer.state ?? '',
+    sourceAmount: transfer.source?.amount ?? '',
+  }
+}
+
+// USD→MXN stablecoin-sandwich payout: treasury wallet USDC → SPEI/MXN.
+// Idempotency-Key = transfers.idempotency_key, so a crash-recovery re-POST
+// with the byte-identical body returns the existing transfer instead of
+// creating a second one. Sandbox-verified: payouts are never cancelable after
+// creation; concurrent payouts serialize (loser gets a sync 400, no transfer
+// created); MXN destination minimum is $2.00 USD; client_reference_id
+// round-trips. Sandbox-UNVERIFIED until the PR 3 e2e: the exact field names
+// source.bridge_wallet_id and destination.amount (fixed-receive placement) —
+// verify there before relying on them in prod.
+export async function createBridgePayout(
+  input: CreateBridgePayoutInput,
+): Promise<BridgePayoutResult> {
+  const response = await bridgeFetch('/v0/transfers', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': input.idempotencyKey },
+    body: buildPayoutBody(input),
+  })
+
+  return parseTransferResponse(response)
+}
+
+// Polling backstop for missed webhooks (payout.poll cron).
+export async function getBridgeTransfer(bridgeTransferId: string): Promise<BridgePayoutResult> {
+  const response = await bridgeFetch(`/v0/transfers/${bridgeTransferId}`)
+  return parseTransferResponse(response)
 }
 
 export async function getKycLink(

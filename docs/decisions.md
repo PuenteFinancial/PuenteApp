@@ -6,6 +6,35 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-20 · Immediate payout — no 30-minute hold; the Reg E tail is accepted.** Submit to
+Bridge as soon as a transfer is `FUNDED`; `cancelable_until` is disclosure metadata, not a
+submission gate. Research (12 CFR §1005.34 + CFPB official interpretations, primary sources): the
+sender's cancellation right survives until funds are *picked up or deposited* — there is NO
+exception for "already submitted to partner," and no safe harbor. Our disclosure's "unless
+submitted for payout" wording is stricter than the law allows (counsel item; hard gate before
+slice-7 real money). Accepted tail: a timely cancel while `SUBMITTED`/`IN_FLIGHT` legally requires
+a full refund even though Bridge payouts are uncancelable — rare, bounded double-pay. Accepted
+because: SPEI deposits in seconds (the right extinguishes almost immediately); the delay is not
+attacker-farmable (delivery delay can't be caused on demand); the 3-business-day refund window
+means the payout resolves first (if it failed, Bridge returns principal — the refund costs
+nothing); per-transfer limits cap the worst case. Slice-6 refund rule keyed to state: `FUNDED` →
+normal cancel; `SUBMITTED`/`IN_FLIGHT` → full refund within 3 business days (wait for payout
+resolution first); `COMPLETED` → lawful denial. **Status: active**
+([transfer-state-machine.md](transfer-state-machine.md)).
+
+**2026-07-20 · Enqueue-after-commit + sweep healing, not a transactional outbox.** PostgREST RPC
+and pg-boss can't share a transaction, so the state change commits first and the job is enqueued
+after. All jobs are idempotent replays, so a lost enqueue costs at most ~1 minute of sweep latency
+(`payout.sweep` re-enqueues unclaimed `FUNDED` rows and stale `received` payment_events) — never
+correctness. Supersedes the transactional-outbox wording in earlier docs. **Status: active.**
+
+**2026-07-20 · Crude aggregate float ceiling ships in slice 5.** Immediate payout is what makes
+fronting risk real, so the submit job checks the aggregate `funding_receivable` balance against
+the `FLOAT_CEILING_MINOR` env cap before creating a Bridge payout. A trip leaves the transfer
+`FUNDED` with **no hold** — self-healing backpressure (the 1-min sweep retries as the balance
+drains) plus a fingerprinted Sentry alert. Per-user limits, velocity checks, and the risk engine
+remain slice 8. **Status: active** ([runbooks/payout-holds.md](runbooks/payout-holds.md)).
+
 **2026-07-13 · Payout topology: pre-funded treasury wallet, one Bridge transfer per Puente
 transfer.** Sandbox spike proved Bridge has no one-transfer fiat→SPEI route (`ach_push`/`ach`/`wire`
 → `spei` all rejected), and the wallet-USDC → MXN-SPEI payout leg works (`201` → `funds_received`

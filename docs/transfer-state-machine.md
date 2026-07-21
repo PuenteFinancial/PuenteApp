@@ -1,7 +1,7 @@
 # Transfer State Machine — USD → MXN Remittance
 
-**Date:** 2026-06-25
-**Status:** v1 draft for review
+**Date:** 2026-06-25 · **Updated:** 2026-07-20 (slice 5 — immediate payout, submit claim contract, payout holds)
+**Status:** v2 — matches the slice-5 implementation
 
 The lifecycle of a single remittance transfer, from an accepted quote to delivery (or refund).
 This is the spine of the system — the queue drives these transitions, the ledger posts on them,
@@ -17,8 +17,8 @@ stateDiagram-v2
     [*] --> PENDING_PAYMENT: user confirms quote
     PENDING_PAYMENT --> FUNDED: Stripe payment captured / initiated
     PENDING_PAYMENT --> PAYMENT_FAILED: charge fails
-    FUNDED --> SUBMITTED: funding_cleared gate (MVP: immediate)
-    FUNDED --> CANCELED: user cancels (in window)
+    FUNDED --> SUBMITTED: submit job claims + creates Bridge payout
+    FUNDED --> CANCELED: user cancels (pre-claim only — slice 6)
     SUBMITTED --> IN_FLIGHT: Bridge accepts payout
     SUBMITTED --> PAYOUT_FAILED: Bridge rejects
     IN_FLIGHT --> COMPLETED: SPEI delivered to recipient
@@ -69,7 +69,7 @@ payment* (new debit against Puente), not a reversal of the original entries. The
 | State | Meaning | Terminal? |
 |---|---|---|
 | `PENDING_PAYMENT` | Transfer created from an accepted quote; collecting funds via Stripe. Reconciliation job marks `PAYMENT_FAILED` if no Stripe webhook arrives within 30 min. | no |
-| `FUNDED` | Stripe payment captured (card) or initiated (ACH). `funding_cleared` flag tracked here. | no |
+| `FUNDED` | Stripe payment captured (card) or initiated (ACH). `funding_cleared` flag tracked here. May carry a `payout_hold_reason` (see Payout holds) — a held transfer stays `FUNDED` until ops releases it. | no |
 | `SUBMITTED` | Payout request sent to Bridge with an idempotency key. | no |
 | `IN_FLIGHT` | Bridge is executing the FX + SPEI payout. | no |
 | `COMPLETED` | Recipient credited at their CLABE. | ✅ success |
@@ -95,39 +95,120 @@ policy setting:
   velocity, account-verification signals) — instant for seasoned trusted users, hold-for-clearing for
   new/large/risky transfers. The gate code is unchanged; it reads a per-transfer decision instead of a
   constant.
-- **Float ceiling (MVP guardrail, live now):** the instant policy fronts cash before ACH clears, so
-  cap the **aggregate outstanding `funding_receivable`**. Block `FUNDED → SUBMITTED` when fronting
-  this transfer would push total fronted float past a configured ceiling. The ledger already computes
-  that number; this bounds a bug or bad actor from running exposure unbounded. It's the one risk
-  control we turn on from day one — everything else in the risk engine is "later."
+- **Float ceiling (crude aggregate version, live in slice 5):** the instant policy fronts cash
+  before ACH clears, so the submit job checks the **aggregate `funding_receivable` balance** (the
+  ledger already computes it) against the `FLOAT_CEILING_MINOR` env cap before creating a Bridge
+  payout. A trip leaves the transfer `FUNDED` with **no hold** — self-healing backpressure: the
+  1-min sweep retries as the balance drains, and a fingerprinted Sentry alert fires (no spam,
+  nothing for ops to release; see [runbooks/payout-holds.md](runbooks/payout-holds.md)). This
+  bounds a bug or bad actor from running exposure unbounded — the one risk control on from day
+  one. The authoritative float controls (per-user limits, velocity, risk engine) are slice 8.
 
 This is a config flag, not an architecture. Same philosophy as the funding-source abstraction.
 
+## Immediate submission & the claim contract (slice 5)
+
+**We submit to Bridge as soon as a transfer is `FUNDED`.** There is no 30-minute hold and no
+cancel-window submission gate: the funding webhook enqueues `payout.submit(transferId)` on the
+`PENDING_PAYMENT → FUNDED` transition, and the 1-min `payout.sweep` cron heals any lost enqueue.
+`cancelable_until` stays recorded on the transfer, but as **disclosure metadata only** — it gates
+nothing. (Why this is Reg E-sound is covered under Cancellation below and in
+[decisions.md](decisions.md), 2026-07-20.)
+
+### The submit claim
+
+Before calling Bridge, the submit job **claims** the transfer with a guarded UPDATE:
+
+```sql
+UPDATE transfers SET submit_attempted_at = now()
+WHERE id = $1
+  AND state = 'FUNDED'
+  AND payout_hold_reason IS NULL
+  AND submit_attempted_at IS NULL
+```
+
+0 rows updated (and not a crash-recovery re-entry) means someone else won — the job stops. Crash
+recovery: if `submit_attempted_at` is already set on entry, the job skips the guards and goes
+straight to the idempotent Bridge re-POST (same idempotency key, byte-identical body → Bridge
+returns the existing transfer) and the RPC transition. The sweep treats claims older than 10 min
+with no `provider_transfer_ref` as stale and re-enqueues.
+
+### Contract for slice 6 (cancel) — binding
+
+User cancel must be a guarded UPDATE with `state = 'FUNDED' AND submit_attempted_at IS NULL`
+**before** its RPC transition. Row locking serializes claim vs cancel — one guarded UPDATE commits
+first and the other matches 0 rows — so a Bridge-payout-exists-but-`CANCELED` race is
+**structurally impossible**. Post-claim cancel requests follow the state-keyed refund rule below.
+
+### Payout holds
+
+A hold is not a state: it is `FUNDED` plus a `payout_hold_reason` (`fx_drift`, `payability`, or
+`submit_error`) and `payout_held_at`. The submit job sets a hold and stops; the sweep skips held
+rows; ops investigates and releases via [runbooks/payout-holds.md](runbooks/payout-holds.md)
+(clear the column; the sweep resubmits within a minute).
+
+- **`fx_drift`** — the FX submission backstop tripped: live Bridge buy rate drifted more than
+  `FX_MAX_DRIFT_BPS` from the quote's `source_rate`, or the quote is older than
+  `FX_MAX_QUOTE_AGE_MINUTES`. Never submit on unknown or dislocated rates.
+- **`payability`** — destination or recipient not `active`, or no `provider_account_ref`.
+- **`submit_error`** — Bridge rejected the payout with a non-retryable 4xx (422 idempotency
+  mismatch or similar).
+
+A float-ceiling trip is deliberately **not** a hold (self-healing — see the gate section above).
+
+### Payout event mapping (webhook + poll, one processing path)
+
+Bridge transfer events arrive via webhook (`POST /v1/webhooks/bridge`) and via the `payout.poll`
+cron, which synthesizes the same event shape from `GET` responses. Both paths insert into
+`payment_events` (deduped on `(source, external_event_id)`) and are processed by one job:
+
+| Bridge signal | Transition |
+|---|---|
+| payout created (submit job, synchronous) | `FUNDED → SUBMITTED` (+ SUBMITTED ledger batch) |
+| `payment_submitted` | `SUBMITTED → IN_FLIGHT` (no ledger) |
+| `payment_processed` | `IN_FLIGHT → COMPLETED` (+ COMPLETED ledger batch; catches up through `IN_FLIGHT` if a webhook was missed) |
+| `undeliverable` / `error` / `canceled` / `returned` / `refunded` | → `PAYOUT_FAILED` (refund postings are slice 6) |
+| `in_review` | no state change — poller alerts if >1h; a cancel request here is an ops runbook case |
+
+Replays are RPC no-ops; out-of-order events are marked `ignored`.
+
 ## Cancellation window (Reg E)
 
-The 30-minute cancellation right applies only while funds are **not yet delivered**. Because payouts
-are near-instant, the practical window is "until `COMPLETED`," often seconds.
+What the law actually says (12 CFR §1005.34 + CFPB official interpretations, primary-source
+research 2026-07-20): the sender's cancellation right runs 30 minutes from payment and **survives
+until the funds are picked up or deposited** — there is NO exception for "already submitted to
+partner," and no safe harbor. Our disclosure's "unless the funds have already been submitted for
+payout" wording is therefore **stricter than the law allows** — already on the counsel list, and a
+hard gate before slice-7 real money.
 
 - **Clock starts at payment, not at funding clearing.** The 30-min window runs from when the sender
   pays. With ACH (clears in days), the window closes long before funding clears — a user effectively
   **cannot "cancel after clearing."** Cancellation and ACH clearing are different timelines.
-- **Cancellation is low-risk:** it is always pre-delivery, so we refund money we still hold — we never
-  lose funds to a cancellation. The real exposure is post-delivery ACH returns (see Funding reversal).
-- **Cancelable only in `FUNDED`** (before we hand off to Bridge), within 30 min of payment. Once
-  `SUBMITTED` to an instant rail we cannot reliably recall it, so a cancel request after submission
-  resolves via **error resolution** (`UNDER_REVIEW`), not cancellation. Disclosure wording must say
-  cancellation is available until the transfer is submitted for payout — *flag for counsel*.
+- **The accepted tail (immediate payout, decision 2026-07-20):** a timely cancel while
+  `SUBMITTED`/`IN_FLIGHT` legally requires a full refund even though Bridge payouts are
+  uncancelable — a rare, bounded double-pay. Accepted because SPEI deposits in seconds (the right
+  extinguishes almost immediately), the delay is not attacker-farmable, the 3-business-day refund
+  window means the payout resolves first, and per-transfer limits cap the worst case. See
+  [decisions.md](decisions.md).
+- **Slice-6 refund rule, keyed to state:**
+  - cancel at `FUNDED` (pre-claim) → normal cancel (`FUNDED → CANCELED → REFUNDED`);
+  - cancel at `SUBMITTED`/`IN_FLIGHT` → **full refund within 3 business days** — wait for payout
+    resolution first (if the payout fails, Bridge returns principal and the refund costs nothing);
+  - cancel at `COMPLETED` → lawful denial (funds deposited; the right has extinguished);
+  - cancel request while Bridge shows `in_review` → ops runbook case
+    ([runbooks/payout-holds.md](runbooks/payout-holds.md)) — compliance holds can leave funds
+    undeposited >1h, so contact Bridge before refunding.
 - **The button is never the control.** Enabling/disabling cancel in the UI is cosmetic; the API
   re-checks cancelable state on every request. A small UI window is not a vulnerability — server-side
   enforcement is.
-- **Guard the race atomically.** Cancel and payout-submission contend for the same `transfer` row:
-  take a row lock / optimistic-concurrency guard so `FUNDED → CANCELED` commits only if the row is
-  still `FUNDED`, and submission commits only if still `FUNDED`. One wins — no refund-and-deliver
+- **Guard the race atomically.** Cancel and payout-submission contend for the same `transfer` row —
+  the submit claim and the slice-6 cancel contract (guarded UPDATEs on `state = 'FUNDED'` /
+  `submit_attempted_at IS NULL`, above) are that guard. One wins — no refund-and-deliver
   double-spend (TOCTOU).
 - We must still **disclose** the right (receipt/disclosure) even when it expires instantly.
 - **Peer practice (Remitly, Wise):** offer the mandatory 30-min right, tie cancelability to "not yet
   paid out," refund fees + taxes within 3 business days; some add a longer courtesy window while
-  pending. Our model matches this.
+  pending. Our model matches this in product terms; the refund rule above is what keeps it lawful.
 - The protection that survives delivery is **error resolution** (§1005.33) → `UNDER_REVIEW`, a
   separate path from cancellation.
 
@@ -136,8 +217,10 @@ are near-instant, the practical window is "until `COMPLETED`," often seconds.
 - Every external call that moves money carries an **idempotency key** keyed to the transfer +
   transition, so the worker can retry safely: `FUNDED → SUBMITTED` (Bridge payout), refunds, and
   `PENDING_PAYMENT → FUNDED` (Stripe capture).
-- Transitions are driven by the Postgres queue with the transactional-outbox pattern: the state
-  change and the "do the next step" job commit in the same DB transaction.
+- Transitions are driven by pg-boss with **enqueue-after-commit + sweep healing**, not a
+  transactional outbox (PostgREST RPC and pg-boss can't share a transaction): the state change
+  commits, then the job is enqueued; jobs are idempotent replays, so a lost enqueue costs at most
+  ~1 min of sweep latency, never correctness. See [decisions.md](decisions.md), 2026-07-20.
 - Webhooks (Stripe, Bridge) are the source of truth for `FUNDED`, `IN_FLIGHT`, `COMPLETED`,
   `PAYOUT_FAILED`; handlers are idempotent (providers redeliver).
 
@@ -174,6 +257,10 @@ accepted now because users are trusted.
    *action* is available only in `FUNDED` (before Bridge submission) — once `SUBMITTED` to an
    instant rail, cancellation is no longer reliable and routes through `UNDER_REVIEW` instead.
    Don't over-build the UX. Matches Remitly/Wise.
+   *Superseded 2026-07-20:* the "routes through `UNDER_REVIEW`" part was wrong on the law — a
+   timely cancel post-submission requires a full refund, not error resolution. See the
+   Cancellation section's state-keyed refund rule and [decisions.md](decisions.md). The
+   `FUNDED`-only cancel *action* stands (now expressed as the slice-6 claim contract).
 2. **`FUNDING_REVERSED`:** manual ops/recovery for MVP. Risk engine (above) comes later.
 3. **Funding rail:** **ACH first, card second.** Accepts the ~60-day ACH return exposure (fine at
    trusted-user scale; neutralized later by the `funding_cleared` gate + risk engine).

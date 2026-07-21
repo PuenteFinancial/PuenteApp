@@ -53,6 +53,10 @@ export interface TransferRow {
   payment_at: string | null
   cancelable_until: string | null
   funding_payment_ref: string | null
+  provider_transfer_ref: string | null
+  payout_hold_reason: string | null
+  payout_held_at: string | null
+  submit_attempted_at: string | null
   completed_at: string | null
   created_at: string
 }
@@ -66,7 +70,7 @@ export interface DisclosureRow {
   presented_at: string
 }
 
-interface LedgerEntryJson {
+export interface LedgerEntryJson {
   account_code: string
   direction: 'debit' | 'credit'
   amount_minor: number
@@ -99,6 +103,28 @@ export function fundedLedgerEntries(transfer: {
     })
   }
   return entries
+}
+
+// The COMPLETED batch (ledger-rules.md): Bridge confirmed the SPEI deposit —
+// extinguish the payable to the recipient against what Bridge owed us.
+// S = quoted send principal; slippage was already recognized at SUBMITTED.
+export function completedLedgerEntries(transfer: {
+  send_amount_minor: number
+}): LedgerEntryJson[] {
+  return [
+    {
+      account_code: 'transfer_payable',
+      direction: 'debit',
+      amount_minor: transfer.send_amount_minor,
+      currency: 'USD',
+    },
+    {
+      account_code: 'due_from_bridge',
+      direction: 'credit',
+      amount_minor: transfer.send_amount_minor,
+      currency: 'USD',
+    },
+  ]
 }
 
 export async function createTransferFromQuote(input: {
@@ -135,6 +161,7 @@ export async function transitionTransfer(input: {
   paymentAt?: Date
   cancelableUntil?: Date
   fundingPaymentRef?: string
+  providerTransferRef?: string
 }): Promise<TransferRow> {
   const { data, error } = await supabaseAdmin.rpc('transition_transfer', {
     p_transfer_id: input.transferId,
@@ -148,6 +175,7 @@ export async function transitionTransfer(input: {
     p_payment_at: input.paymentAt?.toISOString() ?? null,
     p_cancelable_until: input.cancelableUntil?.toISOString() ?? null,
     p_funding_payment_ref: input.fundingPaymentRef ?? null,
+    p_provider_transfer_ref: input.providerTransferRef ?? null,
   })
   if (error) throwMapped(error.message, 'transition_transfer')
   const row = (Array.isArray(data) ? data[0] : data) as TransferRow | undefined

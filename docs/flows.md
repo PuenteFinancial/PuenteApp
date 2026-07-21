@@ -38,7 +38,7 @@ sequenceDiagram
     ST-->>API: webhook: payment initiated/captured
     API->>DB: payment_events (dedupe) + enqueue job — 200 fast
     W->>DB: PENDING_PAYMENT → FUNDED (+ FUNDED ledger post, payment_at set)
-    W->>DB: gate: funding_cleared policy + float ceiling + cancel window
+    W->>DB: gate: payability + float ceiling + FX backstop, then atomic claim
     W->>BR: POST /v0/transfers (idempotency key = transfer)
     W->>DB: FUNDED → SUBMITTED (+ SUBMITTED ledger post)
 
@@ -49,9 +49,10 @@ sequenceDiagram
     W->>DB: funding_cleared = true (+ ACH-clears ledger post)
 ```
 
-Key properties: the state change and the "next step" job commit in one DB transaction (outbox);
-every external money call carries an idempotency key; webhooks are the source of truth for
-`FUNDED`, `IN_FLIGHT`, `COMPLETED`.
+Key properties: jobs are enqueued after the state change commits and are idempotent replays — a
+lost enqueue is healed by the 1-min sweep, never a correctness problem (enqueue-after-commit, not a
+transactional outbox; see decisions.md 2026-07-20); every external money call carries an
+idempotency key; webhooks are the source of truth for `FUNDED`, `IN_FLIGHT`, `COMPLETED`.
 
 ## 2. Payout webhook (Bridge → us)
 
@@ -148,20 +149,23 @@ sequenceDiagram
 
     S->>API: POST /v1/transfers/:id/cancel (Idempotency-Key)
     API->>DB: SELECT ... FOR UPDATE (row lock on transfer)
-    alt state = FUNDED and now() < cancelable_until
-        API->>DB: FUNDED → CANCELED (commits only if still FUNDED — TOCTOU guard)
+    alt state = FUNDED and submit_attempted_at is null
+        API->>DB: FUNDED → CANCELED (commits only if still FUNDED and unclaimed — TOCTOU guard)
         API-->>S: 200 canceled
         W->>DB: CANCELED ledger post (ACH in flight vs not — two variants)
         W->>ST: refund / release payment
         W->>DB: CANCELED → REFUNDED (+ refund paid post)
         W-->>S: push: refunded (full amount incl. fee, within 3 business days)
-    else already SUBMITTED or window closed
-        API-->>S: 409 transfer_not_cancelable → offer dispute path (§3)
+    else already claimed / SUBMITTED / IN_FLIGHT
+        API-->>S: state-keyed refund path (timely Reg E cancel → full refund; see below)
     end
 ```
 
-The same row lock protects the other side: the worker's `FUNDED → SUBMITTED` submission commits only
-if the row is still `FUNDED` — cancel and payout can never both win.
+The same row lock protects the other side: the submit job's atomic claim (`submit_attempted_at`,
+guarded on `state = 'FUNDED'`) and the cancel guard (`submit_attempted_at IS NULL`) serialize on the
+row — cancel and payout can never both win. A timely §1005.34 cancel that arrives after the claim is
+NOT a 409: the right survives until pickup/deposit, so it is honored as a full refund once the
+payout resolves (state-keyed refund rule, slice 6 — see transfer-state-machine.md).
 
 `PAYOUT_FAILED → REFUNDED` (Bridge can't deliver) follows the same refund tail: Bridge returns
 principal → recognize `refunds_payable` (full amount incl. fee) → pay refund → notify sender.

@@ -11,7 +11,7 @@ Everything to settle or build before we write feature code. We tackle these one 
 
 ## Decisions locked
 - **Stack:** Supabase (Postgres + Auth) + Railway. API-first — the Fastify API is the boundary so infra stays swappable.
-- **Async layer:** Postgres-backed job queue (pg-boss or Graphile Worker) + transactional outbox + idempotency keys. `pg_cron` / Railway cron for schedules. No Redis, no SQS for MVP.
+- **Async layer:** Postgres-backed job queue (pg-boss) + enqueue-after-commit with sweep healing (outbox rejected — decisions.md 2026-07-20) + idempotency keys. pg-boss cron for schedules. No Redis, no SQS for MVP.
 - **Rails:** Bridge is the MTL / regulated entity; handles FX, stablecoin orchestration, SPEI payout, and KYC/OFAC. We build the app on top.
 - **Funding source = abstraction:** card/ACH now, LOC later. Never hardcoded.
 - **Remittance and lending are separate stacks** to start.

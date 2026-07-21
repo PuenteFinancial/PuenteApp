@@ -26,7 +26,7 @@ flowchart TB
 
     subgraph supabase [Supabase]
         auth["Supabase Auth<br/>(phone OTP sessions)"]
-        pg[("Postgres<br/>app tables + ledger +<br/>job queue + outbox")]
+        pg[("Postgres<br/>app tables + ledger +<br/>job queue (pg-boss)")]
     end
 
     subgraph providers [Providers — server-side only]
@@ -71,7 +71,7 @@ and PostHog attach to every service and are omitted from the edge list for reada
 | Fastify API | Railway | The boundary. `/v1` routes with schema validation, auth middleware (default-on), audit log, rate limiting (`TRUST_PROXY_HOPS=1`). Uses the Supabase service role (RLS is defense-in-depth behind it). |
 | Worker | Railway | Executes state-machine transitions from the Postgres job queue (pg-boss): the `FUNDED → SUBMITTED` gate + float-ceiling check, Bridge submission with idempotency keys, ledger posting, refunds. |
 | Cron | Railway | Daily reconciliation (ledger vs Stripe vs Bridge), stale-`PENDING_PAYMENT` sweep (30-min no-webhook → `PAYMENT_FAILED`), quote expiry, idempotency-key purge. |
-| Postgres (Supabase) | Supabase (staging + prod projects) | App tables, double-entry ledger, job queue, and outbox in **one database** — a state change and its "do the next step" job commit in the same transaction. RLS enabled everywhere, deny-by-default. |
+| Postgres (Supabase) | Supabase (staging + prod projects) | App tables, double-entry ledger, and job queue (pg-boss) in **one database**. Jobs are enqueued after the state change commits and are idempotent; a 1-min sweep re-enqueues anything lost (enqueue-after-commit, not a transactional outbox — decisions.md 2026-07-20). RLS enabled everywhere, deny-by-default. |
 | Supabase Auth | Supabase | Phone OTP (Twilio SMS) → JWT sessions; 30-day rolling refresh. |
 
 ## Provider seams (all behind interfaces)
