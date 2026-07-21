@@ -21,10 +21,14 @@ export default function Hero() {
           <p className="lede">{t.hero.sub}</p>
           <div className="hero-cta">
             <a className="btn btn--accent btn--lg" href="/waitlist">{t.hero.cta1}</a>
+            <div className="hero-visual hero-visual--mobile">
+              <span className="hero-glow" />
+              <img src="/190shots_so.png" alt="Puente app" className="hero-phone-img" width={1080} height={1920} />
+            </div>
             <a className="btn btn--ghost-light btn--lg" href="#remittances">{t.hero.cta2} →</a>
           </div>
         </div>
-        <div className="hero-visual">
+        <div className="hero-visual hero-visual--desktop">
           <span className="hero-glow" />
           <img src="/190shots_so.png" alt="Puente app" className="hero-phone-img" width={1080} height={1920} fetchPriority="high" />
         </div>

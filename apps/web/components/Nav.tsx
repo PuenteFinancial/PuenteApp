@@ -23,7 +23,7 @@ export default function Nav() {
       <nav className={`nav${scrolled ? ' nav--scrolled' : ''}`}>
         <div className="nav-inner">
           <Link href="/" aria-label="Puente Financial — home">
-            <img src="/logo-hero.svg" alt="Puente" className="nav-logo" />
+            <img src="/logo-hero.svg" alt="Puente" className="nav-logo" width={114} height={42} />
           </Link>
           <div className="nav-links">
             <a href="#remittances">{t.nav.remit}</a>
