@@ -82,7 +82,7 @@ describe.skipIf(!runDb)('recipients + payout_destinations (integration, local Su
     await db.query(
       `truncate table public.ledger_entries, public.ledger_transactions,
        public.idempotency_keys, public.disputes, public.disclosures,
-       public.transfer_transitions, public.transfers,
+       public.payment_events, public.transfer_transitions, public.transfers,
        public.quotes, public.payout_destinations, public.recipients`,
     )
   })
