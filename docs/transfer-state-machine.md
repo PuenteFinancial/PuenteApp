@@ -1,6 +1,6 @@
 # Transfer State Machine — USD → MXN Remittance
 
-**Date:** 2026-06-25 · **Updated:** 2026-07-20 (slice 5 — immediate payout, submit claim contract, payout holds)
+**Date:** 2026-06-25 · **Updated:** 2026-07-21 (slice 5 — immediate payout, submit claim contract, payout holds, Bridge event mapping)
 **Status:** v2 — matches the slice-5 implementation
 
 The lifecycle of a single remittance transfer, from an accepted quote to delivery (or refund).
@@ -91,10 +91,10 @@ policy setting:
 - **Later policy:** `WAIT_FOR_CLEARING = true`. `FUNDED → SUBMITTED` requires `funding_cleared = true`
   (ACH settled). Flipping the policy flag is the only change — no structural rework.
 - **The gate is the mechanism; the risk engine is the policy.** Later, `WAIT_FOR_CLEARING` stops being
-  one global flag and becomes a **per-transfer verdict from the risk engine** (user tenure, amount,
-  velocity, account-verification signals) — instant for seasoned trusted users, hold-for-clearing for
-  new/large/risky transfers. The gate code is unchanged; it reads a per-transfer decision instead of a
-  constant.
+  one global flag and becomes a **per-transfer verdict from the risk engine** — the gate code is
+  unchanged; it reads a per-transfer decision instead of a constant. The full risk-engine roadmap
+  (verify-at-funding, risk-gated delivery, limits, recovery, reserves, rail mix) lives under
+  **Funding reversal — now vs later** below — not restated here.
 - **Float ceiling (crude aggregate version, live in slice 5):** the instant policy fronts cash
   before ACH clears, so the submit job checks the **aggregate `funding_receivable` balance** (the
   ledger already computes it) against the `FLOAT_CEILING_MINOR` env cap before creating a Bridge
@@ -167,7 +167,8 @@ cron, which synthesizes the same event shape from `GET` responses. Both paths in
 | payout created (submit job, synchronous) | `FUNDED → SUBMITTED` (+ SUBMITTED ledger batch) |
 | `payment_submitted` | `SUBMITTED → IN_FLIGHT` (no ledger) |
 | `payment_processed` | `IN_FLIGHT → COMPLETED` (+ COMPLETED ledger batch; catches up through `IN_FLIGHT` if a webhook was missed) |
-| `undeliverable` / `error` / `canceled` / `returned` / `refunded` | → `PAYOUT_FAILED` (refund postings are slice 6) |
+| `undeliverable` / `error` / `canceled` / `returned` / `refunded` / `refund_in_flight` | → `PAYOUT_FAILED` (refund postings are slice 6) |
+| `refund_failed` | → `PAYOUT_FAILED` + **ops Sentry alert** — principal stuck at Bridge (stuck-transfer runbook) |
 | `in_review` | no state change — poller alerts if >1h; a cancel request here is an ops runbook case |
 
 Replays are RPC no-ops; out-of-order events are marked `ignored`.

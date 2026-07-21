@@ -25,7 +25,7 @@ funding: cancel the submission if still gated, refund path if needed, no loss.)*
    - **R05/R07/R10/R11 (unauthorized/revoked)** — treat as possible fraud or account takeover.
    - **R02/R03/R04 (closed/invalid account)** — stale bank link; verify identity before accepting a
      new funding source.
-3. **Freeze the blast radius:** suspend further sends for the user (`profiles.status = suspended` or
+3. **Freeze the blast radius:** suspend further sends for the user (`users.status = suspended` or
    a send-block flag) until resolved. Check for other in-flight transfers from the same user — if any
    are still pre-`SUBMITTED`, hold them at the gate.
 4. If unauthorized-coded: security sweep — `sign_in_events` for the account, rotate sessions, and

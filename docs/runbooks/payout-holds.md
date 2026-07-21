@@ -57,7 +57,13 @@ The pre-submission joined check failed: `payout_destinations.status != 'active'`
 3. Only release once the joined condition would pass; otherwise the submit job will re-hold
    immediately.
 
-## `submit_error` — Bridge rejected the payout (non-retryable 4xx)
+## `submit_error` — payout submission held for engineering
+
+Three distinct failures set `submit_error`. The Sentry `payout_hold` context tells them apart —
+`statusCode` for (a), a `cause` string for (b) and (c). None is a routine ops release; understand
+(and usually fix) the underlying cause before clearing the hold.
+
+### (a) Bridge rejected the payout — non-400 4xx (`statusCode`)
 
 A 422 (idempotency mismatch: same `Idempotency-Key`, different body) or other non-400 4xx. 400s
 (drained wallet, concurrent serialization) retry automatically and never set this hold.
@@ -69,6 +75,35 @@ A 422 (idempotency mismatch: same `Idempotency-Key`, different body) or other no
    re-send the same mismatched request.
 3. Other 4xx: diagnose against Bridge API docs/support (e.g. below the $2.00 USD MXN destination
    minimum, endorsement missing). Fix the cause, then release.
+
+### (b) Recovery re-POST found no destination ref (`cause: recovery_missing_account_ref`)
+
+A crash-recovery run (the transfer was already claimed — `submit_attempted_at` set — then the
+worker died before the SUBMITTED transition) re-read the destination to rebuild the byte-identical
+Bridge body, and `payout_destinations.provider_account_ref` was gone. Payability was checked
+pre-claim, so the ref disappeared *after* the first attempt.
+
+1. Inspect the destination row: why is `provider_account_ref` NULL now when it was set at claim?
+   (destination archived/re-created, Bridge external account deleted, a data fix gone wrong).
+2. Restore the correct `provider_account_ref` — re-create the Bridge external account if needed
+   (`services/bridge.ts` `createExternalAccount`).
+3. Release only once the ref is present; the recovery re-POST reuses the original
+   `Idempotency-Key`, so Bridge returns the existing transfer if one was already created.
+
+### (c) Bridge `source.amount` failed strict 2-dp parse (`cause: source_amount_parse`)
+
+**Engineering incident, not an ops release — money moved with no matching ledger posting.** The
+Bridge payout **was created** (a `bridgeTransferId` exists), but its `source.amount` did not parse
+as an exact 2-dp decimal, so the job refused to guess a ledger amount and held instead of
+transitioning to `SUBMITTED`. A second, `error`-level Sentry event (fingerprint
+`bridge-source-amount-precision`, `bridge_amount` context with `bridgeTransferId` + the raw
+`sourceAmount`) accompanies the hold. This means our model of Bridge is wrong.
+
+1. Do **not** just release — the re-POST returns the same Bridge transfer and re-hits the same
+   parse failure.
+2. Escalate to engineering with the `bridge_amount` context. Reconcile the actual USDC draw against
+   the SUBMITTED ledger expectation, fix `parseDecimalToMinor` / the Bridge model
+   (`services/payouts.ts`), and complete the transition deliberately.
 
 ## Cancel request during Bridge `in_review`
 

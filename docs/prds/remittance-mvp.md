@@ -7,6 +7,9 @@ from the web dashboard, with every cent recorded in a double-entry ledger, Reg E
 right moments, and a state machine that can't lie. Definition of done: **one real send through the
 product** (~$20, Joshua → own test recipient), with the books balanced.
 
+**Status (2026-07-21):** Slices 1–5 shipped; slice 5 (payout + async layer) promoted to production
+2026-07-21. Slices 6–8 (cancel/refund + receipts, send UI + pilot send, ops floor) remain.
+
 **Context:** Everything before this was preparation. The design docs (`erd.md`,
 `transfer-state-machine.md`, `ledger-rules.md`, `api-contract.md`, `flows.md`) are reviewed and
 cross-consistent. The Bridge production PoC moved real money both legs (2026-07-10). The payout
@@ -29,8 +32,8 @@ required before anyone but Joshua uses it.
 5. **Payout + async layer** — pg-boss worker, `funding_cleared` gate, Bridge payout, webhooks + polling.
 6. **Cancel/refund + receipts** — 30-min cancel window, refund postings, Reg E receipt.
 7. **Web send UI + pilot send** — the dashboard send flow end-to-end, then the real ~$20 send.
-8. **Ops floor** — reconciliation cron, stuck-transfer alerts, float ceiling, per-user
-   exposure cap + velocity checks.
+8. **Ops floor** — reconciliation cron, stuck-transfer alerts, per-user exposure cap + velocity
+   checks. (The crude aggregate float ceiling already shipped early, in slice 5 — see §7.)
 
 ### Decisions locked
 
@@ -54,8 +57,9 @@ required before anyone but Joshua uses it.
   earlier "no Puente-imposed limits" call). The instant-front policy makes them load-bearing,
   not risk-engine polish: ACH has no balance check at initiation, and a sender's bank balance
   doesn't reflect in-flight debits — only our ledger knows the in-flight exposure. They ship in
-  slice 8 alongside the **float ceiling** (config values, authoritative check at
-  `FUNDED → SUBMITTED`) — see §10 for the controls and rationale.
+  **slice 8** (config values, authoritative check at `FUNDED → SUBMITTED`) — see §10 for the
+  controls and rationale. The **crude aggregate float ceiling** they were originally paired with
+  shipped early, in slice 5 (see §7).
 
 ### Where reality diverges from the design docs
 
@@ -144,7 +148,7 @@ Enforcement **in the database**, not just the service:
 - UPDATE/DELETE on posted rows fails at the DB.
 - The **worked example from ledger-rules.md** runs end-to-end: FUNDED, SUBMITTED (with
   replenishment), COMPLETED, ACH-clears → assert final balances and the conservation invariant
-  (`cash +1.50 = fee_revenue 2 − provider_fees 0.50`).
+  (`cash +1.92 = fee_revenue 2 − fx_slippage 0.08` — see ledger-rules.md §Happy path).
 - Balance math correct for both normal-balance directions.
 
 ### Guardrails
@@ -210,7 +214,8 @@ receiver (signature-verified — same RSA scheme as the KYC webhook — dedupe o
 `(source, external_event_id)`, ack fast, process async), the `FUNDED → SUBMITTED` job (Bridge
 payout with fixed MXN `destination.amount`; the synchronous `source.amount` draw books slippage
 inside the SUBMITTED batch per ledger-rules), `IN_FLIGHT`/`COMPLETED`/`PAYOUT_FAILED` transitions,
-polling fallback for sandbox/dev.
+a polling reconciliation cron (missed-webhook backstop in all envs; the primary path in sandbox,
+where webhooks stall).
 
 - `funding_cleared` gate wired as config, default off (instant payout).
 - **FX submission backstop (decided 2026-07-18, required):** before the `FUNDED → SUBMITTED`
@@ -222,6 +227,10 @@ polling fallback for sandbox/dev.
   behind a float-ceiling trip / dry treasury / downed worker. Fires ~never by design; the
   50 bps buffer prices the normal 15-min quote window. (A pre-quote volatility pause was
   considered and deferred to slice 8.)
+- **Crude aggregate float ceiling (decision 4) shipped here:** before `FUNDED → SUBMITTED` the
+  submit job pauses while `funding_receivable` ≥ `FLOAT_CEILING_MINOR` — it sets **no hold**, the
+  1-min sweep retries as the balance drains (self-healing backpressure). The per-user exposure
+  controls + velocity checks it anticipates remain slice 8 (§10).
 - Treasury wallet pre-funded manually for MVP (runbook step); replenishment posting exists from
   slice 1. Treasury wallet is owned by the **Puente Financial business customer** (KYB in
   progress as of 2026-07-15), not a personal customer. Shared-wallet cross-customer sourcing
@@ -294,10 +303,11 @@ history list. en + es throughout.
 
 Before anyone but Joshua sends: daily reconciliation job (ledger vs. Stripe vs. Bridge via
 `payment_events` + external refs — **adopt or rewrite the proposal runbook first**, it's
-undecided), Sentry alert on transfers stuck in a non-terminal state past a threshold, the **float
-ceiling** at `FUNDED → SUBMITTED` reading `getAccountBalance('funding_receivable')`, the
+undecided), Sentry alert on transfers stuck in a non-terminal state past a threshold, the
 **per-user exposure controls** below, and the minimal ops capability the runbooks require
-(scripts over console).
+(scripts over console). The **crude aggregate float ceiling** at `FUNDED → SUBMITTED` (reading
+`getAccountBalance('funding_receivable')`) already shipped in slice 5 (§7); slice 8 layers the
+per-user controls onto the same checkpoint.
 
 ### Per-user exposure controls (added 2026-07-17)
 
@@ -362,7 +372,7 @@ Supabase PITR toggle (before widening) · Twilio spend cap + per-phone OTP limit
 - Design docs: `docs/erd.md` · `docs/transfer-state-machine.md` · `docs/ledger-rules.md` ·
   `docs/api-contract.md` · `docs/flows.md` · `docs/architecture.md`
 - Spikes/PoC: production two-leg PoC 2026-07-10; topology + slippage-timing spike 2026-07-13
-  (PR #65). Fee resolution: ledger-rules.md §Provider-fee placement.
+  (PR #65). Fee resolution: ledger-rules.md §FX & provider economics.
 - Sandbox artifacts for slice 2+ testing: customer `d4305c9a…`, MXN external account
   `def2c782-…7329` (dummy CLABE), wallet `4a810de0-…ed29` (base) — see session memory.
 - Prior PRDs: `user-onboarding.md`, `account-lifecycle.md` (the slice-per-PR pattern this follows).

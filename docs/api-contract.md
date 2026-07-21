@@ -1,7 +1,7 @@
 # API Contract (v1) — USD → MXN Remittance MVP
 
-**Date:** 2026-06-26
-**Status:** v1 draft for review
+**Date:** 2026-07-21
+**Status:** v1 — slices 1–5 shipped (payout + async layer live); slices 6–8 pending
 **Pairs with:** `transfer-state-machine.md`, `ledger-rules.md`, `erd.md`
 
 The Fastify `/v1` surface for the send-money flow. The mobile client talks **only** to this API; the
@@ -53,7 +53,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 401 | `unauthorized` | Missing/expired JWT |
 | 403 | `forbidden` | Not the owner of the resource |
 | 403 | `kyc_required` | Sender KYC not `approved` |
-| 403 | `limit_exceeded` | User limit or float ceiling hit |
+| 403 | `limit_exceeded` | Per-user limit hit (arrives with slice-8 caps) |
 | 404 | `not_found` | Unknown resource |
 | 409 | `conflict` | Illegal state transition |
 | 409 | `idempotency_conflict` | Idempotency-Key reused with different body |
@@ -77,25 +77,41 @@ input + response schema validation; authenticated routes write an audit-log entr
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| GET | `/v1/me` | ✓ | Current profile incl. `kyc_status`, `risk_tier`. |
-| PATCH | `/v1/me` | ✓ | Update `full_name`, `preferred_locale`. |
-| POST | `/v1/consents` | ✓ | Body `{ type, doc_version }` — `tos`\|`privacy`\|`esign`\|`tcpa_sms`. Append-only. |
-| GET | `/v1/consents` | ✓ | List grants/revocations. |
+| GET | `/v1/users/me` | ✓ | Current profile: `firstName`, `lastName`, `email`, `kycStatus`, `bridgeCustomerId`. |
+| PATCH | `/v1/users/me` | ✓ | Update `firstName`, `lastName`, `email` (all required). |
 
-## KYC (Sumsub, behind `IdentityVerifier`)
+**Consents** are not a separate API surface yet: consent timestamps are captured on `users` during
+onboarding. The append-only `/v1/consents` endpoints + `consents` table are **deferred** until a
+consent needs versioning we don't have (see erd.md, PRD "Where reality diverges").
+
+## KYC (Bridge-hosted, behind `IdentityVerifier`)
+
+KYC is **Bridge-hosted** (Persona under the hood): the sender verifies in Bridge's hosted flow, not
+a Puente-owned SDK. There is **no `/v1/kyc/*` surface** — the API mints Bridge links from the
+onboarding routes and reads state back off `users.kyc_status` (decided 2026-07-13; see decisions.md
+and the PRD "Where reality diverges").
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/v1/kyc/session` | ✓ | Creates Sumsub applicant; returns SDK access token for the client. |
-| GET | `/v1/kyc/status` | ✓ | `none`\|`pending`\|`approved`\|`rejected`\|`review`. |
+| POST | `/v1/users/me/tos-link` | ✓ | Mints a server-scoped Bridge **ToS acceptance** link (`{ url }`); the sender accepts Bridge's terms before verification. |
+| POST | `/v1/users/me/kyc-link` | ✓ | Returns the **Bridge-hosted KYC link** (`{ url }`) for a `signed_agreement_id`; requests the `spei` (MXN payout) endorsement and creates the Bridge customer on first call. Requires `first_name`/`last_name`/`email` on the profile. |
+| POST | `/v1/users/me/kyc-link/retry` | ✓ | Re-issues the KYC link after a rejection (retry-counted). |
+| GET | `/v1/users/me/kyc-rejection` | ✓ | Rejection detail for a `rejected` sender. |
 
-KYC result arrives via the Sumsub webhook (below), not a client call.
+`kyc_status` (`not_started`\|`pending`\|`approved`\|`rejected`\|`manual_review`) is read via
+`GET /v1/users/me`; the gate raises `kyc_required` (403) until it is `approved`. The result
+**arrives via the Bridge webhook `customer.*` branch** (`customer.created`/`updated`/
+`status_transitioned` → `users.kyc_status`; see Webhooks), never a client call.
+
+**Deferred (not built):** the `/v1/kyc/*` endpoints, the Sumsub webhook, and the ERD's `kyc_records`
+table — Sumsub was superseded by Bridge-hosted KYC for the MVP. `IdentityVerifier` is retained only
+as the swap-seam if a second KYC provider is ever added.
 
 ## Recipients & payout destinations
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/v1/recipients` | ✓ | Body `{ full_name, relationship, country }`. |
+| POST | `/v1/recipients` | ✓ | Body `{ firstName, lastName, relationship, country }`. |
 | GET | `/v1/recipients` | ✓ | List (owner-scoped). |
 | GET | `/v1/recipients/:id` | ✓ | One. |
 | PATCH | `/v1/recipients/:id` | ✓ | Update / `archive`. |
@@ -164,6 +180,10 @@ reconciliation but never cross the wire.
   "fxRate": "19.9997",
   "fundingSourceType": "ach",
   "fundingCleared": false,
+  "paymentAt": null,            // set at FUNDED (funding captured/initiated)
+  "cancelableUntil": null,      // set at FUNDED; close of the 30-min cancel window
+  "providerTransferRef": null,  // the Bridge transfer id, set at SUBMITTED
+  "completedAt": null,          // set when Bridge confirms the SPEI deposit
   "disclosure": { "id": "uuid", "type": "prepayment", "locale": "es", "presentedAt": "..." }
 }
 ```
@@ -199,7 +219,7 @@ webhook** drives `FUNDED`.
 | Method | Path | Drives |
 |---|---|---|
 | POST | `/v1/webhooks/funding` | `FUNDED` (payment captured/initiated), `PAYMENT_FAILED`, `funding_cleared` flag (ACH settled), `FUNDING_REVERSED` (ack + log only until slice 5/6). From the active `FundingProcessor` — **mock** today (Stripe-shaped HMAC signature), **Stripe** in slice 4b. 503 `not_configured` unless the processor's webhook secret is set — the mock secret is never provisioned in production (the lock). |
-| POST | `/v1/webhooks/bridge` | `IN_FLIGHT`, `COMPLETED`, `PAYOUT_FAILED` (slice 5). Today: KYC customer status. |
+| POST | `/v1/webhooks/bridge` | `IN_FLIGHT`, `COMPLETED`, `PAYOUT_FAILED` (slice 5). `transfer.*` events are recorded into `payment_events` (dedupe on `(source, external_event_id)`) and enqueued to `payment-event.process`, which drives those transitions async. KYC customer status (`customer.created`/`updated`/`status_transitioned`) and the `customer.deleted` unlink are one branch among several. |
 
 Slice-4 posture: no worker/queue yet, so the funding webhook transitions **synchronously** via
 `transition_transfer` (state + transition row + ledger batch in one DB transaction; 500 on

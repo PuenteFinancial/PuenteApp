@@ -1,7 +1,7 @@
 # Data Model / ERD — USD → MXN Remittance MVP
 
-**Date:** 2026-07-02
-**Status:** v1 draft for review
+**Date:** 2026-07-02 · **Updated:** 2026-07-21 (slice 5 — payout hold/claim columns, payment_events inbox)
+**Status:** Current through slice 5 (shipped + promoted to prod)
 **Pairs with:** `transfer-state-machine.md`, `ledger-rules.md`
 
 The schema behind the send-money flow. Designed for the full domain even though the MVP exercises a
@@ -19,21 +19,24 @@ slice, so the lending stack and richer risk controls slot in later without migra
 - **Access model: pure API.** The Fastify API uses the Supabase service role and bypasses RLS, so RLS
   is a defense-in-depth backstop, not the primary control. Clients never touch the DB directly.
 - **Append-only tables** (no UPDATE/DELETE — revoke at the role level): `ledger_transactions`,
-  `ledger_entries`, `transfer_transitions`, `payment_events`, `disclosures`, `audit_log`,
+  `ledger_entries`, `transfer_transitions`, `disclosures`, `audit_log`,
   and `consents` (grants/revocations are new rows).
+- **`payment_events`** is the **status-mutable event inbox**: its raw `payload` is immutable, but
+  `status` / `processed_at` / `error` are updated in place as the worker processes each event (it
+  carries a `moddatetime` `updated_at` trigger) — so it is **not** append-only.
 
 ## Relationships
 
 ```mermaid
 erDiagram
-    auth_users         ||--||  profiles            : has
-    profiles           ||--o{  consents            : grants
-    profiles           ||--o{  kyc_records         : verifies
-    profiles           ||--o{  recipients          : owns
-    profiles           ||--o{  quotes              : requests
-    profiles           ||--o{  transfers           : sends
-    profiles           ||--o{  user_limits         : limited_by
-    profiles           ||--o{  disputes            : files
+    auth_users         ||--||  users               : has
+    users              ||--o{  consents            : grants
+    users              ||--o{  kyc_records         : verifies
+    users              ||--o{  recipients          : owns
+    users              ||--o{  quotes              : requests
+    users              ||--o{  transfers           : sends
+    users              ||--o{  user_limits         : limited_by
+    users              ||--o{  disputes            : files
     recipients         ||--o{  payout_destinations : has
     payout_destinations||--o{  quotes              : destination
     payout_destinations||--o{  transfers           : destination
@@ -49,19 +52,19 @@ erDiagram
 
 ## Identity & consent
 
-### profiles  (1:1 with `auth.users`)
+### users  (1:1 with `auth.users`)
 App-level user record; `auth.users` (Supabase-managed) holds phone/email/auth.
 - `id` UUID PK **= auth.users.id** (FK)
-- `full_name` TEXT *(PII)*
-- `preferred_locale` TEXT — `en` | `es`
+- `first_name` / `last_name` TEXT *(PII)*
+- `preferred_language` TEXT — `en` | `es`
 - `status` TEXT — `active` | `suspended` | `closed`
-- `kyc_status` TEXT — `none` | `pending` | `approved` | `rejected` (denormalized from latest kyc_record)
+- `kyc_status` TEXT — `not_started` | `pending` | `approved` | `rejected` | `manual_review` (set by the Bridge webhook `customer.*` branch; `kyc_records` is deferred)
 - `risk_tier` TEXT — `trusted` | `standard` | `elevated` (drives the funding gate later)
-- `provider_customer_ref` TEXT UNIQUE — Bridge customer id; set after KYC approval; used as `on_behalf_of` on transfers. Nullable until created.
+- `bridge_customer_id` TEXT UNIQUE — Bridge customer id; set after KYC approval; used as `on_behalf_of` on transfers. Nullable until created.
 - **RLS:** owner reads/updates own row.
 
 ### consents  *(append-only)*
-- `user_id` FK → profiles
+- `user_id` FK → users
 - `type` TEXT — `tos` | `privacy` | `esign` | `tcpa_sms`
 - `doc_version` TEXT — exact version agreed to
 - `granted_at` / `revoked_at` timestamptz
@@ -70,10 +73,12 @@ App-level user record; `auth.users` (Supabase-managed) holds phone/email/auth.
 
 ## KYC
 
-### kyc_records
-We perform KYC via **Sumsub** and hand the result to Bridge; wrapped behind the `IdentityVerifier`
-interface. Store **minimal** result + the Sumsub reference, not raw documents.
-- `user_id` FK → profiles
+### kyc_records  *(deferred — not built)*
+**Shipped KYC is Bridge-hosted** (Persona), tracked by `users.kyc_status` — this table is **not
+built** (decided 2026-07-13; see decisions.md + api-contract). Retained as the future shape if KYC
+ever moves to a dedicated provider (e.g. Sumsub) behind the `IdentityVerifier` interface: store
+**minimal** result + the provider reference, not raw documents.
+- `user_id` FK → users
 - `provider` TEXT — `sumsub`
 - `provider_ref` TEXT — Sumsub applicant id
 - `status` TEXT — `pending` | `approved` | `rejected` | `review`
@@ -86,8 +91,8 @@ interface. Store **minimal** result + the Sumsub reference, not raw documents.
 
 ### recipients  (the person)
 A sender's saved recipients. Built for multi-country, multi-method payouts.
-- `user_id` FK → profiles (owner/sender)
-- `full_name` TEXT *(recipient PII)*
+- `user_id` FK → users (owner/sender)
+- `first_name` / `last_name` TEXT *(recipient PII)*
 - `relationship` TEXT
 - `country` TEXT — ISO-3166 (e.g. `MX`)
 - `status` TEXT — `active` | `archived` (never hard-deleted)
@@ -136,6 +141,9 @@ slippage (see ledger `fx_slippage`).
 - `disclosure_accepted_at` timestamptz — when the sender accepted the Reg E prepayment disclosure (gates funding; set at `confirm`)
 - `payment_at` timestamptz — when the sender paid (starts the cancellation clock)
 - `cancelable_until` timestamptz — `payment_at + 30 min`; disclosure metadata only since slice 5 (immediate payout) — cancelable = `state = FUNDED AND submit_attempted_at IS NULL` (see transfer-state-machine.md)
+- `submit_attempted_at` timestamptz — the payout **claim**; set once by the winning guarded UPDATE (`state = 'FUNDED' AND payout_hold_reason IS NULL AND submit_attempted_at IS NULL`). Non-null means a Bridge submission may exist, so crash recovery re-POSTs idempotently. Service-role mutated (not frozen)
+- `payout_hold_reason` TEXT — `fx_drift` | `payability` | `submit_error` (CHECK); set when the submit job refuses to submit. A hold is `FUNDED` + this column, not a state; ops clears it to release. `float_ceiling` is deliberately **not** a hold reason. Nullable
+- `payout_held_at` timestamptz — when a hold was placed (alongside `payout_hold_reason`)
 - `idempotency_key` TEXT UNIQUE — for the Bridge submission
 - `provider_transfer_ref` TEXT — Bridge transfer id
 - `funding_payment_ref` TEXT — funding processor payment id
@@ -197,11 +205,14 @@ Immutable snapshot of exactly what the user was shown.
 
 ## System
 
-### payment_events  *(webhook log — append-only)*
-- `source` TEXT — `stripe` | `bridge`, `event_type` TEXT
+### payment_events  *(provider event inbox — webhook + poll; status-mutable, not append-only)*
+- `source` TEXT — `bridge` | `bridge_poll` | `funding`, `event_type` TEXT
 - `external_event_id` TEXT — **UNIQUE(source, external_event_id)** for idempotent processing
 - `transfer_id` FK (nullable until resolved)
-- `payload` JSONB, `received_at` / `processed_at` timestamptz, `status` TEXT
+- `provider_ref` TEXT — provider-side transfer id, when present
+- `payload` JSONB *(immutable raw payload — service-role only, never logged)*, `received_at` / `processed_at` timestamptz
+- `status` TEXT — `received` | `processed` | `ignored` | `failed` (mutated in place; `moddatetime` `updated_at` trigger)
+- `error` TEXT — failure/ignore detail stamped when the row is marked
 - **RLS:** service-role only.
 
 ### user_limits  *(config — defaults to unlimited for MVP)*
@@ -216,7 +227,7 @@ Immutable snapshot of exactly what the user was shown.
 Backs the `Idempotency-Key` header on the money-moving POSTs (see api-contract). A replay returns the
 stored response; same key + different body → `idempotency_conflict`.
 - `key` TEXT — the client-supplied key
-- `user_id` FK → profiles
+- `user_id` FK → users
 - `endpoint` TEXT — e.g. `POST /v1/transfers`
 - **UNIQUE(user_id, endpoint, key)**
 - `request_hash` TEXT — hash of the canonical request body (detects same-key-different-body)
@@ -248,7 +259,7 @@ stored response; same key + different body → `idempotency_conflict`.
 
 | Access tier | Tables |
 |---|---|
-| **Owner-scoped** (owner SELECTs own; writes via API service role) | `profiles`, `consents`, `recipients`, `payout_destinations`, `quotes`, `transfers` (read-only to owner), `disclosures`, `disputes`, `user_limits` |
+| **Owner-scoped** (owner SELECTs own; writes via API service role) | `users`, `consents`, `recipients`, `payout_destinations`, `quotes`, `transfers` (read-only to owner), `disclosures`, `disputes`, `user_limits` |
 | **Service-role only** (no client access; append-only where noted) | `kyc_records`, `transfer_transitions`, `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `payment_events`, `audit_log` |
 
 Every table has RLS enabled and denies by default; the policies above are the explicit grants on top.

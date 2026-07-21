@@ -11,6 +11,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { Client } from 'pg'
 import { moneyFromMinorUnits } from '@puente/shared'
 import { postLedgerTransaction, getAccountBalance, type LedgerEntryInput } from './ledger.js'
+import { submittedLedgerEntries } from './payouts.js'
 import { supabaseAdmin } from './supabase.js'
 
 const runDb = process.env.RUN_DB_TESTS === '1'
@@ -311,15 +312,19 @@ describe.skipIf(!runDb)('ledger core (integration, local Supabase)', () => {
           entry('fee_revenue', 'credit', 200),
         ],
       })
+      // SUBMITTED batch comes straight from the shipped production helper
+      // (payouts.ts) so this worked example can never drift from the real
+      // fx_slippage form again (same guard as payout-ledger.db.test.ts).
+      // S = 9800 quoted send, A = 9808 actual USDC draw ⇒ D = 8 books to
+      // fx_slippage — matches ledger-rules.md. No provider_fees line: Bridge
+      // charges no explicit per-transfer fee.
       await postLedgerTransaction({
         transferId: T1,
         transition: 'SUBMITTED',
         description: 'payout drawn from treasury wallet',
-        entries: [
-          entry('due_from_bridge', 'debit', 9800),
-          entry('provider_fees', 'debit', 50),
-          entry('bridge_wallet_float', 'credit', 9850),
-        ],
+        entries: submittedLedgerEntries({ sendAmountMinor: 9800, actualSourceAmountMinor: 9808 }).map(
+          (e) => ({ accountCode: e.account_code, direction: e.direction, money: usd(e.amount_minor) }),
+        ),
       })
       await postLedgerTransaction({
         idempotencyKey: 'replenishment:test:1',
@@ -350,15 +355,15 @@ describe.skipIf(!runDb)('ledger core (integration, local Supabase)', () => {
       expect(await getAccountBalance('transfer_payable')).toEqual(usd(0))
       expect(await getAccountBalance('due_from_bridge')).toEqual(usd(0))
       expect(await getAccountBalance('fee_revenue')).toEqual(usd(200))
-      expect(await getAccountBalance('provider_fees')).toEqual(usd(50))
+      expect(await getAccountBalance('fx_slippage')).toEqual(usd(8))
 
       // Cash is split across two locations since bridge_wallet_float adoption:
       const cash = await getAccountBalance('cash_clearing')
       const walletFloat = await getAccountBalance('bridge_wallet_float')
       expect(cash).toEqual(usd(-40000))
-      expect(walletFloat).toEqual(usd(40150))
-      // Conservation: cash gained = fee_revenue − provider_fees
-      expect(cash.amountMinor + walletFloat.amountMinor).toBe(200 - 50)
+      expect(walletFloat).toEqual(usd(40192))
+      // Conservation: cash gained = fee_revenue − fx_slippage
+      expect(cash.amountMinor + walletFloat.amountMinor).toBe(200 - 8)
     })
 
     it('every posted batch nets to zero (ledger-skill invariant)', async () => {

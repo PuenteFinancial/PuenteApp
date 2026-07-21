@@ -1,7 +1,7 @@
 # Double-Entry Ledger Rules — USD → MXN Remittance
 
 **Date:** 2026-06-26
-**Status:** v1 draft for review
+**Status:** Documents shipped, test-pinned behavior through slice 5 (2026-07-21)
 **Pairs with:** `transfer-state-machine.md` (every money-moving transition posts here)
 
 ## Principles
@@ -49,7 +49,9 @@ Convention: **assets & expenses increase on debit; liabilities & revenue increas
 
 ## Posting rules per transition
 
-Worked example: sender pays **$100** ($98 to send + **$2** Puente fee); Bridge fee **$0.50**; MVP
+Worked example: sender pays **$100** ($98 to send + **$2** Puente fee); at payout Bridge draws a
+*variable* USDC amount — here **$98.08** against a quoted **$98.00** send, so **$0.08** books to
+`fx_slippage` (Bridge charges no explicit per-transfer fee — see FX & provider economics); MVP
 instant-ACH policy (we front from `cash_clearing` before the ACH clears).
 
 ### Happy path
@@ -61,9 +63,9 @@ FUNDED  (ACH initiated — recognize obligation + fee against a receivable)
   CR fee_revenue              2
 
 SUBMITTED  (payout drawn from the pre-funded treasury wallet; obligation stays open)
-  DR due_from_bridge         98
-  DR provider_fees            0.50
-  CR bridge_wallet_float     98.50
+  DR due_from_bridge         98.00  ← quoted send principal S (what Bridge now owes us)
+  DR fx_slippage              0.08  ← D = A − S > 0 (unfavorable: actual draw exceeded the quote)
+  CR bridge_wallet_float     98.08  ← actual USDC draw A Bridge reported at execution
 
 WALLET REPLENISHMENT  (independent batch event, not per-transfer — top up the treasury wallet)
   DR bridge_wallet_float    500
@@ -78,14 +80,19 @@ ACH CLEARS  (independent later event — funding actually lands)
   CR funding_receivable     100
 ```
 
-End state for this transfer: `funding_receivable` 0, `transfer_payable` 0, `due_from_bridge` 0,
-`fee_revenue` +2, `provider_fees` +0.50, and **cash across its two locations net +1.50**
-(with the $500 replenishment batch included: `cash_clearing` −400, `bridge_wallet_float` +401.50 —
-cash is split across locations since the wallet adoption; their sum is the cash position).
-Conservation check: `cash +1.50 = fee_revenue 2 − provider_fees 0.50`. ✓ (Pinned by the
-worked-example test in `apps/api/src/services/ledger.db.test.ts`.)
+The `SUBMITTED` slippage line flips with the sign of `D = A − S`: a **debit** when unfavorable
+(A > S, shown above), a **credit** of |D| when favorable (A < S), and omitted entirely when A = S
+(the ledger rejects zero-amount entries). There is **no `provider_fees` line** in the SUBMITTED
+batch — Bridge charges no explicit per-transfer fee (see FX & provider economics).
 
-Note the exposure the design surfaces: between `SUBMITTED` and `ACH CLEARS`, you're **−$98.50 of float
+End state for this transfer: `funding_receivable` 0, `transfer_payable` 0, `due_from_bridge` 0,
+`fee_revenue` +2, `fx_slippage` +0.08, and **cash across its two locations net +1.92**
+(with the $500 replenishment batch included: `cash_clearing` −400, `bridge_wallet_float` +401.92 —
+cash is split across locations since the wallet adoption; their sum is the cash position).
+Conservation check: `cash +1.92 = fee_revenue 2 − fx_slippage 0.08`. ✓ (Pinned by the
+production-path test in `apps/api/src/services/payout-ledger.db.test.ts`.)
+
+Note the exposure the design surfaces: between `SUBMITTED` and `ACH CLEARS`, you're **−$98.08 of float
 against an open `funding_receivable`** — that gap is your ACH exposure, sitting on the balance sheet.
 
 ### Exceptions
@@ -147,7 +154,9 @@ UNDER_REVIEW → REFUNDED  (entry from COMPLETED — post-delivery Reg E correct
   `(transfer_id, transition)`. Enforced by a `UNIQUE(transfer_id, transition)` constraint on
   `ledger_transactions`; a conflicting insert is a no-op (`ON CONFLICT DO NOTHING`), so retried
   workers are safe.
-- **Conservation:** across a completed transfer, cash gained = `fee_revenue − provider_fees`.
+- **Conservation:** across a completed transfer, cash gained = `fee_revenue − provider_fees − fx_slippage`.
+  Per transfer `provider_fees` is 0 (Bridge bills a periodic invoice, not per-transfer), so in practice
+  cash = `fee_revenue − fx_slippage` (a favorable slippage credit adds to cash).
 
 ## Float exposure & the ceiling
 
@@ -156,34 +165,46 @@ Outstanding fronted float = `SUM(funding_receivable)` not yet cleared. The **flo
 push the total past the configured ceiling. The number comes straight from this account — no extra
 bookkeeping.
 
-## Provider-fee placement — RESOLVED 2026-07-13 (production PoC receipts)
+## FX & provider economics
 
-Both production PoC legs (ACH→USDC onramp `9f1acb84…`, USDC→ACH payout `b3746f1a…`) returned
-receipts with `developer_fee`, `exchange_fee`, and `gas_fee` all **0.0** and
-`final_amount = initial_amount`: **Bridge charges no explicit fees on these routes — its take on
-cross-currency is the FX spread** (`buy_rate` vs `midmarket_rate`; ~0.5% observed on the sandbox
-USD→MXN rate). Receipt math is `final_amount = initial_amount − fees`, i.e. any fees are **netted
-inside the transfer**, so if explicit Bridge fees ever appear (pricing change, `developer_fee`
-use), they book to `provider_fees` within the transfer's own posting, with `final_amount` as what
-arrives at the destination.
+**Bridge's take is the FX spread, not a per-transfer fee (production PoC receipts, 2026-07-13).** Both
+PoC legs (ACH→USDC onramp `9f1acb84…`, USDC→ACH payout `b3746f1a…`) returned `developer_fee`,
+`exchange_fee`, and `gas_fee` all **0.0** with `final_amount = initial_amount`. Bridge's margin on
+cross-currency is the spread baked into its rate (`buy_rate` vs `midmarket_rate`; ~0.5% on the sandbox
+USD→MXN rate). Receipt math is `final_amount = initial_amount − fees`, so any fees are **netted inside
+the transfer**; if explicit Bridge line items ever appear (pricing change, `developer_fee`), they book
+to `provider_fees` within the transfer's own posting, `final_amount` being what arrives.
 
-Consequences:
-- `provider_fees` stays in the chart primarily for **Stripe's** funding fees (ACH/card), plus any
-  future Bridge line items. The worked example's $0.50 Bridge fee is illustrative only.
-- Quotes must be built from Bridge's **`buy_rate`** (the executable side), not `midmarket_rate` —
-  Bridge's spread is already inside `buy_rate`. The ERD's `source_rate` = buy_rate at quote time;
-  customer rate = buy_rate − our buffer.
-- `fx_slippage` therefore measures execution drift from the quoted buy_rate only; Bridge's spread
-  is a rate input, not slippage.
-- We do **not** use `developer_fee` (Bridge collecting Puente's fee inside the transfer): Stripe
-  collects `total_amount` including our fee, so `developer_fee: "0"` and `fee_revenue` books at
-  `FUNDED` as shown.
-- **Account-level pricing (confirmed 2026-07-13):** Bridge bills **bps on volume** at the account
-  level (rate per the Bridge agreement) — a periodic invoice-style `provider_fees` expense, not a
-  per-transfer receipt line (receipts stay zero). Book it when invoiced; optionally accrue
-  per-transfer once volume matters. Unit economics per transfer:
-  `fee_revenue − (Bridge FX spread inside buy_rate + bps accrual + Stripe funding fee)`.
-- Remaining: observe the real USD→MXN spread and any MXN-leg fee lines at the first pilot send.
+**Quote basis.** Quotes are built from Bridge's **`buy_rate`** (the executable side), not
+`midmarket_rate`; the ERD's `source_rate` = buy_rate at quote time, and customer rate = buy_rate − our
+buffer. We do **not** use `developer_fee` to collect Puente's fee inside the transfer — Stripe collects
+`total_amount` including our fee, so `developer_fee` is `"0"` and `fee_revenue` books at `FUNDED`.
+
+**`provider_fees` is invoice-time, ~0 per transfer.** Bridge bills **bps on volume at the account
+level** (rate per the Bridge agreement, confirmed 2026-07-13) — a periodic invoice-style expense, not
+a per-transfer receipt line (receipts stay zero). Book it when invoiced; optionally accrue
+per-transfer once volume matters. `provider_fees` therefore stays in the chart mainly for **Stripe's**
+funding fees plus this Bridge invoice — the worked example's $0.50 Bridge fee is illustrative only.
+Unit economics per transfer:
+`fee_revenue − (Bridge FX spread inside buy_rate + bps accrual + Stripe funding fee)`.
+
+**No rate lock — `fx_slippage` absorbs the execution variance.** Bridge gives only an indicative rate,
+so the actual USD cost is known at execution (`SUBMITTED`), not at quote time. We quote a firm rate
+(`source_rate` minus the buffer) and absorb the difference. Mechanically (sandbox spike 2026-07-13):
+the payout fixes `destination.amount` in MXN — the recipient gets exactly the disclosed amount — and
+Bridge draws a *variable* USDC amount from the treasury wallet, returned **synchronously** in the
+transfer-create response (`source.amount`). So `D = A − S` (actual draw vs quoted send principal) is
+known at submission and books inside the `SUBMITTED` batch itself — no later true-up entry. The buffer
+funds it; a favorable move lands as a credit.
+
+**Open question — does prod execute at `buy_rate`, or worse?** The framing above reads `fx_slippage` as
+execution *drift* around the quoted `buy_rate`, with Bridge's spread already priced into that rate. The
+slice-5 sandbox complicates it: execution sat a **constant ~2% below `buy_rate`** — a systematic gap,
+not random drift — though the sandbox rate feed is frozen so the magnitude proves nothing. If prod
+shows a real spread, that gap is a **provider cost that belongs in pricing** (`QUOTE_FX_BUFFER_BPS`),
+not in `fx_slippage`. Resolve at the first pilot send: **observe the real USD→MXN spread** and any
+MXN-leg fee lines, then fix the quote basis + account mapping. See [decisions.md](decisions.md)
+2026-07-21.
 
 ## Pending posting rules (flagged in review 2026-07-10)
 
@@ -197,17 +218,6 @@ Consequences:
   in the chart of accounts and the SUBMITTED/replenishment postings above. USDC is treated as USD
   at par in the ledger (it's a cash location, not a currency position); any de-peg variance books
   to `fx_slippage`.
-
-**No rate lock.** Bridge gives only an indicative rate, so the actual USD cost to deliver is known at
-execution (`SUBMITTED`), not at quote time. We quote the customer a firm rate (`source_rate` minus a
-buffer) and absorb the difference: the variance between the quoted send and Bridge's actual USD cost
-books to `fx_slippage`. The buffer in the customer rate funds it; a favorable move lands as a credit.
-Mechanically (sandbox spike 2026-07-13): the payout fixes `destination.amount` in MXN — the recipient
-gets exactly the disclosed amount — and Bridge draws a *variable* USDC amount from the treasury
-wallet. The actual draw is returned **synchronously in the transfer-create response**
-(`source.amount`), so the slippage vs. the quoted cost is known at submission and books inside the
-`SUBMITTED` batch itself (draw the actual from `bridge_wallet_float`; the delta vs. the quoted send
-principal debits/credits `fx_slippage`) — no later true-up entry needed.
 
 ## Reconciliation
 
