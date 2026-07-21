@@ -1,12 +1,7 @@
 import * as Sentry from '@sentry/node'
 import { supabaseAdmin } from '../services/supabase.js'
 import { transitionTransfer, completedLedgerEntries, TransferRpcError } from '../services/transfers.js'
-import {
-  mapBridgeState,
-  markProcessed,
-  markIgnored,
-  markFailed,
-} from '../services/payment-events.js'
+import { mapBridgeState, markProcessed, markIgnored } from '../services/payment-events.js'
 
 // The `payment-event.process` job — the ONE path that turns a recorded Bridge
 // event (webhook OR poll-synthesized) into a transfer transition + ledger post.
@@ -35,6 +30,10 @@ interface TransferRow {
 // (that would be a slice-6 refund, ledger-posted, not a silent state move).
 const FAILABLE_STATES = new Set(['SUBMITTED', 'IN_FLIGHT', 'UNDER_REVIEW'])
 
+// The linear payout happy-path. A forward (success) event for a transfer that
+// has left this path (e.g. PAYOUT_FAILED) is a contradictory Bridge sequence.
+const FORWARD_STATES = new Set(['SUBMITTED', 'IN_FLIGHT', 'COMPLETED'])
+
 // Benign RPC outcomes: another actor (the other arrival path, or a later
 // event) already advanced the row. The event is still successfully processed.
 const benign = (err: unknown) =>
@@ -60,9 +59,13 @@ export async function processPaymentEvent(paymentEventId: string): Promise<void>
       await markProcessed(event.id)
       return
     }
-    // Unexpected: record the failure on the row, then rethrow so pg-boss
-    // retries. Error text only (never the payload).
-    await markFailed(event.id, err instanceof Error ? err.message : String(err))
+    // Retryable failure: leave status 'received' and rethrow. Marking the row
+    // 'failed' here would defeat every recovery path — pg-boss retry, the
+    // payout.sweep re-enqueue, and poll re-synthesis all skip a non-'received'
+    // row, stranding the transfer (e.g. mid catch-up at IN_FLIGHT with the
+    // COMPLETED ledger unposted). The worker handler reports the throw to
+    // Sentry; the queue retry + 5-min sweep re-run this cleanly (each step is
+    // idempotent) until it succeeds.
     throw err
   }
 }
@@ -131,6 +134,18 @@ async function resolveTransfer(event: EventRow): Promise<TransferRow | null> {
 // IN_FLIGHT step. Every transition is replay-safe (already-there = no-op).
 async function drive(transfer: TransferRow, target: 'IN_FLIGHT' | 'COMPLETED'): Promise<void> {
   const current = (await currentState(transfer.id)) ?? transfer.state
+
+  // A success event for a transfer already off the forward path (PAYOUT_FAILED,
+  // CANCELED, …) is a contradictory Bridge sequence — surface it to ops rather
+  // than silently absorbing (symmetric to the fail-after-terminal guard).
+  if (!FORWARD_STATES.has(current)) {
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['payout-success-after-terminal'])
+      scope.setContext('payout_success', { transferId: transfer.id, current, target })
+      Sentry.captureMessage('bridge success event on a non-forward transfer state', 'warning')
+    })
+    return
+  }
 
   if (target === 'IN_FLIGHT') {
     if (current === 'SUBMITTED') {

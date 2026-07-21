@@ -219,8 +219,10 @@ async function main(): Promise<void> {
 
   // 6. Optionally fire Bridge webhooks, then wait for COMPLETED
   begin('drive to COMPLETED')
+  // Reused by the dedupe step (8): re-firing the SAME id+state is what exercises
+  // the (source, external_event_id) dedupe rather than inserting a fresh row.
+  const bridgeTransferId = `sandbox_${crypto.randomUUID()}`
   if (BRIDGE_PRIVATE_KEY) {
-    const bridgeTransferId = `sandbox_${crypto.randomUUID()}`
     for (const st of ['payment_submitted', 'payment_processed']) {
       const r = await fireBridgeWebhook(transferId, bridgeTransferId, st)
       if (r.status < 200 || r.status >= 300) fail(`bridge webhook ${st} → ${r.status} ${r.text}`)
@@ -250,11 +252,12 @@ async function main(): Promise<void> {
   }
   pass('completed transfer looks correct')
 
-  // 8. Dedupe: re-fire a terminal event; state must NOT double-transition
-  begin('event dedupe (re-fire, expect no state change)')
+  // 8. Dedupe: re-fire the SAME event (same bridge id + state) — recordEvent
+  // must dedupe on (source, external_event_id) and the state must not change.
+  begin('event dedupe (re-fire same event, expect no state change)')
   if (BRIDGE_PRIVATE_KEY) {
     const before = String((await getTransfer(transferId)).state)
-    const r = await fireBridgeWebhook(transferId, `sandbox_${crypto.randomUUID()}`, 'payment_processed')
+    const r = await fireBridgeWebhook(transferId, bridgeTransferId, 'payment_processed')
     if (r.status < 200 || r.status >= 300) fail(`re-fire → ${r.status} ${r.text}`)
     // Give the worker a moment to process the (idempotent) replay.
     await sleep(POLL_INTERVAL_MS * 2)

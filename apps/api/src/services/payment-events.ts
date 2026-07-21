@@ -144,6 +144,8 @@ export function markIgnored(id: string, reason?: string): Promise<void> {
   return markStatus(id, 'ignored', reason ?? null)
 }
 
-export function markFailed(id: string, error: string): Promise<void> {
-  return markStatus(id, 'failed', error)
-}
+// NOTE: there is deliberately no markFailed. A processing error must leave the
+// row 'received' so pg-boss retry, payout.sweep, and poll re-synthesis re-run
+// it (each transition is idempotent) — a terminal 'failed' status would strand
+// the transfer, since every recovery path skips non-'received' rows. The DB
+// still allows 'failed' for a future manual/dead-letter tool.

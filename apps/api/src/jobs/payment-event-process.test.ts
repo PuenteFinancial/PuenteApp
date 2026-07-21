@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 // Mapping-driven suite for the payment-event processor: every action kind
 // (ignore / transition / catch-up / fail / unknown), the benign-conflict path,
-// the never-reverse-COMPLETED guard, and failure → markFailed + rethrow.
+// the never-reverse-COMPLETED / never-advance-a-failed guards, and the
+// retryable-error path that leaves the row 'received' and rethrows.
 
 const from = vi.fn()
 vi.mock('../services/supabase.js', () => ({
@@ -17,14 +18,12 @@ vi.mock('../services/transfers.js', async (importOriginal) => {
 
 const markProcessed = vi.hoisted(() => vi.fn())
 const markIgnored = vi.hoisted(() => vi.fn())
-const markFailed = vi.hoisted(() => vi.fn())
 vi.mock('../services/payment-events.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/payment-events.js')>()
   return {
     ...actual, // real mapBridgeState
     markProcessed: (...a: unknown[]) => markProcessed(...a),
     markIgnored: (...a: unknown[]) => markIgnored(...a),
-    markFailed: (...a: unknown[]) => markFailed(...a),
   }
 })
 
@@ -209,14 +208,25 @@ describe('processPaymentEvent — failures', () => {
     transition.mockRejectedValue(new TransferRpcError('transition_conflict'))
     await processPaymentEvent('ev-1')
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
-    expect(markFailed).not.toHaveBeenCalled()
   })
 
-  it('an unexpected error marks the event failed and rethrows for retry', async () => {
+  it('a retryable error rethrows WITHOUT marking the row — status stays received', async () => {
     q('payment_events', event({ event_type: 'payment_submitted' }))
     q('transfers', transfer('SUBMITTED'), stateRow('SUBMITTED'))
     transition.mockRejectedValue(new Error('db down'))
     await expect(processPaymentEvent('ev-1')).rejects.toThrow('db down')
-    expect(markFailed).toHaveBeenCalledWith('ev-1', 'db down')
+    // Must NOT mark processed/ignored — leaving status 'received' is what lets
+    // pg-boss retry + sweep + poll re-run and eventually complete the transfer.
+    expect(markProcessed).not.toHaveBeenCalled()
+    expect(markIgnored).not.toHaveBeenCalled()
+  })
+
+  it('a success event on an already-failed transfer warns and never transitions', async () => {
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('PAYOUT_FAILED'), stateRow('PAYOUT_FAILED'))
+    await processPaymentEvent('ev-1')
+    expect(transition).not.toHaveBeenCalled()
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-success-after-terminal'])
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
   })
 })

@@ -9,7 +9,7 @@ vi.mock('./supabase.js', () => ({
   },
 }))
 
-const { mapBridgeState, recordEvent, markProcessed, markIgnored, markFailed } = await import(
+const { mapBridgeState, recordEvent, markProcessed, markIgnored } = await import(
   './payment-events.js'
 )
 
@@ -244,19 +244,6 @@ describe('mark helpers', () => {
       status: 'ignored',
       processed_at: '2026-07-21T09:00:00.000Z',
       error: null,
-    })
-  })
-
-  it('markFailed sets status failed + processed_at + the error', async () => {
-    const { update } = mockUpdate({ error: null })
-    from.mockReturnValue({ update })
-
-    await markFailed('pe-3', 'transition_conflict')
-
-    expect(update).toHaveBeenCalledWith({
-      status: 'failed',
-      processed_at: '2026-07-21T09:00:00.000Z',
-      error: 'transition_conflict',
     })
   })
 
