@@ -5,7 +5,8 @@ import type { KycStatus } from '@puente/shared'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { getFundingProcessor } from '../../services/funding/index.js'
-import { enqueuePayoutSubmit } from '../../services/queue.js'
+import { enqueuePayoutSubmit, enqueuePaymentEventProcess } from '../../services/queue.js'
+import { recordEvent } from '../../services/payment-events.js'
 import {
   fundedLedgerEntries,
   transitionTransfer,
@@ -36,6 +37,10 @@ interface BridgeWebhookEvent {
     id?: string
     kyc_status?: string
     status?: string
+    // transfer events (slice 5): the payout's current Bridge state and the
+    // client_reference_id we set at submission (= our transfer UUID)
+    state?: string
+    client_reference_id?: string
   }
 }
 
@@ -174,6 +179,70 @@ export async function webhooksRoute(server: FastifyInstance) {
           )
           // 500 so Bridge retries the delivery
           return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
+        }
+        return { received: true }
+      }
+
+      // ── transfer events (slice 5): payout lifecycle ────────────────────────
+      // Record raw, dedupe on (source, external_event_id), enqueue async
+      // processing, ack fast. The payload is stored raw for the worker and is
+      // NEVER logged here (decision 6) — only ids/type/state.
+      if (eventType.startsWith('transfer.')) {
+        const bridgeTransferId = event.event_object?.id ?? event.event_object_id
+        const state = event.event_object?.state ?? event.event_object_status
+        if (!bridgeTransferId || !state) {
+          server.log.warn(
+            { audit: true, webhook: 'bridge', eventType },
+            'transfer event missing id or state',
+          )
+          return { received: true } // malformed — a retry won't fix it
+        }
+
+        // Resolve our transfer up front so the row carries it; the processor
+        // falls back to provider_transfer_ref if this is null.
+        const clientRef = event.event_object?.client_reference_id
+        let transferId: string | null = null
+        if (clientRef) {
+          const { data } = await supabaseAdmin
+            .from('transfers')
+            .select('id')
+            .eq('id', clientRef)
+            .maybeSingle()
+          transferId = (data as { id: string } | null)?.id ?? null
+        }
+
+        let recorded: { id: string; inserted: boolean }
+        try {
+          recorded = await recordEvent({
+            source: 'bridge',
+            // per-state key: redeliveries dedupe, distinct states don't collide
+            externalEventId: `${bridgeTransferId}:${state}`,
+            eventType: state,
+            transferId,
+            providerRef: bridgeTransferId,
+            payload: event,
+          })
+        } catch {
+          // insert failed — 500 so Bridge redelivers into a clean attempt
+          return sendError(reply, 500, 'internal_error', 'Failed to record event')
+        }
+
+        server.log.info(
+          { audit: true, webhook: 'bridge', eventType, state, transferId },
+          'bridge transfer event recorded',
+        )
+
+        if (recorded.inserted) {
+          try {
+            await enqueuePaymentEventProcess(recorded.id)
+          } catch (enqueueErr) {
+            // still ack — payout.sweep re-enqueues stale received events
+            server.log.warn(
+              { webhook: 'bridge', paymentEventId: recorded.id },
+              'payment-event enqueue failed — sweep will heal',
+            )
+            Sentry.captureException(enqueueErr)
+          }
         }
         return { received: true }
       }
