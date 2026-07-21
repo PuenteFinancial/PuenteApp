@@ -118,7 +118,7 @@ export default function Calculator() {
       </div>
 
       <div className="calc-note">
-        <span className="pip" />{c.note}
+        <span className="calc-note-icon">🎉</span>{c.note}
       </div>
 
       <a className="btn btn--accent" href="/waitlist">{c.cta}</a>
