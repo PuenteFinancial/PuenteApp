@@ -41,13 +41,19 @@ if (!env.BRIDGE_TREASURY_WALLET_ID) {
 // to Sentry and rethrown so pg-boss records the failure and applies the
 // queue's retry policy — a handler rejection must never crash the process
 // (pg-boss catches it; the rethrow only fails the job).
+// Log the MESSAGE only, never the error object: BridgeApiError (and future
+// error types) can carry raw provider bodies with PII, and console.error
+// prints enumerable properties. Sentry gets the full exception (scrubbed —
+// sendDefaultPii: false).
+const errMessage = (err: unknown) => (err instanceof Error ? err.message : String(err))
+
 const handle = (jobName: string, fn: () => Promise<number>) => async () => {
   try {
     const count = await fn()
     console.log(`worker: ${jobName} handled ${count} row(s)`)
   } catch (err) {
     Sentry.captureException(err)
-    console.error(`worker: ${jobName} failed`, err)
+    console.error(`worker: ${jobName} failed: ${errMessage(err)}`)
     throw err
   }
 }
@@ -68,7 +74,7 @@ await boss.work<PayoutSubmitPayload>(JOB_PAYOUT_SUBMIT, async (jobs) => {
       console.log(`worker: ${JOB_PAYOUT_SUBMIT} transfer handled (submitted=${submitted})`)
     } catch (err) {
       Sentry.captureException(err)
-      console.error(`worker: ${JOB_PAYOUT_SUBMIT} failed`, err)
+      console.error(`worker: ${JOB_PAYOUT_SUBMIT} failed: ${errMessage(err)}`)
       throw err
     }
   }

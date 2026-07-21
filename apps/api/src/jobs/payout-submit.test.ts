@@ -192,7 +192,7 @@ describe('submitPayout — short-circuits (no Bridge call)', () => {
 describe('submitPayout — holds', () => {
   it('payability failure → payability hold, no float/fx checks, no Bridge call', async () => {
     const load = chain({ data: baseTransfer, error: null })
-    const hold = chain({ error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
     route('transfers', load, hold)
     payability.mockResolvedValue({ payable: false, reason: 'recipient_not_active' })
     expect(await submitPayout('tr-1')).toBe(0)
@@ -203,6 +203,17 @@ describe('submitPayout — holds', () => {
     expect(exchangeRate).not.toHaveBeenCalled()
     expect(createPayout).not.toHaveBeenCalled()
     expect(setFingerprint).toHaveBeenCalledWith(['payout-hold', 'payability'])
+  })
+
+  it('hold race (guarded update matches 0 rows) → no Sentry hold signal', async () => {
+    const load = chain({ data: baseTransfer, error: null })
+    const hold = chain({ data: [], error: null }) // another actor held/moved first
+    route('transfers', load, hold)
+    payability.mockResolvedValue({ payable: false, reason: 'recipient_not_active' })
+    expect(await submitPayout('tr-1')).toBe(0)
+    expect(hold.update).toHaveBeenCalled()
+    expect(captureMessage).not.toHaveBeenCalled() // the winner's signal stands alone
+    expect(createPayout).not.toHaveBeenCalled()
   })
 
   it('float ceiling tripped → NO hold, Sentry alert, no Bridge call', async () => {
@@ -219,7 +230,7 @@ describe('submitPayout — holds', () => {
 
   it('drift over the cap → fx_drift hold, no claim, no Bridge call', async () => {
     const load = chain({ data: baseTransfer, error: null })
-    const hold = chain({ error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
     route('transfers', load, hold)
     route('quotes', chain({ data: { source_rate: 20.1, created_at: new Date().toISOString() }, error: null }))
     payability.mockResolvedValue({ payable: true, providerAccountRef: 'ext_1' })
@@ -235,7 +246,7 @@ describe('submitPayout — holds', () => {
 
   it('stale quote (age over cap) → fx_drift hold even at zero drift', async () => {
     const load = chain({ data: baseTransfer, error: null })
-    const hold = chain({ error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
     route('transfers', load, hold)
     const oldCreated = new Date(Date.now() - 241 * 60_000).toISOString()
     route('quotes', chain({ data: { source_rate: 20.1, created_at: oldCreated }, error: null }))
@@ -313,7 +324,7 @@ describe('submitPayout — submission and transition', () => {
 
   it('422 idempotency mismatch → submit_error hold, no throw, no transition', async () => {
     setupHappy()
-    const hold = chain({ error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
     queues.transfers!.push(hold)
     createPayout.mockRejectedValue(new BridgeApiError(422, {}))
     expect(await submitPayout('tr-1')).toBe(0)
@@ -332,7 +343,7 @@ describe('submitPayout — submission and transition', () => {
 
   it('source.amount failing the strict 2-dp parse → submit_error hold + alert, no transition', async () => {
     setupHappy()
-    const hold = chain({ error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
     queues.transfers!.push(hold)
     parseMinor.mockImplementation(() => {
       throw new PayoutValidationError('more than 2 decimal places')
@@ -409,7 +420,7 @@ describe('submitPayout — crash recovery', () => {
       data: { ...baseTransfer, submit_attempted_at: '2026-07-20T12:00:00.000Z' },
       error: null,
     })
-    const hold = chain({ error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
     route('transfers', load, hold)
     route('payout_destinations', chain({ data: { provider_account_ref: null }, error: null }))
     expect(await submitPayout('tr-1')).toBe(0)

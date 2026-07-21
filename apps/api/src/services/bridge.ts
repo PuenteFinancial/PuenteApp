@@ -2,13 +2,19 @@ import crypto from 'node:crypto'
 import { env } from '../config/env.js'
 
 export class BridgeApiError extends Error {
+  // Raw Bridge error body — readable for code branching (err.body.code), but
+  // deliberately NON-ENUMERABLE so console.error / util.inspect / JSON never
+  // print it: Bridge error bodies can echo request PII (names, CLABEs).
+  declare readonly body: unknown
+
   constructor(
     public readonly status: number,
-    public readonly body: unknown,
+    body: unknown,
   ) {
     // Bridge error bodies can contain request PII — keep the message to status only
     super(`Bridge API request failed with status ${status}`)
     this.name = 'BridgeApiError'
+    Object.defineProperty(this, 'body', { value: body, enumerable: false })
   }
 
   // Contract B alias: payout callers branch on a numeric statusCode

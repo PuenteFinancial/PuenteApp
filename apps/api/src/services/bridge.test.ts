@@ -82,6 +82,10 @@ describe('createBridgeCustomer', () => {
     expect((err as BridgeApiError).body).toEqual({ code: 'invalid_email' })
     // message must not leak the response body (may contain PII)
     expect((err as BridgeApiError).message).not.toContain('invalid_email')
+    // body must be NON-ENUMERABLE: console.error / util.inspect / JSON print
+    // enumerable own properties, and Bridge error bodies can echo request PII
+    expect(Object.keys(err as object)).not.toContain('body')
+    expect(JSON.stringify(err)).not.toContain('invalid_email')
   })
 })
 

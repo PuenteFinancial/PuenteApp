@@ -62,13 +62,17 @@ async function placeHold(
   reason: 'fx_drift' | 'payability' | 'submit_error',
   context: Record<string, unknown>,
 ): Promise<void> {
-  const { error } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from('transfers')
     .update({ payout_hold_reason: reason, payout_held_at: new Date().toISOString() })
     .eq('id', transferId)
     .eq('state', 'FUNDED')
     .is('payout_hold_reason', null)
+    .select('id')
   if (error) throw new Error(`payout-submit hold update failed: ${error.message}`)
+  // 0 rows = another actor held or moved the row first — their signal stands;
+  // alerting here would double-report a hold that never landed.
+  if ((data ?? []).length === 0) return
   Sentry.withScope((scope) => {
     scope.setFingerprint(holdFingerprint(reason))
     scope.setContext('payout_hold', { transferId, reason, ...context })
