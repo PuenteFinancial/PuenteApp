@@ -1,9 +1,11 @@
 import crypto from 'node:crypto'
+import * as Sentry from '@sentry/node'
 import type { FastifyInstance } from 'fastify'
 import type { KycStatus } from '@puente/shared'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { getFundingProcessor } from '../../services/funding/index.js'
+import { enqueuePayoutSubmit } from '../../services/queue.js'
 import {
   fundedLedgerEntries,
   transitionTransfer,
@@ -343,6 +345,18 @@ export async function webhooksRoute(server: FastifyInstance) {
             cancelableUntil: new Date(paymentAt.getTime() + env.CANCEL_WINDOW_MINUTES * 60_000),
             fundingPaymentRef: event.paymentRef,
           })
+          // Immediate payout (slice-5 decision 1): enqueue-after-commit. An
+          // enqueue failure still acks — payout.sweep re-enqueues within a
+          // minute (decision 3), and the stately singleton dedupes.
+          try {
+            await enqueuePayoutSubmit(transfer.id)
+          } catch (enqueueErr) {
+            server.log.warn(
+              { webhook: 'funding', transferId: transfer.id },
+              'payout.submit enqueue failed — payout.sweep will heal',
+            )
+            Sentry.captureException(enqueueErr)
+          }
         } else {
           await transitionTransfer({
             transferId: transfer.id,

@@ -230,8 +230,9 @@ polling fallback for sandbox/dev.
   Bridge-side records joinable to ours for reconciliation (verified accepted in sandbox).
 - Sandbox-verified constraints to build against (2026-07-15): concurrent payouts serialize at
   Bridge (loser gets a synchronous 400, no transfer created — retry after replenishment);
-  Bridge payouts are never cancelable after creation (Reg E cancel window must close at
-  `FUNDED → SUBMITTED`); same Idempotency-Key with different body → Bridge 422; MXN destination
+  Bridge payouts are never cancelable after creation (a timely Reg E cancel after submission is
+  honored as a full refund — §1005.34's right survives to pickup/deposit, no submitted-exception;
+  see decisions.md 2026-07-20); same Idempotency-Key with different body → Bridge 422; MXN destination
   minimum $2.00 USD equivalent.
 - End-to-end in **sandbox** here (API-driven); the real-money send waits for slice 7.
 - Open question for Bridge (deferred): where do funds land when a SPEI payout fails

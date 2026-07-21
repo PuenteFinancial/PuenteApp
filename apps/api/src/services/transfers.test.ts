@@ -35,6 +35,10 @@ const transferRow = {
   payment_at: null,
   cancelable_until: null,
   funding_payment_ref: null,
+  provider_transfer_ref: null,
+  payout_hold_reason: null,
+  payout_held_at: null,
+  submit_attempted_at: null,
   completed_at: null,
   created_at: '2026-07-17T20:00:00.000Z',
 }

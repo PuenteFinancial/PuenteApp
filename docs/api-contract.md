@@ -58,7 +58,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 409 | `conflict` | Illegal state transition |
 | 409 | `idempotency_conflict` | Idempotency-Key reused with different body |
 | 409 | `quote_expired` | Quote past `expires_at` |
-| 409 | `transfer_not_cancelable` | Not in `FUNDED` / past cancel window |
+| 409 | `transfer_not_cancelable` | Not in `FUNDED`, or already claimed for payout submission |
 | 422 | `provider_rejected` | Upstream provider rejected the request (e.g. bank refused the account) |
 | 429 | `rate_limited` | Throttled |
 | 500 | `internal_error` | Unexpected failure; details never leak — use `requestId` |

@@ -26,6 +26,12 @@ vi.mock('../../services/transfers.js', async (importOriginal) => {
   }
 })
 
+const enqueuePayoutSubmit = vi.hoisted(() => vi.fn())
+
+vi.mock('../../services/queue.js', () => ({
+  enqueuePayoutSubmit: (...args: unknown[]) => enqueuePayoutSubmit(...args),
+}))
+
 const { webhooksRoute } = await import('./webhooks.js')
 const { TransferRpcError } = await import('../../services/transfers.js')
 const { env } = await import('../../config/env.js')
@@ -345,6 +351,7 @@ const postFunding = (
 describe('POST /v1/webhooks/funding', () => {
   beforeEach(() => {
     transitionTransfer.mockReset()
+    enqueuePayoutSubmit.mockReset()
   })
 
   it('drives PENDING_PAYMENT → FUNDED with the ledger batch, timestamps, and payment ref', async () => {
@@ -370,6 +377,22 @@ describe('POST /v1/webhooks/funding', () => {
     const paymentAt = call['paymentAt'] as Date
     const cancelableUntil = call['cancelableUntil'] as Date
     expect(cancelableUntil.getTime() - paymentAt.getTime()).toBe(30 * 60 * 1000)
+    // Immediate payout (slice 5): the FUNDED transition enqueues the submit job
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID)
+    await app.close()
+  })
+
+  it('still acks 200 when the payout enqueue fails — the sweep heals it', async () => {
+    from.mockReturnValueOnce(selectChain({ data: transferRow }))
+    transitionTransfer.mockResolvedValue({ ...transferRow, state: 'FUNDED' })
+    enqueuePayoutSubmit.mockRejectedValue(new Error('DATABASE_URL is not set'))
+    const app = await buildApp()
+
+    const body = fundingBody()
+    const res = await postFunding(app, body, fundingSign(body))
+
+    expect(res.status).toBe(200)
+    expect(transitionTransfer).toHaveBeenCalledTimes(1)
     await app.close()
   })
 
