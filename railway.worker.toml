@@ -1,0 +1,11 @@
+# Railway config for the slice-5 background worker service (second service,
+# same repo). The worker service's Settings → Config File Path must point at
+# THIS file — config-as-code overrides dashboard settings, so without it the
+# service would inherit railway.toml and boot the API server instead.
+[build]
+buildCommand = "pnpm turbo build --filter=@puente/api"
+
+[deploy]
+startCommand = "node apps/api/dist/worker.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
