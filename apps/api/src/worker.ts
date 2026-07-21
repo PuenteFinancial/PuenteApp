@@ -13,14 +13,26 @@ import {
   ensureQueues,
   JOB_PAYOUT_SUBMIT,
   JOB_PAYOUT_SWEEP,
+  JOB_PAYOUT_POLL,
+  JOB_PAYMENT_EVENT_PROCESS,
   JOB_RECONCILE_PENDING,
   JOB_IDEMPOTENCY_PURGE,
   type PayoutSubmitPayload,
+  type PaymentEventProcessPayload,
 } from './services/queue.js'
 import { reconcilePendingTransfers } from './jobs/reconcile-pending.js'
 import { purgeExpiredIdempotencyKeys } from './jobs/purge-idempotency.js'
 import { submitPayout } from './jobs/payout-submit.js'
 import { sweepPayouts } from './jobs/payout-sweep.js'
+import { pollPayouts } from './jobs/payout-poll.js'
+import { processPaymentEvent } from './jobs/payment-event-process.js'
+
+// pg-boss schedule() takes cron (1-min floor), but the poll cadence is
+// configured in seconds — convert to an every-N-minutes expression.
+const pollCron = (() => {
+  const minutes = Math.max(1, Math.round(env.WORKER_POLL_INTERVAL_SECONDS / 60))
+  return `*/${minutes} * * * *`
+})()
 
 // Fail fast on missing worker-only env — a worker that boots without these
 // would sit healthy-looking while every payout job errors. (Both are optional
@@ -64,6 +76,21 @@ await ensureQueues()
 await boss.work(JOB_RECONCILE_PENDING, handle(JOB_RECONCILE_PENDING, reconcilePendingTransfers))
 await boss.work(JOB_IDEMPOTENCY_PURGE, handle(JOB_IDEMPOTENCY_PURGE, purgeExpiredIdempotencyKeys))
 await boss.work(JOB_PAYOUT_SWEEP, handle(JOB_PAYOUT_SWEEP, sweepPayouts))
+await boss.work(JOB_PAYOUT_POLL, handle(JOB_PAYOUT_POLL, pollPayouts))
+// payment-event.process carries a paymentEventId payload; same batch-of-1
+// semantics as payout.submit (a rejection fails the job and pg-boss retries).
+await boss.work<PaymentEventProcessPayload>(JOB_PAYMENT_EVENT_PROCESS, async (jobs) => {
+  for (const job of jobs) {
+    try {
+      await processPaymentEvent(job.data.paymentEventId)
+      console.log(`worker: ${JOB_PAYMENT_EVENT_PROCESS} handled ${job.data.paymentEventId}`)
+    } catch (err) {
+      Sentry.captureException(err)
+      console.error(`worker: ${JOB_PAYMENT_EVENT_PROCESS} failed: ${errMessage(err)}`)
+      throw err
+    }
+  }
+})
 // Payload jobs arrive as a batch (size 1 by default); each transfer submits
 // independently — a rejection fails the whole batch job, and pg-boss applies
 // the queue's retry policy per job, so batches must stay size 1.
@@ -85,6 +112,7 @@ await boss.work<PayoutSubmitPayload>(JOB_PAYOUT_SUBMIT, async (jobs) => {
 await boss.schedule(JOB_RECONCILE_PENDING, '*/5 * * * *')
 await boss.schedule(JOB_IDEMPOTENCY_PURGE, '0 4 * * *')
 await boss.schedule(JOB_PAYOUT_SWEEP, '* * * * *')
+await boss.schedule(JOB_PAYOUT_POLL, pollCron)
 
 // Minimal health endpoint for Railway — no Fastify, the worker serves no API.
 const server = http.createServer((req, res) => {

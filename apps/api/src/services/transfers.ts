@@ -209,6 +209,7 @@ export function toApiTransfer(row: TransferRow) {
     disclosureAcceptedAt: row.disclosure_accepted_at,
     paymentAt: row.payment_at,
     cancelableUntil: row.cancelable_until,
+    providerTransferRef: row.provider_transfer_ref,
     completedAt: row.completed_at,
     createdAt: row.created_at,
   }
