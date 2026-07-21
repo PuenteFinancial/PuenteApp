@@ -46,6 +46,23 @@ unmoved and prod code untouched. Any migrations that applied before the failure 
 re-running is safe (`db push` only applies what's still pending). `concurrency: promote-production`
 means never two promotes in flight.
 
+## Worker service (Railway, slice 5)
+
+Slice 5 added a **second Railway service** in the same repo — the pg-boss background worker (payout
+submit/sweep/poll, payment-event processing, housekeeping crons). Its Settings → Config File Path
+points at `railway.worker.toml` (config-as-code overrides dashboard settings; without it the
+service would inherit `railway.toml` and boot the API instead):
+
+- **Build:** `pnpm turbo build --filter=@puente/api` (same as the API).
+- **Start:** `node apps/api/dist/worker.js` (the API starts `dist/server.js`).
+- **Healthcheck:** `/health` — **not** `/v1/health` (the API's path).
+- **Tracks:** the `production` branch + Doppler `prd_main`, same as the API service.
+
+**The prod worker is deferred to slice 7** (PRD §9): the mock-funding lock keeps prod inert until
+real funding, so there is no point running it yet. It runs in **staging only** today. Consequence:
+a Promote today cuts over **API + Vercel only** — there is no prod worker to deploy. Stand it up as
+part of slice 7, then add its healthcheck (below) to this drill.
+
 ## Post-deploy verification drill
 
 - **Staging API:** `curl -s https://puenteapi-staging.up.railway.app/v1/health` (+ CORS headers) — public, no auth.
@@ -53,6 +70,8 @@ means never two promotes in flight.
 - **www identity:** confirm the live deployment's `meta.githubCommitRef == "production"` (Vercel MCP
   `get_deployment` or dashboard). Don't trust "it looks deployed."
 - **Prod API:** `curl -s https://puenteapi-production.up.railway.app/v1/health`.
+- **Worker (staging today; prod when stood up in slice 7):** `curl -s https://<worker-host>.up.railway.app/health`
+  — note `/health`, **not** `/v1/health`.
 - After anything touching rate limiting / IPs: check a staging audit-log row records a real client
   IP (bump `TRUST_PROXY_HOPS` if not).
 

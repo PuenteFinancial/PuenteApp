@@ -11,7 +11,7 @@ Everything to settle or build before we write feature code. We tackle these one 
 
 ## Decisions locked
 - **Stack:** Supabase (Postgres + Auth) + Railway. API-first — the Fastify API is the boundary so infra stays swappable.
-- **Async layer:** Postgres-backed job queue (pg-boss or Graphile Worker) + transactional outbox + idempotency keys. `pg_cron` / Railway cron for schedules. No Redis, no SQS for MVP.
+- **Async layer:** Postgres-backed job queue (pg-boss) + enqueue-after-commit with sweep healing (outbox rejected — decisions.md 2026-07-20) + idempotency keys. pg-boss cron for schedules. No Redis, no SQS for MVP.
 - **Rails:** Bridge is the MTL / regulated entity; handles FX, stablecoin orchestration, SPEI payout, and KYC/OFAC. We build the app on top.
 - **Funding source = abstraction:** card/ACH now, LOC later. Never hardcoded.
 - **Remittance and lending are separate stacks** to start.
@@ -20,7 +20,7 @@ Everything to settle or build before we write feature code. We tackle these one 
 - [x] **Payout timing:** Instant payout for MVP — do **not** wait for ACH. Acceptable: launch is ~5 trusted users and we need fast iteration. Build the `funding_cleared` gate into the state machine now as a **config flag** (default: skip the wait) so we flip it on when we widen beyond trusted users — no rework.
 - [x] **Supabase + PITR:** Pro plan now. Daily backups are an acceptable floor for the ~5 trusted-user phase; enable the PITR add-on (separate toggle, ≥ Small compute, billed hourly, start at 7-day retention) before widening beyond trusted users or moving real volume.
 - [x] **KYC:** Bridge requires **us** to perform KYC and hand verified identity to them. Provider: **Sumsub** (LATAM doc coverage + bundled AML/watchlist + liveness). Wrap behind an `IdentityVerifier` interface so providers can be swapped/added later (e.g. the lending stack). Open: confirm with Bridge whether OFAC/sanctions screening is theirs or expected from our KYC.
-- [x] **Limits:** No Puente-imposed limits for MVP (5 trusted users). Keep limit fields in the data model as config for later. Note: Bridge's own AML monitoring + BSA thresholds (e.g., CTR at $10k) still apply underneath us regardless.
+- [~] **Limits:** ~~No Puente-imposed limits for MVP (5 trusted users).~~ **SUPERSEDED 2026-07-17** — per-user limits + velocity checks are now **MVP-required** (the instant-front policy makes them load-bearing; PRD §1 / §10, slice 8). Limit fields stay in the data model as config. Note: Bridge's own AML monitoring + BSA thresholds (e.g., CTR at $10k) still apply underneath us regardless.
 
 ## Design artifacts (the "before code" docs)
 All four core docs **reviewed for cross-consistency 2026-07-10** (states, accounts, transitions, and
@@ -48,12 +48,12 @@ endpoint maps align). Open items below.
 ## Infra & ops setup
 - [x] **Funding processor — RESOLVED 2026-07-10: Stripe.** Initially declined, now unblocked — Stripe handles USD intake (ACH first, card second); Bridge is the remittance rail and MTL holder; Puente never touches funds. Still wrapped behind the **`FundingProcessor` interface** (swappable). Remaining: confirm quasi-cash / money-transfer MCC approval before relying on card funding.
 - [ ] Paid Supabase + PITR; separate staging & prod projects.
-- [ ] Railway services: API + worker; cron for reconciliation.
-- [ ] Secrets via Doppler across all envs.
-- [ ] Sentry + end-to-end trace IDs; alerts on stuck/failed transfers.
+- [x] Railway services: API + worker; cron for reconciliation. Worker service + housekeeping crons (`transfer.reconcile-pending`, `payout.sweep`, `payout.poll`, `idempotency.purge`) shipped in slice 5 (prod worker deferred to slice 7 — staging only today). The three-way ledger↔Stripe↔Bridge reconciliation is the separate open item below.
+- [x] Secrets via Doppler across all envs. Live — see `runbooks/secrets.md`.
+- [~] Sentry + end-to-end trace IDs; alerts on stuck/failed transfers. Sentry wired; slice-5 alerts live (float-ceiling trip, Bridge `in_review` >1h, payout holds). The **general** stuck-transfer alert (any non-terminal state past a threshold) is still slice 8.
 - [ ] Reconciliation job — ledger vs funding processor vs Bridge payout. Unadopted design sketch in `docs/runbooks/proposals/reconciliation.md`; decide the process, then build the cron with the worker.
 - [ ] Admin/ops console — view transfers, resolve stuck payout, process refund/cancel.
-- [ ] Fraud & exposure guardrails — **float ceiling (cap aggregate fronted `funding_receivable`)**, amount caps, velocity limits, first-transaction holds.
+- [~] Fraud & exposure guardrails — **float ceiling (cap aggregate fronted `funding_receivable`)** shipped in slice 5; amount caps, velocity limits, per-user exposure caps, and first-transaction holds are still slice 8.
 - [x] **Rate-limit keying behind proxies** — implemented 2026-07-09 (`TRUST_PROXY_HOPS`, default 1; semantics pinned in `apps/api/src/config/trust-proxy.test.ts`). Remaining (Joshua, dashboards): confirm Supabase per-phone SMS OTP limits/cooldown + Twilio spend cap; after staging deploy, confirm audit-log `ip` matches a real client IP (bump `TRUST_PROXY_HOPS` if not). Original context: `apps/api/src/server.ts` has no `trustProxy`, so `@fastify/rate-limit` keys on the proxy's address — users share buckets (collateral limiting) and per-client limits are meaningless. Fix: `trustProxy: 1` (trust exactly the Railway edge hop) after empirically confirming chain depth on staging. **Never `trustProxy: true`** — the leftmost `X-Forwarded-For` is client-controlled, so trusting the whole chain lets an attacker rotate fake XFF values for unlimited fresh buckets (a bypass, strictly worse). **Do not key the limiter on `x-client-ip`** (the slice-4 sign-in-events header): the routes are public and the header is spoofable; only safe behind a shared-secret internal header (Doppler) proving the request came from our web tier — build only if actually needed. The control that protects Twilio SMS spend is per-**phone**, not per-IP: confirm GoTrue's built-in per-phone OTP limits/cooldown are configured + a Twilio spend cap is set — that may resolve most of this. Note `@fastify/rate-limit`'s in-memory store resets per deploy/replica (fine at current scale; no Redis). `trustProxy` also changes the IP recorded by the audit plugin and the `sign_in_events` fallback — desirable, but re-verify tests. Security-reviewer before merge.
 
 ---

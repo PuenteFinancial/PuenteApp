@@ -26,6 +26,19 @@ vi.mock('../../services/transfers.js', async (importOriginal) => {
   }
 })
 
+const enqueuePayoutSubmit = vi.hoisted(() => vi.fn())
+const enqueuePaymentEventProcess = vi.hoisted(() => vi.fn())
+
+vi.mock('../../services/queue.js', () => ({
+  enqueuePayoutSubmit: (...args: unknown[]) => enqueuePayoutSubmit(...args),
+  enqueuePaymentEventProcess: (...args: unknown[]) => enqueuePaymentEventProcess(...args),
+}))
+
+const recordEvent = vi.hoisted(() => vi.fn())
+vi.mock('../../services/payment-events.js', () => ({
+  recordEvent: (...args: unknown[]) => recordEvent(...args),
+}))
+
 const { webhooksRoute } = await import('./webhooks.js')
 const { TransferRpcError } = await import('../../services/transfers.js')
 const { env } = await import('../../config/env.js')
@@ -327,6 +340,7 @@ function selectChain(result: { data?: unknown; error?: unknown }) {
   const b: Record<string, ReturnType<typeof vi.fn>> = {} as never
   for (const m of ['select', 'update', 'eq', 'is'] as const) b[m] = vi.fn(() => b)
   b['single'] = vi.fn(async () => resolved)
+  b['maybeSingle'] = vi.fn(async () => resolved)
   ;(b as { then?: (r: (v: unknown) => void) => void }).then = (r) => r(resolved)
   return b
 }
@@ -345,6 +359,7 @@ const postFunding = (
 describe('POST /v1/webhooks/funding', () => {
   beforeEach(() => {
     transitionTransfer.mockReset()
+    enqueuePayoutSubmit.mockReset()
   })
 
   it('drives PENDING_PAYMENT → FUNDED with the ledger batch, timestamps, and payment ref', async () => {
@@ -370,6 +385,22 @@ describe('POST /v1/webhooks/funding', () => {
     const paymentAt = call['paymentAt'] as Date
     const cancelableUntil = call['cancelableUntil'] as Date
     expect(cancelableUntil.getTime() - paymentAt.getTime()).toBe(30 * 60 * 1000)
+    // Immediate payout (slice 5): the FUNDED transition enqueues the submit job
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID)
+    await app.close()
+  })
+
+  it('still acks 200 when the payout enqueue fails — the sweep heals it', async () => {
+    from.mockReturnValueOnce(selectChain({ data: transferRow }))
+    transitionTransfer.mockResolvedValue({ ...transferRow, state: 'FUNDED' })
+    enqueuePayoutSubmit.mockRejectedValue(new Error('DATABASE_URL is not set'))
+    const app = await buildApp()
+
+    const body = fundingBody()
+    const res = await postFunding(app, body, fundingSign(body))
+
+    expect(res.status).toBe(200)
+    expect(transitionTransfer).toHaveBeenCalledTimes(1)
     await app.close()
   })
 
@@ -483,5 +514,120 @@ describe('POST /v1/webhooks/funding', () => {
     } finally {
       env.MOCK_FUNDING_WEBHOOK_SECRET = saved
     }
+  })
+})
+
+// ── bridge transfer events (slice 5 PR 3) ────────────────────────────────────
+
+const transferEventBody = (state = 'payment_processed', overrides: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    event_type: 'transfer.updated.status_transitioned',
+    event_object_id: 'bt-1',
+    event_object: { id: 'bt-1', state, client_reference_id: TRANSFER_ID, ...overrides },
+  })
+
+const postBridge = (app: Awaited<ReturnType<typeof buildApp>>, body: string, header?: string) =>
+  supertest(app.server)
+    .post('/v1/webhooks/bridge')
+    .set('Content-Type', 'application/json')
+    .set('X-Webhook-Signature', header ?? signHeader(body))
+    .send(body)
+
+describe('POST /v1/webhooks/bridge — transfer events', () => {
+  beforeEach(() => {
+    recordEvent.mockReset()
+    enqueuePaymentEventProcess.mockReset()
+  })
+
+  it('records the event, resolves our transfer, enqueues processing, acks 200', async () => {
+    // transfers resolve (client_reference_id → our id)
+    from.mockReturnValueOnce(selectChain({ data: { id: TRANSFER_ID } }))
+    recordEvent.mockResolvedValue({ id: 'ev-1', inserted: true })
+    const app = await buildApp()
+
+    const body = transferEventBody('payment_processed')
+    const res = await postBridge(app, body)
+
+    expect(res.status).toBe(200)
+    expect(recordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: 'bridge',
+        externalEventId: 'bt-1:payment_processed',
+        eventType: 'payment_processed',
+        transferId: TRANSFER_ID,
+        providerRef: 'bt-1',
+      }),
+    )
+    expect(enqueuePaymentEventProcess).toHaveBeenCalledWith('ev-1')
+    await app.close()
+  })
+
+  it('does not enqueue on a duplicate (already-recorded) event', async () => {
+    from.mockReturnValueOnce(selectChain({ data: { id: TRANSFER_ID } }))
+    recordEvent.mockResolvedValue({ id: 'ev-1', inserted: false })
+    const app = await buildApp()
+
+    const res = await postBridge(app, transferEventBody('payment_submitted'))
+
+    expect(res.status).toBe(200)
+    expect(enqueuePaymentEventProcess).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('still acks 200 when the enqueue fails — the sweep heals', async () => {
+    from.mockReturnValueOnce(selectChain({ data: { id: TRANSFER_ID } }))
+    recordEvent.mockResolvedValue({ id: 'ev-1', inserted: true })
+    enqueuePaymentEventProcess.mockRejectedValue(new Error('boss down'))
+    const app = await buildApp()
+
+    const res = await postBridge(app, transferEventBody())
+
+    expect(res.status).toBe(200)
+    await app.close()
+  })
+
+  it('records with a null transfer when client_reference_id resolves nothing', async () => {
+    from.mockReturnValueOnce(selectChain({ data: null }))
+    recordEvent.mockResolvedValue({ id: 'ev-1', inserted: true })
+    const app = await buildApp()
+
+    await postBridge(app, transferEventBody('payment_submitted', { client_reference_id: 'unknown' }))
+
+    expect(recordEvent).toHaveBeenCalledWith(expect.objectContaining({ transferId: null, providerRef: 'bt-1' }))
+    await app.close()
+  })
+
+  it('acks a malformed transfer event (missing state) without recording', async () => {
+    const app = await buildApp()
+    const body = JSON.stringify({
+      event_type: 'transfer.updated.status_transitioned',
+      event_object: { id: 'bt-1', client_reference_id: TRANSFER_ID },
+    })
+    const res = await postBridge(app, body)
+
+    expect(res.status).toBe(200)
+    expect(recordEvent).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('500s when recording fails so Bridge redelivers', async () => {
+    from.mockReturnValueOnce(selectChain({ data: { id: TRANSFER_ID } }))
+    recordEvent.mockRejectedValue(new Error('insert failed'))
+    const app = await buildApp()
+
+    const res = await postBridge(app, transferEventBody())
+
+    expect(res.status).toBe(500)
+    await app.close()
+  })
+
+  it('rejects a transfer event with a bad signature (400), no recording', async () => {
+    const app = await buildApp()
+    const body = transferEventBody()
+    const res = await postBridge(app, body, 't=1,v0=bad')
+
+    expect(res.status).toBe(400)
+    expect(recordEvent).not.toHaveBeenCalled()
+    await app.close()
   })
 })

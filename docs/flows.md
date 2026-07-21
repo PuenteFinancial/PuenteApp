@@ -1,7 +1,7 @@
 # Flow / Sequence Diagrams — USD → MXN Remittance
 
-**Date:** 2026-07-10
-**Status:** v1
+**Date:** 2026-07-10 · **Updated:** 2026-07-21 (slice 5 — payout lifecycle)
+**Status:** slice-5-current
 **Pairs with:** `transfer-state-machine.md` (states), `ledger-rules.md` (postings),
 `api-contract.md` (routes), `architecture.md` (components)
 
@@ -36,9 +36,10 @@ sequenceDiagram
     API-->>S: funding details (client completes via Stripe SDK)
 
     ST-->>API: webhook: payment initiated/captured
-    API->>DB: payment_events (dedupe) + enqueue job — 200 fast
-    W->>DB: PENDING_PAYMENT → FUNDED (+ FUNDED ledger post, payment_at set)
-    W->>DB: gate: funding_cleared policy + float ceiling + cancel window
+    API->>DB: PENDING_PAYMENT → FUNDED (+ FUNDED ledger post, payment_at/cancelable_until set)
+    Note over API,DB: dedupe = transition guard + ledger (transfer_id, transition) uniqueness — funding path never touches payment_events
+    API->>DB: enqueue payout.submit (after commit) — 200 fast
+    W->>DB: gate: payability + float ceiling + FX backstop, then atomic claim
     W->>BR: POST /v0/transfers (idempotency key = transfer)
     W->>DB: FUNDED → SUBMITTED (+ SUBMITTED ledger post)
 
@@ -46,12 +47,13 @@ sequenceDiagram
     Note over W,DB: … IN_FLIGHT → COMPLETED (+ COMPLETED ledger post)
     W-->>S: push notification + receipt available
     ST-->>API: webhook: ACH settled (days later)
-    W->>DB: funding_cleared = true (+ ACH-clears ledger post)
+    API->>DB: funding_cleared = true (flag only — no ledger post)
 ```
 
-Key properties: the state change and the "next step" job commit in one DB transaction (outbox);
-every external money call carries an idempotency key; webhooks are the source of truth for
-`FUNDED`, `IN_FLIGHT`, `COMPLETED`.
+Key properties: jobs are enqueued after the state change commits and are idempotent replays — a
+lost enqueue is healed by the 1-min sweep, never a correctness problem (enqueue-after-commit, not a
+transactional outbox; see decisions.md 2026-07-20); every external money call carries an
+idempotency key; webhooks are the source of truth for `FUNDED`, `IN_FLIGHT`, `COMPLETED`.
 
 ## 2. Payout webhook (Bridge → us)
 
@@ -87,19 +89,17 @@ payment_processed`, with failure states off to the side.
 | `payment_submitted` | `SUBMITTED → IN_FLIGHT` |
 | `payment_processed` | `IN_FLIGHT → COMPLETED` |
 | `undeliverable`, `error`, `canceled` | `SUBMITTED`/`IN_FLIGHT → PAYOUT_FAILED` → refund flow |
-| `returned`, `refunded`, `refund_in_flight` | `PAYOUT_FAILED` path — Bridge returning principal (ledger: Bridge-returns post) |
+| `returned`, `refunded`, `refund_in_flight` | `PAYOUT_FAILED` path — Bridge returning principal (ledger deferred — slice 6) |
 | `refund_failed` | `PAYOUT_FAILED` + **ops alert** — principal stuck at Bridge (stuck-transfer runbook) |
 | `in_review` | **no state change**; transfer stays `SUBMITTED`/`IN_FLIGHT`. Observed in sandbox (2026-07-13) as a routine *transient initial state* on payout creation, resolving to `funds_received` in seconds — so alert only when it **persists** (> 1h), which indicates a real Bridge-side review/AML hold |
+| *unmapped / unknown state* | **no-op** — the processor marks the event `ignored` and never crashes on a never-before-seen Bridge state |
 
 Missed webhooks are backstopped by reconciliation (cron polls `GET /v0/transfers` for
 non-terminal transfers — see reconciliation runbook).
 
-**Payout topology (resolved 2026-07-13, sandbox spike):** one Puente transfer = **one** Bridge
-transfer — the payout leg from the pre-funded treasury wallet (`bridge_wallet` USDC source →
-`spei` MXN destination with `destination.amount` fixed). Wallet replenishment (USD → USDC onramp)
-is a separate batch process outside any user transfer. Bridge offers no one-transfer fiat→SPEI
-route (verified: `ach_push`/`ach`/`wire` all rejected). See the ERD note and ledger
-`bridge_wallet_float` postings.
+**Payout topology (resolved 2026-07-13):** one Puente transfer = one Bridge payout leg from the
+pre-funded treasury wallet — authoritative write-up in the **Bridge wallet id** note in
+[`erd.md`](erd.md).
 
 ## 3. Error resolution (Reg E §1005.33) — dispute
 
@@ -133,7 +133,7 @@ sequenceDiagram
 ```
 
 Only two exits, ops-driven, never self-resolving. Deadlines, notice content, and the investigation
-checklist live in `runbooks/error-resolution.md`.
+checklist live in `runbooks/proposals/error-resolution.md`.
 
 ## 4. Cancel / refund
 
@@ -148,20 +148,23 @@ sequenceDiagram
 
     S->>API: POST /v1/transfers/:id/cancel (Idempotency-Key)
     API->>DB: SELECT ... FOR UPDATE (row lock on transfer)
-    alt state = FUNDED and now() < cancelable_until
-        API->>DB: FUNDED → CANCELED (commits only if still FUNDED — TOCTOU guard)
+    alt state = FUNDED and submit_attempted_at is null
+        API->>DB: FUNDED → CANCELED (commits only if still FUNDED and unclaimed — TOCTOU guard)
         API-->>S: 200 canceled
         W->>DB: CANCELED ledger post (ACH in flight vs not — two variants)
         W->>ST: refund / release payment
         W->>DB: CANCELED → REFUNDED (+ refund paid post)
         W-->>S: push: refunded (full amount incl. fee, within 3 business days)
-    else already SUBMITTED or window closed
-        API-->>S: 409 transfer_not_cancelable → offer dispute path (§3)
+    else already claimed / SUBMITTED / IN_FLIGHT
+        API-->>S: state-keyed refund path (timely Reg E cancel → full refund; see below)
     end
 ```
 
-The same row lock protects the other side: the worker's `FUNDED → SUBMITTED` submission commits only
-if the row is still `FUNDED` — cancel and payout can never both win.
+The same row lock protects the other side: the submit job's atomic claim (`submit_attempted_at`,
+guarded on `state = 'FUNDED'`) and the cancel guard (`submit_attempted_at IS NULL`) serialize on the
+row — cancel and payout can never both win. A timely §1005.34 cancel that arrives after the claim is
+NOT a 409: the right survives until pickup/deposit, so it is honored as a full refund once the
+payout resolves (state-keyed refund rule, slice 6 — see transfer-state-machine.md).
 
 `PAYOUT_FAILED → REFUNDED` (Bridge can't deliver) follows the same refund tail: Bridge returns
 principal → recognize `refunds_payable` (full amount incl. fee) → pay refund → notify sender.

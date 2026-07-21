@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsup src/server.ts --format esm",
+    "dev:worker": "tsx watch src/worker.ts",
+    "build": "tsup src/server.ts src/worker.ts --format esm",
     "start": "node dist/server.js",
+    "start:worker": "node dist/worker.js",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
@@ -23,6 +25,7 @@
     "fastify": "^5.10.0",
     "fastify-plugin": "^6.0.0",
     "jose": "^6.2.3",
+    "pg-boss": "^12.26.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

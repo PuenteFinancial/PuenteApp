@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   createBridgeCustomer,
+  createBridgePayout,
   createExternalAccount,
   createTosLink,
   getBridgeCustomer,
+  getBridgeTransfer,
   getExchangeRate,
   getKycLink,
   listExternalAccounts,
@@ -80,6 +82,10 @@ describe('createBridgeCustomer', () => {
     expect((err as BridgeApiError).body).toEqual({ code: 'invalid_email' })
     // message must not leak the response body (may contain PII)
     expect((err as BridgeApiError).message).not.toContain('invalid_email')
+    // body must be NON-ENUMERABLE: console.error / util.inspect / JSON print
+    // enumerable own properties, and Bridge error bodies can echo request PII
+    expect(Object.keys(err as object)).not.toContain('body')
+    expect(JSON.stringify(err)).not.toContain('invalid_email')
   })
 })
 
@@ -255,6 +261,126 @@ describe('getKycLink', () => {
     await expect(getKycLink('cust_missing', 'https://x.test/return')).rejects.toBeInstanceOf(
       BridgeApiError,
     )
+  })
+})
+
+describe('createBridgePayout', () => {
+  const input = {
+    idempotencyKey: 'idem_tr_1',
+    clientReferenceId: '3f9a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8',
+    onBehalfOf: 'cust_sender',
+    sourceWalletId: 'wallet_treasury',
+    destinationExternalAccountId: 'ea_dest',
+    destinationAmountMxn: '1850.00',
+  }
+
+  const createdBody = {
+    id: 'transfer_1',
+    state: 'awaiting_funds',
+    client_reference_id: input.clientReferenceId,
+    source: { payment_rail: 'bridge_wallet', currency: 'usdc', amount: '92.11' },
+    destination: { payment_rail: 'spei', currency: 'mxn', amount: '1850.00' },
+  }
+
+  it('POSTs the exact payout body with the transfer idempotency key', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, createdBody))
+
+    const result = await createBridgePayout(input)
+
+    expect(result).toEqual({
+      bridgeTransferId: 'transfer_1',
+      state: 'awaiting_funds',
+      sourceAmount: '92.11',
+    })
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.bridge.test/v0/transfers')
+    expect(init.method).toBe('POST')
+    expect(init.headers['Api-Key']).toBe('bridge_test_key')
+    // key comes from transfers.idempotency_key, never generated here
+    expect(init.headers['Idempotency-Key']).toBe('idem_tr_1')
+    expect(JSON.parse(init.body)).toEqual({
+      on_behalf_of: 'cust_sender',
+      client_reference_id: '3f9a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8',
+      developer_fee: '0',
+      source: {
+        payment_rail: 'bridge_wallet',
+        currency: 'usdc',
+        bridge_wallet_id: 'wallet_treasury',
+      },
+      destination: {
+        payment_rail: 'spei',
+        currency: 'mxn',
+        external_account_id: 'ea_dest',
+        amount: '1850.00',
+      },
+    })
+    // fixed MXN amount is passed through as-is — no numeric round-trip
+    expect(init.body).toContain('"amount":"1850.00"')
+  })
+
+  it('serializes a byte-identical body across calls with the same input', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, createdBody))
+    await createBridgePayout(input)
+    await createBridgePayout({ ...input })
+    const bodies = fetchMock.mock.calls.map(([, init]) => init.body)
+    expect(bodies[0]).toBe(bodies[1])
+  })
+
+  it('throws statusCode 400 on sync rejection (concurrent serialization / drained wallet)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(400, { code: 'insufficient_funds' }))
+
+    const err = await createBridgePayout(input).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(BridgeApiError)
+    expect((err as BridgeApiError).statusCode).toBe(400)
+    expect((err as BridgeApiError).message).not.toContain('insufficient_funds')
+  })
+
+  it('throws statusCode 422 on idempotency-key body mismatch', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(422, { code: 'idempotency_key_mismatch' }))
+
+    const err = await createBridgePayout(input).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(BridgeApiError)
+    expect((err as BridgeApiError).statusCode).toBe(422)
+  })
+
+  it('throws when the response has no transfer id', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, { state: 'awaiting_funds' }))
+    await expect(createBridgePayout(input)).rejects.toBeInstanceOf(BridgeApiError)
+  })
+})
+
+describe('getBridgeTransfer', () => {
+  it('GETs the transfer without an idempotency key and maps the result', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        id: 'transfer_1',
+        state: 'payment_processed',
+        source: { amount: '92.11' },
+      }),
+    )
+
+    const result = await getBridgeTransfer('transfer_1')
+
+    expect(result).toEqual({
+      bridgeTransferId: 'transfer_1',
+      state: 'payment_processed',
+      sourceAmount: '92.11',
+    })
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.bridge.test/v0/transfers/transfer_1')
+    expect(init.method ?? 'GET').toBe('GET')
+    expect(init.headers['Idempotency-Key']).toBeUndefined()
+  })
+
+  it('throws BridgeApiError with statusCode 404 when the transfer is unknown', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404, { code: 'not_found' }))
+
+    const err = await getBridgeTransfer('transfer_missing').catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(BridgeApiError)
+    expect((err as BridgeApiError).statusCode).toBe(404)
   })
 })
 

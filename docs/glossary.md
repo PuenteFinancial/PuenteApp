@@ -11,8 +11,10 @@ refer back as needed.
 - **§1005.33 (error resolution)** — the sender's right to dispute a remittance error up to 180 days
   after the disclosed delivery date; we investigate within 90 days. See
   [runbooks/proposals/error-resolution.md](runbooks/proposals/error-resolution.md) (unadopted draft).
-- **§1005.34 (cancellation)** — the mandatory 30-minute cancellation window after payment; ours is
-  enforced server-side in the `FUNDED` state only. See the state machine doc.
+- **§1005.34 (cancellation)** — the mandatory 30-minute cancellation right after payment, which
+  survives until funds are *picked up or deposited* (there is no "already submitted to partner"
+  exception); our enforcement is the `FUNDED`-state cancel action plus the state-keyed refund rule
+  (post-submission timely cancel → full refund within 3 business days). See the state machine doc.
 - **Prepayment disclosure / receipt** — the two Reg E documents we must show (rate, fees, MXN
   amount, rights); stored immutably in the `disclosures` table. See [erd.md](erd.md).
 - **FCRA** — Fair Credit Reporting Act; why the credit-score endpoint requires `fcraConsentAt`
@@ -53,14 +55,19 @@ refer back as needed.
   the sender's bank still owes us.
 - **`due_from_bridge`** — asset account tracking funds handed to Bridge whose delivery isn't
   confirmed yet.
-- **Float / float ceiling** — the cash we front before ACH clears under instant payout; the ceiling
-  is the configured cap on aggregate `funding_receivable` and blocks new submissions when exceeded.
+- **Float / float ceiling** — the cash we front before ACH clears under instant payout; the crude
+  aggregate version is live in slice 5 (submit job checks `funding_receivable` vs
+  `FLOAT_CEILING_MINOR`; a trip leaves the transfer `FUNDED` with no hold and the sweep retries as
+  the balance drains), while the authoritative float controls are slice 8.
 - **`fx_slippage`** — expense account absorbing the difference between the rate we quoted the
   customer and Bridge's actual rate at execution (Bridge offers no rate lock).
 - **Idempotency key** — a unique token making a retried money operation apply exactly once; used on
   client POSTs, Bridge submissions, and ledger postings (`(transfer_id, transition)`).
 - **Transactional outbox** — pattern where the state change and its follow-up job commit in the
-  same DB transaction, so neither can happen without the other.
+  same DB transaction, so neither can happen without the other; we deliberately chose
+  enqueue-after-commit + sweep healing instead (PostgREST RPC and pg-boss can't share a
+  transaction, and idempotent jobs make a lost enqueue cost only sweep latency). See
+  [decisions.md](decisions.md), 2026-07-20.
 
 ## Puente & Bridge mechanics
 
@@ -69,6 +76,18 @@ refer back as needed.
 - **`funding_cleared` gate** — the per-transfer flag + policy controlling whether we wait for ACH
   settlement before paying out; MVP policy is "don't wait" for ~5 trusted users, and the flag exists
   so flipping it later requires no rework. See the state machine doc.
+- **Submit claim** — the guarded UPDATE (`state = 'FUNDED' AND payout_hold_reason IS NULL AND
+  submit_attempted_at IS NULL`) the payout job wins before calling Bridge; it serializes submission
+  against the slice-6 cancel so both can never happen. See the state machine doc.
+- **Payout hold** — a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`,
+  or `submit_error`); the sweep skips it until ops releases it via
+  [runbooks/payout-holds.md](runbooks/payout-holds.md).
+- **Payment event** — a row in `payment_events` recording a raw Bridge transfer event (webhook or
+  poll-synthesized), deduped on `(source, external_event_id)` and processed by one job; payloads
+  are service-role only and never logged.
+- **FX submission backstop** — the pre-submission guard that holds a payout (`fx_drift`) when the
+  live Bridge buy rate drifts more than `FX_MAX_DRIFT_BPS` from the quote's `source_rate` or the
+  quote is older than `FX_MAX_QUOTE_AGE_MINUTES`; never submit on unknown or dislocated rates.
 - **Quote as our commitment** — Bridge's rate is indicative only, but Reg E requires firm numbers,
   so a Puente quote is *our* time-boxed offer (source rate minus a buffer) and we absorb the
   variance. See [erd.md](erd.md) quotes + ledger `fx_slippage`.

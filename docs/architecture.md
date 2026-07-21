@@ -1,7 +1,7 @@
 # System Architecture — Puente
 
-**Date:** 2026-07-10
-**Status:** v1
+**Date:** 2026-07-10 · **Updated:** 2026-07-21 (slice 5)
+**Status:** slice-5-current
 **Pairs with:** `erd.md`, `transfer-state-machine.md`, `ledger-rules.md`, `api-contract.md`, `flows.md`
 
 One picture of every runtime component and who talks to whom. The rule that shapes everything:
@@ -20,13 +20,13 @@ flowchart TB
 
     subgraph railway [Railway]
         api["Fastify API<br/>/v1 — auth, audit, schemas"]
-        worker["Worker<br/>(pg-boss jobs: state transitions,<br/>ledger posts, Bridge submission)"]
-        cron["Cron<br/>(reconciliation, quote expiry,<br/>idempotency-key purge)"]
+        worker["Worker<br/>(pg-boss jobs: state transitions,<br/>ledger posts, Bridge submission,<br/>provider-event ingestion)"]
+        cron["Cron<br/>(payout sweep + poll,<br/>pending-payment reconcile,<br/>idempotency purge)"]
     end
 
     subgraph supabase [Supabase]
         auth["Supabase Auth<br/>(phone OTP sessions)"]
-        pg[("Postgres<br/>app tables + ledger +<br/>job queue + outbox")]
+        pg[("Postgres<br/>app tables + ledger +<br/>job queue (pg-boss)")]
     end
 
     subgraph providers [Providers — server-side only]
@@ -69,9 +69,9 @@ and PostHog attach to every service and are omitted from the edge list for reada
 | Mobile app | Expo EAS | The product surface. NativeWind, expo-router, i18next (EN+ES). Talks only to the API with a Supabase session JWT. |
 | Web app | Vercel | Waitlist, credit check, content, KYC hosted flows. No direct Supabase access — all writes via `INTERNAL_API_URL` to the API. |
 | Fastify API | Railway | The boundary. `/v1` routes with schema validation, auth middleware (default-on), audit log, rate limiting (`TRUST_PROXY_HOPS=1`). Uses the Supabase service role (RLS is defense-in-depth behind it). |
-| Worker | Railway | Executes state-machine transitions from the Postgres job queue (pg-boss): the `FUNDED → SUBMITTED` gate + float-ceiling check, Bridge submission with idempotency keys, ledger posting, refunds. |
-| Cron | Railway | Daily reconciliation (ledger vs Stripe vs Bridge), stale-`PENDING_PAYMENT` sweep (30-min no-webhook → `PAYMENT_FAILED`), quote expiry, idempotency-key purge. |
-| Postgres (Supabase) | Supabase (staging + prod projects) | App tables, double-entry ledger, job queue, and outbox in **one database** — a state change and its "do the next step" job commit in the same transaction. RLS enabled everywhere, deny-by-default. |
+| Worker | Railway | Executes state-machine transitions from the Postgres job queue (pg-boss): the `FUNDED → SUBMITTED` gate + float-ceiling check, Bridge submission with idempotency keys, ledger posting, provider-event ingestion (`payment-event.process`, webhook + poll), and a polling reconciliation backstop for missed webhooks. |
+| Cron | Railway | Scheduled in the worker process: `payout.sweep` (1-min, re-enqueues lost/stale submits), `payout.poll` (N-min Bridge reconciliation backstop), stale-`PENDING_PAYMENT` reconcile (5-min; 30-min no-webhook → `PAYMENT_FAILED`), idempotency-key purge (daily 04:00). |
+| Postgres (Supabase) | Supabase (staging + prod projects) | App tables, double-entry ledger, and job queue (pg-boss) in **one database**. Jobs are enqueued after the state change commits and are idempotent; a 1-min sweep re-enqueues anything lost (enqueue-after-commit, not a transactional outbox — decisions.md 2026-07-20). RLS enabled everywhere, deny-by-default. |
 | Supabase Auth | Supabase | Phone OTP (Twilio SMS) → JWT sessions; 30-day rolling refresh. |
 
 ## Provider seams (all behind interfaces)
@@ -93,10 +93,10 @@ Sender ──Stripe (ACH debit)──▶ Puente Stripe balance ──replenish�
                                                         SPEI ──▶ recipient CLABE (MXN, seconds)
 ```
 
-Puente never custodies MXN; the ledger is USD-only (see `ledger-rules.md`). **Open question** (ERD):
-whether each Puente transfer maps to one Bridge transfer (Bridge orchestrates USD→USDC→MXN
-internally) or to a payout leg from a pre-funded treasury wallet plus batch replenishment — resolve
-in sandbox before building the worker.
+Puente never custodies MXN; the ledger is USD-only (see `ledger-rules.md`). **Resolved 2026-07-13:**
+one Puente transfer = one Bridge payout leg from the pre-funded treasury wallet (USD → USDC
+replenishment is a separate batch process), and the worker that submits it has shipped (slice 5).
+Authoritative write-up in the **Bridge wallet id** note in [`erd.md`](erd.md).
 
 ## Environments & deploys
 
