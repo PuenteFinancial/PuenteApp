@@ -10,6 +10,7 @@ export type Translations = {
     cta1: string
     cta2: string
     elig: string
+    pills: string[]
     notes: string[]
   }
   phone: {
@@ -45,7 +46,8 @@ export type Translations = {
   wl: {
     eyebrow: string
     h2: string
-    sub: string
+    sub: [string, string, string]
+    subFine: string
     cta: string
     points: string[]
     f: { name: string; phone: string; email: string; country: string; amount: string; provider: string; knowsScore: string; scoreRange: string; remitFrequency: string; remitYears: string }
@@ -67,7 +69,7 @@ export type Translations = {
     next: string
     back: string
   }
-  footer: { tagline: string; rights: string; note: string }
+  footer: { tagline: string; disclaimer: [string, string]; disclaimer2: string; rights: string; note: string }
   onboarding: {
     signup: { title: string; sub: string; phone: string; phonePh: string; smsConsent: string; cta: string; sending: string; error: string }
     verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resent: string; error: string }
@@ -120,15 +122,16 @@ export type Translations = {
 }
 
 const en: Translations = {
-  announce: { pre: 'Early access is open.', link: 'Sign up' },
-  nav: { remit: 'Remittances', how: 'How it works', cta: 'Sign up', signIn: 'Sign in' },
+  announce: { pre: 'Join before August 31 - no transfer fees for your first 6 months.', link: 'join the waitlist' },
+  nav: { remit: 'Remittances', how: 'How it works', cta: 'Join the Waitlist', signIn: 'Sign in' },
   hero: {
     eyebrow: 'Remittances + credit building',
     h1: [['Send', 'money.'], ['Build', 'credit.']],
-    sub: 'Send money home — and build your U.S. credit history with every payment you make. One app, built for newcomers.',
-    cta1: 'Sign up',
+    sub: 'Send money the way you already do, and build real U.S. credit with every transfer. All in one app.',
+    cta1: 'Join the Waitlist',
     cta2: 'See how it works',
     elig: 'Works with your ITIN or SSN.',
+    pills: ['Reports to all 3 credit bureaus', 'Set up in minutes', 'No credit card needed'],
     notes: ['Real exchange rate', 'Built for newcomers'],
   },
   phone: {
@@ -142,36 +145,37 @@ const en: Translations = {
   remit: {
     eyebrow: 'Remittances',
     h2: 'Money home, the moment you tap send.',
-    sub: 'Send at the real exchange rate. And every transfer you send also builds your U.S. credit history.',
+    sub: 'Secure international transfers in minutes. Every time you send using your Puente account, your U.S. credit history grows.',
     calc: {
       to: 'Sending to',
       you: 'You send', they: 'They receive',
       rate: '1 USD = 17.20 MXN',
-      note: 'Real mid-market rate',
-      cta: 'Sign up',
+      note: 'Claim no transfer fees for your first 6 months',
+      cta: 'Sign Up',
     },
   },
   how: {
     eyebrow: 'How it works',
     h2: [['Build credit ', 'without thinking about it.']],
-    sub: 'Sending money home is something you already do. With Puente, every on-time payment helps build your U.S. credit history — automatically.',
+    sub: 'Send money and watch your credit score grow. For only $5/month, each payment builds your U.S. credit history, automatically. No credit card required.',
     steps: [
-      { t: 'Send money home', d: 'Send like you always do — at the real exchange rate, arriving in seconds.' },
-      { t: 'We report your on-time payments', d: 'Puente reports your payments to the major U.S. credit bureaus on your behalf.' },
-      { t: 'Your credit history grows', d: 'On-time payments build a stronger U.S. credit profile over time — no card, no debt.' },
+      { t: 'Send money home', d: 'Send like you always do. Transparent pricing. International transfers in minutes.' },
+      { t: 'We report your on-time payments', d: 'Puente reports payments on your account to the 3 major U.S. credit bureaus.' },
+      { t: 'Your credit history grows', d: 'Monitor your credit score growth in real time, all from the app. No credit card or confusing terms. Just credit building.' },
     ],
-    privacyTitle: 'Your status stays private',
-    privacy: 'We never store or report your documentation, legal, or immigration status. Your credit-building is based on your payments — nothing else.',
-    eligTitle: "What you'll need",
-    elig: "An ITIN or SSN and a U.S. address. That's it.",
-    cta: 'Sign up',
+    privacyTitle: 'Commitment to privacy',
+    privacy: 'Puente keeps sensitive personal information and account data protected and private.',
+    eligTitle: 'Get started in minutes',
+    elig: 'Works with ITIN or SSN',
+    cta: 'Join the Waitlist',
   },
   wl: {
     eyebrow: 'Get started',
     h2: 'Sign up today',
-    sub: 'Sign up and start turning your remittances into a stronger U.S. financial future.',
-    cta: 'Sign up',
-    points: ['Start building U.S. credit from your first transfer', 'Early member benefits', 'Help us build the best product for you'],
+    sub: ['Join the waitlist today, and lock in ', 'no transfer fees for your first 6 months', ' on a Puente credit building account.'],
+    subFine: 'Offer ends August 31, 2026',
+    cta: 'Join the Waitlist',
+    points: ['Get more out of your remittances', 'Start building U.S. credit from your first transfer', 'Build a better financial future'],
     f: { name: 'Full name', phone: 'Phone number', email: 'Email', country: 'Country you send to', amount: 'How much do you send per transfer?', provider: 'Current remittance provider', knowsScore: 'Do you know your US credit score?', scoreRange: 'What is your credit score range?', remitFrequency: 'How often do you send?', remitYears: 'How long have you been sending remittances?' },
     scoreOptions: ['Below 580', '580–669', '670–739', '740–799', '800+'],
     remitFrequencyOptions: ['Weekly', 'Every 2 weeks', 'Monthly', 'A few times a year', "I don't send yet"],
@@ -200,8 +204,10 @@ const en: Translations = {
     back: 'Back',
   },
   footer: {
-    tagline: 'Send money home and build U.S. credit doing it. One app, built for our community.',
-    rights: '© 2026 Puente Financial, Inc.',
+    tagline: 'Send money.\nBuild credit.',
+    disclaimer: ['Puente Financial, Inc. ("Puente") is a financial technology company, not a bank. Money remittance, payment, and banking services are provided by our partner U.S.-licensed financial institutions. Puente is an authorized agent of Bridge Building Inc (NMLS # 2450917). For US state licensing information, please see: ', '.'],
+    disclaimer2: 'In the United States, Puente is registered with the U.S. Department of the Treasury Financial Crimes Enforcement Network (FinCEN) as a Money Services Business (BSA ID: 31000334222151).',
+    rights: '© 2026 Puente Financial, Inc. All rights reserved.',
     note: 'Concept in validation — not yet available.',
   },
   onboarding: {
@@ -315,15 +321,16 @@ const en: Translations = {
 }
 
 const es: Translations = {
-  announce: { pre: 'El acceso anticipado está abierto.', link: 'Regístrate' },
-  nav: { remit: 'Remesas', how: 'Cómo funciona', cta: 'Regístrate', signIn: 'Iniciar sesión' },
+  announce: { pre: 'Únete antes del 31 de agosto - sin comisiones de transferencia durante tus primeros 6 meses.', link: 'únete a la lista de espera' },
+  nav: { remit: 'Remesas', how: 'Cómo funciona', cta: 'Únete a la Lista de Espera', signIn: 'Iniciar sesión' },
   hero: {
     eyebrow: 'Remesas + historial de crédito',
     h1: [['Envía', 'dinero.'], ['Crea', 'crédito.']],
-    sub: 'Envía dinero a casa — y crea tu historial crediticio en EE. UU. con cada pago que haces. Una sola app, hecha para ti.',
-    cta1: 'Regístrate',
+    sub: 'Envía dinero como ya lo haces, y construye crédito real en EE. UU. con cada transferencia. Todo en una sola app.',
+    cta1: 'Únete a la Lista de Espera',
     cta2: 'Mira cómo funciona',
     elig: 'Funciona con tu ITIN o SSN.',
+    pills: ['Reporta a los 3 burós de crédito', 'Configúralo en minutos', 'No necesitas tarjeta de crédito'],
     notes: ['Tipo de cambio real', 'Hecha para ti'],
   },
   phone: {
@@ -337,36 +344,37 @@ const es: Translations = {
   remit: {
     eyebrow: 'Remesas',
     h2: 'Dinero a casa, en el momento en que tocas enviar.',
-    sub: 'El tipo de cambio real, sin sobreprecio. Y cada transferencia que envías también construye tu historial crediticio en EE. UU.',
+    sub: 'Transferencias internacionales seguras en minutos. Cada vez que envías usando tu cuenta de Puente, tu historial crediticio en EE. UU. crece.',
     calc: {
       to: 'Enviar a',
       you: 'Tú envías', they: 'Ellos reciben',
       rate: '1 USD = 17.20 MXN',
-      note: 'Tipo de cambio real · sin sobreprecio',
+      note: 'Reclama 6 meses sin comisión de transferencia',
       cta: 'Regístrate',
     },
   },
   how: {
     eyebrow: 'Cómo funciona',
     h2: [['Crea crédito ', 'sin siquiera pensarlo.']],
-    sub: 'Enviar dinero a casa es algo que ya haces. Con Puente, cada pago a tiempo ayuda a construir tu historial crediticio en EE. UU. — automáticamente.',
+    sub: 'Envía dinero y mira crecer tu puntaje de crédito. Por solo $5/mes, cada pago construye tu historial crediticio en EE. UU., automáticamente. No requiere tarjeta de crédito.',
     steps: [
-      { t: 'Envía dinero a casa', d: 'Envía como siempre — al tipo de cambio real, llegando en segundos.' },
-      { t: 'Reportamos tus pagos a tiempo', d: 'Puente reporta tus pagos a los principales burós de crédito de EE. UU. por ti.' },
-      { t: 'Tu historial de crédito crece', d: 'Los pagos a tiempo construyen un mejor perfil de crédito con el tiempo — sin tarjeta, sin deudas.' },
+      { t: 'Envía dinero a casa', d: 'Envía como siempre. Precios transparentes. Transferencias internacionales en minutos.' },
+      { t: 'Reportamos tus pagos a tiempo', d: 'Puente reporta los pagos de tu cuenta a los 3 principales burós de crédito de EE. UU.' },
+      { t: 'Tu historial de crédito crece', d: 'Monitorea el crecimiento de tu puntaje de crédito en tiempo real, todo desde la app. Sin tarjeta de crédito ni términos confusos. Solo construcción de crédito.' },
     ],
-    privacyTitle: 'Tu estatus se queda privado',
-    privacy: 'Nunca guardamos ni reportamos tu documentación, estatus legal o migratorio. Tu historial de crédito se basa en tus pagos — nada más.',
-    eligTitle: 'Lo que necesitas',
-    elig: 'Un ITIN o SSN y una dirección en EE. UU. Eso es todo.',
-    cta: 'Regístrate',
+    privacyTitle: 'Compromiso con la privacidad',
+    privacy: 'Puente mantiene tu información personal y datos de cuenta protegidos y privados.',
+    eligTitle: 'Empieza en minutos',
+    elig: 'Funciona con ITIN o SSN',
+    cta: 'Únete a la Lista de Espera',
   },
   wl: {
     eyebrow: 'Empieza ya',
     h2: 'Regístrate hoy',
-    sub: 'Regístrate y empieza a convertir tus remesas en un futuro financiero más sólido en EE. UU.',
-    cta: 'Regístrate',
-    points: ['Empieza a crear crédito desde tu primera transferencia', 'Beneficios de miembro anticipado', 'Ayúdanos a construir el mejor producto para ti'],
+    sub: ['Únete a la lista de espera hoy y asegura ', '6 meses sin comisión de transferencia', ' en tu cuenta de construcción de crédito de Puente.'],
+    subFine: 'La oferta termina el 31 de agosto de 2026',
+    cta: 'Únete a la Lista de Espera',
+    points: ['Aprovecha más tus remesas', 'Empieza a crear crédito desde tu primera transferencia', 'Construye un mejor futuro financiero'],
     f: { name: 'Nombre completo', phone: 'Teléfono', email: 'Correo electrónico', country: 'País al que envías', amount: '¿Cuánto envías por transferencia?', provider: 'Proveedor de remesas actual', knowsScore: '¿Conoces tu puntaje de crédito en EE. UU.?', scoreRange: '¿Cuál es tu rango de puntaje?', remitFrequency: '¿Con qué frecuencia envías?', remitYears: '¿Hace cuánto tiempo envías remesas?' },
     scoreOptions: ['Menos de 580', '580–669', '670–739', '740–799', '800+'],
     remitFrequencyOptions: ['Semanalmente', 'Cada 2 semanas', 'Mensualmente', 'Pocas veces al año', 'Aún no envío'],
@@ -395,8 +403,10 @@ const es: Translations = {
     back: 'Atrás',
   },
   footer: {
-    tagline: 'Envía dinero a casa y crea crédito en EE. UU. al hacerlo. Una sola app, hecha para nuestra comunidad.',
-    rights: '© 2026 Puente Financial, Inc.',
+    tagline: 'Envía dinero.\nCrea crédito.',
+    disclaimer: ['Puente Financial, Inc. ("Puente") es una empresa de tecnología financiera, no un banco. Los servicios de remesas, pagos y banca son proporcionados por instituciones financieras con licencia en EE. UU. asociadas a Puente. Puente es un agente autorizado de Bridge Building Inc (NMLS # 2450917). Para información sobre licencias estatales en EE. UU., consulte: ', '.'],
+    disclaimer2: 'En los Estados Unidos, Puente está registrada ante la Red de Control de Delitos Financieros del Departamento del Tesoro de EE. UU. (FinCEN) como un Negocio de Servicios Monetarios (BSA ID: 31000334222151).',
+    rights: '© 2026 Puente Financial, Inc. Todos los derechos reservados.',
     note: 'Concepto en validación — aún no disponible.',
   },
   onboarding: {

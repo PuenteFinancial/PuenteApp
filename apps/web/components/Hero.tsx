@@ -23,18 +23,6 @@ export default function Hero() {
             <a className="btn btn--accent btn--lg" href="/waitlist">{t.hero.cta1}</a>
             <a className="btn btn--ghost-light btn--lg" href="#remittances">{t.hero.cta2} →</a>
           </div>
-          <span className="hero-elig">
-            <span className="idot">ID</span>
-            {t.hero.elig}
-          </span>
-          <div className="hero-note">
-            {t.hero.notes.slice(0, 1).map((note, i) => (
-              <span key={i}>
-                <span className="dot" />
-                {note}
-              </span>
-            ))}
-          </div>
         </div>
         <div className="hero-visual">
           <span className="hero-glow" />

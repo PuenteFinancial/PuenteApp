@@ -7,6 +7,7 @@ export default function AnnounceBanner() {
 
   return (
     <div className="announce">
+      <span className="announce-icon">🎉</span>
       <span>{t.announce.pre}</span>
       <a href="#waitlist">
         {t.announce.link}
