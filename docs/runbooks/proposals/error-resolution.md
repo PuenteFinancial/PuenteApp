@@ -35,7 +35,7 @@ the disclosed MXN amount, sender's change of mind (that's cancellation, see stat
 1. Record the dispute: `POST /v1/transfers/:id/disputes` on the user's behalf if it arrived out-of-band
    (type: `non_delivery` | `wrong_amount` | `unauthorized` | `other`). This moves the transfer to
    `UNDER_REVIEW` (non-terminal states) and stamps `opened_at` — the 90-day clock.
-2. Acknowledge to the sender (EN/ES per `preferred_locale`): what was reported, that we're
+2. Acknowledge to the sender (EN/ES per `preferred_language`): what was reported, that we're
    investigating, and the deadline we're working to.
 3. Note the disclosed availability date from the transfer's `disclosures` row — it anchors both the
    180-day eligibility check and error type 3.
