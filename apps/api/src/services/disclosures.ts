@@ -104,3 +104,21 @@ export function buildPrepaymentDisclosure(
     },
   }
 }
+
+// Reg E receipt for a COMPLETED transfer (slice-6 PR3). Per the slice-6 plan it
+// reuses the prepayment content — same numbers, same renderEn/renderEs (en+es
+// parity), so no new counsel-pending copy lands here. The amounts ARE the
+// delivered amounts: they come from the transfer's immutable snapshot terms and
+// Bridge fixes destination.amount in MXN, so the recipient received exactly the
+// disclosed sum. Its own function so slice-7 receipt-specific wording lands here
+// without touching the prepayment path — the deferred disclosure-wording counsel
+// item: Reg E §1005.31(b)(2)(vi) requires a receipt be identified AS a receipt (a
+// "Receipt" heading, a date-available line), which this reused copy does not yet
+// do. Stored with type:'receipt'.
+export function buildReceiptDisclosure(
+  amounts: DisclosureAmounts,
+  locale: 'en' | 'es',
+  cancelWindowMinutes: number,
+): { locale: 'en' | 'es'; content: Record<string, unknown> } {
+  return buildPrepaymentDisclosure(amounts, locale, cancelWindowMinutes)
+}

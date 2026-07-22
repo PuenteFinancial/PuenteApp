@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { buildPrepaymentDisclosure, DISCLOSURE_VERSION } from './disclosures.js'
+import {
+  buildPrepaymentDisclosure,
+  buildReceiptDisclosure,
+  DISCLOSURE_VERSION,
+} from './disclosures.js'
 
 const amounts = { sendMinor: 19801, feeMinor: 199, receiveMinor: 396014, fxRate: '19.9997' }
 
@@ -54,5 +58,32 @@ describe('buildPrepaymentDisclosure', () => {
     const a = content['amounts'] as { feeMinor: number; totalMinor: number }
     expect(a.feeMinor).toBe(0)
     expect(a.totalMinor).toBe(19801)
+  })
+})
+
+describe('buildReceiptDisclosure', () => {
+  it('reuses the prepayment content verbatim with en+es parity (delivered = disclosed terms)', () => {
+    const receipt = buildReceiptDisclosure(amounts, 'es', 30)
+    // slice-6 PR3: same numbers, same copy — no new counsel-pending wording yet
+    expect(receipt).toEqual(buildPrepaymentDisclosure(amounts, 'es', 30))
+    expect(receipt.locale).toBe('es')
+    expect(receipt.content['version']).toBe(DISCLOSURE_VERSION)
+    expect(receipt.content['amounts']).toMatchObject({
+      totalMinor: 20000,
+      receiveMinor: 396014,
+      fxRate: '19.9997',
+    })
+    for (const lang of ['en', 'es'] as const) {
+      const rendered = receipt.content[lang] as Record<string, unknown>
+      expect(rendered['amountLines']).toHaveLength(4)
+      expect(rendered['contact']).toContain('support@puentefinancial.com')
+    }
+  })
+
+  it('records the presented locale (en) while carrying both renderings', () => {
+    const receipt = buildReceiptDisclosure(amounts, 'en', 30)
+    expect(receipt.locale).toBe('en')
+    expect(receipt.content['en']).toBeTruthy()
+    expect(receipt.content['es']).toBeTruthy()
   })
 })

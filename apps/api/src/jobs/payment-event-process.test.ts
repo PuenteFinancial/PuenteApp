@@ -54,11 +54,17 @@ const queues: Record<string, unknown[]> = {}
 function q(table: string, ...results: unknown[]) {
   queues[table] = (queues[table] ?? []).concat(results)
 }
+// captures the receipt disclosures.upsert(payload, opts) calls for assertions
+const upsertCalls: unknown[][] = []
 function chain(result: unknown) {
   const c: Record<string, unknown> = {}
   for (const m of ['select', 'eq', 'in', 'is', 'update']) c[m] = () => c
+  c.upsert = (...args: unknown[]) => {
+    upsertCalls.push(args)
+    return c
+  }
   c.maybeSingle = () => Promise.resolve(result)
-  // the refund-ref persist awaits the builder directly (no .maybeSingle())
+  // the refund-ref persist + receipt upsert await the builder directly
   c.then = (resolve: (v: unknown) => void) => resolve(result)
   return c
 }
@@ -78,6 +84,7 @@ const event = (over: Record<string, unknown> = {}) => ({
 const transfer = (state: string, over: Record<string, unknown> = {}) => ({
   data: {
     id: 'tr-1',
+    user_id: 'user-1',
     state,
     send_amount_minor: 19801,
     // PR2 refund-tail fields (harmless for the pre-PR2 tests that ignore them)
@@ -85,15 +92,27 @@ const transfer = (state: string, over: Record<string, unknown> = {}) => ({
     refund_payment_ref: null,
     funding_payment_ref: 'mockpay_1',
     idempotency_key: 'bridge-key-1',
+    // PR3 receipt fields
+    receive_amount_minor: 396014,
+    fx_rate: 19.9997,
     ...over,
   },
   error: null,
 })
 const stateRow = (state: string) => ({ data: { state }, error: null })
 
+// Queue writeReceipt's tail for a COMPLETED drive: its currentState re-read
+// (transfers), the user locale load (users), and the receipt upsert (disclosures).
+function queueReceipt(finalState = 'COMPLETED', preferredLanguage = 'es') {
+  q('transfers', stateRow(finalState))
+  q('users', { data: { preferred_language: preferredLanguage }, error: null })
+  q('disclosures', { data: null, error: null })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   for (const k of Object.keys(queues)) delete queues[k]
+  upsertCalls.length = 0
   envMock.AUTO_REFUND = false
   postLedger.mockResolvedValue({ id: 'lt-1' })
   refund.mockResolvedValue({ provider: 'mock', ref: 'mockrefund_x', status: 'succeeded' })
@@ -155,6 +174,7 @@ describe('processPaymentEvent — transitions', () => {
   it('payment_processed from IN_FLIGHT posts the COMPLETED ledger batch', async () => {
     q('payment_events', event({ event_type: 'payment_processed' }))
     q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
+    queueReceipt()
     transition.mockResolvedValue({})
     await processPaymentEvent('ev-1')
     expect(transition).toHaveBeenCalledTimes(1)
@@ -171,6 +191,7 @@ describe('processPaymentEvent — transitions', () => {
     q('payment_events', event({ event_type: 'payment_processed' }))
     // resolve, currentState=SUBMITTED, afterCatchup=IN_FLIGHT
     q('transfers', transfer('SUBMITTED'), stateRow('SUBMITTED'), stateRow('IN_FLIGHT'))
+    queueReceipt()
     transition.mockResolvedValue({})
     await processPaymentEvent('ev-1')
     expect(transition).toHaveBeenCalledTimes(2)
@@ -185,6 +206,7 @@ describe('processPaymentEvent — transitions', () => {
   it('already-COMPLETED payment_processed makes no transition (replay-safe)', async () => {
     q('payment_events', event({ event_type: 'payment_processed' }))
     q('transfers', transfer('COMPLETED'), stateRow('COMPLETED'), stateRow('COMPLETED'))
+    queueReceipt() // writeReceipt still runs on a replay — the upsert is idempotent
     await processPaymentEvent('ev-1')
     expect(transition).not.toHaveBeenCalled()
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
@@ -427,5 +449,59 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
     await expect(processPaymentEvent('ev-1')).rejects.toThrow('ledger db down')
     expect(refund).not.toHaveBeenCalled() // threw at the bridge_return post, before refund
     expect(markProcessed).not.toHaveBeenCalled() // stays 'received' for retry
+  })
+})
+
+describe('processPaymentEvent — receipt (PR3)', () => {
+  it('payment_processed writes exactly one Reg E receipt from the snapshot terms', async () => {
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
+    queueReceipt('COMPLETED', 'en') // user prefers en
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    expect(upsertCalls).toHaveLength(1)
+    const [payload, opts] = upsertCalls[0] as [Record<string, unknown>, Record<string, unknown>]
+    expect(payload).toMatchObject({ transfer_id: 'tr-1', type: 'receipt', locale: 'en' })
+    // content built from the immutable snapshot terms (real buildReceiptDisclosure)
+    const content = payload['content'] as { amounts: Record<string, unknown> }
+    expect(content.amounts).toMatchObject({ totalMinor: 20000, receiveMinor: 396014, fxRate: '19.9997' })
+    // idempotent — one receipt per transfer
+    expect(opts).toMatchObject({ onConflict: 'transfer_id,type', ignoreDuplicates: true })
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('never writes a receipt when a concurrent fail moved the row off the forward path', async () => {
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    // resolve SUBMITTED → step to IN_FLIGHT, afterCatchup reads PAYOUT_FAILED
+    // (a concurrent fail landed) → skip COMPLETED, writeReceipt re-reads
+    // PAYOUT_FAILED → no-op. No users/disclosures queries follow.
+    q(
+      'transfers',
+      transfer('SUBMITTED'),
+      stateRow('SUBMITTED'),
+      stateRow('PAYOUT_FAILED'),
+      stateRow('PAYOUT_FAILED'),
+    )
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    expect(upsertCalls).toHaveLength(0) // a receipt only for a delivered transfer
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('a receipt upsert failure rethrows and leaves the event received (self-heals on retry)', async () => {
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('COMPLETED'))
+    q('users', { data: { preferred_language: 'es' }, error: null })
+    q('disclosures', { data: null, error: { message: 'disclosures db down' } })
+    transition.mockResolvedValue({})
+
+    await expect(processPaymentEvent('ev-1')).rejects.toThrow('receipt upsert failed')
+    // COMPLETED ledger already posted; the event stays 'received' so a retry
+    // re-runs drive() (replay no-op) and re-attempts the idempotent receipt.
+    expect(markProcessed).not.toHaveBeenCalled()
   })
 })
