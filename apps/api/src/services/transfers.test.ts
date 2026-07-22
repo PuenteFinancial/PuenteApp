@@ -14,9 +14,22 @@ const {
   cancelTransfer,
   fundedLedgerEntries,
   canceledLedgerEntries,
+  bridgeReturnLedgerEntries,
+  refundedLedgerEntries,
   toApiTransfer,
   TransferRpcError,
 } = await import('./transfers.js')
+
+// signed (debit − credit) per account across a set of entries
+const signedNet = (entries: { account_code: string; direction: string; amount_minor: number }[]) => {
+  const net: Record<string, number> = {}
+  for (const e of entries) {
+    net[e.account_code] = (net[e.account_code] ?? 0) + (e.direction === 'debit' ? e.amount_minor : -e.amount_minor)
+  }
+  return net
+}
+const netsToZero = (entries: { direction: string; amount_minor: number }[]) =>
+  entries.reduce((s, e) => (e.direction === 'debit' ? s + e.amount_minor : s - e.amount_minor), 0)
 
 const transferRow = {
   id: 'tr-1',
@@ -171,6 +184,53 @@ describe('canceledLedgerEntries', () => {
     const entries = canceledLedgerEntries({ send_amount_minor: 100, fee_amount_minor: 0 })
     expect(entries).toHaveLength(2)
     expect(entries.map((e) => e.account_code)).not.toContain('fee_revenue')
+  })
+})
+
+describe('bridgeReturnLedgerEntries', () => {
+  it('books the returned principal back to cash, settling due_from_bridge (nets to zero)', () => {
+    const entries = bridgeReturnLedgerEntries({ send_amount_minor: 19801 })
+    expect(entries).toEqual([
+      { account_code: 'cash_clearing', direction: 'debit', amount_minor: 19801, currency: 'USD' },
+      { account_code: 'due_from_bridge', direction: 'credit', amount_minor: 19801, currency: 'USD' },
+    ])
+    expect(netsToZero(entries)).toBe(0)
+  })
+})
+
+describe('refundedLedgerEntries', () => {
+  it('recognizes + pays the full refund incl. fee from cash (nets to zero)', () => {
+    const entries = refundedLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199 })
+    expect(entries).toEqual([
+      { account_code: 'transfer_payable', direction: 'debit', amount_minor: 19801, currency: 'USD' },
+      { account_code: 'fee_revenue', direction: 'debit', amount_minor: 199, currency: 'USD' },
+      { account_code: 'cash_clearing', direction: 'credit', amount_minor: 20000, currency: 'USD' },
+    ])
+    expect(netsToZero(entries)).toBe(0)
+  })
+
+  it('omits the fee line at zero fee (ledger rejects zero entries)', () => {
+    const entries = refundedLedgerEntries({ send_amount_minor: 100, fee_amount_minor: 0 })
+    expect(entries).toHaveLength(2)
+    expect(entries.map((e) => e.account_code)).not.toContain('fee_revenue')
+    expect(netsToZero(entries)).toBe(0)
+  })
+})
+
+describe('the two-batch refund tail (bridge_return + refunded)', () => {
+  it('each batch nets to zero, and their combined deltas close the open positions leaving cash −fee', () => {
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    expect(netsToZero(bridgeReturnLedgerEntries(t))).toBe(0)
+    expect(netsToZero(refundedLedgerEntries(t))).toBe(0)
+    // combined (debit − credit) deltas: cash +S then −(S+F) = −F (fee refunded);
+    // due_from_bridge −S and transfer_payable +S / fee_revenue +F reverse the
+    // SUBMITTED/FUNDED-era positions to zero when added to their opening balances.
+    expect(signedNet([...bridgeReturnLedgerEntries(t), ...refundedLedgerEntries(t)])).toEqual({
+      cash_clearing: -199,
+      due_from_bridge: -19801,
+      transfer_payable: 19801,
+      fee_revenue: 199,
+    })
   })
 })
 

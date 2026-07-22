@@ -13,12 +13,18 @@ import { supabaseAdmin } from './supabase.js'
 // unknown-state fallthrough so a never-before-seen Bridge state is marked
 // 'ignored' by the processor rather than crashing the job. `fail` carries no
 // `from`: the transition is state-aware (SUBMITTED or IN_FLIGHT) and the
-// processor resolves the current state. Refund ledger postings are slice 6.
+// processor resolves the current state.
+//
+// `principalReturned` (slice-6 PR2): Bridge has returned the principal, so the
+// processor drives the PAYOUT_FAILED → REFUNDED refund-from-float tail (gated by
+// AUTO_REFUND). It's on the TERMINAL return states (returned/refunded) only —
+// refund_in_flight is still in progress, so it's a plain fail that just parks
+// the transfer at PAYOUT_FAILED until the terminal event arrives.
 export type BridgeStateAction =
   | { kind: 'ignore' }
   | { kind: 'transition'; from: 'SUBMITTED'; to: 'IN_FLIGHT' }
   | { kind: 'transition'; from: 'IN_FLIGHT'; to: 'COMPLETED'; ledger: 'completed' }
-  | { kind: 'fail'; to: 'PAYOUT_FAILED'; bridgeReturns?: true; alert?: true }
+  | { kind: 'fail'; to: 'PAYOUT_FAILED'; principalReturned?: true; alert?: true }
   | { kind: 'unknown' }
 
 export function mapBridgeState(state: string): BridgeStateAction {
@@ -45,13 +51,18 @@ export function mapBridgeState(state: string): BridgeStateAction {
     case 'canceled':
       return { kind: 'fail', to: 'PAYOUT_FAILED' }
 
-    // Bridge is returning principal; ensure PAYOUT_FAILED. The Bridge-returns
-    // ledger posting is an OPEN question (where funds land on SPEI failure),
-    // deferred — see the plan's out-of-scope list.
+    // Terminal return: Bridge has sent the principal back → PAYOUT_FAILED and,
+    // when AUTO_REFUND is on, drive the refund-from-float tail (bridge_return +
+    // REFUNDED batches). ⚠️ Assumes Bridge returns S (quoted principal), not A
+    // (actual USDC draw incl. slippage) — sandbox-unverified, slice-7 item.
     case 'returned':
     case 'refunded':
+      return { kind: 'fail', to: 'PAYOUT_FAILED', principalReturned: true }
+
+    // Return still in progress: park at PAYOUT_FAILED and WAIT — the terminal
+    // returned/refunded event drives the refund. No principalReturned yet.
     case 'refund_in_flight':
-      return { kind: 'fail', to: 'PAYOUT_FAILED', bridgeReturns: true }
+      return { kind: 'fail', to: 'PAYOUT_FAILED' }
 
     // Principal stuck at Bridge — ops Sentry alert (stuck-transfer runbook).
     case 'refund_failed':

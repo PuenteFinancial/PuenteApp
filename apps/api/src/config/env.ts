@@ -60,6 +60,17 @@ const envSchema = z.object({
     .default('false')
     .transform((v) => v === 'true'),
   CANCEL_WINDOW_MINUTES: z.coerce.number().int().min(1).max(1440).default(30),
+  // Slice-6 PR2 payout-failure refund gate — mechanism now, policy via flag
+  // (same shape as WAIT_FOR_CLEARING; NOT z.coerce.boolean, which parses
+  // 'false' as true). OFF (prod default): a real payout failure stops at
+  // PAYOUT_FAILED + an ops Sentry alert and a human triggers the refund by
+  // runbook. ON (dev/test): the payment-event.process job auto-drives the
+  // PAYOUT_FAILED → REFUNDED refund-from-float so the e2e proves the full path.
+  // Flip on in prod once Bridge return semantics are pilot-verified (slice 7).
+  AUTO_REFUND: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   // Direct Postgres connection for pg-boss (worker only — the API stays
   // PostgREST-only). Must be the Supabase SESSION-mode pooler (port 5432),
   // never transaction mode (6543) — pg-boss needs session semantics.
