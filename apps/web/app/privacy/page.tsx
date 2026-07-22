@@ -58,10 +58,11 @@ export default function PrivacyPage() {
                 you from signing in.
               </li>
               <li>
-                <strong>No sharing of mobile data:</strong> Mobile phone numbers collected for SMS
-                verification are never sold or shared with third parties or affiliates for marketing
-                or promotional purposes. We share them only with our SMS delivery provider, and only
-                to send your verification codes.
+                <strong>No sharing of mobile data:</strong> We do not share, sell, rent, or
+                otherwise provide your mobile phone number, SMS opt-in, or messaging consent to any
+                third parties or affiliates for marketing or promotional purposes. We use a messaging
+                service provider solely to deliver your verification codes; this information is never
+                used for marketing or promotional purposes.
               </li>
             </ul>
           </section>
