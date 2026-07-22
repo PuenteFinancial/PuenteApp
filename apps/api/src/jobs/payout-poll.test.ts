@@ -29,6 +29,9 @@ vi.mock('@sentry/node', () => ({
   captureMessage: (...a: unknown[]) => captureMessage(...a),
 }))
 
+const envMock = vi.hoisted(() => ({ AUTO_REFUND: false }))
+vi.mock('../config/env.js', () => ({ env: envMock }))
+
 const { pollPayouts } = await import('./payout-poll.js')
 
 function selectResult(result: { data: unknown; error: unknown }) {
@@ -38,8 +41,27 @@ function selectResult(result: { data: unknown; error: unknown }) {
   return { select, in: inFn }
 }
 
+// AUTO_REFUND-on: first from() is the in-flight .in() query, second is the
+// refund-pending .eq().not().is() self-heal query.
+function selectHeal(inFlight: unknown[], refundPending: unknown[]) {
+  const isFn = vi.fn().mockResolvedValue({ data: refundPending, error: null })
+  from
+    .mockReturnValueOnce({
+      select: vi.fn().mockReturnValue({
+        in: vi.fn().mockResolvedValue({ data: inFlight, error: null }),
+      }),
+    })
+    .mockReturnValueOnce({
+      select: vi.fn().mockReturnValue({
+        eq: vi.fn().mockReturnValue({ not: vi.fn().mockReturnValue({ is: isFn }) }),
+      }),
+    })
+  return { is: isFn }
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  envMock.AUTO_REFUND = false
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(new Date('2026-07-21T12:00:00.000Z'))
 })
@@ -112,6 +134,40 @@ describe('pollPayouts', () => {
     recordEvent.mockResolvedValue({ id: 'ev-1', inserted: true })
     await pollPayouts()
     expect(captureMessage).not.toHaveBeenCalled()
+  })
+
+  it('AUTO_REFUND off: only the in-flight query runs — PAYOUT_FAILED rows are a human’s job', async () => {
+    envMock.AUTO_REFUND = false
+    selectResult({ data: [], error: null })
+    expect(await pollPayouts()).toBe(0)
+    expect(from).toHaveBeenCalledTimes(1) // no second (refund-pending) query
+  })
+
+  it('AUTO_REFUND on: re-synthesizes a missed terminal refunded for a PAYOUT_FAILED+refund_null transfer', async () => {
+    envMock.AUTO_REFUND = true
+    const { is } = selectHeal(
+      [], // no in-flight transfers
+      [{ id: 'tr-9', provider_transfer_ref: 'bt-9', submit_attempted_at: '2026-07-21T11:00:00.000Z' }],
+    )
+    getBridgeTransfer.mockResolvedValue({ bridgeTransferId: 'bt-9', state: 'refunded', sourceAmount: '' })
+    recordEvent.mockResolvedValue({ id: 'ev-9', inserted: true })
+
+    expect(await pollPayouts()).toBe(1)
+    expect(is).toHaveBeenCalledWith('refund_payment_ref', null) // the self-heal gate
+    expect(getBridgeTransfer).toHaveBeenCalledWith('bt-9')
+    expect(recordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ externalEventId: 'bt-9:refunded', eventType: 'refunded', transferId: 'tr-9' }),
+    )
+    expect(enqueueEvent).toHaveBeenCalledWith('ev-9')
+  })
+
+  it('AUTO_REFUND on: an already-recorded refunded state does not re-enqueue (dedupe)', async () => {
+    envMock.AUTO_REFUND = true
+    selectHeal([], [{ id: 'tr-9', provider_transfer_ref: 'bt-9', submit_attempted_at: null }])
+    getBridgeTransfer.mockResolvedValue({ bridgeTransferId: 'bt-9', state: 'refunded', sourceAmount: '' })
+    recordEvent.mockResolvedValue({ id: 'ev-9', inserted: false })
+    expect(await pollPayouts()).toBe(0)
+    expect(enqueueEvent).not.toHaveBeenCalled()
   })
 
   it('one transfer failing to poll does not sink the sweep; it throws after all', async () => {

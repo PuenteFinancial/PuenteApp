@@ -1,6 +1,16 @@
 import * as Sentry from '@sentry/node'
+import { env } from '../config/env.js'
 import { supabaseAdmin } from '../services/supabase.js'
-import { transitionTransfer, completedLedgerEntries, TransferRpcError } from '../services/transfers.js'
+import {
+  transitionTransfer,
+  completedLedgerEntries,
+  bridgeReturnLedgerEntries,
+  refundedLedgerEntries,
+  TransferRpcError,
+  type LedgerEntryJson,
+} from '../services/transfers.js'
+import { postLedgerTransaction, type LedgerEntryInput } from '../services/ledger.js'
+import { getFundingProcessor } from '../services/funding/index.js'
 import { mapBridgeState, markProcessed, markIgnored } from '../services/payment-events.js'
 
 // The `payment-event.process` job — the ONE path that turns a recorded Bridge
@@ -23,6 +33,12 @@ interface TransferRow {
   id: string
   state: string
   send_amount_minor: number
+  // slice-6 PR2 refund tail: the fee (refunded per Reg E on failure), the
+  // idempotency gate, and the processor-call inputs (payment ref + stable key).
+  fee_amount_minor: number
+  refund_payment_ref: string | null
+  funding_payment_ref: string | null
+  idempotency_key: string
 }
 
 // States a fail event can legally advance from. COMPLETED is absent on
@@ -105,7 +121,90 @@ async function route(event: EventRow): Promise<void> {
     })
   }
   await failTransfer(transfer, event.event_type)
+  // slice-6 PR2: Bridge returned the principal → drive the refund-from-float
+  // tail (gated). Before markProcessed so a throw leaves the event 'received'
+  // for pg-boss retry / poll self-heal to re-run — every step is idempotent.
+  if (action.principalReturned) {
+    await driveRefund(transfer, event)
+  }
   await markProcessed(event.id)
+}
+
+const toLedgerInput = (entries: LedgerEntryJson[]): LedgerEntryInput[] =>
+  entries.map((e) => ({
+    accountCode: e.account_code,
+    direction: e.direction,
+    money: { amountMinor: e.amount_minor, currency: e.currency },
+  }))
+
+// The PAYOUT_FAILED → REFUNDED refund-from-float tail (ledger-rules.md). Gated
+// by AUTO_REFUND (mechanism now / policy via flag — same as WAIT_FOR_CLEARING
+// and the float ceiling): OFF stops at PAYOUT_FAILED + an ops alert (a human
+// refunds by runbook); ON drives the full path. Idempotent throughout: the two
+// ledger batches are keyed (bridge_return / REFUNDED) and refund() is
+// refund_payment_ref-null-gated, so a webhook+poll duplicate or a crash-replay
+// posts and disburses exactly once. Any throw propagates (non-benign) to leave
+// the event 'received' for retry.
+async function driveRefund(transfer: TransferRow, event: EventRow): Promise<void> {
+  // failTransfer alerts + no-ops a fail-after-COMPLETED, so re-read: only refund
+  // a transfer that actually reached PAYOUT_FAILED (never one that delivered).
+  const current = (await currentState(transfer.id)) ?? transfer.state
+  if (current !== 'PAYOUT_FAILED') return
+
+  if (!env.AUTO_REFUND) {
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['payout-refund-gated', transfer.id])
+      scope.setContext('payout_refund_gated', {
+        transferId: transfer.id,
+        bridgeState: event.event_type,
+      })
+      Sentry.captureMessage(
+        'payout failed, principal returned — AUTO_REFUND off, manual refund required',
+        'warning',
+      )
+    })
+    return
+  }
+
+  // 1) Book the returned principal back to cash — a stand-alone post (state
+  //    stays PAYOUT_FAILED), keyed {id}:bridge_return, idempotent on replay.
+  await postLedgerTransaction({
+    transferId: transfer.id,
+    transition: 'bridge_return',
+    description: 'bridge returned principal on payout failure',
+    entries: toLedgerInput(bridgeReturnLedgerEntries(transfer)),
+  })
+
+  // 2) Return the collected funds to the sender. null-gated so a duplicate
+  //    never double-refunds; keyed off the transfer's stable bridge idempotency
+  //    key so a retry dedupes against the real processor (slice 7).
+  if (!transfer.refund_payment_ref) {
+    const undo = await getFundingProcessor().refund({
+      transferId: transfer.id,
+      paymentRef: transfer.funding_payment_ref ?? '',
+      amountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,
+      currency: 'USD',
+      idempotencyKey: `${transfer.idempotency_key}:refund`,
+    })
+    const { error } = await supabaseAdmin
+      .from('transfers')
+      .update({ refund_payment_ref: undo.ref, refunded_at: new Date().toISOString() })
+      .eq('id', transfer.id)
+      .is('refund_payment_ref', null)
+    if (error) throw new Error(`payment-event refund ref persist failed: ${error.message}`)
+  }
+
+  // 3) Recognize + pay the refund and settle REFUNDED — a DISTINCT posting key
+  //    from bridge_return (the UNIQUE(transfer_id, transition) index needs both).
+  await transitionTransfer({
+    transferId: transfer.id,
+    fromState: 'PAYOUT_FAILED',
+    toState: 'REFUNDED',
+    actor: 'worker:payment-event',
+    reason: 'refund completed — sender made whole',
+    ledgerDescription: 'transfer REFUNDED — payout failed, sender refunded from float',
+    ledgerEntries: refundedLedgerEntries(transfer),
+  })
 }
 
 // Resolve our transfer for the event: the ingest path usually set transfer_id;
@@ -115,7 +214,10 @@ async function resolveTransfer(event: EventRow): Promise<TransferRow | null> {
   const load = async (column: 'id' | 'provider_transfer_ref', value: string) => {
     const { data, error } = await supabaseAdmin
       .from('transfers')
-      .select('id, state, send_amount_minor')
+      .select(
+        'id, state, send_amount_minor, fee_amount_minor, refund_payment_ref, ' +
+          'funding_payment_ref, idempotency_key',
+      )
       .eq(column, value)
       .maybeSingle()
     if (error) throw new Error(`payment-event transfer load failed: ${error.message}`)
@@ -168,7 +270,13 @@ async function drive(transfer: TransferRow, target: 'IN_FLIGHT' | 'COMPLETED'): 
 
 async function failTransfer(transfer: TransferRow, bridgeState: string): Promise<void> {
   const current = (await currentState(transfer.id)) ?? transfer.state
-  if (current === 'PAYOUT_FAILED') return // already failed — benign
+  // Already at a refund-tail terminal — a late/duplicate fail or return event is
+  // benign, not a contradictory sequence. REFUNDED matters since PR2 made it
+  // reachable from PAYOUT_FAILED: a duplicate returned/refunded (webhook + poll,
+  // or a post-REFUNDED retry) lands here on REFUNDED and must NOT trip the
+  // post-delivery-reversal loss alert below — they share this fingerprint, and a
+  // routine refund duplicate would train ops to ignore a real money-loss signal.
+  if (current === 'PAYOUT_FAILED' || current === 'REFUNDED') return
   if (!FAILABLE_STATES.has(current)) {
     // A fail after COMPLETED (or another terminal): never reverse it here.
     Sentry.withScope((scope) => {

@@ -49,14 +49,18 @@ describe('mapBridgeState', () => {
     }
   })
 
-  it('flags bridgeReturns for returned / refunded / refund_in_flight', () => {
-    for (const state of ['returned', 'refunded', 'refund_in_flight']) {
+  it('flags principalReturned for the terminal returns (returned / refunded)', () => {
+    for (const state of ['returned', 'refunded']) {
       expect(mapBridgeState(state), state).toEqual({
         kind: 'fail',
         to: 'PAYOUT_FAILED',
-        bridgeReturns: true,
+        principalReturned: true,
       })
     }
+  })
+
+  it('refund_in_flight is a plain fail — parks at PAYOUT_FAILED, no refund drive yet', () => {
+    expect(mapBridgeState('refund_in_flight')).toEqual({ kind: 'fail', to: 'PAYOUT_FAILED' })
   })
 
   it('flags an ops alert for refund_failed (principal stuck)', () => {

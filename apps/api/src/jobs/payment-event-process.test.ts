@@ -34,6 +34,18 @@ vi.mock('@sentry/node', () => ({
   captureMessage: (...a: unknown[]) => captureMessage(...a),
 }))
 
+// PR2 refund-tail collaborators
+const envMock = vi.hoisted(() => ({ AUTO_REFUND: false }))
+vi.mock('../config/env.js', () => ({ env: envMock }))
+
+const postLedger = vi.hoisted(() => vi.fn())
+vi.mock('../services/ledger.js', () => ({ postLedgerTransaction: (...a: unknown[]) => postLedger(...a) }))
+
+const refund = vi.hoisted(() => vi.fn())
+vi.mock('../services/funding/index.js', () => ({
+  getFundingProcessor: () => ({ refund: (...a: unknown[]) => refund(...a) }),
+}))
+
 const { processPaymentEvent } = await import('./payment-event-process.js')
 const { TransferRpcError } = await import('../services/transfers.js')
 
@@ -44,8 +56,10 @@ function q(table: string, ...results: unknown[]) {
 }
 function chain(result: unknown) {
   const c: Record<string, unknown> = {}
-  for (const m of ['select', 'eq', 'in', 'update']) c[m] = () => c
+  for (const m of ['select', 'eq', 'in', 'is', 'update']) c[m] = () => c
   c.maybeSingle = () => Promise.resolve(result)
+  // the refund-ref persist awaits the builder directly (no .maybeSingle())
+  c.then = (resolve: (v: unknown) => void) => resolve(result)
   return c
 }
 
@@ -61,8 +75,18 @@ const event = (over: Record<string, unknown> = {}) => ({
   },
   error: null,
 })
-const transfer = (state: string) => ({
-  data: { id: 'tr-1', state, send_amount_minor: 19801 },
+const transfer = (state: string, over: Record<string, unknown> = {}) => ({
+  data: {
+    id: 'tr-1',
+    state,
+    send_amount_minor: 19801,
+    // PR2 refund-tail fields (harmless for the pre-PR2 tests that ignore them)
+    fee_amount_minor: 199,
+    refund_payment_ref: null,
+    funding_payment_ref: 'mockpay_1',
+    idempotency_key: 'bridge-key-1',
+    ...over,
+  },
   error: null,
 })
 const stateRow = (state: string) => ({ data: { state }, error: null })
@@ -70,6 +94,9 @@ const stateRow = (state: string) => ({ data: { state }, error: null })
 beforeEach(() => {
   vi.clearAllMocks()
   for (const k of Object.keys(queues)) delete queues[k]
+  envMock.AUTO_REFUND = false
+  postLedger.mockResolvedValue({ id: 'lt-1' })
+  refund.mockResolvedValue({ provider: 'mock', ref: 'mockrefund_x', status: 'succeeded' })
   from.mockImplementation((table: string) => {
     const next = queues[table]?.shift()
     if (next === undefined) throw new Error(`unexpected from('${table}')`)
@@ -186,7 +213,7 @@ describe('processPaymentEvent — failures', () => {
   })
 
   it('never reverses a COMPLETED transfer on a late fail event', async () => {
-    q('payment_events', event({ event_type: 'returned' }))
+    q('payment_events', event({ event_type: 'error' }))
     q('transfers', transfer('COMPLETED'), stateRow('COMPLETED'))
     await processPaymentEvent('ev-1')
     expect(transition).not.toHaveBeenCalled()
@@ -228,5 +255,177 @@ describe('processPaymentEvent — failures', () => {
     expect(transition).not.toHaveBeenCalled()
     expect(setFingerprint).toHaveBeenCalledWith(['payout-success-after-terminal'])
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+})
+
+describe('processPaymentEvent — refund tail (PR2)', () => {
+  it('refunded + AUTO_REFUND on → bridge_return post, one refund, REFUNDED batch', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('SUBMITTED'), // resolveTransfer
+      stateRow('SUBMITTED'), // failTransfer currentState
+      stateRow('PAYOUT_FAILED'), // driveRefund currentState
+      { data: null, error: null }, // refund_payment_ref persist
+    )
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    // SUBMITTED → PAYOUT_FAILED, then PAYOUT_FAILED → REFUNDED
+    expect(transition).toHaveBeenCalledTimes(2)
+    expect((transition.mock.calls[0] as [Record<string, unknown>])[0]).toMatchObject({
+      toState: 'PAYOUT_FAILED',
+    })
+    const refunded = (transition.mock.calls[1] as [Record<string, unknown>])[0]
+    expect(refunded).toMatchObject({ fromState: 'PAYOUT_FAILED', toState: 'REFUNDED' })
+    expect(refunded.ledgerEntries).toEqual([
+      { account_code: 'transfer_payable', direction: 'debit', amount_minor: 19801, currency: 'USD' },
+      { account_code: 'fee_revenue', direction: 'debit', amount_minor: 199, currency: 'USD' },
+      { account_code: 'cash_clearing', direction: 'credit', amount_minor: 20000, currency: 'USD' },
+    ])
+
+    // bridge_return posted stand-alone under its own distinct key
+    expect(postLedger).toHaveBeenCalledTimes(1)
+    expect(postLedger.mock.calls[0]![0]).toMatchObject({
+      transferId: 'tr-1',
+      transition: 'bridge_return',
+    })
+
+    // refunded exactly once, full amount incl. fee, keyed off the stable bridge key
+    expect(refund).toHaveBeenCalledTimes(1)
+    expect(refund.mock.calls[0]![0]).toMatchObject({
+      amountMinor: 20000,
+      currency: 'USD',
+      paymentRef: 'mockpay_1',
+      idempotencyKey: 'bridge-key-1:refund',
+    })
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('refund_in_flight parks at PAYOUT_FAILED with NO refund drive', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refund_in_flight' }))
+    q('transfers', transfer('SUBMITTED'), stateRow('SUBMITTED'))
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    expect(transition).toHaveBeenCalledTimes(1)
+    expect((transition.mock.calls[0] as [Record<string, unknown>])[0]).toMatchObject({
+      toState: 'PAYOUT_FAILED',
+    })
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('AUTO_REFUND off → PAYOUT_FAILED + ops alert, no ledger, no disbursement', async () => {
+    envMock.AUTO_REFUND = false
+    q('payment_events', event({ event_type: 'refunded' }))
+    q('transfers', transfer('SUBMITTED'), stateRow('SUBMITTED'), stateRow('PAYOUT_FAILED'))
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    expect(transition).toHaveBeenCalledTimes(1) // only the fail — no REFUNDED
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-refund-gated', 'tr-1'])
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('refund_payment_ref already set (webhook+poll duplicate) → skips refund(), still settles REFUNDED', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('PAYOUT_FAILED', { refund_payment_ref: 'mockrefund_prev' }), // resolveTransfer
+      stateRow('PAYOUT_FAILED'), // failTransfer currentState (already failed → no-op)
+      stateRow('PAYOUT_FAILED'), // driveRefund currentState
+    )
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    expect(postLedger).toHaveBeenCalledTimes(1) // bridge_return is idempotent
+    expect(refund).not.toHaveBeenCalled() // gate closed — no second disbursement
+    expect(transition).toHaveBeenCalledTimes(1) // only REFUNDED (fail was a no-op)
+    expect((transition.mock.calls[0] as [Record<string, unknown>])[0]).toMatchObject({
+      toState: 'REFUNDED',
+    })
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('refunded after an earlier PAYOUT_FAILED (out-of-order) still drives the refund', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('PAYOUT_FAILED'), // already failed via a prior error event
+      stateRow('PAYOUT_FAILED'), // failTransfer no-op
+      stateRow('PAYOUT_FAILED'), // driveRefund currentState
+      { data: null, error: null }, // persist
+    )
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    expect(postLedger).toHaveBeenCalledTimes(1)
+    expect(refund).toHaveBeenCalledTimes(1)
+    expect(transition).toHaveBeenCalledWith(expect.objectContaining({ toState: 'REFUNDED' }))
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('never refunds a COMPLETED transfer on a late refunded event', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('COMPLETED'), // resolveTransfer
+      stateRow('COMPLETED'), // failTransfer → fail-after-terminal (alert, no step)
+      stateRow('COMPLETED'), // driveRefund currentState → not PAYOUT_FAILED → return
+    )
+
+    await processPaymentEvent('ev-1')
+
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-fail-after-terminal'])
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('a duplicate returned/refunded landing on an already-REFUNDED transfer is benign (no false fail-after-terminal alert)', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('REFUNDED', { refund_payment_ref: 'mockrefund_prev' }), // resolveTransfer
+      stateRow('REFUNDED'), // failTransfer currentState → benign (already refunded)
+      stateRow('REFUNDED'), // driveRefund currentState → not PAYOUT_FAILED → no-op
+    )
+
+    await processPaymentEvent('ev-1')
+
+    // must NOT trip the post-delivery-reversal loss fingerprint on a routine dup
+    expect(setFingerprint).not.toHaveBeenCalledWith(['payout-fail-after-terminal'])
+    expect(transition).not.toHaveBeenCalled()
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('a refund-tail error rethrows and leaves the event received (retryable)', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q('transfers', transfer('SUBMITTED'), stateRow('SUBMITTED'), stateRow('PAYOUT_FAILED'))
+    transition.mockResolvedValue({})
+    postLedger.mockRejectedValue(new Error('ledger db down'))
+
+    await expect(processPaymentEvent('ev-1')).rejects.toThrow('ledger db down')
+    expect(refund).not.toHaveBeenCalled() // threw at the bridge_return post, before refund
+    expect(markProcessed).not.toHaveBeenCalled() // stays 'received' for retry
   })
 })

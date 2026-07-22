@@ -170,6 +170,71 @@ export function completedLedgerEntries(transfer: {
   ]
 }
 
+// The PAYOUT_FAILED → REFUNDED refund-from-float tail (slice-6 PR2,
+// ledger-rules.md "Bridge returns principal"). Two DISTINCT posting keys are
+// mandatory — the UNIQUE(transfer_id, transition) index rejects a second row
+// under one key — so this is split into the bridge_return batch (posted
+// stand-alone, no state change) and the REFUNDED batch (posted with the
+// PAYOUT_FAILED → REFUNDED transition).
+
+// bridge_return: Bridge sent the quoted principal S back to our cash; the
+// due_from_bridge claim opened at SUBMITTED settles. (⚠️ assumes Bridge returns
+// S, not the actual USDC draw A incl. slippage — slice-7 verification item; the
+// fx_slippage recognized at SUBMITTED stays realized, never reversed here.)
+export function bridgeReturnLedgerEntries(transfer: {
+  send_amount_minor: number
+}): LedgerEntryJson[] {
+  return [
+    {
+      account_code: 'cash_clearing',
+      direction: 'debit',
+      amount_minor: transfer.send_amount_minor,
+      currency: 'USD',
+    },
+    {
+      account_code: 'due_from_bridge',
+      direction: 'credit',
+      amount_minor: transfer.send_amount_minor,
+      currency: 'USD',
+    },
+  ]
+}
+
+// REFUNDED: recognize and pay the sender's refund in one batch — full amount
+// incl. fee, per Reg E (fee refunded on payout failure). Collapses ledger-rules'
+// refunds_payable recognize-then-pay pair (it would net to zero instantly, the
+// refund being paid from float the same moment) straight to cash_clearing. Nets
+// to zero; zero-fee omits the fee line (the ledger rejects zero-amount entries).
+export function refundedLedgerEntries(transfer: {
+  send_amount_minor: number
+  fee_amount_minor: number
+}): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  const entries: LedgerEntryJson[] = [
+    {
+      account_code: 'transfer_payable',
+      direction: 'debit',
+      amount_minor: transfer.send_amount_minor,
+      currency: 'USD',
+    },
+  ]
+  if (transfer.fee_amount_minor > 0) {
+    entries.push({
+      account_code: 'fee_revenue',
+      direction: 'debit',
+      amount_minor: transfer.fee_amount_minor,
+      currency: 'USD',
+    })
+  }
+  entries.push({
+    account_code: 'cash_clearing',
+    direction: 'credit',
+    amount_minor: total,
+    currency: 'USD',
+  })
+  return entries
+}
+
 export async function createTransferFromQuote(input: {
   quoteId: string
   userId: string
