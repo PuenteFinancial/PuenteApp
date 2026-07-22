@@ -639,3 +639,69 @@ describe('GET /v1/transfers/:id', () => {
     await app.close()
   })
 })
+
+describe('GET /v1/transfers/:id/receipt', () => {
+  const get = (app: Awaited<ReturnType<typeof buildApp>>) =>
+    supertest(app.server)
+      .get(`/v1/transfers/${TRANSFER_ID}/receipt`)
+      .set('Authorization', 'Bearer test-token')
+
+  it('returns the receipt for a delivered, owned transfer', async () => {
+    from
+      .mockReturnValueOnce(chain({ data: { id: TRANSFER_ID } })) // owner check
+      .mockReturnValueOnce(
+        chain({
+          data: {
+            id: 'disc-receipt-1',
+            transfer_id: TRANSFER_ID,
+            type: 'receipt',
+            locale: 'es',
+            content: { version: 1, amounts: { totalMinor: 20000, receiveMinor: 396014 } },
+            presented_at: '2026-07-22T00:00:00.000Z',
+          },
+        }),
+      )
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      id: 'disc-receipt-1',
+      transferId: TRANSFER_ID,
+      type: 'receipt',
+      locale: 'es',
+    })
+    expect(res.body.content.amounts.totalMinor).toBe(20000)
+    expect(res.body.presentedAt).toBe('2026-07-22T00:00:00.000Z')
+    await app.close()
+  })
+
+  it('404s before COMPLETED — owned but no receipt yet', async () => {
+    from
+      .mockReturnValueOnce(chain({ data: { id: TRANSFER_ID } })) // owned
+      .mockReturnValueOnce(chain({ data: null })) // no receipt row
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('not_found')
+    await app.close()
+  })
+
+  it("404s a non-owner's transfer without loading the receipt", async () => {
+    from.mockReturnValueOnce(chain({ data: null })) // owner check fails → stop
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(404)
+    // the disclosures query is never reached (owner check short-circuits)
+    expect(from).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  it('401s without auth', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server).get(`/v1/transfers/${TRANSFER_ID}/receipt`)
+    expect(res.status).toBe(401)
+    await app.close()
+  })
+})
