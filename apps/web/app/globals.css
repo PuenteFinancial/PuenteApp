@@ -270,6 +270,7 @@ a{color:inherit;text-decoration:none;}
 .how-step .h3{ margin-top:6px; }
 .how-step p{ margin:0; font-size:15.5px; color:var(--ink-2); line-height:1.55; }
 .how-num{ width:46px; height:46px; border-radius:10px; font-family:var(--mono); font-weight:700; font-size:19px; display:flex; align-items:center; justify-content:center; background:var(--accent); color:var(--accent-ink); }
+.how-emoji{ display:inline-block; font-size:22px; line-height:1; margin-right:8px; vertical-align:-3px; }
 .how-foot{ display:grid; grid-template-columns:1.5fr 1fr; gap:22px; margin-top:34px; align-items:stretch; }
 .how-privacy{ display:flex; gap:16px; align-items:center; background:var(--accent-soft); border:1px solid var(--accent-line); border-radius:var(--r-card); padding:24px 26px; }
 .how-privacy .hp-ic{ width:40px; height:40px; border-radius:10px; flex:none; background:var(--hero); color:var(--on-hero); display:flex; align-items:center; justify-content:center; }
@@ -293,8 +294,8 @@ a{color:inherit;text-decoration:none;}
 .wl-highlight .lede{ margin:0; color:var(--promo); font-weight:600; }
 .wl-highlight .lede b{ font-weight:800; }
 .wl-highlight-fine{ position:absolute; right:16px; bottom:10px; margin:0; font-size:12px; color:var(--promo); opacity:.8; }
-.wl-points{ display:flex; flex-wrap:wrap; gap:12px 24px; justify-content:center; margin:4px 0 6px; padding:0; list-style:none; }
-.wl-points li{ display:inline-flex; gap:9px; align-items:center; font-size:14.5px; color:var(--on-hero); }
+.wl-points{ display:flex; flex-direction:column; align-items:flex-start; gap:12px; margin:4px 0 6px; padding:0; list-style:none; }
+.wl-points li{ display:flex; gap:9px; align-items:center; font-size:14.5px; color:var(--on-hero); text-align:left; }
 .wl-points .tick{ width:21px; height:21px; border-radius:5px; flex:none; background:var(--accent); color:var(--accent-ink); display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
 
 .footer{ background:var(--hero-3); color:var(--on-hero-2); padding:60px 32px 38px; }
@@ -378,7 +379,7 @@ a{color:inherit;text-decoration:none;}
   display:block; transition:color .15s;
 }
 .nav-drawer a:hover{ color:var(--accent); }
-.nav-drawer .btn{ width:100%; justify-content:center; }
+.nav-drawer .btn{ display:flex; width:100%; justify-content:center; padding:16px 26px; border-bottom:none; }
 
 /* ---------- responsive ---------- */
 @media (max-width:920px){
