@@ -11,7 +11,9 @@ vi.mock('./supabase.js', () => ({
 const {
   createTransferFromQuote,
   transitionTransfer,
+  cancelTransfer,
   fundedLedgerEntries,
+  canceledLedgerEntries,
   toApiTransfer,
   TransferRpcError,
 } = await import('./transfers.js')
@@ -34,8 +36,11 @@ const transferRow = {
   disclosure_accepted_at: null,
   payment_at: null,
   cancelable_until: null,
+  idempotency_key: 'bridge-key-1',
   funding_payment_ref: null,
   provider_transfer_ref: null,
+  refund_payment_ref: null,
+  refunded_at: null,
   payout_hold_reason: null,
   payout_held_at: null,
   submit_attempted_at: null,
@@ -135,6 +140,74 @@ describe('fundedLedgerEntries', () => {
     expect(entries).toHaveLength(2)
     expect(entries.map((e) => e.account_code)).not.toContain('fee_revenue')
   })
+})
+
+describe('canceledLedgerEntries', () => {
+  it('builds the net-zero CANCELED batch — the exact reversal of FUNDED', () => {
+    const entries = canceledLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199 })
+    expect(entries).toEqual([
+      { account_code: 'transfer_payable', direction: 'debit', amount_minor: 19801, currency: 'USD' },
+      { account_code: 'fee_revenue', direction: 'debit', amount_minor: 199, currency: 'USD' },
+      { account_code: 'funding_receivable', direction: 'credit', amount_minor: 20000, currency: 'USD' },
+    ])
+    const debits = entries.filter((e) => e.direction === 'debit').reduce((s, e) => s + e.amount_minor, 0)
+    const credits = entries.filter((e) => e.direction === 'credit').reduce((s, e) => s + e.amount_minor, 0)
+    expect(debits).toBe(credits)
+  })
+
+  it('is the direction-flipped mirror of fundedLedgerEntries (per account)', () => {
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const funded = fundedLedgerEntries(t)
+    const canceled = canceledLedgerEntries(t)
+    // same accounts + amounts, every direction inverted → the two batches sum to nothing
+    for (const f of funded) {
+      const c = canceled.find((e) => e.account_code === f.account_code)!
+      expect(c.amount_minor).toBe(f.amount_minor)
+      expect(c.direction).toBe(f.direction === 'debit' ? 'credit' : 'debit')
+    }
+  })
+
+  it('omits the fee line at zero fee (ledger rejects zero entries)', () => {
+    const entries = canceledLedgerEntries({ send_amount_minor: 100, fee_amount_minor: 0 })
+    expect(entries).toHaveLength(2)
+    expect(entries.map((e) => e.account_code)).not.toContain('fee_revenue')
+  })
+})
+
+describe('cancelTransfer', () => {
+  it('calls cancel_transfer with actor/reason/ledger and returns the row', async () => {
+    rpc.mockResolvedValue({ data: { ...transferRow, state: 'CANCELED' }, error: null })
+
+    const row = await cancelTransfer({
+      transferId: 'tr-1',
+      actor: 'user',
+      reason: 'sender canceled',
+      ledgerDescription: 'transfer CANCELED',
+      ledgerEntries: canceledLedgerEntries(transferRow),
+    })
+
+    expect(row.state).toBe('CANCELED')
+    const [name, args] = rpc.mock.calls[0] as [string, Record<string, unknown>]
+    expect(name).toBe('cancel_transfer')
+    expect(args['p_transfer_id']).toBe('tr-1')
+    expect(args['p_actor']).toBe('user')
+    expect(args['p_reason']).toBe('sender canceled')
+    expect(args['p_ledger_entries']).toEqual(canceledLedgerEntries(transferRow))
+  })
+
+  it.each(['transfer_not_cancelable', 'transfer_not_found'] as const)(
+    'maps %s raises to typed errors',
+    async (code) => {
+      rpc.mockResolvedValue({ data: null, error: { message: code } })
+      const err = await cancelTransfer({
+        transferId: 'tr-1',
+        actor: 'user',
+        ledgerEntries: [],
+      }).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(TransferRpcError)
+      expect((err as InstanceType<typeof TransferRpcError>).code).toBe(code)
+    },
+  )
 })
 
 describe('toApiTransfer', () => {

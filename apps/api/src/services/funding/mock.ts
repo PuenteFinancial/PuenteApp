@@ -1,6 +1,12 @@
 import crypto from 'node:crypto'
 import { env } from '../../config/env.js'
-import type { FundingEvent, FundingEventType, FundingInitiation, FundingProcessor } from './index.js'
+import type {
+  FundingEvent,
+  FundingEventType,
+  FundingInitiation,
+  FundingProcessor,
+  FundingUndo,
+} from './index.js'
 
 // Deliberately Stripe-shaped: header `t=<ms>,v1=<hex>` where
 // v1 = HMAC-SHA256(secret, "<t>.<rawBody>"). Slice 4b's Stripe adapter swaps
@@ -53,6 +59,21 @@ export class MockFundingProcessor implements FundingProcessor {
     } catch {
       return false
     }
+  }
+
+  async voidFunding(): Promise<FundingUndo> {
+    // No real money exists behind the mock: the void just mints a ref the
+    // cancel path records. The key is deliberately ignored — a fresh ref each
+    // call — so the exactly-once guarantee is proven to live in the caller's
+    // refund_payment_ref null-gate (and, in slice 7, real Stripe's key), not in
+    // the processor. Always 'succeeded' → PR1's cancel runs synchronously.
+    return { provider: this.provider, ref: `mockvoid_${crypto.randomUUID()}`, status: 'succeeded' }
+  }
+
+  async refund(): Promise<FundingUndo> {
+    // Same shape as voidFunding for the PR2 PAYOUT_FAILED→REFUNDED tail; the
+    // mock returns collected funds instantly and ignores amount + key.
+    return { provider: this.provider, ref: `mockrefund_${crypto.randomUUID()}`, status: 'succeeded' }
   }
 
   parseEvent(rawBody: Buffer): FundingEvent | null {
