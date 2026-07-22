@@ -757,4 +757,76 @@ export async function transfersRoute(server: FastifyInstance) {
       }
     },
   )
+
+  // GET /transfers/:id/receipt — the Reg E receipt for a delivered transfer.
+  // Owner-scoped; the receipt row exists only once the transfer reached COMPLETED
+  // (written by the payment-event.process job), so its absence — pre-COMPLETED or
+  // a non-owner — is a 404 (never leaks whether the transfer exists).
+  server.get<{ Params: { id: string } }>(
+    '/transfers/:id/receipt',
+    {
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string', format: 'uuid' } },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              transferId: { type: 'string' },
+              type: { type: 'string' },
+              locale: { type: 'string' },
+              content: { type: 'object', additionalProperties: true },
+              presentedAt: { type: 'string' },
+            },
+          },
+          404: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const userId = request.user!.id
+
+      // Owner check first — 404 (not 403) so a non-owner can't tell the transfer apart.
+      const { data: owned, error: ownedError } = await supabaseAdmin
+        .from('transfers')
+        .select('id')
+        .eq('id', request.params.id)
+        .eq('user_id', userId)
+        .single()
+      if (ownedError || !owned) {
+        return sendError(reply, 404, 'not_found', 'Receipt not found')
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from('disclosures')
+        .select('id, transfer_id, type, locale, content, presented_at')
+        .eq('transfer_id', request.params.id)
+        .eq('type', 'receipt')
+        .single()
+      if (error || !data) {
+        return sendError(reply, 404, 'not_found', 'Receipt not found')
+      }
+      const receipt = data as unknown as {
+        id: string
+        transfer_id: string
+        type: string
+        locale: string
+        content: Record<string, unknown>
+        presented_at: string
+      }
+
+      return {
+        id: receipt.id,
+        transferId: receipt.transfer_id,
+        type: receipt.type,
+        locale: receipt.locale,
+        content: receipt.content,
+        presentedAt: receipt.presented_at,
+      }
+    },
+  )
 }
