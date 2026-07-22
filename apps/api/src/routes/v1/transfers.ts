@@ -1,12 +1,15 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, FastifyReply } from 'fastify'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { buildPrepaymentDisclosure } from '../../services/disclosures.js'
 import { getFundingProcessor } from '../../services/funding/index.js'
 import {
+  cancelTransfer,
+  canceledLedgerEntries,
   createTransferFromQuote,
   fxRateToWire,
   toApiTransfer,
+  transitionTransfer,
   TransferRpcError,
   type TransferRow,
 } from '../../services/transfers.js'
@@ -17,7 +20,8 @@ const TRANSFER_COLUMNS =
   'id, user_id, payout_destination_id, quote_id, state, send_amount_minor, send_currency, ' +
   'receive_amount_minor, receive_currency, fee_amount_minor, fee_currency, fx_rate, ' +
   'funding_source_type, funding_cleared, disclosure_accepted_at, payment_at, ' +
-  'cancelable_until, funding_payment_ref, provider_transfer_ref, completed_at, created_at'
+  'cancelable_until, idempotency_key, funding_payment_ref, provider_transfer_ref, ' +
+  'refund_payment_ref, refunded_at, submit_attempted_at, completed_at, created_at'
 
 const moneySchema = (currency: string) =>
   ({
@@ -72,6 +76,10 @@ interface ConfirmTransferBody {
   accepted: true
 }
 
+interface CancelTransferBody {
+  transferId: string
+}
+
 interface QuoteForTransferRow {
   id: string
   status: string
@@ -116,6 +124,32 @@ function encodeCursor(row: { created_at: string; id: string }): string {
 // events that complete it can never arrive.
 function fundingConfigured(): boolean {
   return getFundingProcessor().provider !== 'mock' || Boolean(env.MOCK_FUNDING_WEBHOOK_SECRET)
+}
+
+// A cancel that arrives once a payout is being submitted (claimed-but-still-
+// FUNDED), already SUBMITTED, or IN_FLIGHT can't be auto-applied — but Reg E
+// forbids a flat denial, so route to support/error-resolution and affirm the
+// refund-if-the-payout-fails tail (PR2). Both language renderings travel in the
+// response (like disclosures carry both); the client shows the sender's locale.
+// HTTP 202: the cancellation request is accepted for out-of-band handling, not
+// denied. NOTE (slice-7): the actual pending-cancel resolution track this points
+// into is deferred work.
+function submissionInProgressResponse(reply: FastifyReply, id: string, state: string) {
+  return reply.status(202).send({
+    id,
+    state,
+    code: 'cancellation_requires_support',
+    messages: {
+      en:
+        "This transfer is being sent for payout and can't be canceled automatically. " +
+        'Contact support to exercise your cancellation right — if the payout does not ' +
+        'complete, you will be refunded in full.',
+      es:
+        'Esta transferencia se está enviando para su pago y no se puede cancelar ' +
+        'automáticamente. Comunícate con soporte para ejercer tu derecho de cancelación: ' +
+        'si el pago no se completa, se te reembolsará el monto total.',
+    },
+  })
 }
 
 export async function transfersRoute(server: FastifyInstance) {
@@ -398,6 +432,218 @@ export async function transfersRoute(server: FastifyInstance) {
           clientFields: funding.clientFields,
         },
       }
+    },
+  )
+
+  // POST /transfers/:id/cancel — the sender's Reg E cancellation right. Modeled
+  // on /confirm: idempotent, owner-scoped, synchronous (the void is instant).
+  // Deliberately NOT gated on requireApprovedUser or fundingConfigured: canceling
+  // is a legal right that must not be blocked by KYC status, and a FUNDED
+  // transfer already implies funding was configured; owner-scoping is the
+  // authorization. The audit-log entry is automatic (global audit plugin).
+  server.post<{ Params: { id: string }; Body: CancelTransferBody }>(
+    '/transfers/:id/cancel',
+    {
+      config: { idempotency: true },
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string', format: 'uuid' } },
+        },
+        // The transfer id is REQUIRED in the body — not redundancy. The shared
+        // idempotency plugin scopes a claim to (user, route-PATTERN, key) plus a
+        // hash of the BODY; the concrete :id lives only in the path. With no body
+        // that hash is constant across transfers, so one reused Idempotency-Key
+        // would silently replay a different transfer's cancel (a money-moving
+        // no-op). Carrying transferId makes the hash per-transfer (reuse across
+        // transfers → an explicit 409 idempotency_conflict, never a silent
+        // replay) and doubles as a path/body match check; it also gives the POST
+        // a body, sidestepping Fastify's empty-application/json 400.
+        body: {
+          type: 'object',
+          required: ['transferId'],
+          properties: { transferId: { type: 'string', format: 'uuid' } },
+          additionalProperties: false,
+        },
+        response: {
+          200: transferResponseSchema,
+          // being-submitted / SUBMITTED / IN_FLIGHT → compliant support routing.
+          202: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              state: { type: 'string' },
+              code: { type: 'string' },
+              messages: {
+                type: 'object',
+                properties: { en: { type: 'string' }, es: { type: 'string' } },
+              },
+            },
+          },
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const userId = request.user!.id
+
+      if (request.body.transferId !== request.params.id) {
+        return sendError(
+          reply,
+          400,
+          'validation_error',
+          'transferId must match the transfer being canceled',
+        )
+      }
+
+      const { data: transferData } = await supabaseAdmin
+        .from('transfers')
+        .select(TRANSFER_COLUMNS)
+        .eq('id', request.params.id)
+        .eq('user_id', userId)
+        .single()
+
+      if (!transferData) {
+        return sendError(reply, 404, 'not_found', 'Transfer not found')
+      }
+      let transfer = transferData as unknown as TransferRow
+
+      // Idempotent terminal: the sender is already made whole.
+      if (transfer.state === 'REFUNDED') {
+        return reply.status(200).send(toApiTransfer(transfer))
+      }
+
+      // Being submitted (a claimed-but-still-FUNDED row: the submit job set
+      // submit_attempted_at while state is still FUNDED, so a Bridge payout is
+      // being created), already SUBMITTED, or IN_FLIGHT → compliant support
+      // routing, never a flat denial. Testing submit_attempted_at here is what
+      // keeps a post-claim cancel out of the FUNDED cancel path below — the state
+      // column alone still reads FUNDED during the claimed-but-not-submitted
+      // window, so a state-only check would wrongly deny it.
+      if (
+        transfer.state === 'SUBMITTED' ||
+        transfer.state === 'IN_FLIGHT' ||
+        (transfer.state === 'FUNDED' && transfer.submit_attempted_at !== null)
+      ) {
+        return submissionInProgressResponse(reply, transfer.id, transfer.state)
+      }
+
+      // FUNDED → the guarded cancel: race-safe against the payout submit claim
+      // (the RPC's guarded UPDATE is the serialization point) + a clean reversal
+      // of the FUNDED ledger batch. A CANCELED row (a retry after a crash between
+      // the RPC and the void step) skips straight to the void step below.
+      if (transfer.state === 'FUNDED') {
+        try {
+          transfer = await cancelTransfer({
+            transferId: transfer.id,
+            actor: 'user',
+            reason: 'sender canceled within the Reg E window',
+            ledgerDescription: 'transfer CANCELED — sender void; FUNDED batch reversed',
+            ledgerEntries: canceledLedgerEntries(transfer),
+          })
+        } catch (err) {
+          if (err instanceof TransferRpcError) {
+            if (err.code === 'transfer_not_found') {
+              return sendError(reply, 404, 'not_found', 'Transfer not found')
+            }
+            if (err.code === 'transfer_not_cancelable') {
+              // The guard failed AFTER our pre-claim read. Re-read the row to
+              // classify by why: a concurrent cancel (a double-click that minted
+              // a fresh key, another tab) already finished → REFUNDED, so answer
+              // the idempotent 200 the terminal check above would have (never a
+              // misleading "window has passed" for a refunded transfer); the
+              // submit job claimed/advanced it → the right is still live, 202
+              // support routing; otherwise the Reg E window expired → lawful 409.
+              // (An already-CANCELED row never raises — cancel_transfer returns
+              // it as a replay no-op — so this handler resumes the void tail
+              // rather than landing here.)
+              const { data: fresh } = await supabaseAdmin
+                .from('transfers')
+                .select(TRANSFER_COLUMNS)
+                .eq('id', transfer.id)
+                .eq('user_id', userId)
+                .single()
+              const f = fresh as unknown as TransferRow | null
+              if (f?.state === 'REFUNDED') {
+                return reply.status(200).send(toApiTransfer(f))
+              }
+              if (
+                f &&
+                (f.state === 'SUBMITTED' ||
+                  f.state === 'IN_FLIGHT' ||
+                  (f.state === 'FUNDED' && f.submit_attempted_at !== null))
+              ) {
+                return submissionInProgressResponse(reply, transfer.id, f.state)
+              }
+              return sendError(
+                reply,
+                409,
+                'transfer_not_cancelable',
+                'The cancellation window has passed',
+              )
+            }
+          }
+          server.log.error({ userId, transferId: transfer.id }, 'transfer cancel failed')
+          return sendError(reply, 500, 'internal_error', 'Failed to cancel transfer')
+        }
+      } else if (transfer.state !== 'CANCELED') {
+        // PENDING_PAYMENT (unfunded — nothing to void; abandoned rows are reaped
+        // by the reconcile-pending job), COMPLETED (funds delivered — the right
+        // has extinguished; lawful denial), PAYOUT_FAILED (auto-refunds via PR2),
+        // and any other state → not cancelable through this path.
+        return sendError(reply, 409, 'transfer_not_cancelable', 'This transfer cannot be canceled')
+      }
+
+      // state is now CANCELED (fresh or resumed). Void the uncleared funding
+      // pull, null-gated so a retry never double-calls the processor, then settle
+      // REFUNDED. A FUNDED/CANCELED transfer always carries a funding_payment_ref
+      // (set at confirm); its absence is a data-integrity fault — fail loudly
+      // rather than void with an empty ref a real Stripe adapter could misapply.
+      if (!transfer.refund_payment_ref) {
+        if (!transfer.funding_payment_ref) {
+          server.log.error(
+            { userId, transferId: transfer.id },
+            'cancel: CANCELED transfer missing funding_payment_ref',
+          )
+          return sendError(reply, 500, 'internal_error', 'Failed to cancel transfer')
+        }
+        // Keyed off the transfer's stable bridge idempotency key (not the client
+        // header) so a crash-and-retry with a fresh header still dedupes the void
+        // against real Stripe in slice 7.
+        const undo = await getFundingProcessor().voidFunding({
+          transferId: transfer.id,
+          paymentRef: transfer.funding_payment_ref,
+          idempotencyKey: `${transfer.idempotency_key}:void`,
+        })
+        const { error: persistError } = await supabaseAdmin
+          .from('transfers')
+          .update({ refund_payment_ref: undo.ref, refunded_at: new Date().toISOString() })
+          .eq('id', transfer.id)
+          .is('refund_payment_ref', null)
+        if (persistError) {
+          server.log.error(
+            { userId, transferId: transfer.id, supabaseError: persistError.code },
+            'void ref persist failed',
+          )
+          return sendError(reply, 500, 'internal_error', 'Failed to cancel transfer')
+        }
+      }
+
+      // CANCELED → REFUNDED carries NO ledger: the FUNDED reversal already zeroed
+      // the books (a receivable recognized then reversed). A concurrent finisher
+      // that already reached REFUNDED replays here as a no-op returning the row.
+      const refunded = await transitionTransfer({
+        transferId: transfer.id,
+        fromState: 'CANCELED',
+        toState: 'REFUNDED',
+        actor: 'user',
+        reason: 'void completed — sender made whole',
+      })
+
+      return reply.status(200).send(toApiTransfer(refunded))
     },
   )
 

@@ -6,6 +6,28 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-21 · Cancel-at-`FUNDED` is a *void*, not a refund (slice-6 two-verb model).** When a sender
+cancels a `FUNDED`-pre-claim transfer, no payout has gone out and no float was fronted, so the inbound
+ACH is *voided* (canceled before it settles) and the ledger is a **clean reversal** of the `FUNDED`
+batch — not the `refunds_payable`/`cash_clearing` refund-from-float path. Two verbs, keyed to where
+the money actually is: **void** (never moved — the cancel path) vs **refund** (moved and returned —
+the `PAYOUT_FAILED → REFUNDED` path, which keeps ledger-rules.md's template). The `FundingProcessor`
+seam gets both `voidFunding()` and `refund()`; `CANCELED → REFUNDED` carries no ledger. Why a future
+engineer will ask "why on earth doesn't cancel post through `refunds_payable` like ledger-rules.md's
+CANCELED variant 2?" — because at `FUNDED`-pre-claim nothing has moved. Verify in slice 7: real Stripe
+ACH is cancelable inside the 30-min window; if not, add a void→refund fallback. **Status: active**
+(slice 6) ([transfer-state-machine.md](transfer-state-machine.md), [ledger-rules.md](ledger-rules.md)).
+
+**2026-07-21 · Human-gate the first real payout-failure refunds (`AUTO_REFUND`, default-safe).**
+Slice 6 builds the full auto-refund path for `PAYOUT_FAILED → REFUNDED`, but gates the disbursement
+behind a default-safe `AUTO_REFUND` flag — mechanism now, policy via flag, same pattern as
+`funding_cleared` and the float ceiling. Off (prod default) → a real payout failure stops at
+`PAYOUT_FAILED` + ops alert and a human triggers the refund by runbook; on (dev/test) → the e2e proves
+the full path. The trigger is that Bridge's `returned`/`refunded` semantics are **sandbox-unverified**
+(the sandbox stalls at `funds_received`) and the refund fronts float. Flip it on once verified in the
+slice-7 pilot; the ops-trigger surface is deferred human-shaped work. **Status: active** (slice 6)
+([transfer-state-machine.md](transfer-state-machine.md)).
+
 **2026-07-21 · Bridge execution rate vs quoted `buy_rate` — an unresolved pricing question, must be
 answered before slice-7 real money.** The slice-5 sandbox e2e drove a full payout whose `SUBMITTED`
 batch debited `fx_slippage` (`D` = actual USDC draw − quoted send principal). Investigation: Bridge's
