@@ -12,14 +12,28 @@ vi.mock('../../services/supabase.js', () => ({
 }))
 
 const createTransferFromQuote = vi.fn()
+const cancelTransfer = vi.fn()
+const transitionTransfer = vi.fn()
 
 vi.mock('../../services/transfers.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/transfers.js')>()
   return {
     ...actual,
     createTransferFromQuote: (...args: unknown[]) => createTransferFromQuote(...args),
+    cancelTransfer: (...args: unknown[]) => cancelTransfer(...args),
+    transitionTransfer: (...args: unknown[]) => transitionTransfer(...args),
   }
 })
+
+// Funding processor is mocked so the cancel tests can assert void call-counts
+// (the real mock mints a fresh ref each call). initiateFunding keeps the shape
+// the confirm tests expect.
+const initiateFunding = vi.fn()
+const voidFunding = vi.fn()
+
+vi.mock('../../services/funding/index.js', () => ({
+  getFundingProcessor: () => ({ provider: 'mock', initiateFunding, voidFunding }),
+}))
 
 const { transfersRoute } = await import('./transfers.js')
 const { idempotencyPlugin } = await import('../../plugins/idempotency.js')
@@ -88,7 +102,12 @@ const transferRow = {
   disclosure_accepted_at: null,
   payment_at: null,
   cancelable_until: null,
+  idempotency_key: 'bridge-key-1',
   funding_payment_ref: null,
+  provider_transfer_ref: null,
+  refund_payment_ref: null,
+  refunded_at: null,
+  submit_attempted_at: null,
   completed_at: null,
   created_at: '2026-07-17T20:00:00.000Z',
 }
@@ -128,6 +147,17 @@ async function buildApp() {
 beforeEach(() => {
   from.mockReset()
   createTransferFromQuote.mockReset()
+  cancelTransfer.mockReset()
+  transitionTransfer.mockReset()
+  initiateFunding.mockReset()
+  voidFunding.mockReset()
+  initiateFunding.mockResolvedValue({
+    provider: 'mock',
+    method: 'ach',
+    paymentRef: 'mockpay_new',
+    clientFields: {},
+  })
+  voidFunding.mockResolvedValue({ provider: 'mock', ref: 'mockvoid_test', status: 'succeeded' })
 })
 
 describe('POST /v1/transfers', () => {
@@ -311,6 +341,240 @@ describe('POST /v1/transfers/:id/confirm', () => {
     const app = await buildApp()
     const res = await confirm(app)
     expect(res.status).toBe(409)
+    await app.close()
+  })
+})
+
+describe('POST /v1/transfers/:id/cancel', () => {
+  const cancel = (
+    app: Awaited<ReturnType<typeof buildApp>>,
+    key = 'cancel-1',
+    body: Record<string, unknown> = { transferId: TRANSFER_ID },
+  ) =>
+    supertest(app.server)
+      .post(`/v1/transfers/${TRANSFER_ID}/cancel`)
+      .set('Authorization', 'Bearer test-token')
+      .set('Idempotency-Key', key)
+      .send(body)
+
+  const fundedRow = {
+    ...transferRow,
+    state: 'FUNDED',
+    funding_payment_ref: 'mockpay_1',
+    cancelable_until: FUTURE,
+  }
+
+  // transfers mock returning a different row per successive from('transfers')
+  // read (initial load, then the post-RPC re-read); idempotency_keys has its own
+  // table mock, so this advances only on transfers reads.
+  const seqTransfers = (...rows: unknown[]) => {
+    let i = 0
+    return () => chain({ data: rows[Math.min(i++, rows.length - 1)] })
+  }
+
+  it('FUNDED → cancels (reverses the FUNDED batch), voids once, settles REFUNDED', async () => {
+    routeTables({ transfers: () => chain({ data: fundedRow }) })
+    cancelTransfer.mockResolvedValue({ ...fundedRow, state: 'CANCELED' })
+    transitionTransfer.mockResolvedValue({
+      ...fundedRow,
+      state: 'REFUNDED',
+      refund_payment_ref: 'mockvoid_test',
+      refunded_at: '2026-07-17T20:10:00.000Z',
+    })
+    const app = await buildApp()
+
+    const res = await cancel(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ id: TRANSFER_ID, state: 'REFUNDED' })
+
+    // the CANCELED ledger batch is the exact reversal of the FUNDED batch
+    const cancelArg = cancelTransfer.mock.calls[0]![0] as { ledgerEntries: unknown[] }
+    expect(cancelArg.ledgerEntries).toEqual([
+      { account_code: 'transfer_payable', direction: 'debit', amount_minor: 19801, currency: 'USD' },
+      { account_code: 'fee_revenue', direction: 'debit', amount_minor: 199, currency: 'USD' },
+      { account_code: 'funding_receivable', direction: 'credit', amount_minor: 20000, currency: 'USD' },
+    ])
+
+    // voided exactly once, keyed off the transfer's stable bridge key
+    expect(voidFunding).toHaveBeenCalledTimes(1)
+    expect(voidFunding.mock.calls[0]![0]).toMatchObject({
+      paymentRef: 'mockpay_1',
+      idempotencyKey: 'bridge-key-1:void',
+    })
+
+    // CANCELED → REFUNDED carries NO ledger
+    const transitionArg = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+    expect(transitionArg).toMatchObject({ fromState: 'CANCELED', toState: 'REFUNDED' })
+    expect(transitionArg['ledgerEntries']).toBeUndefined()
+    await app.close()
+  })
+
+  it('401s without auth and 400s without an Idempotency-Key', async () => {
+    const app = await buildApp()
+    const noAuth = await supertest(app.server)
+      .post(`/v1/transfers/${TRANSFER_ID}/cancel`)
+      .send({ transferId: TRANSFER_ID })
+    expect(noAuth.status).toBe(401)
+
+    routeTables({ transfers: () => chain({ data: fundedRow }) })
+    const noKey = await supertest(app.server)
+      .post(`/v1/transfers/${TRANSFER_ID}/cancel`)
+      .set('Authorization', 'Bearer test-token')
+      .send({ transferId: TRANSFER_ID })
+    expect(noKey.status).toBe(400)
+    expect(cancelTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('400s a missing or mismatched transferId body (per-transfer idempotency guard)', async () => {
+    routeTables({ transfers: () => chain({ data: fundedRow }) })
+    const app = await buildApp()
+    // missing → schema rejects (the body is what makes the idempotency key per-transfer)
+    const missing = await cancel(app, 'c-missing', {})
+    expect(missing.status).toBe(400)
+    // body id ≠ path id → 400, before any state work
+    const mismatch = await cancel(app, 'c-mismatch', {
+      transferId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa99',
+    })
+    expect(mismatch.status).toBe(400)
+    expect(mismatch.body.error.code).toBe('validation_error')
+    expect(cancelTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it("404s a missing or another user's transfer", async () => {
+    routeTables({ transfers: () => chain({ data: null }) })
+    const app = await buildApp()
+    const res = await cancel(app)
+    expect(res.status).toBe(404)
+    expect(cancelTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('REFUNDED replay is an idempotent 200 — no cancel, no void', async () => {
+    routeTables({ transfers: () => chain({ data: { ...fundedRow, state: 'REFUNDED' } }) })
+    const app = await buildApp()
+    const res = await cancel(app)
+    expect(res.status).toBe(200)
+    expect(res.body.state).toBe('REFUNDED')
+    expect(cancelTransfer).not.toHaveBeenCalled()
+    expect(voidFunding).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it.each(['SUBMITTED', 'IN_FLIGHT'] as const)(
+    '%s → 202 compliant support routing (en+es), never a flat denial',
+    async (state) => {
+      routeTables({ transfers: () => chain({ data: { ...fundedRow, state } }) })
+      const app = await buildApp()
+      const res = await cancel(app)
+      expect(res.status).toBe(202)
+      expect(res.body).toMatchObject({ id: TRANSFER_ID, state, code: 'cancellation_requires_support' })
+      expect(res.body.messages.en).toMatch(/support/i)
+      expect(res.body.messages.es).toMatch(/soporte/i)
+      expect(cancelTransfer).not.toHaveBeenCalled()
+      expect(voidFunding).not.toHaveBeenCalled()
+      await app.close()
+    },
+  )
+
+  it('claimed-but-still-FUNDED (submit_attempted_at set) → 202, never the cancel path', async () => {
+    // the submit job set submit_attempted_at while state is still FUNDED — a
+    // Bridge payout is being created, so this is post-claim, not a fresh cancel
+    routeTables({
+      transfers: () => chain({ data: { ...fundedRow, submit_attempted_at: '2026-07-17T20:05:00.000Z' } }),
+    })
+    const app = await buildApp()
+    const res = await cancel(app)
+    expect(res.status).toBe(202)
+    expect(res.body.code).toBe('cancellation_requires_support')
+    expect(cancelTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it.each(['PENDING_PAYMENT', 'COMPLETED', 'PAYOUT_FAILED'] as const)(
+    '%s → 409 transfer_not_cancelable',
+    async (state) => {
+      routeTables({ transfers: () => chain({ data: { ...fundedRow, state } }) })
+      const app = await buildApp()
+      const res = await cancel(app)
+      expect(res.status).toBe(409)
+      expect(res.body.error.code).toBe('transfer_not_cancelable')
+      expect(cancelTransfer).not.toHaveBeenCalled()
+      await app.close()
+    },
+  )
+
+  it('lost the race after our read (re-read shows the submit job won) → compliant 202, not a flat 409', async () => {
+    // initial load reads FUNDED+unclaimed; RPC raises transfer_not_cancelable;
+    // the re-read shows the row advanced → Reg E-compliant support routing
+    routeTables({ transfers: seqTransfers(fundedRow, { ...fundedRow, state: 'SUBMITTED' }) })
+    cancelTransfer.mockRejectedValue(new TransferRpcError('transfer_not_cancelable'))
+    const app = await buildApp()
+    const res = await cancel(app)
+    expect(res.status).toBe(202)
+    expect(res.body.code).toBe('cancellation_requires_support')
+    expect(voidFunding).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('lost the race to a concurrent cancel (re-read shows REFUNDED) → idempotent 200, not a 409', async () => {
+    // two cancels with DIFFERENT keys both load FUNDED; the other finished first
+    routeTables({
+      transfers: seqTransfers(fundedRow, {
+        ...fundedRow,
+        state: 'REFUNDED',
+        refund_payment_ref: 'mockvoid_prev',
+      }),
+    })
+    cancelTransfer.mockRejectedValue(new TransferRpcError('transfer_not_cancelable'))
+    const app = await buildApp()
+    const res = await cancel(app)
+    expect(res.status).toBe(200)
+    expect(res.body.state).toBe('REFUNDED')
+    expect(voidFunding).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('window expired (re-read still FUNDED + unclaimed) → lawful 409', async () => {
+    routeTables({ transfers: () => chain({ data: fundedRow }) }) // FUNDED+null on load and re-read
+    cancelTransfer.mockRejectedValue(new TransferRpcError('transfer_not_cancelable'))
+    const app = await buildApp()
+    const res = await cancel(app)
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('transfer_not_cancelable')
+    expect(voidFunding).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('CANCELED replay (no ref yet) resumes at the void step — no second cancel', async () => {
+    routeTables({ transfers: () => chain({ data: { ...fundedRow, state: 'CANCELED' } }) })
+    transitionTransfer.mockResolvedValue({ ...fundedRow, state: 'REFUNDED' })
+    const app = await buildApp()
+
+    const res = await cancel(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body.state).toBe('REFUNDED')
+    expect(cancelTransfer).not.toHaveBeenCalled() // already CANCELED — don't re-cancel
+    expect(voidFunding).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  it('CANCELED replay (ref already persisted) skips the void entirely', async () => {
+    routeTables({
+      transfers: () => chain({ data: { ...fundedRow, state: 'CANCELED', refund_payment_ref: 'mockvoid_prev' } }),
+    })
+    transitionTransfer.mockResolvedValue({ ...fundedRow, state: 'REFUNDED', refund_payment_ref: 'mockvoid_prev' })
+    const app = await buildApp()
+
+    const res = await cancel(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body.state).toBe('REFUNDED')
+    expect(cancelTransfer).not.toHaveBeenCalled()
+    expect(voidFunding).not.toHaveBeenCalled() // ref already set — no second processor call
     await app.close()
   })
 })

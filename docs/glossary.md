@@ -79,6 +79,18 @@ refer back as needed.
 - **Submit claim** — the guarded UPDATE (`state = 'FUNDED' AND payout_hold_reason IS NULL AND
   submit_attempted_at IS NULL`) the payout job wins before calling Bridge; it serializes submission
   against the slice-6 cancel so both can never happen. See the state machine doc.
+- **Void** — the undo of an *uncleared* funding collection: a `FUNDED`-pre-claim transfer the sender
+  cancels within the Reg E window; the inbound ACH is canceled before it settles, so no money moved
+  and the ledger is a **clean reversal** of the `FUNDED` batch (no `refunds_payable`, no float).
+  Serialized against the **Submit claim** by the `cancel_transfer` guard. Contrast **Refund**. See
+  [transfer-state-machine.md](transfer-state-machine.md).
+- **Refund** — the return of funds that *did* move, paid back to the sender from float
+  (`refunds_payable` → `cash_clearing`): the `PAYOUT_FAILED → REFUNDED` path after Bridge returns the
+  principal, and later real-Stripe refunds. Distinct from a **Void** (nothing moved). See
+  [ledger-rules.md](ledger-rules.md).
+- **`REFUNDED`** — the terminal "sender made whole" state, reached from `CANCELED` (via a void) or
+  `PAYOUT_FAILED` (via a refund); the ledger shows which. See
+  [transfer-state-machine.md](transfer-state-machine.md).
 - **Payout hold** — a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`,
   or `submit_error`); the sweep skips it until ops releases it via
   [runbooks/payout-holds.md](runbooks/payout-holds.md).

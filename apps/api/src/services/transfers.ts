@@ -12,6 +12,7 @@ export type TransferRpcCode =
   | 'quote_expired'
   | 'transfer_not_found'
   | 'transition_conflict'
+  | 'transfer_not_cancelable'
 
 const RPC_CODES: readonly TransferRpcCode[] = [
   'quote_not_found',
@@ -19,6 +20,7 @@ const RPC_CODES: readonly TransferRpcCode[] = [
   'quote_expired',
   'transfer_not_found',
   'transition_conflict',
+  'transfer_not_cancelable',
 ]
 
 export class TransferRpcError extends Error {
@@ -52,8 +54,11 @@ export interface TransferRow {
   disclosure_accepted_at: string | null
   payment_at: string | null
   cancelable_until: string | null
+  idempotency_key: string
   funding_payment_ref: string | null
   provider_transfer_ref: string | null
+  refund_payment_ref: string | null
+  refunded_at: string | null
   payout_hold_reason: string | null
   payout_held_at: string | null
   submit_attempted_at: string | null
@@ -102,6 +107,44 @@ export function fundedLedgerEntries(transfer: {
       currency: 'USD',
     })
   }
+  return entries
+}
+
+// The CANCELED batch (ledger-rules.md "ACH not yet in flight"): a clean reversal
+// of the FUNDED batch. At FUNDED-pre-claim nothing has moved — no payout, no
+// float fronted — so the sender's uncleared ACH is *voided* and the FUNDED
+// receivable/payable/fee lines are booked back exactly. The fee is NOT earned on
+// a cancel, so its credit reverses too. Nets to zero; mirrors fundedLedgerEntries
+// line-for-line with directions flipped (zero-fee omits the fee line — the ledger
+// rejects zero-amount entries). CANCELED→REFUNDED then posts NO ledger: reversing
+// the receivable already zeroed the books.
+export function canceledLedgerEntries(transfer: {
+  send_amount_minor: number
+  fee_amount_minor: number
+}): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  const entries: LedgerEntryJson[] = [
+    {
+      account_code: 'transfer_payable',
+      direction: 'debit',
+      amount_minor: transfer.send_amount_minor,
+      currency: 'USD',
+    },
+  ]
+  if (transfer.fee_amount_minor > 0) {
+    entries.push({
+      account_code: 'fee_revenue',
+      direction: 'debit',
+      amount_minor: transfer.fee_amount_minor,
+      currency: 'USD',
+    })
+  }
+  entries.push({
+    account_code: 'funding_receivable',
+    direction: 'credit',
+    amount_minor: total,
+    currency: 'USD',
+  })
   return entries
 }
 
@@ -180,6 +223,33 @@ export async function transitionTransfer(input: {
   if (error) throwMapped(error.message, 'transition_transfer')
   const row = (Array.isArray(data) ? data[0] : data) as TransferRow | undefined
   if (!row) throw new Error('transition_transfer failed: no row returned')
+  return row
+}
+
+// The cancel side of the payout-vs-cancel race (slice 6). A dedicated RPC, not
+// transition_transfer, because its guarded UPDATE carries the extra race guard
+// (submit_attempted_at IS NULL) + the Reg E window check, and it is the
+// serialization point against the submit job's claim — exactly one guarded
+// UPDATE commits, so a Bridge-payout-exists-but-CANCELED row is structurally
+// impossible. Maps 'transfer_not_cancelable' (lost the race, or window expired)
+// and 'transfer_not_found'; a CANCELED replay is a no-op returning the row.
+export async function cancelTransfer(input: {
+  transferId: string
+  actor: string
+  reason?: string
+  ledgerDescription?: string
+  ledgerEntries: LedgerEntryJson[]
+}): Promise<TransferRow> {
+  const { data, error } = await supabaseAdmin.rpc('cancel_transfer', {
+    p_transfer_id: input.transferId,
+    p_actor: input.actor,
+    p_reason: input.reason ?? null,
+    p_ledger_description: input.ledgerDescription ?? null,
+    p_ledger_entries: input.ledgerEntries,
+  })
+  if (error) throwMapped(error.message, 'cancel_transfer')
+  const row = (Array.isArray(data) ? data[0] : data) as TransferRow | undefined
+  if (!row) throw new Error('cancel_transfer failed: no row returned')
   return row
 }
 

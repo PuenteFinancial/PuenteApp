@@ -49,6 +49,39 @@ describe('mock initiateFunding', () => {
   })
 })
 
+describe('mock voidFunding', () => {
+  it('returns a succeeded void ref, minting a fresh ref each call (ignores the key)', async () => {
+    const a = await processor.voidFunding({
+      transferId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      paymentRef: 'mockpay_abc',
+      idempotencyKey: 'bridge-key-1:void',
+    })
+    const b = await processor.voidFunding({
+      transferId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      paymentRef: 'mockpay_abc',
+      idempotencyKey: 'bridge-key-1:void',
+    })
+    expect(a).toMatchObject({ provider: 'mock', status: 'succeeded' })
+    expect(a.ref).toMatch(/^mockvoid_/)
+    // key ignored → distinct refs; exactly-once lives in the caller's null-gate
+    expect(a.ref).not.toBe(b.ref)
+  })
+})
+
+describe('mock refund', () => {
+  it('returns a succeeded refund ref for the collected amount', async () => {
+    const r = await processor.refund({
+      transferId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      paymentRef: 'mockpay_abc',
+      amountMinor: 20000,
+      currency: 'USD',
+      idempotencyKey: 'bridge-key-1:refund',
+    })
+    expect(r).toMatchObject({ provider: 'mock', status: 'succeeded' })
+    expect(r.ref).toMatch(/^mockrefund_/)
+  })
+})
+
 describe('mock verifySignature', () => {
   it('accepts a valid signature', () => {
     const body = eventBody()

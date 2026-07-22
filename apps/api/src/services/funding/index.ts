@@ -28,6 +28,17 @@ export interface FundingInitiation {
   clientFields: Record<string, string>
 }
 
+// The result of a funding-undo op (slice 6). Persisted to
+// transfers.refund_payment_ref (one undo path per transfer). `pending` is for a
+// real async return (Stripe ACH refund); the mock void/refund is always
+// `succeeded` (instant), which is what lets PR1's cancel run synchronously.
+export interface FundingUndo {
+  provider: string
+  /** Processor-side undo id (Stripe: canceled PaymentIntent / Refund id; mock: mockvoid_… / mockrefund_…). */
+  ref: string
+  status: 'succeeded' | 'pending'
+}
+
 // The seam Stripe drops into (slice 4b): initiation on confirm, plus the
 // webhook-side verify + normalize. Implementations never throw from
 // verifySignature; parseEvent returns null for anything unusable.
@@ -41,6 +52,25 @@ export interface FundingProcessor {
   }): Promise<FundingInitiation>
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean
   parseEvent(rawBody: Buffer): FundingEvent | null
+  // The two funding-undo ops (slice 6), mirroring the initiateFunding seam.
+  // Distinct money movements → distinct ledger batches: voidFunding cancels an
+  // UNCLEARED pull (Stripe: cancel the PaymentIntent) so nothing ever settled —
+  // the cancel-at-FUNDED path; refund returns COLLECTED funds (Stripe: create a
+  // Refund) — the PAYOUT_FAILED→REFUNDED path. Both accept an idempotencyKey so
+  // the slice-7 Stripe adapter drops in exactly-once without a signature change
+  // (PR1 calls voidFunding; PR2 calls refund).
+  voidFunding(input: {
+    transferId: string
+    paymentRef: string
+    idempotencyKey: string
+  }): Promise<FundingUndo>
+  refund(input: {
+    transferId: string
+    paymentRef: string
+    amountMinor: number
+    currency: 'USD'
+    idempotencyKey: string
+  }): Promise<FundingUndo>
 }
 
 // No DI container in this codebase (services are plain modules, bridge.ts
