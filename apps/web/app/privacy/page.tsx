@@ -21,7 +21,9 @@ export default function PrivacyPage() {
             <h2 className="text-xl font-semibold text-gray-900 mb-3">1. Information We Collect</h2>
             <p>
               When you join our waitlist, we collect your first name, WhatsApp number, estimated
-              monthly send amount, and destination country. We also collect standard web analytics
+              monthly send amount, and destination country. When you create an account or sign in,
+              we collect your mobile phone number so we can send one-time verification codes by SMS
+              (see &ldquo;SMS / Text Messaging&rdquo; below). We also collect standard web analytics
               data such as your browser type and general location.
             </p>
           </section>
@@ -29,9 +31,10 @@ export default function PrivacyPage() {
           <section>
             <h2 className="text-xl font-semibold text-gray-900 mb-3">2. How We Use Your Information</h2>
             <p>
-              We use the information you provide solely to contact you about Puente Financial product
-              updates, early access, and launch announcements. We will not sell or share your personal
-              information with third parties for marketing purposes.
+              We use the information you provide to operate Puente Financial, to communicate with you
+              about product updates and launch announcements, and to verify your identity and secure
+              your account &mdash; including sending one-time verification codes by SMS. We will not
+              sell or share your personal information with third parties for marketing purposes.
             </p>
           </section>
 
