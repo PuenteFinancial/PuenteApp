@@ -1,18 +1,13 @@
 import type { FastifyInstance } from 'fastify'
 import { supabaseAdmin } from '../../services/supabase.js'
-import { sendError } from '../../utils/errors.js'
+import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 interface WaitlistBody {
   first_name: string
   phone: string
-  email?: string
-  monthly_send_amount?: string
-  destination_country?: string
-  remittance_provider?: string
-  remit_frequency?: string
-  remit_years?: string
-  knows_credit_score?: string
-  credit_score_range?: string
+  destination_country: string
+  referral_source: string
+  referral_source_other?: string
   language_preference?: string
   utm_source?: string
   utm_medium?: string
@@ -28,18 +23,13 @@ export async function waitlistRoute(server: FastifyInstance) {
       schema: {
         body: {
           type: 'object',
-          required: ['first_name', 'phone'],
+          required: ['first_name', 'phone', 'destination_country', 'referral_source'],
           properties: {
             first_name: { type: 'string', minLength: 1 },
             phone: { type: 'string', minLength: 1 },
-            email: { type: 'string' },
-            monthly_send_amount: { type: 'string' },
-            destination_country: { type: 'string' },
-            remittance_provider: { type: 'string' },
-            remit_frequency: { type: 'string' },
-            remit_years: { type: 'string' },
-            knows_credit_score: { type: 'string' },
-            credit_score_range: { type: 'string' },
+            destination_country: { type: 'string', minLength: 1 },
+            referral_source: { type: 'string', minLength: 1 },
+            referral_source_other: { type: 'string' },
             language_preference: { type: 'string' },
             utm_source: { type: 'string' },
             utm_medium: { type: 'string' },
@@ -53,6 +43,7 @@ export async function waitlistRoute(server: FastifyInstance) {
             type: 'object',
             properties: { success: { type: 'boolean' } },
           },
+          400: errorResponseSchema,
         },
       },
     },
@@ -60,14 +51,9 @@ export async function waitlistRoute(server: FastifyInstance) {
       const {
         first_name,
         phone,
-        email,
-        monthly_send_amount,
         destination_country,
-        remittance_provider,
-        remit_frequency,
-        remit_years,
-        knows_credit_score,
-        credit_score_range,
+        referral_source,
+        referral_source_other,
         language_preference,
         utm_source,
         utm_medium,
@@ -75,17 +61,16 @@ export async function waitlistRoute(server: FastifyInstance) {
         user_agent,
       } = request.body
 
+      if (referral_source === 'Other' && !referral_source_other?.trim()) {
+        return sendError(reply, 400, 'validation_error', 'referral_source_other is required when referral_source is "Other"')
+      }
+
       const { error } = await supabaseAdmin.from('waitlist').insert({
         first_name: first_name.trim(),
         phone: phone.trim(),
-        email: email?.trim() || null,
-        monthly_send_amount: monthly_send_amount || null,
-        destination_country: destination_country || null,
-        remittance_provider: remittance_provider || null,
-        remit_frequency: remit_frequency || null,
-        remit_years: remit_years || null,
-        knows_credit_score: knows_credit_score || null,
-        credit_score_range: credit_score_range || null,
+        destination_country: destination_country.trim(),
+        referral_source,
+        referral_source_other: referral_source === 'Other' ? referral_source_other?.trim() || null : null,
         language_preference: language_preference || 'en',
         utm_source: utm_source || null,
         utm_medium: utm_medium || null,

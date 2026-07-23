@@ -9,15 +9,17 @@ export default function Footer() {
 
   return (
     <footer className="footer">
-      <div className="footer-inner">
-        <div>
-          <Link href="/" aria-label="Puente Financial — home">
-            <img src="/logo-hero.svg" alt="Puente" style={{ height: 34 }} />
-          </Link>
-          <p className="footer-tag">{t.footer.tagline}</p>
-        </div>
-        <div className="footer-right">
-          <LanguageToggle variant="light" />
+      <div className="footer-top">
+        <Link href="/" aria-label="Puente Financial — home">
+          <img src="/logo-hero.svg" alt="Puente" width={93} height={34} />
+        </Link>
+        <LanguageToggle variant="light" />
+      </div>
+      <div className="footer-body">
+        <p className="footer-tag">{t.footer.tagline}</p>
+        <div className="footer-legal-links">
+          <Link href="/privacy">{t.footer.privacyLink}</Link>
+          <Link href="/terms">{t.footer.termsLink}</Link>
         </div>
       </div>
       <p className="footer-disclaimer">
