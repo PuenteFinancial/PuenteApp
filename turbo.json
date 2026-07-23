@@ -17,6 +17,10 @@
       "dependsOn": ["^build"],
       "outputs": ["coverage/**"],
       "env": ["RUN_DB_TESTS", "SUPABASE_URL", "SUPABASE_SECRET_KEY", "TEST_DB_URL"]
+    },
+    "test:e2e": {
+      "cache": false,
+      "outputs": ["playwright-report/**"]
     }
   }
 }
