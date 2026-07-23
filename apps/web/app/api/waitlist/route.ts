@@ -16,14 +16,9 @@ export async function POST(req: NextRequest) {
     const {
       first_name,
       phone,
-      email,
-      monthly_send_amount,
       destination_country,
-      remittance_provider,
-      remit_frequency,
-      remit_years,
-      knows_credit_score,
-      credit_score_range,
+      referral_source,
+      referral_source_other,
       lang,
     } = body
 
@@ -32,6 +27,15 @@ export async function POST(req: NextRequest) {
     }
     if (!phone?.trim()) {
       return NextResponse.json({ error: 'Phone number is required' }, { status: 400 })
+    }
+    if (!destination_country?.trim()) {
+      return NextResponse.json({ error: 'Destination country is required' }, { status: 400 })
+    }
+    if (!referral_source?.trim()) {
+      return NextResponse.json({ error: 'Referral source is required' }, { status: 400 })
+    }
+    if (referral_source === 'Other' && !referral_source_other?.trim()) {
+      return NextResponse.json({ error: 'Please specify how you heard about us' }, { status: 400 })
     }
 
     const url = new URL(req.url)
@@ -55,14 +59,9 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         first_name: first_name.trim(),
         phone: phone.trim(),
-        ...(email?.trim() && { email: email.trim() }),
-        ...(monthly_send_amount && { monthly_send_amount }),
-        ...(destination_country && { destination_country }),
-        ...(remittance_provider && { remittance_provider }),
-        ...(remit_frequency && { remit_frequency }),
-        ...(remit_years && { remit_years }),
-        ...(knows_credit_score && { knows_credit_score }),
-        ...(credit_score_range && { credit_score_range }),
+        destination_country: destination_country.trim(),
+        referral_source,
+        ...(referral_source === 'Other' && { referral_source_other: referral_source_other.trim() }),
         language_preference: lang || 'en',
         ...(url.searchParams.get('utm_source') ?? utm_source_referer
           ? { utm_source: url.searchParams.get('utm_source') ?? utm_source_referer }
@@ -89,7 +88,7 @@ export async function POST(req: NextRequest) {
         event: 'waitlist_signup_failed',
         properties: {
           destination_country,
-          monthly_send_amount,
+          referral_source,
           language: lang || 'en',
           error: errBody?.error ?? 'Unknown',
           $session_id: sessionId ?? undefined,
@@ -112,10 +111,7 @@ export async function POST(req: NextRequest) {
       event: 'waitlist_signup_completed',
       properties: {
         destination_country,
-        monthly_send_amount,
-        remittance_provider,
-        remit_frequency: remit_frequency || undefined,
-        remit_years: remit_years || undefined,
+        referral_source,
         language: lang || 'en',
         utm_source: url.searchParams.get('utm_source') ?? utm_source_referer,
         utm_medium: url.searchParams.get('utm_medium'),

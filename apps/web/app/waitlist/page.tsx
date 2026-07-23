@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import SignupFlow from '@/components/SignupFlow'
+import LanguageToggle from '@/components/LanguageToggle'
 
 export const metadata: Metadata = {
   title: 'Join the Waitlist — Puente Financial',
@@ -21,10 +22,14 @@ export default function WaitlistPage() {
         width: '100%',
         maxWidth: 480,
         marginBottom: 36,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
       }}>
         <Link href="/" aria-label="Puente Financial — home">
-          <img src="/logo-dark.svg" alt="Puente" style={{ height: 34 }} />
+          <img src="/logo-dark.svg" alt="Puente" width={93} height={34} />
         </Link>
+        <LanguageToggle variant="light" />
       </div>
       <SignupFlow />
     </main>

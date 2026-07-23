@@ -50,14 +50,10 @@ export type Translations = {
     subFine: string
     cta: string
     points: string[]
-    f: { name: string; phone: string; email: string; country: string; amount: string; provider: string; knowsScore: string; scoreRange: string; remitFrequency: string; remitYears: string }
-    scoreOptions: string[]
-    remitFrequencyOptions: string[]
-    remitYearsOptions: string[]
+    f: { name: string; phone: string; country: string; referralSource: string; referralSourceOther: string }
+    referralSourceOptions: string[]
     countries: string[]
-    amounts: string[]
-    providers: string[]
-    ph: { name: string; phone: string; email: string }
+    ph: { name: string; phone: string; referralSourceOther: string }
     select: string
     submit: string
     fine: string
@@ -69,7 +65,7 @@ export type Translations = {
     next: string
     back: string
   }
-  footer: { tagline: string; disclaimer: [string, string]; disclaimer2: string; rights: string; note: string }
+  footer: { tagline: string; privacyLink: string; termsLink: string; disclaimer: [string, string]; disclaimer2: string; rights: string; note: string }
   onboarding: {
     signup: { title: string; sub: string; phone: string; phonePh: string; smsConsent: string; cta: string; sending: string; error: string }
     verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resent: string; error: string }
@@ -176,14 +172,10 @@ const en: Translations = {
     subFine: 'Offer ends August 31, 2026',
     cta: 'Join the Waitlist',
     points: ['Get more out of your remittances', 'Start building U.S. credit from your first transfer', 'Build a better financial future'],
-    f: { name: 'Full name', phone: 'Phone number', email: 'Email', country: 'Country you send to', amount: 'How much do you send per transfer?', provider: 'Current remittance provider', knowsScore: 'Do you know your US credit score?', scoreRange: 'What is your credit score range?', remitFrequency: 'How often do you send?', remitYears: 'How long have you been sending remittances?' },
-    scoreOptions: ['Below 580', '580–669', '670–739', '740–799', '800+'],
-    remitFrequencyOptions: ['Weekly', 'Every 2 weeks', 'Monthly', 'A few times a year', "I don't send yet"],
-    remitYearsOptions: ['Less than 1 year', '1–3 years', '3–5 years', 'More than 5 years', "I don't send yet"],
+    f: { name: 'Name', phone: 'Phone number or WhatsApp', country: 'Where do you send money?', referralSource: 'How did you hear about us?', referralSourceOther: 'Please specify' },
+    referralSourceOptions: ['Facebook', 'Instagram', 'Friend or Family', 'Google Search', 'In Person', 'Physical Advertisement', 'Other'],
     countries: ['Mexico', 'Other'],
-    amounts: ['$0–$50', '$50–$200', '$200–$500', '$500+', "I don't send yet"],
-    providers: ['Western Union', 'Remitly', 'Félix', 'MoneyGram', 'Bank transfer', "I don't send yet", 'Other'],
-    ph: { name: 'María Santos', phone: '(555) 123-4567', email: 'you@email.com' },
+    ph: { name: 'María Santos', phone: '(555) 123-4567', referralSourceOther: 'Tell us more' },
     select: 'Select…',
     submit: 'Join the waitlist',
     fine: 'Puente is in early validation and not yet available. Joining adds you to the early-access list.',
@@ -197,14 +189,15 @@ const en: Translations = {
     },
     steps: [
       { h: 'Tell us about yourself' },
-      { h: 'About your remittances' },
-      { h: 'Your credit picture' },
+      { h: 'Just a couple more questions' },
     ],
     next: 'Next',
     back: 'Back',
   },
   footer: {
     tagline: 'Send money.\nBuild credit.',
+    privacyLink: 'Privacy Policy',
+    termsLink: 'Terms of Service',
     disclaimer: ['Puente Financial, Inc. ("Puente") is a financial technology company, not a bank. Money remittance, payment, and banking services are provided by our partner U.S.-licensed financial institutions. Puente is an authorized agent of Bridge Building Inc (NMLS # 2450917). For US state licensing information, please see: ', '.'],
     disclaimer2: 'In the United States, Puente is registered with the U.S. Department of the Treasury Financial Crimes Enforcement Network (FinCEN) as a Money Services Business (BSA ID: 31000334222151).',
     rights: '© 2026 Puente Financial, Inc. All rights reserved.',
@@ -375,14 +368,10 @@ const es: Translations = {
     subFine: 'La oferta termina el 31 de agosto de 2026',
     cta: 'Únete a la Lista de Espera',
     points: ['Aprovecha más tus remesas', 'Empieza a crear crédito desde tu primera transferencia', 'Construye un mejor futuro financiero'],
-    f: { name: 'Nombre completo', phone: 'Teléfono', email: 'Correo electrónico', country: 'País al que envías', amount: '¿Cuánto envías por transferencia?', provider: 'Proveedor de remesas actual', knowsScore: '¿Conoces tu puntaje de crédito en EE. UU.?', scoreRange: '¿Cuál es tu rango de puntaje?', remitFrequency: '¿Con qué frecuencia envías?', remitYears: '¿Hace cuánto tiempo envías remesas?' },
-    scoreOptions: ['Menos de 580', '580–669', '670–739', '740–799', '800+'],
-    remitFrequencyOptions: ['Semanalmente', 'Cada 2 semanas', 'Mensualmente', 'Pocas veces al año', 'Aún no envío'],
-    remitYearsOptions: ['Menos de 1 año', '1–3 años', '3–5 años', 'Más de 5 años', 'Aún no envío'],
+    f: { name: 'Nombre', phone: 'Teléfono o WhatsApp', country: '¿A dónde envías dinero?', referralSource: '¿Cómo te enteraste de nosotros?', referralSourceOther: 'Por favor especifica' },
+    referralSourceOptions: ['Facebook', 'Instagram', 'Amigo o familiar', 'Búsqueda en Google', 'En persona', 'Publicidad física', 'Otro'],
     countries: ['México', 'Otro'],
-    amounts: ['$0–$50', '$50–$200', '$200–$500', '$500+', 'Aún no envío'],
-    providers: ['Western Union', 'Remitly', 'Félix', 'MoneyGram', 'Transferencia bancaria', 'Aún no envío', 'Otro'],
-    ph: { name: 'María Santos', phone: '(555) 123-4567', email: 'tu@correo.com' },
+    ph: { name: 'María Santos', phone: '(555) 123-4567', referralSourceOther: 'Cuéntanos más' },
     select: 'Selecciona…',
     submit: 'Unirme a la lista',
     fine: 'Puente está en validación temprana y aún no está disponible. Al unirte entras a la lista de acceso anticipado.',
@@ -396,14 +385,15 @@ const es: Translations = {
     },
     steps: [
       { h: 'Cuéntanos sobre ti' },
-      { h: 'Sobre tus remesas' },
-      { h: 'Tu historial de crédito' },
+      { h: 'Un par de preguntas más' },
     ],
     next: 'Siguiente',
     back: 'Atrás',
   },
   footer: {
     tagline: 'Envía dinero.\nCrea crédito.',
+    privacyLink: 'Política de Privacidad',
+    termsLink: 'Términos de Servicio',
     disclaimer: ['Puente Financial, Inc. ("Puente") es una empresa de tecnología financiera, no un banco. Los servicios de remesas, pagos y banca son proporcionados por instituciones financieras con licencia en EE. UU. asociadas a Puente. Puente es un agente autorizado de Bridge Building Inc (NMLS # 2450917). Para información sobre licencias estatales en EE. UU., consulte: ', '.'],
     disclaimer2: 'En los Estados Unidos, Puente está registrada ante la Red de Control de Delitos Financieros del Departamento del Tesoro de EE. UU. (FinCEN) como un Negocio de Servicios Monetarios (BSA ID: 31000334222151).',
     rights: '© 2026 Puente Financial, Inc. Todos los derechos reservados.',

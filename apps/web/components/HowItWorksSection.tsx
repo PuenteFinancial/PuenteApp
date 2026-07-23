@@ -2,8 +2,6 @@
 
 import { useLanguage } from '@/components/LanguageProvider'
 
-const STEP_EMOJIS = ['💸', '🗓️', '📈']
-
 export default function HowItWorksSection() {
   const { t } = useLanguage()
   const h = t.how
@@ -28,10 +26,7 @@ export default function HowItWorksSection() {
           {h.steps.map((step, i) => (
             <div className="how-step" key={i}>
               <span className="how-num">{i + 1}</span>
-              <h3 className="h3">
-                <span className="how-emoji" aria-hidden="true">{STEP_EMOJIS[i]}</span>
-                {step.t}
-              </h3>
+              <h3 className="h3">{step.t}</h3>
               <p>{step.d}</p>
             </div>
           ))}

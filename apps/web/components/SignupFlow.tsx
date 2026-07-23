@@ -3,11 +3,17 @@
 import { useState } from 'react'
 import { useLanguage } from '@/components/LanguageProvider'
 import { COUNTRIES } from '@/lib/countries'
+import { translations } from '@/lib/translations'
 import posthog from 'posthog-js'
+
+// Canonical English values for the referral-source dropdown — stored/compared
+// in English regardless of UI language, so "Other" detection and DB values
+// stay consistent no matter which language the signup happened in.
+const REFERRAL_SOURCE_VALUES = translations.en.wl.referralSourceOptions
 
 type Status = 'idle' | 'loading' | 'success' | 'error'
 
-const TOTAL = 3
+const TOTAL = 2
 
 export default function SignupFlow() {
   const { t, lang } = useLanguage()
@@ -16,14 +22,9 @@ export default function SignupFlow() {
   const [step, setStep] = useState(1)
   const [name, setName] = useState('')
   const [phone, setPhone] = useState('')
-  const [email, setEmail] = useState('')
   const [country, setCountry] = useState('')
-  const [amount, setAmount] = useState('')
-  const [provider, setProvider] = useState('')
-  const [remitFrequency, setRemitFrequency] = useState('')
-  const [remitYears, setRemitYears] = useState('')
-  const [knowsScore, setKnowsScore] = useState('')
-  const [scoreRange, setScoreRange] = useState('')
+  const [referralSource, setReferralSource] = useState('')
+  const [referralSourceOther, setReferralSourceOther] = useState('')
   const [status, setStatus] = useState<Status>('idle')
   const [copied, setCopied] = useState(false)
 
@@ -58,25 +59,19 @@ export default function SignupFlow() {
         body: JSON.stringify({
           first_name: name,
           phone,
-          email,
-          monthly_send_amount: amount,
           destination_country: country,
-          remittance_provider: provider,
-          remit_frequency: remitFrequency || null,
-          remit_years: remitYears || null,
-          knows_credit_score: knowsScore || null,
-          credit_score_range: scoreRange || null,
+          referral_source: referralSource,
+          ...(referralSource === 'Other' && { referral_source_other: referralSourceOther }),
           lang,
         }),
       })
 
       if (!res.ok) throw new Error('Failed')
 
-      posthog.identify(phone, { first_name: name, email, language_preference: lang })
+      posthog.identify(phone, { first_name: name, language_preference: lang })
       posthog.capture('waitlist_form_submitted', {
         destination_country: country,
-        monthly_send_amount: amount,
-        remittance_provider: provider,
+        referral_source: referralSource,
         language: lang,
       })
 
@@ -160,108 +155,64 @@ export default function SignupFlow() {
                 placeholder={s.ph.name}
               />
             </div>
-            <div className="field-row">
-              <div className="field">
-                <label>{s.f.phone}</label>
-                <input
-                  required
-                  type="tel"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder={s.ph.phone}
-                />
-              </div>
-              <div className="field">
-                <label>{s.f.email}</label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder={s.ph.email}
-                />
-              </div>
+            <div className="field">
+              <label>{s.f.phone}</label>
+              <input
+                required
+                type="tel"
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder={s.ph.phone}
+              />
             </div>
           </>
         )}
 
         {step === 2 && (
           <>
-            <div className="field-row">
-              <div className="field">
-                <label>{s.f.country}</label>
-                <select value={country} onChange={(e) => setCountry(e.target.value)}>
-                  <option value="" disabled>{s.select}</option>
-                  {COUNTRIES.map((c) => (
-                    <option key={c.name.en} value={c.name.en}>
-                      {lang === 'es' ? c.name.es : c.name.en}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="field">
-                <label>{s.f.amount}</label>
-                <select value={amount} onChange={(e) => setAmount(e.target.value)}>
-                  <option value="" disabled>{s.select}</option>
-                  {s.amounts.map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
-              </div>
-            </div>
-            <div className="field-row">
-              <div className="field">
-                <label>{s.f.remitFrequency}</label>
-                <select value={remitFrequency} onChange={(e) => setRemitFrequency(e.target.value)}>
-                  <option value="" disabled>{s.select}</option>
-                  {s.remitFrequencyOptions.map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
-              </div>
-              <div className="field">
-                <label>{s.f.remitYears}</label>
-                <select value={remitYears} onChange={(e) => setRemitYears(e.target.value)}>
-                  <option value="" disabled>{s.select}</option>
-                  {s.remitYearsOptions.map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
-              </div>
-            </div>
             <div className="field">
-              <label>{s.f.provider}</label>
-              <select value={provider} onChange={(e) => setProvider(e.target.value)}>
+              <label>{s.f.country}</label>
+              <select required value={country} onChange={(e) => setCountry(e.target.value)}>
                 <option value="" disabled>{s.select}</option>
-                {s.providers.map((o) => <option key={o} value={o}>{o}</option>)}
+                {COUNTRIES.map((c) => (
+                  <option key={c.name.en} value={c.name.en}>
+                    {lang === 'es' ? c.name.es : c.name.en}
+                  </option>
+                ))}
               </select>
             </div>
-          </>
-        )}
-
-        {step === 3 && (
-          <>
             <div className="field">
-              <label>{s.f.knowsScore}</label>
+              <label>{s.f.referralSource}</label>
               <select
-                value={knowsScore}
+                required
+                value={referralSource}
                 onChange={(e) => {
-                  setKnowsScore(e.target.value)
-                  if (e.target.value !== 'yes') setScoreRange('')
+                  setReferralSource(e.target.value)
+                  if (e.target.value !== 'Other') setReferralSourceOther('')
                 }}
               >
                 <option value="" disabled>{s.select}</option>
-                <option value="yes">{lang === 'es' ? 'Sí' : 'Yes'}</option>
-                <option value="no">No</option>
+                {s.referralSourceOptions.map((o, i) => (
+                  <option key={o} value={REFERRAL_SOURCE_VALUES[i]}>{o}</option>
+                ))}
               </select>
             </div>
-            {knowsScore === 'yes' && (
+            {referralSource === 'Other' && (
               <div className="field">
-                <label>{s.f.scoreRange}</label>
-                <select value={scoreRange} onChange={(e) => setScoreRange(e.target.value)}>
-                  <option value="" disabled>{s.select}</option>
-                  {s.scoreOptions.map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
+                <label>{s.f.referralSourceOther}</label>
+                <input
+                  required
+                  value={referralSourceOther}
+                  onChange={(e) => setReferralSourceOther(e.target.value)}
+                  placeholder={s.ph.referralSourceOther}
+                />
               </div>
             )}
           </>
         )}
 
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-          {step > 1 && step < TOTAL && (
+          {step > 1 && (
             <button
               type="button"
               className="btn btn--ghost btn--sm"
