@@ -829,4 +829,79 @@ export async function transfersRoute(server: FastifyInstance) {
       }
     },
   )
+
+  // GET /transfers/:id/disclosure — the Reg E PREPAYMENT disclosure content.
+  // Owner-scoped, mirroring GET /:id/receipt; this returns the type:'prepayment'
+  // row (written at transfer creation, so it exists for any of the sender's
+  // transfers) whereas receipt returns type:'receipt'. The web renders this
+  // server-authored content verbatim — a single source of truth for the Reg E
+  // copy rather than re-deriving it client-side. 404 (not 403) for a non-owner
+  // so it never leaks whether the transfer exists.
+  server.get<{ Params: { id: string } }>(
+    '/transfers/:id/disclosure',
+    {
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string', format: 'uuid' } },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              transferId: { type: 'string' },
+              type: { type: 'string' },
+              locale: { type: 'string' },
+              content: { type: 'object', additionalProperties: true },
+              presentedAt: { type: 'string' },
+            },
+          },
+          404: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const userId = request.user!.id
+
+      // Owner check first — 404 (not 403) so a non-owner can't tell the transfer apart.
+      const { data: owned, error: ownedError } = await supabaseAdmin
+        .from('transfers')
+        .select('id')
+        .eq('id', request.params.id)
+        .eq('user_id', userId)
+        .single()
+      if (ownedError || !owned) {
+        return sendError(reply, 404, 'not_found', 'Disclosure not found')
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from('disclosures')
+        .select('id, transfer_id, type, locale, content, presented_at')
+        .eq('transfer_id', request.params.id)
+        .eq('type', 'prepayment')
+        .single()
+      if (error || !data) {
+        return sendError(reply, 404, 'not_found', 'Disclosure not found')
+      }
+      const disclosure = data as unknown as {
+        id: string
+        transfer_id: string
+        type: string
+        locale: string
+        content: Record<string, unknown>
+        presented_at: string
+      }
+
+      return {
+        id: disclosure.id,
+        transferId: disclosure.transfer_id,
+        type: disclosure.type,
+        locale: disclosure.locale,
+        content: disclosure.content,
+        presentedAt: disclosure.presented_at,
+      }
+    },
+  )
 }
