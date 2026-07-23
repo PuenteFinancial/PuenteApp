@@ -6,11 +6,13 @@ import {
   completedLedgerEntries,
   bridgeReturnLedgerEntries,
   refundedLedgerEntries,
+  fxRateToWire,
   TransferRpcError,
   type LedgerEntryJson,
 } from '../services/transfers.js'
 import { postLedgerTransaction, type LedgerEntryInput } from '../services/ledger.js'
 import { getFundingProcessor } from '../services/funding/index.js'
+import { buildReceiptDisclosure } from '../services/disclosures.js'
 import { mapBridgeState, markProcessed, markIgnored } from '../services/payment-events.js'
 
 // The `payment-event.process` job — the ONE path that turns a recorded Bridge
@@ -31,6 +33,7 @@ interface EventRow {
 
 interface TransferRow {
   id: string
+  user_id: string
   state: string
   send_amount_minor: number
   // slice-6 PR2 refund tail: the fee (refunded per Reg E on failure), the
@@ -39,6 +42,9 @@ interface TransferRow {
   refund_payment_ref: string | null
   funding_payment_ref: string | null
   idempotency_key: string
+  // slice-6 PR3 receipt: the remaining snapshot terms the receipt is built from.
+  receive_amount_minor: number
+  fx_rate: number
 }
 
 // States a fail event can legally advance from. COMPLETED is absent on
@@ -215,8 +221,8 @@ async function resolveTransfer(event: EventRow): Promise<TransferRow | null> {
     const { data, error } = await supabaseAdmin
       .from('transfers')
       .select(
-        'id, state, send_amount_minor, fee_amount_minor, refund_payment_ref, ' +
-          'funding_payment_ref, idempotency_key',
+        'id, user_id, state, send_amount_minor, fee_amount_minor, refund_payment_ref, ' +
+          'funding_payment_ref, idempotency_key, receive_amount_minor, fx_rate',
       )
       .eq(column, value)
       .maybeSingle()
@@ -266,6 +272,59 @@ async function drive(transfer: TransferRow, target: 'IN_FLIGHT' | 'COMPLETED'): 
     await step(transfer.id, 'IN_FLIGHT', 'COMPLETED', completedLedgerEntries(transfer))
   }
   // already COMPLETED → replay no-op handled by the RPC
+
+  // slice-6 PR3: write the Reg E receipt. Before markProcessed (the caller marks
+  // after drive returns), so a crash between the COMPLETED ledger post and the
+  // receipt leaves the event 'received' and self-heals on retry. writeReceipt
+  // re-reads state and no-ops unless COMPLETED, and the upsert is idempotent.
+  await writeReceipt(transfer)
+}
+
+// Write the Reg E receipt for a delivered transfer, idempotently. Guards on the
+// live state — a concurrent fail could move the row off COMPLETED between drive's
+// catch-up steps, and a receipt must exist only for a delivered transfer.
+async function writeReceipt(transfer: TransferRow): Promise<void> {
+  const current = await currentState(transfer.id)
+  if (current !== 'COMPLETED') return
+
+  // Presented language = the user's preference (the same source the prepayment
+  // disclosure used at creation); both renderings are stored in content.
+  const { data: userData, error: userError } = await supabaseAdmin
+    .from('users')
+    .select('preferred_language')
+    .eq('id', transfer.user_id)
+    .maybeSingle()
+  if (userError) throw new Error(`payment-event receipt user load failed: ${userError.message}`)
+  const locale =
+    (userData as { preferred_language?: string } | null)?.preferred_language === 'en' ? 'en' : 'es'
+
+  // Built from the transfer's IMMUTABLE snapshot terms = the delivered amounts
+  // (Bridge fixes destination.amount in MXN, so the recipient got exactly this).
+  const receipt = buildReceiptDisclosure(
+    {
+      sendMinor: transfer.send_amount_minor,
+      feeMinor: transfer.fee_amount_minor,
+      receiveMinor: transfer.receive_amount_minor,
+      fxRate: fxRateToWire(transfer.fx_rate),
+    },
+    locale,
+    env.CANCEL_WINDOW_MINUTES,
+  )
+
+  // One receipt per transfer: ON CONFLICT (transfer_id, type) DO NOTHING. A
+  // replay / catch-up / crash-retry writes it exactly once, and the no-op insert
+  // never trips the disclosures append-only trigger (before update/delete). A
+  // real error rethrows to leave the event 'received' for retry.
+  const { error } = await supabaseAdmin.from('disclosures').upsert(
+    {
+      transfer_id: transfer.id,
+      type: 'receipt',
+      locale: receipt.locale,
+      content: receipt.content,
+    },
+    { onConflict: 'transfer_id,type', ignoreDuplicates: true },
+  )
+  if (error) throw new Error(`payment-event receipt upsert failed: ${error.message}`)
 }
 
 async function failTransfer(transfer: TransferRow, bridgeState: string): Promise<void> {
