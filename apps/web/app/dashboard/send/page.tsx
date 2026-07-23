@@ -3,7 +3,8 @@ import { redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 import { isSendMoneyEnabled } from '@/lib/flags'
 import OnboardingShell from '@/components/onboarding/OnboardingShell'
-import QuoteScreen, { type SendRecipient } from '@/components/send/QuoteScreen'
+import SendFlow from '@/components/send/SendFlow'
+import { type SendRecipient } from '@/components/send/QuoteScreen'
 
 export const metadata: Metadata = {
   title: 'Send money — Puente Financial',
@@ -60,7 +61,7 @@ export default async function SendPage() {
 
   return (
     <OnboardingShell>
-      <QuoteScreen recipients={withDestinations} />
+      <SendFlow recipients={withDestinations} />
     </OnboardingShell>
   )
 }

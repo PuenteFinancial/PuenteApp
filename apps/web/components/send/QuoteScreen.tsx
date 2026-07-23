@@ -5,6 +5,7 @@ import Link from 'next/link'
 import posthog from 'posthog-js'
 import { useLanguage } from '@/components/LanguageProvider'
 import { parseApiError, errorMessage } from '@/lib/apiError'
+import { useIdempotencyKey } from '@/lib/idempotency'
 import { formatUsd, formatMxn, mmss, secondsUntil, isQuoteShape, type Quote } from '@/lib/sendFormat'
 
 export interface SendDestination {
@@ -24,7 +25,18 @@ export interface SendRecipient {
   destinations: SendDestination[]
 }
 
-export default function QuoteScreen({ recipients }: { recipients: SendRecipient[] }) {
+export interface CreatedTransfer {
+  id: string
+  disclosureId: string
+}
+
+export default function QuoteScreen({
+  recipients,
+  onCreated,
+}: {
+  recipients: SendRecipient[]
+  onCreated: (transfer: CreatedTransfer) => void
+}) {
   const { t } = useLanguage()
   const s = t.send
 
@@ -46,15 +58,16 @@ export default function QuoteScreen({ recipients }: { recipients: SendRecipient[
   const [errorMsg, setErrorMsg] = useState('')
   const [quote, setQuote] = useState<Quote | null>(null)
   const [secondsLeft, setSecondsLeft] = useState(0)
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState('')
 
-  // Monotonic id for the latest committed action. Bumped on submit AND on any
-  // who/where change, so a superseded in-flight response can't repaint.
   const requestKeyRef = useRef(0)
+  // Idempotency key for the create-transfer POST. It must be FRESH per quote —
+  // a reused key with a different quoteId would 409-conflict — so we clear it
+  // whenever the quote changes (below) and take() mints a fresh one; retries of
+  // the same commit reuse it.
+  const createKey = useIdempotencyKey()
 
-  // Countdown on the active quote. secondsLeft is seeded synchronously when the
-  // quote is set (in handleSubmit), so the first paint already shows the real
-  // time remaining — this effect only keeps it ticking and never flashes a
-  // stale "expired".
   useEffect(() => {
     if (!quote) return
     const id = setInterval(() => setSecondsLeft(secondsUntil(quote.expiresAt, Date.now())), 1000)
@@ -63,13 +76,12 @@ export default function QuoteScreen({ recipients }: { recipients: SendRecipient[
 
   const expired = quote !== null && secondsLeft <= 0
 
-  // Any change to who/where invalidates a shown or in-flight quote: bump the
-  // request key so an older in-flight response can't repaint, and drop the stale
-  // quote so the panel never shows numbers for a no-longer-selected account.
   const invalidateQuote = () => {
     requestKeyRef.current++
     setQuote(null)
     setStatus('idle')
+    setCreateError('')
+    createKey.clear() // next quote → fresh create key
   }
 
   const onRecipientChange = (id: string) => {
@@ -96,6 +108,7 @@ export default function QuoteScreen({ recipients }: { recipients: SendRecipient[
 
     setStatus('loading')
     setErrorMsg('')
+    setCreateError('')
     const reqId = ++requestKeyRef.current
     posthog.capture('send_quote_requested', { amount_minor: amountMinor, currency: 'USD' })
 
@@ -116,11 +129,11 @@ export default function QuoteScreen({ recipients }: { recipients: SendRecipient[
         return
       }
       if (!isQuoteShape(body)) {
-        // 2xx but not a quote (contract break upstream) — don't trust it.
         setStatus('error')
         setErrorMsg(s.errors.generic)
         return
       }
+      createKey.clear() // a fresh quote gets a fresh create key
       setQuote(body)
       setSecondsLeft(secondsUntil(body.expiresAt, Date.now()))
       setStatus('idle')
@@ -133,6 +146,46 @@ export default function QuoteScreen({ recipients }: { recipients: SendRecipient[
       if (reqId !== requestKeyRef.current) return
       setStatus('error')
       setErrorMsg(s.errors.generic)
+    }
+  }
+
+  // Commit the quote → create the transfer (money POST, idempotency key #1),
+  // then hand off to the review/confirm step.
+  const handleContinue = async () => {
+    if (!quote || expired || creating) return
+    setCreating(true)
+    setCreateError('')
+    try {
+      const res = await fetch('/api/transfers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'idempotency-key': createKey.take() },
+        body: JSON.stringify({ quoteId: quote.id }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setCreating(false)
+        setCreateError(errorMessage(parseApiError(body)?.code, s.errors))
+        return
+      }
+      const id = body?.id
+      const disclosureId = body?.disclosure?.id
+      if (typeof id !== 'string' || !id || typeof disclosureId !== 'string' || !disclosureId) {
+        // 2xx but not the expected shape (upstream contract break) — surface a
+        // clean error instead of advancing into a broken review step.
+        setCreating(false)
+        setCreateError(s.errors.generic)
+        return
+      }
+      createKey.clear()
+      posthog.capture('send_transfer_created', {
+        amount_minor: quote.totalAmount.amountMinor,
+        currency: 'USD',
+      })
+      onCreated({ id, disclosureId })
+      // leave `creating` true through the hand-off so the button stays disabled
+    } catch {
+      setCreating(false)
+      setCreateError(s.errors.generic)
     }
   }
 
@@ -227,23 +280,32 @@ export default function QuoteScreen({ recipients }: { recipients: SendRecipient[
           </div>
 
           {expired ? (
-            <p role="alert" style={{ color: 'var(--color-error)', fontFamily: 'var(--mono)', fontSize: 12.5, margin: '4px 2px 0' }}>
-              {s.expiredNotice}
-            </p>
+            <>
+              <p role="alert" style={{ color: 'var(--color-error)', fontFamily: 'var(--mono)', fontSize: 12.5, margin: '4px 2px 0' }}>
+                {s.expiredNotice}
+              </p>
+              <button type="button" className="btn btn--accent" style={{ marginTop: 4 }} onClick={invalidateQuote}>
+                {s.newQuote}
+              </button>
+            </>
           ) : (
-            <p style={{ color: 'var(--muted)', fontFamily: 'var(--mono)', fontSize: 12.5, margin: '4px 2px 0' }}>
-              {s.expiresIn.replace('{time}', mmss(secondsLeft))}
-            </p>
+            <>
+              <p style={{ color: 'var(--muted)', fontFamily: 'var(--mono)', fontSize: 12.5, margin: '4px 2px 0' }}>
+                {s.expiresIn.replace('{time}', mmss(secondsLeft))}
+              </p>
+              <button type="button" className="btn btn--accent" style={{ marginTop: 4 }} disabled={creating} onClick={handleContinue}>
+                {s.continue}
+              </button>
+              <button type="button" className="btn btn--ghost btn--sm" style={{ alignSelf: 'flex-start' }} disabled={creating} onClick={invalidateQuote}>
+                {s.newQuote}
+              </button>
+              {createError && (
+                <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '2px 0 0' }}>
+                  {createError}
+                </p>
+              )}
+            </>
           )}
-
-          <button
-            type="button"
-            className="btn btn--ghost btn--sm"
-            style={{ alignSelf: 'flex-start', marginTop: 4 }}
-            onClick={invalidateQuote}
-          >
-            {s.newQuote}
-          </button>
         </div>
       )}
     </div>

@@ -27,3 +27,30 @@ test('quote happy path: approved user gets an FX quote', async ({ context, page 
   // And it is NOT showing the spurious "expired" notice on a fresh quote.
   await expect(page.getByText(/expired|expiró/i)).toHaveCount(0)
 })
+
+test('full flow: quote → create → Reg E disclosure → confirm', async ({ context, page }) => {
+  await context.addCookies([
+    { name: 'puente_session', value: 'e2e-token', url: 'http://localhost:3100' },
+  ])
+
+  await page.goto('/dashboard/send')
+  await page.getByLabel(/amount to send|monto a enviar/i).fill('100')
+  await page.getByRole('button', { name: /get a quote|obtener cotización/i }).click()
+  await page.getByText(/they receive|ellos reciben/i).waitFor()
+
+  // Continue → creates the transfer and advances to review.
+  await page.getByRole('button', { name: /^(continue|continuar)$/i }).click()
+
+  // The server-authored Reg E prepayment disclosure renders.
+  await page.getByText(/prepayment disclosure|divulgación previa al pago/i).waitFor()
+
+  // Confirm is gated on an explicit accept.
+  const confirm = page.getByRole('button', { name: /confirm transfer|confirmar transferencia/i })
+  await expect(confirm).toBeDisabled()
+  await page.getByLabel(/i have read and accept|he leído y acepto/i).check()
+  await expect(confirm).toBeEnabled()
+  await confirm.click()
+
+  // Confirmed terminal state.
+  await page.getByText(/transfer confirmed|transferencia confirmada/i).waitFor()
+})

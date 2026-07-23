@@ -705,3 +705,74 @@ describe('GET /v1/transfers/:id/receipt', () => {
     await app.close()
   })
 })
+
+describe('GET /v1/transfers/:id/disclosure', () => {
+  const get = (app: Awaited<ReturnType<typeof buildApp>>) =>
+    supertest(app.server)
+      .get(`/v1/transfers/${TRANSFER_ID}/disclosure`)
+      .set('Authorization', 'Bearer test-token')
+
+  it('returns the prepayment disclosure for an owned transfer', async () => {
+    from
+      .mockReturnValueOnce(chain({ data: { id: TRANSFER_ID } })) // owner check
+      .mockReturnValueOnce(
+        chain({
+          data: {
+            id: 'disc-prepay-1',
+            transfer_id: TRANSFER_ID,
+            type: 'prepayment',
+            locale: 'es',
+            content: {
+              version: 1,
+              amounts: { totalMinor: 20000, receiveMinor: 396014 },
+              en: { title: 'Prepayment disclosure' },
+              es: { title: 'Divulgación previa al pago' },
+            },
+            presented_at: '2026-07-23T00:00:00.000Z',
+          },
+        }),
+      )
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      id: 'disc-prepay-1',
+      transferId: TRANSFER_ID,
+      type: 'prepayment',
+      locale: 'es',
+    })
+    expect(res.body.content.es.title).toBe('Divulgación previa al pago')
+    expect(res.body.presentedAt).toBe('2026-07-23T00:00:00.000Z')
+    await app.close()
+  })
+
+  it('404s when the transfer is owned but has no prepayment disclosure', async () => {
+    from
+      .mockReturnValueOnce(chain({ data: { id: TRANSFER_ID } })) // owned
+      .mockReturnValueOnce(chain({ data: null })) // no disclosure row
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('not_found')
+    await app.close()
+  })
+
+  it("404s a non-owner's transfer without loading the disclosure", async () => {
+    from.mockReturnValueOnce(chain({ data: null })) // owner check fails → stop
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(404)
+    // the disclosures query is never reached (owner check short-circuits)
+    expect(from).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  it('401s without auth', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server).get(`/v1/transfers/${TRANSFER_ID}/disclosure`)
+    expect(res.status).toBe(401)
+    await app.close()
+  })
+})

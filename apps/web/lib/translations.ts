@@ -139,6 +139,19 @@ export type Translations = {
     expiredNotice: string
     newQuote: string
     continue: string
+    review: {
+      title: string
+      sub: string
+      accept: string
+      confirm: string
+      confirming: string
+      back: string
+      confirmedTitle: string
+      confirmedBody: string
+      loading: string
+      loadError: string
+      retry: string
+    }
     // code → user-facing message; the apiError layer maps the API error
     // envelope's stable `code` onto these (unmapped codes fall back to generic)
     errors: {
@@ -382,6 +395,19 @@ const en: Translations = {
     expiredNotice: 'This rate expired. Get a new quote to continue.',
     newQuote: 'New quote',
     continue: 'Continue',
+    review: {
+      title: 'Review and confirm',
+      sub: 'Read the disclosure below, then confirm to send your money.',
+      accept: 'I have read and accept this disclosure.',
+      confirm: 'Confirm transfer',
+      confirming: 'Confirming…',
+      back: 'Back',
+      confirmedTitle: 'Transfer confirmed',
+      confirmedBody: 'Your transfer is confirmed and waiting for payment.',
+      loading: 'Loading disclosure…',
+      loadError: 'We couldn’t load the disclosure. Try again, or go back.',
+      retry: 'Retry',
+    },
     errors: {
       validation_error: 'Please check the details and try again.',
       unauthorized: 'Your session expired. Please sign in again.',
@@ -623,6 +649,19 @@ const es: Translations = {
     expiredNotice: 'Este tipo de cambio expiró. Obtén una nueva cotización para continuar.',
     newQuote: 'Nueva cotización',
     continue: 'Continuar',
+    review: {
+      title: 'Revisa y confirma',
+      sub: 'Lee la divulgación abajo y confirma para enviar tu dinero.',
+      accept: 'He leído y acepto esta divulgación.',
+      confirm: 'Confirmar transferencia',
+      confirming: 'Confirmando…',
+      back: 'Atrás',
+      confirmedTitle: 'Transferencia confirmada',
+      confirmedBody: 'Tu transferencia está confirmada y esperando el pago.',
+      loading: 'Cargando la divulgación…',
+      loadError: 'No pudimos cargar la divulgación. Inténtalo de nuevo o regresa.',
+      retry: 'Reintentar',
+    },
     errors: {
       validation_error: 'Revisa los datos e inténtalo de nuevo.',
       unauthorized: 'Tu sesión expiró. Inicia sesión de nuevo.',
