@@ -115,6 +115,53 @@ export type Translations = {
       generic: string
     }
   }
+  send: {
+    cta: string
+    title: string
+    sub: string
+    dashboardReady: string
+    recipient: string
+    recipientPh: string
+    account: string
+    accountPh: string
+    noRecipients: string
+    manageRecipients: string
+    amount: string
+    amountPh: string
+    getQuote: string
+    quoting: string
+    youPay: string
+    fee: string
+    theyReceive: string
+    rate: string
+    rateValue: string
+    expiresIn: string
+    expiredNotice: string
+    newQuote: string
+    continue: string
+    // code → user-facing message; the apiError layer maps the API error
+    // envelope's stable `code` onto these (unmapped codes fall back to generic)
+    errors: {
+      validation_error: string
+      unauthorized: string
+      forbidden: string
+      not_found: string
+      kyc_required: string
+      limit_exceeded: string
+      quote_expired: string
+      transfer_not_cancelable: string
+      conflict: string
+      idempotency_conflict: string
+      not_configured: string
+      rate_limited: string
+      rate_unavailable: string
+      provider_rejected: string
+      provider_unavailable: string
+      internal_error: string
+      cancellation_requires_support: string
+      generic: string
+    }
+  }
 }
 
 const en: Translations = {
@@ -311,6 +358,51 @@ const en: Translations = {
       generic: 'Something went wrong. Please try again.',
     },
   },
+  send: {
+    cta: 'Send money',
+    title: 'Send money',
+    sub: 'Choose who to pay and how much. We’ll show you the rate before anything is sent.',
+    dashboardReady: 'Send money to your recipients — or manage who you send to.',
+    recipient: 'Recipient',
+    recipientPh: 'Choose a recipient',
+    account: 'Account',
+    accountPh: 'Choose an account',
+    noRecipients: 'You don’t have any recipients yet.',
+    manageRecipients: 'Add a recipient',
+    amount: 'Amount to send (USD)',
+    amountPh: '0.00',
+    getQuote: 'Get a quote',
+    quoting: 'Getting your rate…',
+    youPay: 'You pay',
+    fee: 'Fee',
+    theyReceive: 'They receive',
+    rate: 'Exchange rate',
+    rateValue: '1 USD = {rate} MXN',
+    expiresIn: 'Rate locked for {time}',
+    expiredNotice: 'This rate expired. Get a new quote to continue.',
+    newQuote: 'New quote',
+    continue: 'Continue',
+    errors: {
+      validation_error: 'Please check the details and try again.',
+      unauthorized: 'Your session expired. Please sign in again.',
+      forbidden: 'You don’t have access to do that.',
+      not_found: 'We couldn’t find that. Refresh and try again.',
+      kyc_required: 'You’ll need to verify your identity before sending money.',
+      limit_exceeded: 'This goes over your sending limit right now. Try a smaller amount or come back later.',
+      quote_expired: 'This rate expired. Get a new quote to continue.',
+      transfer_not_cancelable: 'This transfer can no longer be canceled.',
+      conflict: 'This can’t be updated right now. Refresh and try again.',
+      idempotency_conflict: 'We’re still processing your last request. Give it a moment before trying again.',
+      not_configured: 'Sending money isn’t available yet. We’ll let you know the moment it’s live.',
+      rate_limited: 'Too many attempts. Please wait a moment and try again.',
+      rate_unavailable: 'We couldn’t get an exchange rate right now. Try again in a moment.',
+      provider_rejected: 'Our payout partner couldn’t accept this. Check the recipient’s account details.',
+      provider_unavailable: 'We couldn’t reach our payout partner. Try again in a moment.',
+      internal_error: 'Something went wrong on our end. Please try again.',
+      cancellation_requires_support: 'Please contact support to cancel this transfer.',
+      generic: 'Something went wrong. Please try again.',
+    },
+  },
 }
 
 const es: Translations = {
@@ -504,6 +596,51 @@ const es: Translations = {
       bankRejected: 'El banco rechazó esta cuenta. Verifica la CLABE con tu destinatario.',
       alreadySaved: 'Esta cuenta ya está guardada.',
       providerDown: 'No pudimos conectar con nuestro proveedor de pagos. Inténtalo en un momento.',
+      generic: 'Algo salió mal. Inténtalo de nuevo.',
+    },
+  },
+  send: {
+    cta: 'Enviar dinero',
+    title: 'Enviar dinero',
+    sub: 'Elige a quién pagar y cuánto. Te mostramos el tipo de cambio antes de enviar nada.',
+    dashboardReady: 'Envía dinero a tus destinatarios — o administra a quién le envías.',
+    recipient: 'Destinatario',
+    recipientPh: 'Elige un destinatario',
+    account: 'Cuenta',
+    accountPh: 'Elige una cuenta',
+    noRecipients: 'Aún no tienes destinatarios.',
+    manageRecipients: 'Agregar un destinatario',
+    amount: 'Monto a enviar (USD)',
+    amountPh: '0.00',
+    getQuote: 'Obtener cotización',
+    quoting: 'Obteniendo tu tipo de cambio…',
+    youPay: 'Tú pagas',
+    fee: 'Comisión',
+    theyReceive: 'Ellos reciben',
+    rate: 'Tipo de cambio',
+    rateValue: '1 USD = {rate} MXN',
+    expiresIn: 'Tipo de cambio fijo por {time}',
+    expiredNotice: 'Este tipo de cambio expiró. Obtén una nueva cotización para continuar.',
+    newQuote: 'Nueva cotización',
+    continue: 'Continuar',
+    errors: {
+      validation_error: 'Revisa los datos e inténtalo de nuevo.',
+      unauthorized: 'Tu sesión expiró. Inicia sesión de nuevo.',
+      forbidden: 'No tienes acceso para hacer eso.',
+      not_found: 'No encontramos eso. Actualiza e inténtalo de nuevo.',
+      kyc_required: 'Necesitas verificar tu identidad antes de enviar dinero.',
+      limit_exceeded: 'Esto supera tu límite de envío por ahora. Prueba con un monto menor o vuelve más tarde.',
+      quote_expired: 'Este tipo de cambio expiró. Obtén una nueva cotización para continuar.',
+      transfer_not_cancelable: 'Esta transferencia ya no se puede cancelar.',
+      conflict: 'Esto no se puede actualizar ahora. Actualiza e inténtalo de nuevo.',
+      idempotency_conflict: 'Todavía estamos procesando tu solicitud anterior. Espera un momento antes de intentar de nuevo.',
+      not_configured: 'Enviar dinero aún no está disponible. Te avisaremos en cuanto esté listo.',
+      rate_limited: 'Demasiados intentos. Espera un momento e inténtalo de nuevo.',
+      rate_unavailable: 'No pudimos obtener el tipo de cambio ahora. Inténtalo en un momento.',
+      provider_rejected: 'Nuestro socio de pagos no pudo aceptar esto. Revisa los datos de la cuenta del destinatario.',
+      provider_unavailable: 'No pudimos conectar con nuestro socio de pagos. Inténtalo en un momento.',
+      internal_error: 'Algo salió mal de nuestro lado. Inténtalo de nuevo.',
+      cancellation_requires_support: 'Comunícate con soporte para cancelar esta transferencia.',
       generic: 'Algo salió mal. Inténtalo de nuevo.',
     },
   },

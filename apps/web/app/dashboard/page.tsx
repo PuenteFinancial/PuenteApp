@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
+import { isSendMoneyEnabled } from '@/lib/flags'
 import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import StatusCard from '@/components/onboarding/StatusCard'
 
@@ -17,13 +18,15 @@ export default async function DashboardPage() {
   const res = await apiFetch('/v1/users/me', token)
   if (!res.ok) redirect('/signup')
 
-  const { kycStatus } = (await res.json()) as { kycStatus: string }
+  const { id: userId, kycStatus } = (await res.json()) as { id: string; kycStatus: string }
   if (kycStatus === 'rejected') redirect('/onboarding/rejected')
   if (kycStatus !== 'approved') redirect('/onboarding/pending')
 
+  const sendEnabled = await isSendMoneyEnabled(userId)
+
   return (
     <OnboardingShell>
-      <StatusCard variant="dashboard" />
+      <StatusCard variant="dashboard" sendEnabled={sendEnabled} />
     </OnboardingShell>
   )
 }
