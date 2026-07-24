@@ -17,14 +17,32 @@ export function resolveSendMoneyFlag(phValue: boolean | undefined, isProduction:
   return !isProduction
 }
 
+export type AppEnv = 'production' | 'preview' | 'development'
+
+// Which deployment this is. NODE_ENV is 'production' for EVERY Vercel build —
+// preview + staging + prod — so it can't distinguish them; VERCEL_ENV can.
+// Staging is the `main` branch, which Vercel builds as a PREVIEW deployment
+// (only the `production` branch is a Vercel Production deployment), so staging
+// and PR previews both report 'preview'. Falls back to NODE_ENV for local /
+// non-Vercel runs.
+//
+// Server-only (VERCEL_ENV is not exposed to the browser). Single source of the
+// environment for the whole web app — the production test below, the dev
+// simulate-funding proxy, the "Simulate payment" affordance, and the `app_env`
+// person property all read it, so they can never disagree.
+export function appEnv(): AppEnv {
+  const vercel = process.env.VERCEL_ENV
+  if (vercel === 'production') return 'production'
+  if (vercel === 'preview') return 'preview'
+  if (vercel) return 'development'
+  return process.env.NODE_ENV === 'production' ? 'production' : 'development'
+}
+
 // "Real production" = the Vercel Production deployment (the `production` branch).
-// NODE_ENV is 'production' for EVERY Vercel build — preview + staging + prod — so
-// it can't distinguish them; VERCEL_ENV can. Fall back to NODE_ENV for local /
-// non-Vercel runs. Getting this wrong would hide the flow's fallback on
-// staging/preview (fails safe, but breaks the preview-URL workflow).
-function isProductionEnv(): boolean {
-  if (process.env.VERCEL_ENV) return process.env.VERCEL_ENV === 'production'
-  return process.env.NODE_ENV === 'production'
+// Getting this wrong would hide the flow's fallback on staging/preview (fails
+// safe, but breaks the preview-URL workflow).
+export function isProductionEnv(): boolean {
+  return appEnv() === 'production'
 }
 
 // Is the send-money flow enabled for this user? distinctId should be the stable
@@ -36,7 +54,16 @@ export async function isSendMoneyEnabled(distinctId: string): Promise<boolean> {
     return resolveSendMoneyFlag(undefined, isProduction)
   }
   try {
-    const value = await getPostHogClient().isFeatureEnabled(SEND_MONEY_FLAG, distinctId)
+    // `app_env` lets a PostHog release condition target staging/preview
+    // explicitly. Without it the flag CANNOT be created safely: staging and
+    // production share one PostHog project, so a single flag value applies to
+    // both, and the moment a real flag exists it overrides the code fallback
+    // that is currently the only thing keeping staging visible — creating the
+    // flag disabled would go dark on staging. With the property sent, the flag
+    // can be created and controlled explicitly while staging stays on.
+    const value = await getPostHogClient().isFeatureEnabled(SEND_MONEY_FLAG, distinctId, {
+      personProperties: { app_env: appEnv() },
+    })
     return resolveSendMoneyFlag(value, isProduction)
   } catch (err) {
     // Keep failing safe, but never dark: a persistent PostHog failure must be

@@ -1,18 +1,25 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { useLanguage } from '@/components/LanguageProvider'
 import QuoteScreen, { type SendRecipient, type CreatedTransfer } from './QuoteScreen'
 import ReviewConfirm from './ReviewConfirm'
 
-// Client-side step machine for the send flow: quote → review+confirm → confirmed.
-// PR3 adds the pay (mock simulate) + tracking step after confirm.
+// Client-side step machine for the pre-transfer part of the send flow: quote →
+// review+confirm. Once confirmed, the transfer exists and money is about to
+// move, so it stops being a step in an in-memory machine and gets its own URL
+// (/dashboard/send/:id) — reload-safe, linkable, and where the tracker lives.
 export default function SendFlow({ recipients }: { recipients: SendRecipient[] }) {
   const { t } = useLanguage()
+  const router = useRouter()
   const [transfer, setTransfer] = useState<CreatedTransfer | null>(null)
   const [confirmed, setConfirmed] = useState(false)
 
   if (confirmed) {
+    // Transitional only — the replace() to the tracker is already in flight.
+    // replace(), not push(): "back" must not return to a review screen for a
+    // transfer that has already been confirmed.
     const s = t.send.review
     return (
       <div className="wl-card">
@@ -28,12 +35,14 @@ export default function SendFlow({ recipients }: { recipients: SendRecipient[] }
     // Back = start over with a new quote. The already-created transfer is left
     // at PENDING_PAYMENT (pre-funding, pre-confirm): economically inert — no
     // ledger entry, no money moved — and swept by the reconcile-pending job.
-    // PR3's per-transfer route makes this reload-safe and resolvable in-place.
     return (
       <ReviewConfirm
         transfer={transfer}
         onBack={() => setTransfer(null)}
-        onConfirmed={() => setConfirmed(true)}
+        onConfirmed={() => {
+          setConfirmed(true)
+          router.replace(`/dashboard/send/${transfer.id}`)
+        }}
       />
     )
   }

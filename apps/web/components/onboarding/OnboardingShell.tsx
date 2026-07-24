@@ -20,7 +20,12 @@ export default function OnboardingShell({ children }: { children: ReactNode }) {
           <img src="/logo-dark.svg" alt="Puente" style={{ height: 34 }} />
         </Link>
       </div>
-      {children}
+      {/* .wl-card sets no width, and a centered column flex item is sized by its
+          content — so any card with a long paragraph (the Reg E disclosure, the
+          cancellation-support notice) stretched to the full viewport, running
+          legally-operative copy out to ~1100px line lengths. Constraining here
+          rather than per-card keeps every onboarding screen the same width. */}
+      <div style={{ width: '100%', maxWidth: 480 }}>{children}</div>
     </main>
   )
 }

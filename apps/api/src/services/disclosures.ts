@@ -58,9 +58,15 @@ function renderEn(a: DisclosureAmounts, cancelWindowMinutes: number): RenderedDi
 }
 
 function renderEs(a: DisclosureAmounts, cancelWindowMinutes: number): RenderedDisclosure {
-  const total = formatMoney(usd(a.sendMinor + a.feeMinor), 'es-MX')
-  const send = formatMoney(usd(a.sendMinor), 'es-MX')
-  const fee = formatMoney(usd(a.feeMinor), 'es-MX')
+  // USD amounts are formatted with 'en-US', NOT 'es-MX', even in the Spanish
+  // rendering. Intl treats USD as a FOREIGN currency in the Mexican locale and
+  // renders it with a code prefix — "USD 99.00" — so appending the " USD"
+  // suffix below produced "USD 99.00 USD" in the legally-operative Reg E copy.
+  // 'en-US' gives "$99.00", so the line reads "$99.00 USD", matching renderEn.
+  // MXN keeps 'es-MX', where it is the local currency and correctly renders "$".
+  const total = formatMoney(usd(a.sendMinor + a.feeMinor), 'en-US')
+  const send = formatMoney(usd(a.sendMinor), 'en-US')
+  const fee = formatMoney(usd(a.feeMinor), 'en-US')
   const receive = formatMoney(mxn(a.receiveMinor), 'es-MX')
   return {
     title: 'Divulgación previa al pago',

@@ -35,13 +35,42 @@ describe('buildPrepaymentDisclosure', () => {
     }
   })
 
-  it('formats the customer-facing amounts from minor units', () => {
+  // WHOLE-LINE assertions, not toContain(<number>). A substring match on the
+  // amount passes for both "$198.01 USD" and the garbled "USD 198.01 USD" that
+  // shipped in the Spanish rendering for months — Intl renders USD with a code
+  // prefix in the es-MX locale, and the renderer appended " USD" on top.
+  it('formats the customer-facing amounts from minor units (en)', () => {
     const { content } = buildPrepaymentDisclosure(amounts, 'en', 30)
     const en = content['en'] as { amountLines: string[] }
-    expect(en.amountLines[0]).toContain('198.01')
-    expect(en.amountLines[1]).toContain('1.99')
-    expect(en.amountLines[2]).toContain('200.00')
-    expect(en.amountLines[3]).toContain('3,960.14')
+    expect(en.amountLines).toEqual([
+      'Transfer amount: $198.01',
+      'Transfer fee: $1.99',
+      'Total to pay: $200.00',
+      'Amount to be received: $3,960.14 MXN',
+    ])
+  })
+
+  it('formats the customer-facing amounts from minor units (es)', () => {
+    const { content } = buildPrepaymentDisclosure(amounts, 'es', 30)
+    const es = content['es'] as { amountLines: string[] }
+    expect(es.amountLines).toEqual([
+      'Monto de la transferencia: $198.01 USD',
+      'Comisión por transferencia: $1.99 USD',
+      'Total a pagar: $200.00 USD',
+      'Monto a recibir: $3,960.14 MXN',
+    ])
+  })
+
+  it('never repeats a currency label in either rendering', () => {
+    // The specific defect, pinned: "USD 198.01 USD".
+    const { content } = buildPrepaymentDisclosure(amounts, 'es', 30)
+    for (const locale of ['en', 'es'] as const) {
+      const lines = (content[locale] as { amountLines: string[] }).amountLines
+      for (const line of lines) {
+        expect(line.match(/USD/g)?.length ?? 0).toBeLessThanOrEqual(1)
+        expect(line.match(/MXN/g)?.length ?? 0).toBeLessThanOrEqual(1)
+      }
+    }
   })
 
   it('respects a configured cancel window', () => {

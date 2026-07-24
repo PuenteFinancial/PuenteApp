@@ -12,10 +12,174 @@ function json(res, status, body) {
   res.end(JSON.stringify(body))
 }
 
-const server = createServer((req, res) => {
-  req.resume() // drain any request body
+// Transfer-state fixtures for the tracker specs.
+//
+// FIXED ids always report the same state no matter what a test does to them, so
+// specs stay safe under `fullyParallel`: a cancel spec that already drove its
+// transfer to REFUNDED still finds it FUNDED on a re-read.
+//
+// Everything else is stateful in `mutableStates`, which persists for the whole
+// Playwright run — the webServer starts ONCE and survives retries. So any spec
+// that mutates must use a per-ATTEMPT id (see track.spec.ts), or its retry
+// would find the state the first attempt left behind and fail deterministically
+// — turning the retry that exists to absorb a flake into a guaranteed red.
+const FIXED = new Map([
+  ['transfer-e2e-cancel', 'FUNDED'],
+  ['transfer-e2e-support', 'FUNDED'],
+  ['transfer-e2e-late', 'FUNDED'],
+])
+const mutableStates = new Map()
+
+// Ids matching this advance PENDING_PAYMENT → FUNDED on the second read, so a
+// spec can prove the tracker's POLL (not an explicit refresh) picks up a state
+// change on its own.
+const ADVANCING = /^transfer-e2e-advance/
+const readCounts = new Map()
+
+function stateOf(id) {
+  const fixed = FIXED.get(id)
+  if (fixed) return fixed
+  const mutable = mutableStates.get(id)
+  if (mutable) return mutable
+  if (ADVANCING.test(id)) {
+    const seen = (readCounts.get(id) ?? 0) + 1
+    readCounts.set(id, seen)
+    return seen === 1 ? 'PENDING_PAYMENT' : 'FUNDED'
+  }
+  return 'PENDING_PAYMENT'
+}
+
+// Mirrors the API's transfer response schema (transfers.ts transferResponseSchema).
+function transferBody(id, state = stateOf(id)) {
+  return {
+    id,
+    quoteId: 'quote-e2e-1',
+    payoutDestinationId: 'dest-1',
+    state,
+    totalAmount: { amountMinor: 10000, currency: 'USD' },
+    sendAmount: { amountMinor: 9800, currency: 'USD' },
+    feeAmount: { amountMinor: 200, currency: 'USD' },
+    receiveAmount: { amountMinor: 168952, currency: 'MXN' },
+    fxRate: '17.2400',
+    fundingSourceType: 'ach',
+    fundingCleared: false,
+    disclosureAcceptedAt: new Date(START).toISOString(),
+    paymentAt: state === 'PENDING_PAYMENT' ? null : new Date().toISOString(),
+    // Computed per request so the Reg E window is always live, never a fixture
+    // that goes stale mid-run.
+    cancelableUntil: state === 'FUNDED' ? new Date(Date.now() + 30 * 60 * 1000).toISOString() : null,
+    providerTransferRef: null,
+    completedAt: state === 'COMPLETED' ? new Date().toISOString() : null,
+    createdAt: new Date(START).toISOString(),
+    disclosures: [],
+  }
+}
+
+// Reads the raw body once and caches it — rejectsEmptyJsonBody consumes the
+// stream before any route handler sees it, so a second read would hang.
+function readRaw(req) {
+  if (req._rawBody !== undefined) return Promise.resolve(req._rawBody)
+  return new Promise((resolve) => {
+    let raw = ''
+    req.on('data', (c) => {
+      raw += c
+    })
+    req.on('end', () => resolve(raw))
+  })
+}
+
+async function readBody(req) {
+  const raw = await readRaw(req)
+  try {
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+// Fastify rejects a request declaring `Content-Type: application/json` with an
+// empty body ("Body cannot be empty…") BEFORE the handler runs. The web's
+// apiFetch always sets that header, so any proxy that forwards a POST without a
+// body 400s against the real API. Mirroring that here is what stops a
+// permissive mock from green-lighting a proxy that cannot work in production —
+// it is exactly how the simulate-funding proxy shipped broken past 8 passing
+// specs.
+async function rejectsEmptyJsonBody(req, res) {
+  if (req.method !== 'POST' && req.method !== 'PATCH') return false
+  if (!(req.headers['content-type'] || '').includes('application/json')) return false
+  const raw = await readRaw(req)
+  req._rawBody = raw
+  if (raw.length === 0) {
+    json(res, 400, {
+      error: {
+        code: 'validation_error',
+        message: "mock: Body cannot be empty when content-type is set to 'application/json'",
+        requestId: 'mock',
+      },
+    })
+    return true
+  }
+  return false
+}
+
+const server = createServer(async (req, res) => {
   const { pathname } = new URL(req.url, `http://localhost:${PORT}`)
   const method = req.method
+
+  if (await rejectsEmptyJsonBody(req, res)) return
+
+  // The cancel route is the one place this fixture must MIRROR the real API's
+  // preconditions rather than wave requests through. The API rejects a cancel
+  // twice over — the idempotency plugin 400s a missing Idempotency-Key, and the
+  // body schema plus an explicit path/body match check 400 a missing or
+  // mismatched transferId. A permissive mock here means a refactor that drops
+  // either one still ships green, and every real Reg E cancel then fails with
+  // "Please check the details and try again" inside a 30-minute window.
+  if (method === 'POST' && /^\/v1\/transfers\/[^/]+\/cancel$/.test(pathname)) {
+    const id = pathname.split('/')[3]
+    const body = await readBody(req)
+
+    if (!req.headers['idempotency-key']) {
+      return json(res, 400, {
+        error: { code: 'validation_error', message: 'mock: Idempotency-Key header is required', requestId: 'mock' },
+      })
+    }
+    if (body?.transferId !== id) {
+      return json(res, 400, {
+        error: { code: 'validation_error', message: 'mock: transferId must match the transfer being canceled', requestId: 'mock' },
+      })
+    }
+
+    // Reg E 202: accepted for out-of-band handling, never a flat denial. Copy is
+    // server-authored in both languages (verbatim from transfers.ts).
+    if (id === 'transfer-e2e-support') {
+      return json(res, 202, {
+        id,
+        state: 'SUBMITTED',
+        code: 'cancellation_requires_support',
+        messages: {
+          en: "This transfer is being sent for payout and can't be canceled automatically. Contact support to exercise your cancellation right — if the payout does not complete, you will be refunded in full.",
+          es: 'Esta transferencia se está enviando para su pago y no se puede cancelar automáticamente. Comunícate con soporte para ejercer tu derecho de cancelación: si el pago no se completa, se te reembolsará el monto total.',
+        },
+      })
+    }
+
+    if (id === 'transfer-e2e-late') {
+      return json(res, 409, {
+        error: {
+          code: 'transfer_not_cancelable',
+          message: 'The cancellation window has passed',
+          requestId: 'mock',
+        },
+      })
+    }
+
+    // Deliberately does NOT mutate: the REFUNDED transfer travels in the
+    // response body, which is what the client adopts.
+    return json(res, 200, transferBody(id, 'REFUNDED'))
+  }
+
+  req.resume() // drain any request body
 
   if (method === 'GET' && pathname === '/v1/users/me') {
     return json(res, 200, {
@@ -117,6 +281,17 @@ const server = createServer((req, res) => {
       disclosureAcceptedAt: new Date().toISOString(),
       funding: { provider: 'mock', method: 'ach', clientFields: {} },
     })
+  }
+
+  if (method === 'GET' && /^\/v1\/transfers\/[^/]+$/.test(pathname)) {
+    return json(res, 200, transferBody(pathname.split('/')[3]))
+  }
+
+  // Dev-only simulate-pay: stands in for the Stripe pay step (PENDING_PAYMENT →
+  // FUNDED), exactly as the real dev endpoint drives it via the funding webhook.
+  if (method === 'POST' && /^\/v1\/dev\/transfers\/[^/]+\/simulate-funding$/.test(pathname)) {
+    mutableStates.set(pathname.split('/')[4], 'FUNDED')
+    return json(res, 200, { simulated: true })
   }
 
   return json(res, 404, { error: { code: 'not_found', message: 'mock: no route', requestId: 'mock' } })
