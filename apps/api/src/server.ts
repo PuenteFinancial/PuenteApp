@@ -19,6 +19,7 @@ import { destinationsRoute } from './routes/v1/destinations.js'
 import { quotesRoute } from './routes/v1/quotes.js'
 import { transfersRoute } from './routes/v1/transfers.js'
 import { webhooksRoute } from './routes/v1/webhooks.js'
+import { devRoute, devEndpointsEnabled } from './routes/v1/dev.js'
 
 // Fail boot on a bad DETAILS_ENCRYPTION_KEY — otherwise a wrong key stays
 // invisible until the first payout decrypt.
@@ -71,6 +72,12 @@ await server.register(destinationsRoute, { prefix: '/v1' })
 await server.register(quotesRoute, { prefix: '/v1' })
 await server.register(transfersRoute, { prefix: '/v1' })
 await server.register(webhooksRoute, { prefix: '/v1' })
+// Dev-only simulate-funding surface. Both controls default off (see dev.ts), so
+// unless they are BOTH positively set the route is never registered and 404s
+// from the router; the handler re-checks independently.
+if (devEndpointsEnabled()) {
+  await server.register(devRoute, { prefix: '/v1' })
+}
 
 try {
   await server.listen({ port: env.PORT, host: env.HOST })
