@@ -152,6 +152,56 @@ export type Translations = {
       loadError: string
       retry: string
     }
+    // Transfer tracker (PR3). NOTE: the Reg E disclosure copy is NOT here — it
+    // is server-authored and rendered verbatim (see ReviewConfirm), as is the
+    // 202 cancellation-requires-support message. These strings are UI chrome
+    // around it. The cancel-window and outcome lines still make statements
+    // about the sender's money and their cancellation right, so:
+    // NEEDS LEGAL REVIEW (ES) — bundled into the PR7 human-ES review.
+    track: {
+      title: string
+      youSend: string
+      theyReceive: string
+      steps: {
+        PENDING_PAYMENT: string
+        FUNDED: string
+        SUBMITTED: string
+        IN_FLIGHT: string
+        COMPLETED: string
+      }
+      // States the Reg E RIGHT (the full window), not the mechanism. The
+      // self-service cancel only works until the payout job claims the transfer
+      // — seconds after funding, since payout.submit is enqueued with no delay —
+      // after which the server returns its 202 support routing. cancelWindowNote
+      // sets that expectation without overstating: a cancellation request that
+      // arrives late is still timely under §1005.34, but it can't be automatic,
+      // and if the payout already delivered it can't be honored at all.
+      cancelWindow: string
+      cancelWindowNote: string
+      cancel: string
+      cancelConfirm: string
+      canceling: string
+      simulate: string
+      simulating: string
+      simulateNote: string
+      loadError: string
+      retry: string
+      done: string
+      // Rendered as a mailto next to every message that tells a sender to
+      // contact us — the 202 cancellation routing and the outcomes that direct
+      // to support. Without it those messages instruct a sender to exercise a
+      // statutory right with no route to do so.
+      supportCta: string
+      outcomes: {
+        completed: { title: string; body: string }
+        canceled: { title: string; body: string }
+        refunded: { title: string; body: string }
+        paymentFailed: { title: string; body: string }
+        payoutFailed: { title: string; body: string }
+        fundingReversed: { title: string; body: string }
+        underReview: { title: string; body: string }
+      }
+    }
     // code → user-facing message; the apiError layer maps the API error
     // envelope's stable `code` onto these (unmapped codes fall back to generic)
     errors: {
@@ -408,6 +458,61 @@ const en: Translations = {
       loadError: 'We couldn’t load the disclosure. Try again, or go back.',
       retry: 'Retry',
     },
+    track: {
+      title: 'Your transfer',
+      youSend: 'You send',
+      theyReceive: 'They receive',
+      steps: {
+        PENDING_PAYMENT: 'Waiting for payment',
+        FUNDED: 'Payment received',
+        SUBMITTED: 'Sent for payout',
+        IN_FLIGHT: 'On its way',
+        COMPLETED: 'Delivered',
+      },
+      cancelWindow: 'You have {time} left to cancel this transfer.',
+      cancelWindowNote:
+        'If it’s already been sent for payout, cancelling isn’t automatic — contact us and we’ll take it from there.',
+      cancel: 'Cancel transfer',
+      cancelConfirm: 'Tap again to cancel',
+      canceling: 'Canceling…',
+      simulate: 'Simulate payment',
+      simulating: 'Simulating…',
+      simulateNote: 'Test environment only — stands in for card and bank payment.',
+      loadError: 'We couldn’t load this transfer. Try again.',
+      retry: 'Retry',
+      done: 'Back to dashboard',
+      supportCta: 'Contact support',
+      outcomes: {
+        completed: {
+          title: 'Delivered',
+          body: 'Your money reached your recipient’s account.',
+        },
+        canceled: {
+          title: 'Canceled',
+          body: 'This transfer was canceled. Your refund is being returned now.',
+        },
+        refunded: {
+          title: 'Refunded',
+          body: 'This transfer was canceled and you were refunded in full.',
+        },
+        paymentFailed: {
+          title: 'Payment failed',
+          body: 'We couldn’t collect your payment, so nothing was sent and you were not charged. Start a new transfer to try again.',
+        },
+        payoutFailed: {
+          title: 'Couldn’t be delivered',
+          body: 'Your recipient’s bank couldn’t accept this transfer. You will be refunded in full — contact support if you have questions.',
+        },
+        fundingReversed: {
+          title: 'Payment reversed',
+          body: 'Your bank reversed the payment for this transfer. Contact support so we can sort it out with you.',
+        },
+        underReview: {
+          title: 'Under review',
+          body: 'We’re looking into this transfer. We’ll contact you as soon as the review is done.',
+        },
+      },
+    },
     errors: {
       validation_error: 'Please check the details and try again.',
       unauthorized: 'Your session expired. Please sign in again.',
@@ -661,6 +766,61 @@ const es: Translations = {
       loading: 'Cargando la divulgación…',
       loadError: 'No pudimos cargar la divulgación. Inténtalo de nuevo o regresa.',
       retry: 'Reintentar',
+    },
+    track: {
+      title: 'Tu transferencia',
+      youSend: 'Tú envías',
+      theyReceive: 'Ellos reciben',
+      steps: {
+        PENDING_PAYMENT: 'Esperando el pago',
+        FUNDED: 'Pago recibido',
+        SUBMITTED: 'Enviada para su pago',
+        IN_FLIGHT: 'En camino',
+        COMPLETED: 'Entregada',
+      },
+      cancelWindow: 'Te quedan {time} para cancelar esta transferencia.',
+      cancelWindowNote:
+        'Si ya fue enviada para su pago, la cancelación no es automática — comunícate con nosotros y lo resolvemos.',
+      cancel: 'Cancelar transferencia',
+      cancelConfirm: 'Toca de nuevo para cancelar',
+      canceling: 'Cancelando…',
+      simulate: 'Simular pago',
+      simulating: 'Simulando…',
+      simulateNote: 'Solo en el entorno de pruebas — sustituye el pago con tarjeta o banco.',
+      loadError: 'No pudimos cargar esta transferencia. Inténtalo de nuevo.',
+      retry: 'Reintentar',
+      done: 'Volver al panel',
+      supportCta: 'Comunícate con soporte',
+      outcomes: {
+        completed: {
+          title: 'Entregada',
+          body: 'Tu dinero llegó a la cuenta de tu destinatario.',
+        },
+        canceled: {
+          title: 'Cancelada',
+          body: 'Esta transferencia fue cancelada. Tu reembolso se está procesando ahora.',
+        },
+        refunded: {
+          title: 'Reembolsada',
+          body: 'Esta transferencia fue cancelada y se te reembolsó el monto total.',
+        },
+        paymentFailed: {
+          title: 'El pago falló',
+          body: 'No pudimos cobrar tu pago, así que no se envió nada y no se te cobró. Inicia una nueva transferencia para intentarlo otra vez.',
+        },
+        payoutFailed: {
+          title: 'No se pudo entregar',
+          body: 'El banco de tu destinatario no pudo aceptar esta transferencia. Se te reembolsará el monto total — comunícate con soporte si tienes preguntas.',
+        },
+        fundingReversed: {
+          title: 'Pago revertido',
+          body: 'Tu banco revirtió el pago de esta transferencia. Comunícate con soporte para que lo resolvamos juntos.',
+        },
+        underReview: {
+          title: 'En revisión',
+          body: 'Estamos revisando esta transferencia. Te contactaremos en cuanto termine la revisión.',
+        },
+      },
     },
     errors: {
       validation_error: 'Revisa los datos e inténtalo de nuevo.',

@@ -51,6 +51,9 @@ test('full flow: quote → create → Reg E disclosure → confirm', async ({ co
   await expect(confirm).toBeEnabled()
   await confirm.click()
 
-  // Confirmed terminal state.
-  await page.getByText(/transfer confirmed|transferencia confirmada/i).waitFor()
+  // Confirm hands off to the transfer's own URL — reload-safe, so a sender with
+  // money in flight is never stranded on an in-memory step.
+  await page.waitForURL(/\/dashboard\/send\/transfer-e2e-1$/)
+  await expect(page.getByRole('heading', { name: /your transfer|tu transferencia/i })).toBeVisible()
+  await expect(page.getByText(/waiting for payment|esperando el pago/i)).toBeVisible()
 })

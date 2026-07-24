@@ -203,8 +203,16 @@ idiom) → `POST /api/transfers/:id/cancel {transferId}` (key #3): handle `200` 
 pay = the dev-gated API endpoint (E) + web proxy + non-prod-only button. **Analytics**:
 `send_funding_simulated` (dev), `send_transfer_canceled`.
 
+**Flag `app_env` fold-in** (decision 2026-07-23, after this plan was written): `isSendMoneyEnabled`
+passes `personProperties: { app_env }` (from `VERCEL_ENV`) so a PostHog release condition can target
+staging/preview explicitly. Required before the `web-send-money` flag may be **created at all**:
+staging and prod share one PostHog project, so a single flag value applies to both, and any real flag
+overrides the code fallback that is currently the only thing keeping staging visible — creating it
+disabled would take staging dark. With this landed, create the flag with an `app_env != production`
+release condition.
+
 **Tests**: poll state-timeline rendering across states; cancel branches (200 / 202 / 409); dev endpoint
-`404` in prod-like env; Playwright cancel path.
+`404` in prod-like env; Playwright cancel path; `appEnv` mapping (Vercel preview ≠ production).
 
 ## PR4 — Receipt + transfer history
 
@@ -242,6 +250,27 @@ PR delivers the mechanism only. Skills: `api-route`, `ledger`, `migration` (if n
 `security-reviewer` + `compliance-reviewer`.
 
 ## PR7 — Reg E disclosure-wording counsel package *[doc + staged copy, counsel-gated]*
+
+**Also carried into this package (added after the PR3 compliance review):**
+- **Tracker cancellation copy** (`send.track` in [translations.ts](/apps/web/lib/translations.ts)):
+  `cancelWindow` + `cancelWindowNote` — the countdown states the Reg E *right* (full window) while
+  the note states the *mechanism* (self-service until the payout job claims, support after). Shipped
+  in PR3 because the previous wording implied 30 minutes of self-service cancellation that in reality
+  lasts seconds; needs human-ES review.
+- **Step label "Sent for payout" / "Enviada para su pago"** encodes the same "submitted for payout"
+  concept being corrected below — it must move WITH the disclosure or the tracker teaches senders the
+  right dies at submission.
+- **The `outcomes` block** — two statements overclaim and must be fixed in both languages together:
+  `paymentFailed` asserts "you were not charged" although `PAYMENT_FAILED` is also set by
+  [reconcile-pending.ts](/apps/api/src/jobs/reconcile-pending.ts) on webhook *silence*, which is not
+  proof of no charge; `refunded`/`canceled` assert the money is back when it has only been *issued*
+  (a real ACH reversal posts days later).
+- **The 202 message** in [transfers.ts](/apps/api/src/routes/v1/transfers.ts)
+  `submissionInProgressResponse` and its conditional refund promise.
+- **Spanish register split**: `disclosures.ts` `renderEs` uses *usted*; `send.track` and the 202 use
+  *tú*. A sender sees both on one screen.
+- **§1005.31(b)(1)(vii)** contemplates name, telephone, and website alongside the rights statements;
+  the `contact` line currently gives an email only.
 
 **Doc** `docs/compliance/reg-e-disclosure-counsel-package.md`: the current copy (from
 [disclosures.ts](/apps/api/src/services/disclosures.ts) `renderEn`/`renderEs`), the required changes —
@@ -302,6 +331,13 @@ Engineering scope, not calendar; mobile is a separate later track. Remaining blo
 | Per-user risk controls | 0% | **✓** (PR5) | — |
 | **Pilot readiness (first real $)** | ~40% | **~85% (code)** | Stripe keys/MCC · Bridge KYB · prod worker · Bridge webhook + `S`/`A` |
 | **Real-user launch** | ~40% | **~70%** | above + counsel sign-off · human-ES · slice-8 ops remainder |
+
+**⚠️ Pre-real-user blocker added in PR3:** `support@puentefinancial.com` — the address on the Reg E
+disclosure's contact line and on the tracker's cancellation/error surfaces — **is not provisioned
+yet** (confirmed 2026-07-24). It must be live and monitored before the flow is enabled for any real
+sender: the 202 cancellation routing, `payoutFailed`, `fundingReversed`, and `underReview` all
+instruct the sender to contact us there to exercise a statutory right. Harmless while the pilot is
+Joshua-only; a compliance problem the moment a real user sees it.
 
 **Still missing after this slice:** Stripe (keys + real adapter + Elements); the pilot (prod worker,
 real Bridge webhook verification, `S`-vs-`A`, buy_rate-vs-execution); compliance human track (counsel

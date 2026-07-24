@@ -52,6 +52,18 @@ const envSchema = z.object({
   // purpose — its absence 503s the funding webhook and confirm, which is the
   // production lock against mock funding. Doppler sets it dev/staging only.
   MOCK_FUNDING_WEBHOOK_SECRET: z.string().min(16).optional(),
+  // Explicit opt-in for the dev-only routes (slice 7 PR3: simulate-funding,
+  // which drives PENDING_PAYMENT→FUNDED — a real ledger batch — with no real
+  // payment). Same fail-closed enum shape as WAIT_FOR_CLEARING / AUTO_REFUND,
+  // and deliberately NOT keyed on NODE_ENV: nothing in this repo sets NODE_ENV
+  // for the deployed API (railway.toml has no env block), so `NODE_ENV !==
+  // 'production'` would be a fail-OPEN predicate — an unset var parses to
+  // 'development' and silently opens the gate. This must be positively set,
+  // dev/staging only, alongside MOCK_FUNDING_WEBHOOK_SECRET.
+  ENABLE_DEV_ENDPOINTS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   // funding_cleared gate policy — recorded this slice, never gated on until
   // the risk engine flips it. NOT z.coerce.boolean(): that parses 'false' as
   // true; the enum-transform is exact.

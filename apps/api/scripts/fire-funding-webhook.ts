@@ -7,12 +7,19 @@
 //     <transferId> succeeded|failed|cleared|reversed [--url http://localhost:3001] [--reason R01]
 //
 // Works against localhost and staging (use the staging secret from Doppler).
-// A script, not an HTTP surface: zero production attack surface.
-import crypto from 'node:crypto'
+//
+// This script stays the operator-facing driver AND the escape hatch that works
+// against any environment. The dev-gated POST /v1/dev/transfers/:id/
+// simulate-funding endpoint (slice 7 PR3) is the in-app equivalent for the web
+// "Simulate payment" button; both sign through buildMockFundingEvent so the
+// wire format has exactly one definition. Importing it pulls in no env
+// validation, so this still runs with nothing but the secret.
+import type { FundingEventType } from '../src/services/funding/index.js'
+import { buildMockFundingEvent } from '../src/services/funding/mock-events.js'
 
 const [transferId, kind, ...rest] = process.argv.slice(2)
 
-const KINDS: Record<string, string> = {
+const KINDS: Record<string, FundingEventType> = {
   succeeded: 'funding_succeeded',
   failed: 'funding_failed',
   cleared: 'funding_cleared',
@@ -35,24 +42,18 @@ const argValue = (flag: string): string | undefined => {
 const baseUrl = argValue('--url') ?? 'http://localhost:3001'
 const reason = argValue('--reason')
 
-const body = JSON.stringify({
-  id: `evt_${crypto.randomUUID()}`,
+const { body, signature } = buildMockFundingEvent({
+  transferId,
   type: KINDS[kind],
-  data: {
-    transfer_id: transferId,
-    payment_ref: `mockpay_${crypto.randomUUID()}`,
-    ...(reason && { reason }),
-  },
+  secret,
+  ...(reason && { reason }),
 })
-
-const t = Date.now()
-const signature = crypto.createHmac('sha256', secret).update(`${t}.${body}`).digest('hex')
 
 const res = await fetch(`${baseUrl}/v1/webhooks/funding`, {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'Funding-Signature': `t=${t},v1=${signature}`,
+    'Funding-Signature': signature,
   },
   body,
 })
