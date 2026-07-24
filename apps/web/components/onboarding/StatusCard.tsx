@@ -50,6 +50,11 @@ export default function StatusCard({
         >
           {s.recipientsCta}
         </Link>
+        {sendEnabled && (
+          <Link href="/dashboard/transfers" className="btn btn--ghost" style={{ display: 'inline-block' }}>
+            {s.historyCta}
+          </Link>
+        )}
       </div>
     </div>
   )
