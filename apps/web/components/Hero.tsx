@@ -23,14 +23,14 @@ export default function Hero() {
             <a className="btn btn--accent btn--lg" href="/waitlist">{t.hero.cta1}</a>
             <div className="hero-visual hero-visual--mobile">
               <span className="hero-glow" />
-              <img src="/190shots_so.png" alt="Puente app" className="hero-phone-img" width={1080} height={1920} />
+              <img src="/344shots_so.png" alt="Puente app" className="hero-phone-img" width={1080} height={1920} />
             </div>
             <a className="btn btn--ghost-light btn--lg" href="#remittances">{t.hero.cta2} →</a>
           </div>
         </div>
         <div className="hero-visual hero-visual--desktop">
           <span className="hero-glow" />
-          <img src="/190shots_so.png" alt="Puente app" className="hero-phone-img" width={1080} height={1920} fetchPriority="high" />
+          <img src="/344shots_so.png" alt="Puente app" className="hero-phone-img" width={1080} height={1920} fetchPriority="high" />
         </div>
       </div>
     </header>
