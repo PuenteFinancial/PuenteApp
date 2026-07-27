@@ -360,20 +360,18 @@ describe('verifyPrincipalReturned', () => {
 })
 
 describe('listRefundBacklog', () => {
-  it('scopes to parked rows the poller provably cannot heal, and returns no PII', async () => {
-    q('transfers', {
-      data: [
-        {
-          id: T,
-          state: 'PAYOUT_FAILED',
-          send_amount_minor: S,
-          fee_amount_minor: FEE,
-          provider_transfer_ref: 'bridge_tr_1',
-          created_at: '2026-07-27T00:00:00.000Z',
-        },
-      ],
-      error: null,
-    })
+  const parkedRow = (over: Record<string, unknown> = {}) => ({
+    id: T,
+    send_amount_minor: S,
+    fee_amount_minor: FEE,
+    provider_transfer_ref: 'bridge_tr_1',
+    refund_payment_ref: null,
+    created_at: '2026-07-27T00:00:00.000Z',
+    ...over,
+  })
+
+  it('scopes to submitted rows parked at PAYOUT_FAILED, and returns no PII', async () => {
+    q('transfers', { data: [parkedRow()], error: null })
 
     const rows = await listRefundBacklog()
 
@@ -384,13 +382,25 @@ describe('listRefundBacklog', () => {
       'fee_amount_minor',
       'id',
       'provider_transfer_ref',
+      'refund_payment_ref',
       'send_amount_minor',
-      'state',
     ])
-    // the same predicate the payout poller uses for its self-heal scan
     expect(filtersFor('transfers', 'eq')).toContainEqual(['state', 'PAYOUT_FAILED'])
-    expect(filtersFor('transfers', 'is')).toContainEqual(['refund_payment_ref', null])
     expect(filtersFor('transfers', 'not')).toContainEqual(['provider_transfer_ref', 'is', null])
+  })
+
+  // A crash between the disbursement and the REFUNDED transition leaves the ref
+  // SET at PAYOUT_FAILED — the sender was paid but {id}:REFUNDED was never
+  // posted, so the ledger is wrong about that transfer. Filtering on
+  // `refund_payment_ref is null` (as the poller does) would hide exactly the
+  // rows nothing else can heal on this path.
+  it('does NOT hide rows whose disbursement already went out', async () => {
+    q('transfers', { data: [parkedRow({ refund_payment_ref: 'mockrefund_prev' })], error: null })
+
+    const rows = await listRefundBacklog()
+
+    expect(rows[0]!.refund_payment_ref).toBe('mockrefund_prev')
+    expect(filtersFor('transfers', 'is')).not.toContainEqual(['refund_payment_ref', null])
   })
 
   it('fails closed rather than reporting an empty backlog', async () => {

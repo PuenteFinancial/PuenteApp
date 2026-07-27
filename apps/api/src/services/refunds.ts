@@ -219,29 +219,38 @@ export async function verifyPrincipalReturned(transferId: string): Promise<Princ
 // reach an operator's terminal or scrollback).
 export interface ParkedRefund {
   id: string
-  state: string
   send_amount_minor: number
   fee_amount_minor: number
   provider_transfer_ref: string | null
+  /** Non-null = the sender was already paid but the state never settled. */
+  refund_payment_ref: string | null
   created_at: string
 }
 
 const PARKED_COLUMNS =
-  'id, state, send_amount_minor, fee_amount_minor, provider_transfer_ref, created_at'
+  'id, send_amount_minor, fee_amount_minor, provider_transfer_ref, refund_payment_ref, created_at'
 
 /**
- * The parked-refund backlog: transfers stuck at `PAYOUT_FAILED` with the payout
- * submitted and no refund disbursed. Same predicate as the payout poller's
- * self-heal scan (payout-poll.ts) — with `AUTO_REFUND` off the poller skips
- * these entirely, and a row whose terminal event was already processed while the
- * flag was off is never re-driven by flipping it on. This IS the human backlog.
+ * The parked-refund backlog: every transfer stuck at `PAYOUT_FAILED` after the
+ * payout was submitted. With `AUTO_REFUND` off the poller skips these entirely,
+ * and a row whose terminal event was already processed while the flag was off is
+ * never re-driven by flipping it on — so this IS the human backlog.
+ *
+ * Deliberately NOT filtered on `refund_payment_ref IS NULL`, unlike the poller's
+ * self-heal scan (payout-poll.ts). A crash between the disbursement and the
+ * REFUNDED transition leaves the ref SET and the state still `PAYOUT_FAILED`:
+ * the sender's cash went out but `{id}:REFUNDED` was never posted, so
+ * `transfer_payable` stays open and the books disagree with actual cash. On the
+ * job path a pg-boss retry heals that; on this path nothing does, so hiding
+ * those rows would hide the only class of row the ledger is wrong about.
+ * `refund_payment_ref` is returned so the caller can mark them — they need
+ * finishing, not disbursing (`refundPayoutFailure` reports `already_disbursed`).
  */
 export async function listRefundBacklog(): Promise<ParkedRefund[]> {
   const { data, error } = await supabaseAdmin
     .from('transfers')
     .select(PARKED_COLUMNS)
     .eq('state', 'PAYOUT_FAILED')
-    .is('refund_payment_ref', null)
     .not('provider_transfer_ref', 'is', null)
   // Fail closed: an empty backlog and a broken read must never look the same.
   if (error || data == null) {

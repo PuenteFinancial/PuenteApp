@@ -45,9 +45,14 @@ Locally, the `dev:e2e` precedent works too:
 doppler run -- pnpm exec tsx scripts/trigger-refund.ts --list
 ```
 
-Read-only. Prints every transfer at `PAYOUT_FAILED` with the payout submitted and no refund disbursed
-(`refund_payment_ref IS NULL`, `provider_transfer_ref IS NOT NULL`) — ids, amounts and timestamps
-only, never recipient details. This is the whole human backlog.
+Read-only. Prints every transfer at `PAYOUT_FAILED` whose payout was submitted — ids, amounts and
+timestamps only, never recipient details. This is the whole human backlog.
+
+A row marked **`⚠ ALREADY DISBURSED — needs settling only`** is the crash case: a previous run paid
+the sender but died before posting `{id}:REFUNDED`, so the money is gone while `transfer_payable`
+stays open and **the ledger is currently wrong about that transfer**. Treat it as urgent. Re-running
+the normal `--confirm` below finishes it and disburses nothing further (step 2 will say "the
+disbursement had already gone out").
 
 ### 2. Dry run — check the interlock
 

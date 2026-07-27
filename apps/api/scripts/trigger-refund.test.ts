@@ -91,6 +91,15 @@ describe('parseArgs', () => {
     expect(parseArgs(['not-a-uuid', '--operator', 'jphelps'])).toMatchObject({ mode: 'error' })
   })
 
+  // Postgres accepts an uppercase uuid, so the refund would run — but ledger
+  // keys come from `uuid::text`, which is always lowercase, so the step-3 key
+  // check would miss and report FAIL after the sender was already paid.
+  it('lowercases the transfer id so the ledger-key check cannot miss', () => {
+    expect(parseArgs([ID.toUpperCase(), '--operator', 'jphelps'])).toMatchObject({
+      transferId: ID,
+    })
+  })
+
   it('refuses an empty invocation', () => {
     expect(parseArgs([])).toMatchObject({ mode: 'error' })
   })

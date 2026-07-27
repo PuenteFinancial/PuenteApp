@@ -28,6 +28,7 @@
 //   node --env-file=.env --import tsx scripts/trigger-refund.ts …   (local)
 //
 // A script, not an HTTP surface — nothing here is reachable over the network.
+import { formatMoney } from '@puente/shared'
 import {
   refundPayoutFailure,
   verifyPrincipalReturned,
@@ -101,7 +102,18 @@ export function parseArgs(argv: string[]): ParsedArgs {
     return { mode: 'error', message: `invalid --operator "${operator}" — expected 2-32 chars of [a-z0-9._-]` }
   }
 
-  return { mode: 'trigger', transferId, operator, confirm: has('--confirm') }
+  // Lowercase it. Postgres accepts an uppercase uuid literal, so the refund
+  // itself would run — but ledger idempotency keys are built as
+  // `p_transfer_id::text || ':' || p_to_state` in the RPC, and uuid::text always
+  // renders lowercase. The step-3 key check would then miss and report FAIL
+  // *after* the sender was paid, which is the one outcome this script must
+  // never produce.
+  return {
+    mode: 'trigger',
+    transferId: transferId.toLowerCase(),
+    operator,
+    confirm: has('--confirm'),
+  }
 }
 
 let step = 0
@@ -132,7 +144,7 @@ const USAGE =
   'usage: tsx scripts/trigger-refund.ts --list\n' +
   '       tsx scripts/trigger-refund.ts <transferId> --operator <id> [--confirm]'
 
-const usd = (minor: number): string => `$${(minor / 100).toFixed(2)}`
+const usd = (amountMinor: number): string => formatMoney({ amountMinor, currency: 'USD' }, 'en-US')
 
 export async function list(): Promise<void> {
   const rows = await listRefundBacklog()
@@ -147,7 +159,11 @@ export async function list(): Promise<void> {
       // transfers has no failed_at column (the failure time lives in
       // transfer_transitions). Labelled honestly so nobody triages on it.
       `  ${row.id}  ${usd(row.send_amount_minor + row.fee_amount_minor)}  ` +
-        `bridge=${row.provider_transfer_ref ?? '—'}  created=${row.created_at}`,
+        `bridge=${row.provider_transfer_ref ?? '—'}  created=${row.created_at}` +
+        // A set ref means a prior run paid the sender and died before settling:
+        // the money is gone but {id}:REFUNDED was never posted, so the ledger is
+        // currently WRONG about this transfer. Re-running finishes it.
+        (row.refund_payment_ref ? '  ⚠ ALREADY DISBURSED — needs settling only' : ''),
     )
   }
   console.log('\nrun with <transferId> --operator <id> to inspect one (dry run by default)')
