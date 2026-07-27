@@ -267,6 +267,15 @@ correction path. **Gated**: the counsel-adopted error-resolution process (propos
 real-money execution wait — this PR delivers the mechanism only. Skills: `api-route`, `ledger`,
 `migration`, `i18n`, `tdd`; `security-reviewer` + `compliance-reviewer`.
 
+**Carried in from the PR6a review:** close the refund double-pay window. `refundPayoutFailure` reads
+`refund_payment_ref IS NULL`, disburses, then persists under a null-guard — two concurrent runs both
+pass the read, so the guard stops the second *write*, not the second *payment*. Exactly-once rests on
+the processor idempotency key today (real Stripe dedupes; **the mock does not**, so staging
+double-pays). Unchanged slice-6 code, but PR6a widened it: an operator CLI can now run alongside the
+worker. Fix is a `refund_claimed_at` column plus a claim-before-paying guarded UPDATE — a migration,
+which is why it waits for this PR. Removing it also retires the "run one trigger at a time" caveat in
+[manual-refund.md](/docs/runbooks/manual-refund.md).
+
 ## PR7 — Reg E disclosure-wording counsel package *[doc + staged copy, counsel-gated]*
 
 **Also carried into this package (added after the PR3 compliance review):**
