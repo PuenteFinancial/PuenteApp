@@ -288,7 +288,7 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
       'transfers',
       transfer('SUBMITTED'), // resolveTransfer
       stateRow('SUBMITTED'), // failTransfer currentState
-      stateRow('PAYOUT_FAILED'), // driveRefund currentState
+      transfer('PAYOUT_FAILED'), // refundPayoutFailure re-reads the full row
       { data: null, error: null }, // refund_payment_ref persist
     )
     transition.mockResolvedValue({})
@@ -301,7 +301,12 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
       toState: 'PAYOUT_FAILED',
     })
     const refunded = (transition.mock.calls[1] as [Record<string, unknown>])[0]
-    expect(refunded).toMatchObject({ fromState: 'PAYOUT_FAILED', toState: 'REFUNDED' })
+    expect(refunded).toMatchObject({
+      fromState: 'PAYOUT_FAILED',
+      toState: 'REFUNDED',
+      // the job's actor survives the delegation to services/refunds.ts
+      actor: 'worker:payment-event',
+    })
     expect(refunded.ledgerEntries).toEqual([
       { account_code: 'transfer_payable', direction: 'debit', amount_minor: 19801, currency: 'USD' },
       { account_code: 'fee_revenue', direction: 'debit', amount_minor: 199, currency: 'USD' },
@@ -358,6 +363,25 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
   })
 
+  it('AUTO_REFUND off → no “manual refund required” alert for a transfer that actually delivered', async () => {
+    envMock.AUTO_REFUND = false
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('COMPLETED'), // resolveTransfer
+      stateRow('COMPLETED'), // failTransfer → fail-after-terminal
+      stateRow('COMPLETED'), // the gate re-reads before alerting
+    )
+
+    await processPaymentEvent('ev-1')
+
+    // the gate alert is for a PARKED transfer; a delivered one must not page ops
+    expect(setFingerprint).not.toHaveBeenCalledWith(['payout-refund-gated', 'tr-1'])
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
   it('refund_payment_ref already set (webhook+poll duplicate) → skips refund(), still settles REFUNDED', async () => {
     envMock.AUTO_REFUND = true
     q('payment_events', event({ event_type: 'refunded' }))
@@ -365,7 +389,7 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
       'transfers',
       transfer('PAYOUT_FAILED', { refund_payment_ref: 'mockrefund_prev' }), // resolveTransfer
       stateRow('PAYOUT_FAILED'), // failTransfer currentState (already failed → no-op)
-      stateRow('PAYOUT_FAILED'), // driveRefund currentState
+      transfer('PAYOUT_FAILED', { refund_payment_ref: 'mockrefund_prev' }), // refundPayoutFailure re-read
     )
     transition.mockResolvedValue({})
 
@@ -387,7 +411,7 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
       'transfers',
       transfer('PAYOUT_FAILED'), // already failed via a prior error event
       stateRow('PAYOUT_FAILED'), // failTransfer no-op
-      stateRow('PAYOUT_FAILED'), // driveRefund currentState
+      transfer('PAYOUT_FAILED'), // refundPayoutFailure re-read
       { data: null, error: null }, // persist
     )
     transition.mockResolvedValue({})
@@ -407,12 +431,16 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
       'transfers',
       transfer('COMPLETED'), // resolveTransfer
       stateRow('COMPLETED'), // failTransfer → fail-after-terminal (alert, no step)
-      stateRow('COMPLETED'), // driveRefund currentState → not PAYOUT_FAILED → return
+      transfer('COMPLETED'), // refundPayoutFailure re-read → not PAYOUT_FAILED → refuses
     )
 
     await processPaymentEvent('ev-1')
 
     expect(setFingerprint).toHaveBeenCalledWith(['payout-fail-after-terminal'])
+    // the tail refuses too, but the transfer DELIVERED — the sender is owed
+    // nothing, so the "sender still owed" page must stay quiet or it trains ops
+    // to ignore the one alert that means money is actually stuck
+    expect(setFingerprint).not.toHaveBeenCalledWith(['payout-refund-refused', 'tr-1'])
     expect(postLedger).not.toHaveBeenCalled()
     expect(refund).not.toHaveBeenCalled()
     expect(transition).not.toHaveBeenCalled()
@@ -426,14 +454,38 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
       'transfers',
       transfer('REFUNDED', { refund_payment_ref: 'mockrefund_prev' }), // resolveTransfer
       stateRow('REFUNDED'), // failTransfer currentState → benign (already refunded)
-      stateRow('REFUNDED'), // driveRefund currentState → not PAYOUT_FAILED → no-op
+      transfer('REFUNDED', { refund_payment_ref: 'mockrefund_prev' }), // → already_settled (done, nothing written)
     )
 
     await processPaymentEvent('ev-1')
 
     // must NOT trip the post-delivery-reversal loss fingerprint on a routine dup
     expect(setFingerprint).not.toHaveBeenCalledWith(['payout-fail-after-terminal'])
+    // …nor the "sender still owed" page: the refund already happened
+    expect(setFingerprint).not.toHaveBeenCalledWith(['payout-refund-refused', 'tr-1'])
     expect(transition).not.toHaveBeenCalled()
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('AUTO_REFUND on but the tail refuses in a non-settled state → loud ops alert', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('SUBMITTED'), // resolveTransfer
+      stateRow('SUBMITTED'), // failTransfer currentState
+      transfer('IN_FLIGHT'), // the row moved between the fail and the service re-read
+    )
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    // markProcessed burns the only retry token, so a silent refusal here would
+    // strand the transfer holding the sender's money with nothing to notice
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-refund-refused', 'tr-1'])
+    expect(captureMessage).toHaveBeenCalledWith(expect.stringContaining('refund tail refused'), 'error')
     expect(postLedger).not.toHaveBeenCalled()
     expect(refund).not.toHaveBeenCalled()
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
@@ -442,7 +494,7 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
   it('a refund-tail error rethrows and leaves the event received (retryable)', async () => {
     envMock.AUTO_REFUND = true
     q('payment_events', event({ event_type: 'refunded' }))
-    q('transfers', transfer('SUBMITTED'), stateRow('SUBMITTED'), stateRow('PAYOUT_FAILED'))
+    q('transfers', transfer('SUBMITTED'), stateRow('SUBMITTED'), transfer('PAYOUT_FAILED'))
     transition.mockResolvedValue({})
     postLedger.mockRejectedValue(new Error('ledger db down'))
 

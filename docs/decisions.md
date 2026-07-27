@@ -6,6 +6,32 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-27 · One refund implementation, with the policy gate at the caller — and an operator CLI,
+not an ops endpoint.** Slice-7 PR6a lifts the `PAYOUT_FAILED → REFUNDED` tail out of the
+payment-event job into [`services/refunds.ts`](/apps/api/src/services/refunds.ts), so the automated
+path and the human path execute the *same* code. The alternative — a second, by-hand procedure —
+is how the two drift: the SQL an operator would otherwise write skips both ledger batches and never
+actually returns the money, leaving the books claiming a refund the sender never received.
+`AUTO_REFUND` shipped default-off with "a human refunds by runbook" (2026-07-21, below) and
+**neither the runbook nor the trigger existed**, so every parked row was unclearable in practice —
+and the poller cannot heal them later, because flipping the flag on re-synthesizes an event
+`recordEvent` dedupes. Three shape choices worth recording. **(1) The `AUTO_REFUND` check stays at
+the call site, never inside the service.** A `force: true` parameter on a money-moving service is an
+invitation for the next caller to bypass policy; keeping the gate in the job makes the policy visible
+per caller (the job checks the flag; the script does not, because the operator *is* the gate).
+**(2) The operator surface is a CLI, not an authenticated HTTP route.** A money-moving prod endpoint
+is the admin console the PRD rules out, and the script is strictly safer than the Supabase SQL editor
+the runbooks already use because it posts through the ledger RPC. A future support dashboard is
+additive — it calls the same service, and the script stays as break-glass. **(3) A
+principal-returned interlock, refusing on disagreement.** `bridge_return` books
+`DR cash_clearing / CR due_from_bridge` — it *asserts* Bridge sent our cash back — so the script
+requires both a recorded terminal `returned`/`refunded` event **and** a live Bridge `GET` confirming
+it, and refuses if they disagree. `refund_failed` (principal stuck at Bridge) is refused outright:
+fronting from float would book an unreconciled receivable under a ledger rule that does not exist.
+The service takes a transfer **id**, not a caller-supplied row, so the amounts and the
+never-refund-a-delivered-transfer guard always come from the database. **Status: active** (slice 7
+PR6a) ([runbooks/manual-refund.md](runbooks/manual-refund.md)).
+
 **2026-07-27 · Per-user transaction limits (the AML launch limits) ship commit-gated; the dollar
 "outstanding-uncleared" cap waits for ACH clearing.** Slice-7 PR5 adds `services/risk.ts` enforcing
 the **AML "Transaction Limits at Launch"** policy per user: a per-transaction send cap **($1,500)**

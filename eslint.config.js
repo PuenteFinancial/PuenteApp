@@ -22,6 +22,16 @@ export default [
     },
   },
   {
+    // Operator CLIs in apps/api/scripts/ — stdout IS their output surface, so
+    // the no-console rule (right for server code, where logs go through pino
+    // and must never carry PII) is noise here. Everything else still applies:
+    // these scripts call into src/services/*, including money movement.
+    files: ['apps/api/scripts/**/*.ts'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
+  {
     ignores: ['dist/', 'node_modules/', '.expo/'],
   },
 ]

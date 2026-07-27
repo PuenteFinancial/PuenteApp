@@ -53,7 +53,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 401 | `unauthorized` | Missing/expired JWT |
 | 403 | `forbidden` | Not the owner of the resource |
 | 403 | `kyc_required` | Sender KYC not `approved` |
-| 403 | `limit_exceeded` | Per-user limit hit (arrives with slice-8 caps) |
+| 403 | `limit_exceeded` | Per-user transaction limit hit (per-transaction / day / month / 6 months / sends per day) |
 | 404 | `not_found` | Unknown resource |
 | 409 | `conflict` | Illegal state transition |
 | 409 | `idempotency_conflict` | Idempotency-Key reused with different body |
@@ -189,8 +189,8 @@ reconciliation but never cross the wire.
 ```
 Errors: `quote_expired` (409), `conflict` (409 — quote already used / destination archived since
 quoting), `kyc_required` (403), `not_found` (404), `idempotency_conflict` (409),
-`not_configured` (503 — funding processor unavailable). `limit_exceeded` arrives with the
-slice-8 per-user caps. Rate-limited 10/min/user. The disclosure content (en + es, built from the
+`not_configured` (503 — funding processor unavailable), `limit_exceeded` (403 — a per-user
+transaction limit would be breached; see `services/risk.ts`). Rate-limited 10/min/user. The disclosure content (en + es, built from the
 quote snapshot, incl. cancellation right and the §1005.33(h) wrong-account warning) is stored
 append-only on `disclosures`; the response carries the summary.
 
