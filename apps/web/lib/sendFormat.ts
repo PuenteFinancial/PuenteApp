@@ -43,6 +43,15 @@ export function secondsUntil(iso: string, nowMs: number): number {
   return Math.round((new Date(iso).getTime() - nowMs) / 1000)
 }
 
+// ISO timestamp → localized medium date ("Jul 24, 2026" / "24 jul 2026") for the
+// transfer history + receipt. Date only (no time); the sender's language drives
+// the month name and ordering.
+export function formatDate(iso: string, lang: 'en' | 'es'): string {
+  return new Date(iso).toLocaleDateString(lang === 'es' ? 'es-MX' : 'en-US', {
+    dateStyle: 'medium',
+  })
+}
+
 function isMoney(v: unknown): boolean {
   return (
     typeof v === 'object' && v !== null && typeof (v as { amountMinor?: unknown }).amountMinor === 'number'

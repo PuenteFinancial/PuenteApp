@@ -6,6 +6,35 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-24 · Transfer history shows only *money-moved* transfers; abandoned sends are hidden, not
+deleted.** The sender-facing transaction history (`/dashboard/transfers`, slice-7 PR4) lists only
+transfers where payment was actually made — `FUNDED` and beyond — via a new
+`GET /v1/transfers?scope=history` filter (`state NOT IN (PENDING_PAYMENT, PAYMENT_FAILED)`);
+`scope=all` (the default) still returns everything for ops. A `transfer` row is created at the
+"Continue" step (`POST /transfers` → `PENDING_PAYMENT`) *before* the sender pays, and an abandoned one
+reconciles to `PAYMENT_FAILED` after 30 min — so listing every row would fill a sender's history with
+attempts they never completed (and, while prod is mock-funding-locked, with `PAYMENT_FAILED` for
+*every* transfer). Real payment apps don't surface abandoned attempts, so we filter. Crucially this is
+a **view filter, not a delete**: the rows + audit log are retained (append-only; abandoned rows carry
+zero ledger postings), so nothing about compliance retention changes — only what the sender is shown.
+Why a future engineer will ask "why on earth does the list take a `scope` param and hide failed
+transfers?" — because history is a product *view*, not the `transfers` table. **Status: active**
+(slice 7 PR4) ([api-contract.md](api-contract.md), [glossary.md](glossary.md)).
+
+**2026-07-24 · The receipt view ships ahead of counsel-final receipt wording, rendering server content
+verbatim.** Slice-7 PR4 adds a receipt view (`/dashboard/send/:id/receipt`) backed by
+`GET /v1/transfers/:id/receipt`. That endpoint's content is currently the *prepayment* copy reused
+(`buildReceiptDisclosure` delegates to `buildPrepaymentDisclosure`) — it does not yet carry the
+receipt-specific §1005.31(b)(2)(vi) elements (funds-availability date, receipt identification), a
+deferred counsel item (PR7, the hard pre-real-money gate). We ship the view now because it is
+**content-agnostic**: it renders `content[lang]` verbatim, so counsel's real wording swaps in
+server-side with no web change. Safe because the feature is behind the `web-send-money` dark-launch
+flag (off in prod) and the pilot is Joshua-only; the web chrome stays neutral ("Transfer receipt" +
+date) and invents no legal elements client-side. Why a future engineer will ask "why does the receipt
+show prepayment copy?" — because the display surface landed before the counsel wording, and the swap
+is server-only. **Status: active** (slice 7 PR4); receipt wording stays on the PR7 gate
+([transfer-state-machine.md](transfer-state-machine.md)).
+
 **2026-07-21 · Cancel-at-`FUNDED` is a *void*, not a refund (slice-6 two-verb model).** When a sender
 cancels a `FUNDED`-pre-claim transfer, no payout has gone out and no float was fronted, so the inbound
 ACH is *voided* (canceled before it settles) and the ledger is a **clean reversal** of the `FUNDED`

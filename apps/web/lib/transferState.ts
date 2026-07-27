@@ -94,6 +94,32 @@ export function outcomeFor(state: TransferState): TransferOutcome | null {
   return OUTCOMES[state as keyof typeof OUTCOMES] ?? null
 }
 
+export type BadgeTone = 'success' | 'progress' | 'neutral' | 'error'
+
+// The coarse visual grouping a history-row status badge carries alongside its
+// exact per-state label — the label gives precision, the tone gives the
+// at-a-glance scan. Exhaustive over TransferState (a Record, not a lookup with a
+// fallback) so adding a state without a tone is a compile error, never a silent
+// default. `progress` = still moving; `success` = delivered; `neutral` = money
+// returned or a benign dead end; `error` = needs attention.
+const BADGE_TONES: Record<TransferState, BadgeTone> = {
+  PENDING_PAYMENT: 'progress',
+  FUNDED: 'progress',
+  SUBMITTED: 'progress',
+  IN_FLIGHT: 'progress',
+  COMPLETED: 'success',
+  CANCELED: 'neutral',
+  REFUNDED: 'neutral',
+  PAYMENT_FAILED: 'neutral',
+  PAYOUT_FAILED: 'error',
+  FUNDING_REVERSED: 'error',
+  UNDER_REVIEW: 'error',
+}
+
+export function badgeTone(state: TransferState): BadgeTone {
+  return BADGE_TONES[state]
+}
+
 // Step-by-step progress for a happy-path state. Deliberately NOT defined for
 // off-path states: a canceled or refunded transfer gives no honest answer to
 // "how far did it get" (REFUNDED is reachable from both CANCELED and
@@ -182,6 +208,9 @@ export function isTransferShape(body: unknown): body is TrackedTransfer {
     typeof t.state === 'string' &&
     STATES.has(t.state) &&
     typeof t.fxRate === 'string' &&
+    // createdAt is consumed unconditionally by the history list (formatDate);
+    // a missing/non-string value would render "Invalid Date" with no signal.
+    typeof t.createdAt === 'string' &&
     isMoney(t.totalAmount) &&
     isMoney(t.sendAmount) &&
     isMoney(t.feeAmount) &&

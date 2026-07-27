@@ -107,3 +107,11 @@ refer back as needed.
   funding gate and limits once the risk engine exists; MVP users are all `trusted`.
 - **Truthful pending copy** — the product rule that status screens never promise what the system
   doesn't do (e.g. no "we'll email you" until email exists); established in lifecycle slice 5 (#48).
+- **Transaction history** — the sender-facing list of their *money-moved* transfers (`FUNDED` and
+  beyond), served by `GET /v1/transfers?scope=history`; never-funded attempts
+  (`PENDING_PAYMENT`/`PAYMENT_FAILED`) are filtered out. A product VIEW, not the `transfers` table —
+  abandoned rows are retained for audit/ledger but not shown. See [decisions.md](decisions.md) 2026-07-24.
+- **Abandoned send** — a transfer created at the "Continue" step (`POST /transfers` →
+  `PENDING_PAYMENT`) that the sender never funds; the `transfer.reconcile-pending` cron flips it to
+  `PAYMENT_FAILED` after 30 min (a zero-ledger dead row). Excluded from **Transaction history**. See
+  [transfer-state-machine.md](transfer-state-machine.md).

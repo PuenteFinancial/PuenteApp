@@ -14,8 +14,13 @@ export async function GET(req: NextRequest) {
     const qs = new URLSearchParams()
     const limit = searchParams.get('limit')
     const cursor = searchParams.get('cursor')
+    // scope MUST be forwarded: "Load more" pages through here, and dropping it
+    // would return the unfiltered (scope=all) page — leaking abandoned sends
+    // into the history list on every page after the first.
+    const scope = searchParams.get('scope')
     if (limit) qs.set('limit', limit)
     if (cursor) qs.set('cursor', cursor)
+    if (scope) qs.set('scope', scope)
     const path = `/v1/transfers${qs.toString() ? `?${qs.toString()}` : ''}`
     const apiRes = await apiFetch(path, token)
     const body = await apiRes.json().catch(() => ({}))

@@ -288,6 +288,17 @@ export default function TransferTracker({
           <p style={{ fontSize: 14, color: 'var(--muted)', margin: 0, lineHeight: 1.6 }}>
             {s.outcomes[outcome].body}
           </p>
+          {outcome === 'completed' && (
+            <p style={{ margin: '10px 0 0' }}>
+              <Link
+                href={`/dashboard/send/${transferId}/receipt`}
+                className="btn btn--accent btn--sm"
+                style={{ display: 'inline-block' }}
+              >
+                {s.viewReceipt}
+              </Link>
+            </p>
+          )}
           {outcomeNeedsSupport && <p style={{ margin: '8px 0 0' }}>{supportLink}</p>}
         </div>
       )}
