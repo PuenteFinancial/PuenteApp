@@ -14,8 +14,8 @@
     "@typescript-eslint/eslint-plugin": "^8.64.0",
     "@typescript-eslint/parser": "^8.64.0",
     "eslint": "^10.5.0",
-    "prettier": "^3.9.5",
-    "turbo": "^2.10.5",
+    "prettier": "^3.9.6",
+    "turbo": "^2.10.6",
     "typescript": "^6.0.3"
   },
   "packageManager": "pnpm@11.8.0",
