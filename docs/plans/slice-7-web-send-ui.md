@@ -240,14 +240,32 @@ window, backstop rejects at submit, idempotent-safe.
 ## PR6 — AUTO_REFUND ops-trigger surface + full SUBMITTED/IN_FLIGHT cancel handling *[API]*
 
 Backend + services/jobs + one operator CLI script — **no UI, not an admin dashboard** ("scripts over
-console"). **AUTO_REFUND ops trigger**: `apps/api/scripts/trigger-refund.ts`, run by runbook to drive
-`PAYOUT_FAILED→REFUNDED` while the flag stays **off** in prod (flipping it on is Stripe/pilot-gated).
+console"). **Split into two PRs** (2026-07-27): PR6a is self-contained and closes the runbook gap
+immediately; PR6b carries a migration, the repo's first `UNDER_REVIEW` writer, a web change, and a
+compliance review, and branches from fresh `main` *after* PR6a merges (it edits `services/refunds.ts`).
+
+### PR6a — AUTO_REFUND ops trigger *(shipped)*
+
+No migration, no new route, no new queue. The `PAYOUT_FAILED → REFUNDED` tail moves out of the
+payment-event job into [`services/refunds.ts`](/apps/api/src/services/refunds.ts) so the job and
+`apps/api/scripts/trigger-refund.ts` run the *same* code; the `AUTO_REFUND` gate stays at the job
+call site. The CLI is dry-run by default, requires `--operator <id>` (recorded as actor `ops:<id>`),
+does one transfer per run, and refuses unless a recorded terminal `returned`/`refunded` event **and**
+a live Bridge `GET` agree that the principal came back. Also widens typecheck + lint to `apps/api/scripts/`,
+which was covered by neither. Runbook: [manual-refund.md](/docs/runbooks/manual-refund.md); rationale:
+[decisions.md](/docs/decisions.md) 2026-07-27.
+
+### PR6b — pending-cancel record + `UNDER_REVIEW` resolution
+
 **Full `SUBMITTED`/`IN_FLIGHT` cancel handling**: `submissionInProgressResponse`
 ([transfers.ts:137](/apps/api/src/routes/v1/transfers.ts)) returns a bare `202` today — build the
-pending-cancel record + `UNDER_REVIEW` routing + ops-resolution surface, driven on mock. **Gated**: the
-counsel-adopted error-resolution process (proposal, not adopted) and real-money execution wait — this
-PR delivers the mechanism only. Skills: `api-route`, `ledger`, `migration` (if needed), `tdd`;
-`security-reviewer` + `compliance-reviewer`.
+pending-cancel record + `UNDER_REVIEW` routing + ops-resolution surface, driven on mock. Note
+[transfer-state-machine.md](/docs/transfer-state-machine.md) **supersedes** "post-submission cancel
+routes through `UNDER_REVIEW`" as wrong on the law (§1005.34 cancellation is not §1005.33 error
+resolution); `UNDER_REVIEW` is used only on the `COMPLETED` tail, as the one modeled post-delivery
+correction path. **Gated**: the counsel-adopted error-resolution process (proposal, not adopted) and
+real-money execution wait — this PR delivers the mechanism only. Skills: `api-route`, `ledger`,
+`migration`, `i18n`, `tdd`; `security-reviewer` + `compliance-reviewer`.
 
 ## PR7 — Reg E disclosure-wording counsel package *[doc + staged copy, counsel-gated]*
 

@@ -9,8 +9,8 @@
     "build": "tsup src/server.ts src/worker.ts --format esm",
     "start": "node dist/server.js",
     "start:worker": "node dist/worker.js",
-    "lint": "eslint src/",
-    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/ scripts/",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "dev:e2e": "node --env-file=.env.e2e.local --import tsx src/server.ts"

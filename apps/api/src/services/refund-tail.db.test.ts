@@ -18,6 +18,7 @@ import {
 } from './transfers.js'
 import { submittedLedgerEntries } from './payouts.js'
 import { postLedgerTransaction, type LedgerEntryInput } from './ledger.js'
+import { refundPayoutFailure } from './refunds.js'
 
 const runDb = process.env.RUN_DB_TESTS === '1'
 
@@ -25,6 +26,9 @@ const DB_URL = process.env.TEST_DB_URL ?? 'postgresql://postgres:postgres@127.0.
 
 const USER = '00000000-0000-4000-8000-00000000008a'
 const T_REFUND = '00000000-0000-4000-8000-000000000081'
+// slice-7 PR6a: the same tail driven through services/refunds.ts by an operator
+// (AUTO_REFUND off — the service reads no flag; the gate lives at the caller).
+const T_OPS = '00000000-0000-4000-8000-000000000082'
 
 const S = 19801 // quoted send principal
 const FEE = 199
@@ -77,6 +81,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       [recipient.rows[0].id],
     )
     await seedFundedTransfer(T_REFUND, destination.rows[0].id)
+    await seedFundedTransfer(T_OPS, destination.rows[0].id)
   })
 
   afterAll(async () => {
@@ -108,8 +113,19 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
     return Object.fromEntries(res.rows.map((r) => [r.code, Number(r.net)]))
   }
 
-  // Walk to PAYOUT_FAILED, then drive the two-batch refund (as driveRefund does).
-  const walkToRefunded = async (transferId: string) => {
+  const countEntries = async (transferId: string): Promise<number> => {
+    const res = await db.query(
+      `select count(*)::int as n from public.ledger_entries e
+        join public.ledger_transactions t on t.id = e.ledger_transaction_id
+       where t.transfer_id = $1`,
+      [transferId],
+    )
+    return res.rows[0].n as number
+  }
+
+  // FUNDED → SUBMITTED → PAYOUT_FAILED: the state a payout failure parks in,
+  // whichever path drives the refund from there.
+  const walkToPayoutFailed = async (transferId: string) => {
     await transitionTransfer({
       transferId,
       fromState: 'PENDING_PAYMENT',
@@ -131,6 +147,11 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       toState: 'PAYOUT_FAILED',
       actor: 'worker:payment-event',
     })
+  }
+
+  // Walk to PAYOUT_FAILED, then drive the two-batch refund (as driveRefund does).
+  const walkToRefunded = async (transferId: string) => {
+    await walkToPayoutFailed(transferId)
     // 1) bridge_return — stand-alone post, its own key {id}:bridge_return
     await postLedgerTransaction({
       transferId,
@@ -180,16 +201,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
   })
 
   it('replaying both refund posts adds nothing (idempotent on the two distinct keys)', async () => {
-    const countEntries = async () => {
-      const res = await db.query(
-        `select count(*)::int as n from public.ledger_entries e
-          join public.ledger_transactions t on t.id = e.ledger_transaction_id
-         where t.transfer_id = $1`,
-        [T_REFUND],
-      )
-      return res.rows[0].n as number
-    }
-    const before = await countEntries()
+    const before = await countEntries(T_REFUND)
 
     // replay bridge_return (same {id}:bridge_return key → ON CONFLICT DO NOTHING)
     await postLedgerTransaction({
@@ -209,6 +221,97 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       }),
     ).resolves.toMatchObject({ state: 'REFUNDED' })
 
-    expect(await countEntries()).toBe(before)
+    expect(await countEntries(T_REFUND)).toBe(before)
+  })
+
+  // slice-7 PR6a: the SAME tail driven by an operator through the shared service
+  // while AUTO_REFUND is off (the service reads no flag — the gate is the
+  // caller's). This is what scripts/trigger-refund.ts --confirm executes.
+  it('an operator-triggered refund reaches REFUNDED with both batches and an ops: actor', async () => {
+    await walkToPayoutFailed(T_OPS)
+
+    await expect(
+      refundPayoutFailure({
+        transferId: T_OPS,
+        actor: 'ops:jphelps',
+        reason: 'operator-triggered refund — AUTO_REFUND off',
+      }),
+    ).resolves.toEqual({ done: true, already: false })
+
+    const transfer = await db.query(
+      'select state, refund_payment_ref, refunded_at from public.transfers where id = $1',
+      [T_OPS],
+    )
+    expect(transfer.rows[0].state).toBe('REFUNDED')
+    // the sender was actually paid — not just marked refunded
+    expect(transfer.rows[0].refund_payment_ref).toMatch(/^mockrefund_/)
+    expect(transfer.rows[0].refunded_at).not.toBeNull()
+
+    // transfer_transitions.actor is the ONLY durable record of who did this
+    const transitions = await db.query(
+      `select actor from public.transfer_transitions
+        where transfer_id = $1 and to_state = 'REFUNDED'`,
+      [T_OPS],
+    )
+    expect(transitions.rows.map((r) => r.actor)).toEqual(['ops:jphelps'])
+
+    // same money as the automated path — the two implementations cannot diverge
+    expect(await accountTotals(T_OPS)).toEqual({
+      funding_receivable: S + FEE,
+      transfer_payable: 0,
+      fee_revenue: 0,
+      due_from_bridge: 0,
+      fx_slippage: A - S,
+      bridge_wallet_float: -A,
+      cash_clearing: -FEE,
+    })
+
+    const perTx = await db.query(
+      `select t.transition,
+              sum(case when e.direction = 'debit' then e.amount_minor else -e.amount_minor end)::bigint as net
+         from public.ledger_entries e
+         join public.ledger_transactions t on t.id = e.ledger_transaction_id
+        where t.transfer_id = $1 group by t.id, t.transition`,
+      [T_OPS],
+    )
+    for (const row of perTx.rows) expect(Number(row.net)).toBe(0)
+    expect(perTx.rows.map((r) => r.transition).sort()).toEqual(
+      ['FUNDED', 'REFUNDED', 'SUBMITTED', 'bridge_return'].sort(),
+    )
+  })
+
+  it('a second operator run is a clean no-op — no second disbursement, no new entries', async () => {
+    const before = await countEntries(T_OPS)
+    const beforeRef = (
+      await db.query('select refund_payment_ref from public.transfers where id = $1', [T_OPS])
+    ).rows[0].refund_payment_ref
+
+    await expect(
+      refundPayoutFailure({ transferId: T_OPS, actor: 'ops:jphelps', reason: 'replay' }),
+    ).resolves.toEqual({ done: true, already: true })
+
+    expect(await countEntries(T_OPS)).toBe(before)
+    expect(
+      (await db.query('select refund_payment_ref from public.transfers where id = $1', [T_OPS]))
+        .rows[0].refund_payment_ref,
+    ).toBe(beforeRef)
+  })
+
+  it('refuses a transfer that never failed and writes nothing', async () => {
+    // A fresh PENDING_PAYMENT transfer stands in for the case that matters most:
+    // a transfer an operator must never be able to "refund" through this path.
+    const other = '00000000-0000-4000-8000-000000000083'
+    const destination = await db.query(
+      `select pd.id from public.payout_destinations pd
+         join public.recipients r on r.id = pd.recipient_id where r.user_id = $1 limit 1`,
+      [USER],
+    )
+    await seedFundedTransfer(other, destination.rows[0].id)
+
+    await expect(
+      refundPayoutFailure({ transferId: other, actor: 'ops:jphelps', reason: 'x' }),
+    ).resolves.toEqual({ done: false, reason: 'not_payout_failed' })
+
+    expect(await countEntries(other)).toBe(0)
   })
 })

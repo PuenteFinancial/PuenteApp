@@ -4,14 +4,10 @@ import { supabaseAdmin } from '../services/supabase.js'
 import {
   transitionTransfer,
   completedLedgerEntries,
-  bridgeReturnLedgerEntries,
-  refundedLedgerEntries,
   fxRateToWire,
   TransferRpcError,
-  type LedgerEntryJson,
 } from '../services/transfers.js'
-import { postLedgerTransaction, type LedgerEntryInput } from '../services/ledger.js'
-import { getFundingProcessor } from '../services/funding/index.js'
+import { refundPayoutFailure } from '../services/refunds.js'
 import { buildReceiptDisclosure } from '../services/disclosures.js'
 import { mapBridgeState, markProcessed, markIgnored } from '../services/payment-events.js'
 
@@ -36,13 +32,10 @@ interface TransferRow {
   user_id: string
   state: string
   send_amount_minor: number
-  // slice-6 PR2 refund tail: the fee (refunded per Reg E on failure), the
-  // idempotency gate, and the processor-call inputs (payment ref + stable key).
-  fee_amount_minor: number
-  refund_payment_ref: string | null
-  funding_payment_ref: string | null
-  idempotency_key: string
   // slice-6 PR3 receipt: the remaining snapshot terms the receipt is built from.
+  // (The refund tail's own inputs — refund_payment_ref, funding_payment_ref,
+  // idempotency_key — live in services/refunds.ts, which re-reads them itself.)
+  fee_amount_minor: number
   receive_amount_minor: number
   fx_rate: number
 }
@@ -136,33 +129,31 @@ async function route(event: EventRow): Promise<void> {
   await markProcessed(event.id)
 }
 
-const toLedgerInput = (entries: LedgerEntryJson[]): LedgerEntryInput[] =>
-  entries.map((e) => ({
-    accountCode: e.account_code,
-    direction: e.direction,
-    money: { amountMinor: e.amount_minor, currency: e.currency },
-  }))
-
-// The PAYOUT_FAILED → REFUNDED refund-from-float tail (ledger-rules.md). Gated
-// by AUTO_REFUND (mechanism now / policy via flag — same as WAIT_FOR_CLEARING
-// and the float ceiling): OFF stops at PAYOUT_FAILED + an ops alert (a human
-// refunds by runbook); ON drives the full path. Idempotent throughout: the two
-// ledger batches are keyed (bridge_return / REFUNDED) and refund() is
-// refund_payment_ref-null-gated, so a webhook+poll duplicate or a crash-replay
-// posts and disburses exactly once. Any throw propagates (non-benign) to leave
-// the event 'received' for retry.
+// The PAYOUT_FAILED → REFUNDED refund-from-float tail itself lives in
+// services/refunds.ts (slice-7 PR6a) — ONE implementation shared with the
+// operator CLI, so the automated path and the by-hand path cannot diverge.
+// What stays here is the POLICY GATE: AUTO_REFUND (mechanism now / policy via
+// flag — same as WAIT_FOR_CLEARING and the float ceiling). OFF (prod default)
+// stops at PAYOUT_FAILED + an ops alert and a human refunds via
+// scripts/trigger-refund.ts; ON drives the full path. The gate is deliberately
+// at this call site rather than inside the service: a `force` parameter on a
+// money-moving service would make the policy invisible to the next caller.
+// Any throw propagates (non-benign) to leave the event 'received' for retry.
 async function driveRefund(transfer: TransferRow, event: EventRow): Promise<void> {
-  // failTransfer alerts + no-ops a fail-after-COMPLETED, so re-read: only refund
-  // a transfer that actually reached PAYOUT_FAILED (never one that delivered).
-  const current = (await currentState(transfer.id)) ?? transfer.state
-  if (current !== 'PAYOUT_FAILED') return
-
   if (!env.AUTO_REFUND) {
+    // failTransfer alerts + no-ops a fail-after-COMPLETED, so re-read before
+    // alerting: "manual refund required" must never fire for a transfer that
+    // actually delivered. (On the ON path the service does this re-read itself.)
+    const current = (await currentState(transfer.id)) ?? transfer.state
+    if (current !== 'PAYOUT_FAILED') return
+
     Sentry.withScope((scope) => {
       scope.setFingerprint(['payout-refund-gated', transfer.id])
       scope.setContext('payout_refund_gated', {
         transferId: transfer.id,
         bridgeState: event.event_type,
+        // point the alert at its own fix
+        runbook: 'docs/runbooks/manual-refund.md',
       })
       Sentry.captureMessage(
         'payout failed, principal returned — AUTO_REFUND off, manual refund required',
@@ -172,44 +163,10 @@ async function driveRefund(transfer: TransferRow, event: EventRow): Promise<void
     return
   }
 
-  // 1) Book the returned principal back to cash — a stand-alone post (state
-  //    stays PAYOUT_FAILED), keyed {id}:bridge_return, idempotent on replay.
-  await postLedgerTransaction({
+  await refundPayoutFailure({
     transferId: transfer.id,
-    transition: 'bridge_return',
-    description: 'bridge returned principal on payout failure',
-    entries: toLedgerInput(bridgeReturnLedgerEntries(transfer)),
-  })
-
-  // 2) Return the collected funds to the sender. null-gated so a duplicate
-  //    never double-refunds; keyed off the transfer's stable bridge idempotency
-  //    key so a retry dedupes against the real processor (slice 7).
-  if (!transfer.refund_payment_ref) {
-    const undo = await getFundingProcessor().refund({
-      transferId: transfer.id,
-      paymentRef: transfer.funding_payment_ref ?? '',
-      amountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,
-      currency: 'USD',
-      idempotencyKey: `${transfer.idempotency_key}:refund`,
-    })
-    const { error } = await supabaseAdmin
-      .from('transfers')
-      .update({ refund_payment_ref: undo.ref, refunded_at: new Date().toISOString() })
-      .eq('id', transfer.id)
-      .is('refund_payment_ref', null)
-    if (error) throw new Error(`payment-event refund ref persist failed: ${error.message}`)
-  }
-
-  // 3) Recognize + pay the refund and settle REFUNDED — a DISTINCT posting key
-  //    from bridge_return (the UNIQUE(transfer_id, transition) index needs both).
-  await transitionTransfer({
-    transferId: transfer.id,
-    fromState: 'PAYOUT_FAILED',
-    toState: 'REFUNDED',
     actor: 'worker:payment-event',
     reason: 'refund completed — sender made whole',
-    ledgerDescription: 'transfer REFUNDED — payout failed, sender refunded from float',
-    ledgerEntries: refundedLedgerEntries(transfer),
   })
 }
 
@@ -221,8 +178,8 @@ async function resolveTransfer(event: EventRow): Promise<TransferRow | null> {
     const { data, error } = await supabaseAdmin
       .from('transfers')
       .select(
-        'id, user_id, state, send_amount_minor, fee_amount_minor, refund_payment_ref, ' +
-          'funding_payment_ref, idempotency_key, receive_amount_minor, fx_rate',
+        'id, user_id, state, send_amount_minor, fee_amount_minor, ' +
+          'receive_amount_minor, fx_rate',
       )
       .eq(column, value)
       .maybeSingle()
