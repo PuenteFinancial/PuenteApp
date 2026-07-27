@@ -2,8 +2,8 @@
 
 **Date:** 2026-07-20 · **Status:** live process (slice 5)
 
-A payout hold is a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`, or
-`submit_error`) and `payout_held_at`. The submit job sets the hold and stops; the 1-min
+A payout hold is a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`,
+`submit_error`, or `velocity_review`) and `payout_held_at`. The submit job sets the hold and stops; the 1-min
 `payout.sweep` cron skips held rows. Releasing a hold means clearing the column — the sweep
 resubmits automatically within a minute. There is no admin endpoint at MVP; release is SQL via
 the Supabase SQL editor (a sanctioned ops **data** fix — schema changes still go through
@@ -105,6 +105,27 @@ transitioning to `SUBMITTED`. A second, `error`-level Sentry event (fingerprint
    the SUBMITTED ledger expectation, fix `parseDecimalToMinor` / the Bridge model
    (`services/payouts.ts`), and complete the transition deliberately.
 
+## `velocity_review` — per-user velocity backstop tripped
+
+The `FUNDED → SUBMITTED` backstop found the sender over one of their per-user transaction limits (the
+AML launch limits: per-transaction, or a rolling day / month / 6-month send total, or the per-day
+count) — a rare same-instant commit race that slipped the confirm-time gate. The Sentry `payout_hold`
+context carries `velocityReason` (`per_transaction` / `daily` / `monthly` / `semiannual` /
+`velocity_count`) and the transfer id (no PII). This is **not** self-healing: a per-user tally doesn't
+drain on its own (a completed send keeps counting for its window), so the transfer would strand until
+the window rolls — hence the hold.
+
+1. Look at the sender's other in-window committed sends (`transfers` where `user_id = …`,
+   `disclosure_accepted_at` within the window, state not in the unwound set). Confirm whether the
+   burst is legitimate (the sender really meant to send this much) or looks like an error or abuse.
+2. Decide:
+   - **Legitimate** (trusted sender, honest burst) → release; the payout submits within a minute. If
+     they will routinely exceed the pilot caps, raise the `RISK_*` env values **with Joshua's
+     sign-off** rather than releasing repeatedly.
+   - **Error or suspicious** → do not release; cancel the transfer and refund the sender (the Reg E
+     cancel/refund path), then follow up.
+3. Release SQL is the standard procedure above with `payout_hold_reason = 'velocity_review'`.
+
 ## Cancel request during Bridge `in_review`
 
 Not a hold, but it lands here (decision 2026-07-20): Bridge compliance review can leave funds
@@ -133,5 +154,5 @@ alert is fingerprinted, so it fires once per episode, not per retry.
 2. If the balance is flat or growing: check treasury wallet replenishment and whether funding
    webhooks/clearing are stalled.
 3. Raise `FLOAT_CEILING_MINOR` **only with Joshua's sign-off** — it is the aggregate fronting
-   exposure cap, not a tuning knob. The authoritative float controls (per-user limits, velocity,
-   risk engine) are slice 8.
+   exposure cap, not a tuning knob. (Per-user velocity landed in slice 7 PR5 — see `velocity_review`
+   above; the per-user dollar-outstanding cap and the broader risk engine remain slice 8.)

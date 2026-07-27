@@ -20,6 +20,7 @@ import {
   BridgeApiError,
 } from '../services/bridge.js'
 import { enqueuePaymentEventProcess } from '../services/queue.js'
+import { assessTransferRisk } from '../services/risk.js'
 
 // The payout submission job (`payout.submit`) — the ONLY code path that asks
 // Bridge to move money. Ordering is load → cheap gates → claim → Bridge POST →
@@ -59,7 +60,7 @@ const holdFingerprint = (reason: string) => ['payout-hold', reason]
 // existing hold and never touches a row that has already moved on.
 async function placeHold(
   transferId: string,
-  reason: 'fx_drift' | 'payability' | 'submit_error',
+  reason: 'fx_drift' | 'payability' | 'submit_error' | 'velocity_review',
   context: Record<string, unknown>,
 ): Promise<void> {
   const { data, error } = await supabaseAdmin
@@ -144,6 +145,26 @@ export async function submitPayout(transferId: string): Promise<number> {
         })
         Sentry.captureMessage('float ceiling tripped — payout submission paused', 'warning')
       })
+      return 0
+    }
+
+    // Per-user velocity backstop (slice-7 PR5): the authoritative catch for the
+    // rare same-instant commit race that slipped the confirm-time gate. This is
+    // the last gate before the irreversible MXN payout, so holding here prevents
+    // delivery even though the ACH pull already happened. excludeTransferId omits
+    // this transfer (already committed + funded) so it never counts itself.
+    // A trip places a HOLD, not a self-heal: unlike the aggregate float ceiling
+    // (which drains as ACH settles), a per-user velocity count does NOT drain on
+    // its own — a completed send keeps counting for the whole window — so a
+    // self-heal would strand a funded transfer for up to a full window with no ops
+    // signal. The hold surfaces it for release-or-refund (payout-holds runbook).
+    const risk = await assessTransferRisk({
+      userId: transfer.user_id,
+      sendAmountMinor: transfer.send_amount_minor,
+      excludeTransferId: transfer.id,
+    })
+    if (!risk.ok) {
+      await placeHold(transfer.id, 'velocity_review', { velocityReason: risk.reason })
       return 0
     }
 

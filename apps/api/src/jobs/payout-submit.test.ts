@@ -49,6 +49,11 @@ vi.mock('../services/queue.js', () => ({
   enqueuePaymentEventProcess: (...args: unknown[]) => enqueueEvent(...args),
 }))
 
+const risk = vi.hoisted(() => vi.fn())
+vi.mock('../services/risk.js', () => ({
+  assessTransferRisk: (...args: unknown[]) => risk(...args),
+}))
+
 const captureMessage = vi.hoisted(() => vi.fn())
 const setFingerprint = vi.hoisted(() => vi.fn())
 vi.mock('@sentry/node', () => ({
@@ -141,6 +146,8 @@ beforeEach(() => {
     if (!next) throw new Error(`unexpected supabase.from('${table}')`)
     return next
   })
+  // Per-user velocity backstop passes by default; the trip test overrides.
+  risk.mockResolvedValue({ ok: true })
 })
 
 describe('submitPayout — short-circuits (no Bridge call)', () => {
@@ -225,6 +232,38 @@ describe('submitPayout — holds', () => {
     expect(load.update).not.toHaveBeenCalled() // the whole point: self-healing, no hold
     expect(setFingerprint).toHaveBeenCalledWith(['float-ceiling'])
     expect(exchangeRate).not.toHaveBeenCalled()
+    expect(createPayout).not.toHaveBeenCalled()
+  })
+
+  it('per-user velocity tripped at submit → velocity_review hold, no Bridge call', async () => {
+    const load = chain({ data: baseTransfer, error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
+    route('transfers', load, hold)
+    payability.mockResolvedValue({ payable: true, providerAccountRef: 'ext_1' })
+    floatCeiling.mockResolvedValue({ tripped: false, balanceMinor: 0, ceilingMinor: 100 })
+    risk.mockResolvedValue({ ok: false, reason: 'daily' })
+    expect(await submitPayout('tr-1')).toBe(0)
+    // a hold (ops-visible), NOT a self-heal — a per-user count doesn't drain on its own
+    expect(hold.update).toHaveBeenCalledWith(
+      expect.objectContaining({ payout_hold_reason: 'velocity_review' }),
+    )
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-hold', 'velocity_review'])
+    expect(exchangeRate).not.toHaveBeenCalled() // returned before the FX backstop
+    expect(createPayout).not.toHaveBeenCalled()
+    // the backstop must meter the send principal and exclude the transfer itself (else it self-counts)
+    expect(risk).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'user-1', sendAmountMinor: 19801, excludeTransferId: 'tr-1' }),
+    )
+  })
+
+  it('fails closed — a risk-query error fails the job (pg-boss retry), no Bridge, no hold', async () => {
+    const load = chain({ data: baseTransfer, error: null })
+    route('transfers', load)
+    payability.mockResolvedValue({ payable: true, providerAccountRef: 'ext_1' })
+    floatCeiling.mockResolvedValue({ tripped: false, balanceMinor: 0, ceilingMinor: 100 })
+    risk.mockRejectedValue(new Error('db down'))
+    await expect(submitPayout('tr-1')).rejects.toThrow('db down')
+    expect(load.update).not.toHaveBeenCalled() // no hold written
     expect(createPayout).not.toHaveBeenCalled()
   })
 
@@ -406,6 +445,7 @@ describe('submitPayout — crash recovery', () => {
     expect(await submitPayout('tr-1')).toBe(1)
     expect(payability).not.toHaveBeenCalled()
     expect(floatCeiling).not.toHaveBeenCalled()
+    expect(risk).not.toHaveBeenCalled() // the velocity backstop is skipped on recovery too
     expect(exchangeRate).not.toHaveBeenCalled()
     expect(load.update).not.toHaveBeenCalled() // no re-claim
     expect(createPayout).toHaveBeenCalledWith(
