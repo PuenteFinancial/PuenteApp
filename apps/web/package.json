@@ -13,7 +13,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "next": "^15.3.2",
+    "next": "^16.2.11",
     "posthog-js": "^1.404.0",
     "posthog-node": "^5.45.2",
     "react": "^19.1.0",
