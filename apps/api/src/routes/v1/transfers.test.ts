@@ -54,7 +54,7 @@ function chain(result: { data?: unknown; error?: unknown }) {
   const b: Record<string, ReturnType<typeof vi.fn>> & {
     then?: (resolve: (v: unknown) => void) => void
   } = {} as never
-  for (const m of ['select', 'insert', 'update', 'delete', 'eq', 'is', 'or', 'order', 'limit'] as const) {
+  for (const m of ['select', 'insert', 'update', 'delete', 'eq', 'is', 'not', 'or', 'order', 'limit'] as const) {
     b[m] = vi.fn(() => b)
   }
   b['single'] = vi.fn(async () => resolved)
@@ -605,6 +605,43 @@ describe('GET /v1/transfers', () => {
     const app = await buildApp()
     const res = await supertest(app.server)
       .get('/v1/transfers?cursor=%20nonsense%20')
+      .set('Authorization', 'Bearer test-token')
+    expect(res.status).toBe(400)
+    await app.close()
+  })
+
+  it('scope=history hides abandoned (never-funded) transfers', async () => {
+    const list = chain({ data: [transferRow] })
+    from.mockReturnValueOnce(list)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/transfers?scope=history')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(list['not']).toHaveBeenCalledWith('state', 'in', '(PENDING_PAYMENT,PAYMENT_FAILED)')
+    await app.close()
+  })
+
+  it('scope=all (default) returns everything — no state filter', async () => {
+    const list = chain({ data: [transferRow] })
+    from.mockReturnValueOnce(list)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/transfers')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(list['not']).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('400s an invalid scope', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server)
+      .get('/v1/transfers?scope=bogus')
       .set('Authorization', 'Bearer test-token')
     expect(res.status).toBe(400)
     await app.close()

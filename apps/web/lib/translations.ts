@@ -77,7 +77,7 @@ export type Translations = {
       retryCta: string; retrying: string; retryError: string
       exhaustedBody: string; supportCta: string
     }
-    dashboard: { title: string; body: string; recipientsCta: string }
+    dashboard: { title: string; body: string; recipientsCta: string; historyCta: string }
   }
   recipients: {
     title: string
@@ -187,6 +187,8 @@ export type Translations = {
       loadError: string
       retry: string
       done: string
+      // Shown on the delivered outcome — links to the receipt view (PR4).
+      viewReceipt: string
       // Rendered as a mailto next to every message that tells a sender to
       // contact us — the 202 cancellation routing and the outcomes that direct
       // to support. Without it those messages instruct a sender to exercise a
@@ -201,6 +203,24 @@ export type Translations = {
         fundingReversed: { title: string; body: string }
         underReview: { title: string; body: string }
       }
+    }
+    // Receipt view (PR4). Chrome ONLY — the Reg E receipt body is server-authored
+    // and rendered verbatim (see ReceiptView/DisclosureBody). Its counsel-final
+    // wording is the PR7 gate; this chrome makes no statement about money or rights.
+    receipt: {
+      title: string
+      completedOn: string
+      viewHistory: string
+    }
+    // Transfer history (PR4) — the money-moved transaction list. Row status
+    // labels reuse track.steps / track.outcomes; these are just list chrome.
+    history: {
+      title: string
+      empty: string
+      loadMore: string
+      loading: string
+      loadError: string
+      retry: string
     }
     // code → user-facing message; the apiError layer maps the API error
     // envelope's stable `code` onto these (unmapped codes fall back to generic)
@@ -383,6 +403,7 @@ const en: Translations = {
       title: 'You’re verified',
       body: 'Sending money is coming soon. We’ll let you know the moment it’s live.',
       recipientsCta: 'Manage recipients',
+      historyCta: 'Transfer history',
     },
   },
   recipients: {
@@ -481,6 +502,7 @@ const en: Translations = {
       loadError: 'We couldn’t load this transfer. Try again.',
       retry: 'Retry',
       done: 'Back to dashboard',
+      viewReceipt: 'View receipt',
       supportCta: 'Contact support',
       outcomes: {
         completed: {
@@ -512,6 +534,19 @@ const en: Translations = {
           body: 'We’re looking into this transfer. We’ll contact you as soon as the review is done.',
         },
       },
+    },
+    receipt: {
+      title: 'Transfer receipt',
+      completedOn: 'Completed on {date}',
+      viewHistory: 'View all transfers',
+    },
+    history: {
+      title: 'Transfer history',
+      empty: 'You haven’t sent any transfers yet.',
+      loadMore: 'Load more',
+      loading: 'Loading…',
+      loadError: 'We couldn’t load your transfers. Try again.',
+      retry: 'Retry',
     },
     errors: {
       validation_error: 'Please check the details and try again.',
@@ -692,6 +727,7 @@ const es: Translations = {
       title: 'Estás verificado',
       body: 'Muy pronto podrás enviar dinero. Te avisaremos en cuanto esté disponible.',
       recipientsCta: 'Administrar destinatarios',
+      historyCta: 'Historial de transferencias',
     },
   },
   recipients: {
@@ -790,6 +826,7 @@ const es: Translations = {
       loadError: 'No pudimos cargar esta transferencia. Inténtalo de nuevo.',
       retry: 'Reintentar',
       done: 'Volver al panel',
+      viewReceipt: 'Ver recibo',
       supportCta: 'Comunícate con soporte',
       outcomes: {
         completed: {
@@ -821,6 +858,19 @@ const es: Translations = {
           body: 'Estamos revisando esta transferencia. Te contactaremos en cuanto termine la revisión.',
         },
       },
+    },
+    receipt: {
+      title: 'Recibo de transferencia',
+      completedOn: 'Completado el {date}',
+      viewHistory: 'Ver todas las transferencias',
+    },
+    history: {
+      title: 'Historial de transferencias',
+      empty: 'Aún no has enviado ninguna transferencia.',
+      loadMore: 'Cargar más',
+      loading: 'Cargando…',
+      loadError: 'No pudimos cargar tus transferencias. Inténtalo de nuevo.',
+      retry: 'Reintentar',
     },
     errors: {
       validation_error: 'Revisa los datos e inténtalo de nuevo.',

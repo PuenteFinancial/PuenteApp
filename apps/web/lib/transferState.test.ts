@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   TIMELINE_STEPS,
+  badgeTone,
   canRequestCancel,
   classifyCancelResponse,
   isOnHappyPath,
@@ -251,5 +252,32 @@ describe('isTransferShape', () => {
 
   it('rejects an unrecognized state rather than treating it as in-progress', () => {
     expect(isTransferShape({ ...transfer(), state: 'SOMETHING_NEW' })).toBe(false)
+  })
+
+  it('rejects a body missing createdAt (the history date would be Invalid Date)', () => {
+    const partial: Record<string, unknown> = { ...transfer() }
+    delete partial.createdAt
+    expect(isTransferShape(partial)).toBe(false)
+  })
+})
+
+describe('badgeTone', () => {
+  it('groups every state into a tone (delivered=success, in-flight=progress)', () => {
+    expect(badgeTone('COMPLETED')).toBe('success')
+    for (const state of ['PENDING_PAYMENT', 'FUNDED', 'SUBMITTED', 'IN_FLIGHT'] as const) {
+      expect(badgeTone(state)).toBe('progress')
+    }
+  })
+
+  it('treats money-returned and benign dead-ends as neutral, not alarming', () => {
+    for (const state of ['CANCELED', 'REFUNDED', 'PAYMENT_FAILED'] as const) {
+      expect(badgeTone(state)).toBe('neutral')
+    }
+  })
+
+  it('flags states that need attention as error', () => {
+    for (const state of ['PAYOUT_FAILED', 'FUNDING_REVERSED', 'UNDER_REVIEW'] as const) {
+      expect(badgeTone(state)).toBe('error')
+    }
   })
 })
