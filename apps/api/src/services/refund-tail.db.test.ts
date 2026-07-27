@@ -236,7 +236,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
         actor: 'ops:jphelps',
         reason: 'operator-triggered refund — AUTO_REFUND off',
       }),
-    ).resolves.toEqual({ done: true, already: false })
+    ).resolves.toEqual({ done: true, outcome: 'refunded' })
 
     const transfer = await db.query(
       'select state, refund_payment_ref, refunded_at from public.transfers where id = $1',
@@ -288,7 +288,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
 
     await expect(
       refundPayoutFailure({ transferId: T_OPS, actor: 'ops:jphelps', reason: 'replay' }),
-    ).resolves.toEqual({ done: true, already: true })
+    ).resolves.toEqual({ done: true, outcome: 'already_settled' })
 
     expect(await countEntries(T_OPS)).toBe(before)
     expect(

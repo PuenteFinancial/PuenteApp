@@ -44,8 +44,20 @@ const REFUNDABLE_COLUMNS =
 // principal is stuck AT Bridge; neither confirms anything.
 const PRINCIPAL_RETURNED_STATES = ['returned', 'refunded'] as const
 
+// Transfer ids arrive from an operator's command line and are interpolated into
+// a PostgREST `or` FILTER STRING (findReturnEvent), which takes no bound
+// parameters — so the shape is checked before it can reach one.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// `done` means the transfer is at REFUNDED. The three done-outcomes are kept
+// distinct because a caller that reports "refunded by you" must not say so for
+// a run that wrote nothing:
+//   refunded          — this run disbursed and settled
+//   already_disbursed — the disbursement pre-existed (crash between the persist
+//                       and the transition); this run posted the batches
+//   already_settled   — already REFUNDED; this run wrote NOTHING at all
 export type RefundOutcome =
-  | { done: true; already: boolean } // reached REFUNDED (already = the disbursement had already gone out)
+  | { done: true; outcome: 'refunded' | 'already_disbursed' | 'already_settled' }
   | { done: false; reason: 'not_payout_failed' | 'transfer_not_found' }
 
 export type PrincipalVerdict =
@@ -90,7 +102,7 @@ export async function refundPayoutFailure(input: {
   // disbursement are keyed, so re-posting would be a no-op anyway, but a replay
   // from a terminal state should not touch the ledger at all. Distinct from the
   // refusal below so the CLI can exit 0 here and non-zero there.
-  if (transfer.state === 'REFUNDED') return { done: true, already: true }
+  if (transfer.state === 'REFUNDED') return { done: true, outcome: 'already_settled' }
 
   // The guard that matters: only refund a transfer that actually reached
   // PAYOUT_FAILED — never one that delivered.
@@ -108,8 +120,8 @@ export async function refundPayoutFailure(input: {
   // 2) Return the collected funds to the sender. null-gated so a duplicate
   //    never double-refunds; keyed off the transfer's stable bridge idempotency
   //    key so a retry dedupes against the real processor (slice 7).
-  const already = transfer.refund_payment_ref !== null
-  if (!already) {
+  const alreadyDisbursed = transfer.refund_payment_ref !== null
+  if (!alreadyDisbursed) {
     const undo = await getFundingProcessor().refund({
       transferId: transfer.id,
       paymentRef: transfer.funding_payment_ref ?? '',
@@ -137,7 +149,7 @@ export async function refundPayoutFailure(input: {
     ledgerEntries: refundedLedgerEntries(transfer),
   })
 
-  return { done: true, already }
+  return { done: true, outcome: alreadyDisbursed ? 'already_disbursed' : 'refunded' }
 }
 
 /**
@@ -237,13 +249,17 @@ async function loadRefundable(transferId: string): Promise<RefundableTransfer | 
 }
 
 // Ingest does not always resolve transfer_id (out-of-order / unknown reference —
-// see payment-events.ts), so match on either key. The provider-ref clause is
-// included only for a syntactically safe ref: PostgREST `or` takes a filter
-// STRING, so an exotic value could otherwise alter the predicate.
+// see payment-events.ts), so match on either key. PostgREST `or` takes a filter
+// STRING, not bound parameters, so BOTH interpolated values are charset-checked
+// first: an id like `x),or(1.eq.1` would otherwise rewrite the predicate. The
+// transfer id reaches here straight from a CLI argument.
 async function findReturnEvent(
   transferId: string,
   providerTransferRef: string,
 ): Promise<string | null> {
+  if (!UUID_RE.test(transferId)) {
+    throw new Error(`refund principal-return event query failed: malformed transfer id`)
+  }
   const clauses = [`transfer_id.eq.${transferId}`]
   if (/^[A-Za-z0-9_-]+$/.test(providerTransferRef)) {
     clauses.push(`provider_ref.eq.${providerTransferRef}`)

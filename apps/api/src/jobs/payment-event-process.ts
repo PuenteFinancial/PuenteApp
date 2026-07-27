@@ -163,11 +163,33 @@ async function driveRefund(transfer: TransferRow, event: EventRow): Promise<void
     return
   }
 
-  await refundPayoutFailure({
+  const outcome = await refundPayoutFailure({
     transferId: transfer.id,
     actor: 'worker:payment-event',
     reason: 'refund completed — sender made whole',
   })
+
+  // A refusal means the sender was NOT refunded, and the caller marks the event
+  // 'processed' either way — so nothing retries and nothing else would ever
+  // notice. Every other contradictory-sequence branch in this file pages ops
+  // (payout-success-after-terminal, payout-fail-after-terminal); the one that
+  // holds the sender's money must not be the silent one. Reachable when the row
+  // moves between failTransfer and the service's re-read.
+  if (!outcome.done) {
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['payout-refund-refused', transfer.id])
+      scope.setContext('payout_refund_refused', {
+        transferId: transfer.id,
+        reason: outcome.reason,
+        bridgeState: event.event_type,
+        runbook: 'docs/runbooks/manual-refund.md',
+      })
+      Sentry.captureMessage(
+        'refund tail refused — transfer not refunded, sender still owed',
+        'error',
+      )
+    })
+  }
 }
 
 // Resolve our transfer for the event: the ingest path usually set transfer_id;

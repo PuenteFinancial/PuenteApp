@@ -33,11 +33,67 @@ import {
   refundLedgerBatches,
 } from '../src/services/refunds.js'
 
-const argv = process.argv.slice(2)
-const has = (flag: string): boolean => argv.includes(flag)
-const argValue = (flag: string): string | undefined => {
-  const i = argv.indexOf(flag)
-  return i === -1 ? undefined : argv[i + 1]
+const KNOWN_FLAGS = ['--list', '--operator', '--confirm']
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export type ParsedArgs =
+  | { mode: 'list' }
+  | { mode: 'trigger'; transferId: string; operator: string; confirm: boolean }
+  | { mode: 'error'; message: string }
+
+/**
+ * Pure arg parsing, exported so it can be tested without executing a refund.
+ *
+ * Strict on purpose. A money CLI that silently reinterprets a typo is worse
+ * than one that refuses: `--comfirm` must not quietly become a dry run that
+ * exits 0, and `--operator --confirm` must not disburse under the actor
+ * `ops:--confirm` (both of which a lenient parser does — `--confirm` matches
+ * the operator charset, and the same token satisfies the confirm check).
+ */
+export function parseArgs(argv: string[]): ParsedArgs {
+  const flagValueIndexes = new Set<number>()
+  for (const [i, token] of argv.entries()) {
+    if (token === '--operator') flagValueIndexes.add(i + 1)
+  }
+  for (const [i, token] of argv.entries()) {
+    if (token.startsWith('-') && !KNOWN_FLAGS.includes(token) && !flagValueIndexes.has(i)) {
+      return { mode: 'error', message: `unknown option "${token}"` }
+    }
+  }
+
+  const has = (flag: string): boolean => argv.includes(flag)
+  const operatorIndex = argv.indexOf('--operator')
+  const operator = operatorIndex === -1 ? undefined : argv[operatorIndex + 1]
+
+  if (has('--list')) {
+    // --list is read-only; pairing it with execution flags is a confused
+    // command, not a request to do both.
+    if (argv.length > 1) return { mode: 'error', message: '--list takes no other arguments' }
+    return { mode: 'list' }
+  }
+
+  const transferId = argv[0]
+  if (!transferId || transferId.startsWith('-')) {
+    return { mode: 'error', message: 'a transfer id is required' }
+  }
+  if (!UUID_RE.test(transferId)) {
+    return { mode: 'error', message: `"${transferId}" is not a transfer id (expected a UUID)` }
+  }
+
+  // A DEFAULTED actor is worthless in an audit trail, so this is required, not
+  // optional. Rejecting a leading `-` is what stops `--operator --confirm` from
+  // both naming the operator and confirming the disbursement.
+  if (operator === undefined || operator.startsWith('-')) {
+    return {
+      mode: 'error',
+      message: '--operator <id> is required: it is recorded as the actor on this refund',
+    }
+  }
+  if (!/^[a-z0-9._-]{2,32}$/.test(operator)) {
+    return { mode: 'error', message: `invalid --operator "${operator}" — expected 2-32 chars of [a-z0-9._-]` }
+  }
+
+  return { mode: 'trigger', transferId, operator, confirm: has('--confirm') }
 }
 
 let step = 0
@@ -53,15 +109,9 @@ function fail(msg: string): never {
   process.exit(1)
 }
 
-// A function declaration, not a const arrow: TS only narrows through a
-// never-returning call when the callee is a plain name with a declared type.
-function usage(): never {
-  console.error(
-    'usage: tsx scripts/trigger-refund.ts --list\n' +
-      '       tsx scripts/trigger-refund.ts <transferId> --operator <id> [--confirm]',
-  )
-  process.exit(1)
-}
+const USAGE =
+  'usage: tsx scripts/trigger-refund.ts --list\n' +
+  '       tsx scripts/trigger-refund.ts <transferId> --operator <id> [--confirm]'
 
 const usd = (minor: number): string => `$${(minor / 100).toFixed(2)}`
 
@@ -125,9 +175,12 @@ async function trigger(transferId: string, operator: string, confirm: boolean): 
     fail(`refund refused: ${outcome.reason} (only a transfer at PAYOUT_FAILED can be refunded)`)
   }
   pass(
-    outcome.already
-      ? 'already disbursed on a previous run — state settled, no second disbursement'
-      : 'sender refunded (send + fee) and state settled',
+    {
+      refunded: 'sender refunded (send + fee) and state settled',
+      already_disbursed:
+        'the disbursement had already gone out — no second payment; state settled by this run',
+      already_settled: 'ALREADY REFUNDED before this run — nothing was written',
+    }[outcome.outcome],
   )
 
   // 3) Prove both batches landed under their distinct keys.
@@ -139,41 +192,39 @@ async function trigger(transferId: string, operator: string, confirm: boolean): 
     console.log(`   ${expected}`)
   }
   pass('both refund batches posted')
+
+  // Never claim credit for a run that wrote nothing: the verify query below
+  // would show a different actor and make the tool look like it lied.
   console.log(
-    `\n✅ ${transferId} refunded by ops:${operator}\n` +
-      `   verify: select actor, from_state, to_state from public.transfer_transitions ` +
+    outcome.outcome === 'already_settled'
+      ? `\n✅ ${transferId} was already REFUNDED — this run changed nothing`
+      : `\n✅ ${transferId} refunded by ops:${operator}`,
+  )
+  console.log(
+    `   verify: select actor, from_state, to_state from public.transfer_transitions ` +
       `where transfer_id = '${transferId}' order by created_at;`,
   )
 }
 
 async function main(): Promise<void> {
-  if (has('--list')) {
+  const args = parseArgs(process.argv.slice(2))
+  if (args.mode === 'error') {
+    console.error(`${args.message}\n\n${USAGE}`)
+    process.exit(1)
+  }
+  if (args.mode === 'list') {
     await list()
     return
   }
-
-  const transferId = argv[0]
-  if (!transferId || transferId.startsWith('--')) usage()
-
-  // A DEFAULTED actor is worthless in an audit trail, so this is required, not
-  // optional. The charset keeps it a readable handle and keeps anything odd out
-  // of transfer_transitions.actor (DB caps it at 100 chars).
-  const operator = argValue('--operator')
-  if (!operator) {
-    console.error('--operator <id> is required: it is recorded as the actor on this refund')
-    process.exit(1)
-  }
-  if (!/^[a-z0-9._-]{2,32}$/.test(operator)) {
-    console.error(`invalid --operator "${operator}" — expected 2-32 chars of [a-z0-9._-]`)
-    process.exit(1)
-  }
-
   // One transfer per run, on purpose: no --all. Looping disbursements from a
   // CLI is how ten refunds go out at once.
-  await trigger(transferId, operator, has('--confirm'))
+  await trigger(args.transferId, args.operator, args.confirm)
 }
 
-main().catch((err: unknown) => {
-  console.error(`✗ FAIL [${step}] uncaught: ${err instanceof Error ? err.stack : String(err)}`)
-  process.exit(1)
-})
+// Only run when invoked as the CLI — the parser above is imported by its test.
+if (process.argv[1]?.includes('trigger-refund')) {
+  main().catch((err: unknown) => {
+    console.error(`✗ FAIL [${step}] uncaught: ${err instanceof Error ? err.stack : String(err)}`)
+    process.exit(1)
+  })
+}

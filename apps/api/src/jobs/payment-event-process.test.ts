@@ -463,6 +463,28 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
   })
 
+  it('AUTO_REFUND on but the tail refuses → loud ops alert (the sender is still owed)', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('SUBMITTED'), // resolveTransfer
+      stateRow('SUBMITTED'), // failTransfer currentState
+      transfer('COMPLETED'), // the row moved between the fail and the service re-read
+    )
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    // markProcessed burns the only retry token, so a silent refusal would
+    // strand the transfer holding the sender's money with nothing to notice
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-refund-refused', 'tr-1'])
+    expect(captureMessage).toHaveBeenCalledWith(expect.stringContaining('refund tail refused'), 'error')
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
   it('a refund-tail error rethrows and leaves the event received (retryable)', async () => {
     envMock.AUTO_REFUND = true
     q('payment_events', event({ event_type: 'refunded' }))

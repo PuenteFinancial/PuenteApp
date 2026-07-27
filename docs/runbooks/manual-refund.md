@@ -75,6 +75,7 @@ means it is still on its way — wait for the terminal event.
 | `bridge_disagrees` (other) | our event and Bridge's live state conflict | investigate; never override |
 | `not_submitted` | never sent to Bridge — Bridge holds nothing of ours | wrong runbook; this is not a payout failure |
 | `not_payout_failed` | the transfer is not parked at `PAYOUT_FAILED` | check the id. **A `COMPLETED` transfer must never be reversed here.** |
+| `transfer_not_found` | no transfer with that id | check the id against `--list` |
 
 ### 3. Execute
 
@@ -84,9 +85,20 @@ doppler run -- pnpm exec tsx scripts/trigger-refund.ts <transferId> --operator <
 
 One transfer per run — there is deliberately no `--all`. The script posts `{id}:bridge_return`,
 disburses send + fee back to the sender (the fee is refunded per Reg E on payout failure), settles
-`PAYOUT_FAILED → REFUNDED` with the `{id}:REFUNDED` batch, and prints both keys. Re-running is safe:
-the disbursement is `refund_payment_ref`-null-gated and both batches are keyed, so a second run
-reports "already disbursed" and writes nothing.
+`PAYOUT_FAILED → REFUNDED` with the `{id}:REFUNDED` batch, and prints both keys.
+
+Re-running is safe. The script tells you which of three things happened, and only the first claims
+credit for you:
+
+| Step 2 line | Meaning |
+|---|---|
+| `sender refunded (send + fee) and state settled` | this run moved the money |
+| `the disbursement had already gone out — no second payment; state settled by this run` | a previous attempt paid the sender but crashed before settling; this run finished it |
+| `ALREADY REFUNDED before this run — nothing was written` | it was already done; the actor in `transfer_transitions` is someone else's |
+
+**Run one trigger at a time.** Exactly-once on the disbursement rests on the processor's idempotency
+key (`{idempotency_key}:refund`); the `refund_payment_ref` null-guard is the second line, not a lock.
+Two operators refunding the same transfer concurrently is not a supported situation.
 
 ### 4. Verify
 

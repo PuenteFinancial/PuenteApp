@@ -52,7 +52,9 @@ function chain(table: string, result: unknown): Record<string, unknown> {
   return c
 }
 
-const T = 'tr-1'
+// a real UUID: the interlock interpolates the id into a PostgREST `or` filter
+// string, so it charset-checks the id first
+const T = '00000000-0000-4000-8000-000000000081'
 const S = 19801
 const FEE = 199
 
@@ -98,7 +100,7 @@ describe('refundPayoutFailure', () => {
 
     await expect(
       refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'operator-triggered' }),
-    ).resolves.toEqual({ done: true, already: false })
+    ).resolves.toEqual({ done: true, outcome: 'refunded' })
 
     // 1) bridge_return — stand-alone post under its own key
     expect(postLedger).toHaveBeenCalledTimes(1)
@@ -160,7 +162,7 @@ describe('refundPayoutFailure', () => {
 
     await expect(
       refundPayoutFailure({ transferId: T, actor: 'worker:payment-event', reason: 'r' }),
-    ).resolves.toEqual({ done: true, already: true })
+    ).resolves.toEqual({ done: true, outcome: 'already_disbursed' })
 
     expect(refund).not.toHaveBeenCalled() // gate closed — no second disbursement
     expect(postLedger).toHaveBeenCalledTimes(1) // bridge_return is idempotent on its key
@@ -183,7 +185,7 @@ describe('refundPayoutFailure', () => {
 
     await expect(
       refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' }),
-    ).resolves.toEqual({ done: true, already: true })
+    ).resolves.toEqual({ done: true, outcome: 'already_settled' })
 
     // a replay from a TERMINAL state posts nothing at all — not even the
     // idempotent bridge_return batch
@@ -328,6 +330,15 @@ describe('verifyPrincipalReturned', () => {
     q('payment_events', { data: null, error: { message: 'db down' } })
 
     await expect(verifyPrincipalReturned(T)).rejects.toThrow(/principal-return event query failed/)
+  })
+
+  it('refuses to build the event filter from a malformed transfer id', async () => {
+    // PostgREST `or` takes a filter STRING, not bound parameters — an id like
+    // `x),or(1.eq.1` would otherwise rewrite the predicate.
+    q('transfers', verifiable({ id: 'x),or(1.eq.1' }))
+
+    await expect(verifyPrincipalReturned('x),or(1.eq.1')).rejects.toThrow(/malformed transfer id/)
+    expect(getBridgeTransfer).not.toHaveBeenCalled()
   })
 })
 
