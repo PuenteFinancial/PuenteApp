@@ -102,7 +102,8 @@ policy setting:
   1-min sweep retries as the balance drains, and a fingerprinted Sentry alert fires (no spam,
   nothing for ops to release; see [runbooks/payout-holds.md](runbooks/payout-holds.md)). This
   bounds a bug or bad actor from running exposure unbounded — the one risk control on from day
-  one. The authoritative float controls (per-user limits, velocity, risk engine) are slice 8.
+  one. Per-user **velocity** control landed early in slice 7 PR5 (confirm gate + `FUNDED → SUBMITTED`
+  backstop); the per-user dollar-outstanding cap and the broader risk engine remain slice 8.
 
 This is a config flag, not an architecture. Same philosophy as the funding-source abstraction.
 
@@ -142,8 +143,8 @@ first and the other matches 0 rows — so a Bridge-payout-exists-but-`CANCELED` 
 
 ### Payout holds
 
-A hold is not a state: it is `FUNDED` plus a `payout_hold_reason` (`fx_drift`, `payability`, or
-`submit_error`) and `payout_held_at`. The submit job sets a hold and stops; the sweep skips held
+A hold is not a state: it is `FUNDED` plus a `payout_hold_reason` (`fx_drift`, `payability`,
+`submit_error`, or `velocity_review`) and `payout_held_at`. The submit job sets a hold and stops; the sweep skips held
 rows; ops investigates and releases via [runbooks/payout-holds.md](runbooks/payout-holds.md)
 (clear the column; the sweep resubmits within a minute).
 
@@ -153,6 +154,10 @@ rows; ops investigates and releases via [runbooks/payout-holds.md](runbooks/payo
 - **`payability`** — destination or recipient not `active`, or no `provider_account_ref`.
 - **`submit_error`** — Bridge rejected the payout with a non-retryable 4xx (422 idempotency
   mismatch or similar).
+- **`velocity_review`** — the per-user velocity backstop tripped at `FUNDED → SUBMITTED`: a rare
+  same-instant commit race slipped the confirm-time cap. Deliberately a hold, **not** a self-heal —
+  a per-user velocity count doesn't drain on its own (a completed send keeps counting for the whole
+  window), so ops must release (if legitimate) or cancel + refund rather than let it strand.
 
 A float-ceiling trip is deliberately **not** a hold (self-healing — see the gate section above).
 
@@ -245,7 +250,11 @@ accepted now because users are trusted.
   - **Verify at funding** — bank ownership + name match + balance check (e.g. Plaid) before `FUNDED`.
   - **Gate delivery by risk** — flip `WAIT_FOR_CLEARING = true` (or hold part of the return window)
     for new / large / high-risk transfers; keep instant for seasoned, trusted users.
-  - **Limits & holds** — first-transfer holds, per-user / velocity caps, amount tiers.
+  - **Limits & holds** — per-user **transaction limits shipped in slice 7 PR5** (the AML launch
+    limits: a per-transaction send cap + rolling day/month/6-month send totals + a per-day count;
+    enforced at confirm, backstopped at `FUNDED → SUBMITTED` where a trip places a `velocity_review`
+    hold). Still deferred: first-transfer holds and the per-user *dollar-outstanding* cap (waits for
+    ACH clearing — `funding_receivable` doesn't drain today).
   - **Automated recovery** — re-present eligible returns (e.g. R01 NSF), dunning, account freeze,
     block further sends, collections.
   - **Reserves** — provision for expected loss.

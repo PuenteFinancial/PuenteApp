@@ -69,6 +69,23 @@ refer back as needed.
   transaction, and idempotent jobs make a lost enqueue cost only sweep latency). See
   [decisions.md](decisions.md), 2026-07-20.
 
+## Risk & limits
+
+- **Committed send** — a transfer whose sender has accepted the terms (`disclosure_accepted_at` set)
+  and which hasn't been unwound (not `CANCELED`/`REFUNDED`/`PAYMENT_FAILED`/`FUNDING_REVERSED`); the
+  unit the per-user transaction limits count. See [decisions.md](decisions.md) (slice 7 PR5).
+- **Funded send** — a transfer that reached `FUNDED` (dollars pulled; `payment_at` set). Distinct from
+  a *committed* send: every funded send was committed, but a just-committed send may not fund for days
+  (ACH). See [transfer-state-machine.md](transfer-state-machine.md).
+- **Transaction limits (AML launch)** — the per-user caps on the send principal from the AML
+  "Transaction Limits at Launch" policy: per transaction (`RISK_PER_TXN_MAX_MINOR`) and rolling
+  day / month / 6-month totals (`RISK_DAILY_MAX_MINOR` / `RISK_MONTHLY_MAX_MINOR` /
+  `RISK_SEMIANNUAL_MAX_MINOR`), plus a per-day send count (`RISK_VELOCITY_MAX_COUNT`). Enforced at
+  confirm and backstopped at `FUNDED → SUBMITTED`. See [decisions.md](decisions.md).
+- **Per-user outstanding-uncleared cap** *(deferred)* — the future per-user dollar limit on un-settled
+  ACH exposure (ERD `user_limits.daily_max_minor` et al.); deferred to slice 8 with real ACH clearing,
+  since `funding_receivable` doesn't drain today. See [erd.md](erd.md).
+
 ## Puente & Bridge mechanics
 
 - **Stablecoin sandwich** — Bridge has no direct fiat→fiat route; every transfer runs

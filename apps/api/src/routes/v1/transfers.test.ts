@@ -35,6 +35,13 @@ vi.mock('../../services/funding/index.js', () => ({
   getFundingProcessor: () => ({ provider: 'mock', initiateFunding, voidFunding }),
 }))
 
+// Per-user velocity gate (slice-7 PR5) is mocked ok by default so existing
+// confirm paths stay green; the over-limit case flips it.
+const assessTransferRisk = vi.fn()
+vi.mock('../../services/risk.js', () => ({
+  assessTransferRisk: (...args: unknown[]) => assessTransferRisk(...args),
+}))
+
 const { transfersRoute } = await import('./transfers.js')
 const { idempotencyPlugin } = await import('../../plugins/idempotency.js')
 const { TransferRpcError } = await import('../../services/transfers.js')
@@ -158,6 +165,8 @@ beforeEach(() => {
     clientFields: {},
   })
   voidFunding.mockResolvedValue({ provider: 'mock', ref: 'mockvoid_test', status: 'succeeded' })
+  assessTransferRisk.mockReset()
+  assessTransferRisk.mockResolvedValue({ ok: true })
 })
 
 describe('POST /v1/transfers', () => {
@@ -288,6 +297,8 @@ describe('POST /v1/transfers/:id/confirm', () => {
       funding: { provider: 'mock', method: 'ach', clientFields: {} },
     })
     expect(res.body.disclosureAcceptedAt).toBeTruthy()
+    // a retry of an already-committed send skips the velocity check (keeps its slot)
+    expect(assessTransferRisk).not.toHaveBeenCalled()
     await app.close()
   })
 
@@ -341,6 +352,36 @@ describe('POST /v1/transfers/:id/confirm', () => {
     const app = await buildApp()
     const res = await confirm(app)
     expect(res.status).toBe(409)
+    await app.close()
+  })
+
+  it('403 limit_exceeded when over the velocity limit — before any funding', async () => {
+    routeTables() // fresh transfer, disclosure_accepted_at: null → the gate runs
+    assessTransferRisk.mockResolvedValue({ ok: false, reason: 'velocity_count' })
+    const app = await buildApp()
+    const res = await confirm(app)
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('limit_exceeded')
+    // the whole point: an over-limit send is refused before a dollar moves
+    expect(initiateFunding).not.toHaveBeenCalled()
+    // and the caller metered the send principal only (fee excluded) and excluded the transfer itself
+    expect(assessTransferRisk).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-123',
+        sendAmountMinor: 19801,
+        excludeTransferId: TRANSFER_ID,
+      }),
+    )
+    await app.close()
+  })
+
+  it('fails closed — a risk-query error 500s and never initiates funding', async () => {
+    routeTables()
+    assessTransferRisk.mockRejectedValue(new Error('db down'))
+    const app = await buildApp()
+    const res = await confirm(app)
+    expect(res.status).toBe(500)
+    expect(initiateFunding).not.toHaveBeenCalled()
     await app.close()
   })
 })

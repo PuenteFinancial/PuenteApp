@@ -103,6 +103,20 @@ const envSchema = z.object({
   // FX submission backstop: max quote age before the submit job holds the
   // transfer (fx_drift). Fires only on transfers stuck for hours.
   FX_MAX_QUOTE_AGE_MINUTES: z.coerce.number().int().min(1).default(240),
+  // Per-user transaction limits (slice-7 PR5) — the AML "Transaction Limits at
+  // Launch" policy: a per-transaction send cap plus rolling-window send-amount
+  // caps (day / month / 6 months) and a belt-and-suspenders per-day send count.
+  // All amounts are the SEND principal in USD minor units (fees excluded — the
+  // policy caps the amount transmitted). DEFAULTED to the launch values so the
+  // control stays on even if unset (fail-closed); the per-user counterpart to the
+  // aggregate FLOAT_CEILING_MINOR. Names track the ERD `user_limits` columns
+  // (per_transfer / daily / monthly) for the slice-8 lift; the 6-month tier is
+  // beyond the ERD today. Windows are rolling 30/180 days, not calendar periods.
+  RISK_PER_TXN_MAX_MINOR: z.coerce.number().int().min(0).default(150_000), // $1,500 per transfer
+  RISK_DAILY_MAX_MINOR: z.coerce.number().int().min(0).default(150_000), // $1,500 / rolling 24h
+  RISK_MONTHLY_MAX_MINOR: z.coerce.number().int().min(0).default(300_000), // $3,000 / rolling 30d
+  RISK_SEMIANNUAL_MAX_MINOR: z.coerce.number().int().min(0).default(1_800_000), // $18,000 / rolling 180d
+  RISK_VELOCITY_MAX_COUNT: z.coerce.number().int().min(1).default(5), // sends / rolling 24h
   // Cadence of the payout.poll Bridge reconciliation cron. 300 in prod;
   // set 60 in dev via env. Floor of 10 keeps a fat-fingered value from
   // hammering the Bridge API.

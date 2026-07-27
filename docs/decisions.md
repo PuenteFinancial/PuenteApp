@@ -6,6 +6,41 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-27 · Per-user transaction limits (the AML launch limits) ship commit-gated; the dollar
+"outstanding-uncleared" cap waits for ACH clearing.** Slice-7 PR5 adds `services/risk.ts` enforcing
+the **AML "Transaction Limits at Launch"** policy per user: a per-transaction send cap **($1,500)**
+plus rolling-window **send-amount** caps — **day $1,500 / month $3,000 / 6 months $18,000** — with a
+belt-and-suspenders **5 sends/day** count (the count is ours, not in the AML doc). Amounts are the
+**send principal** in USD minor units — fees excluded, because the policy caps the amount
+*transmitted*, not the total charged (so a max $1,500 send sits exactly at the $1,500/day cap). Values
+live in env (`RISK_PER_TXN_MAX_MINOR` / `RISK_DAILY_MAX_MINOR` / `RISK_MONTHLY_MAX_MINOR` /
+`RISK_SEMIANNUAL_MAX_MINOR` / `RISK_VELOCITY_MAX_COUNT`), **on-by-default** at the policy values so an
+unset env still enforces. The source of truth is the AML policy doc (kept out of the repo by
+decision), so **code defaults and policy must be reconciled by hand** — the first cut shipped
+placeholder numbers precisely because the values weren't in the codebase. Windows are rolling 30/180
+days, not calendar. Three shape choices a future engineer will question: **(1) no dollar
+outstanding-uncleared cap** — even though the PRD (§10) frames it as the purpose-built control —
+because `funding_receivable` is never drained on the happy path (the `ACH CLEARS` batch is
+documented-only) and `funding_cleared` posts no ledger entry, so a per-user outstanding sum is
+*monotonic* today; it can only be correct once ACH clearing is wired (slice 8 / post-Stripe).
+SPEI-seconds-vs-ACH-days makes these send-amount caps — not a concurrency cap — what actually bounds
+the R01 double-pay exposure, so a concurrency cap was dropped as redundant. **(2) Counts from COMMIT
+(`disclosure_accepted_at`), enforced at confirm before funding is initiated** — counting only *funded*
+sends lets the multi-day ACH lag hide a rapid burst (each new send sees "nothing funded yet"); commit
+is the first irreversible intent, so it's both the honest counting point and the right pre-money gate.
+**(3) Canceled / refunded / payment-failed sends don't count** (but `PAYOUT_FAILED` / `UNDER_REVIEW`
+do — the sender was charged and not yet refunded) — since we reject at commit, counting an unwound
+mistake would lock an honest re-send out. Enforcement: a UX gate at confirm (`403 limit_exceeded`) +
+an authoritative backstop at `FUNDED → SUBMITTED` (the last gate before the irreversible MXN payout)
+that places a `velocity_review` ops hold on a trip (a new `payout_hold_reason` — migration
+`20260727191425` extends the CHECK) — **not** a self-heal, because a per-user tally
+(unlike the aggregate float ceiling) doesn't drain on its own, so self-heal would strand the funded
+transfer for up to a full window. Config names track the ERD `user_limits` columns (`per_transfer` /
+`daily` / `monthly`) for the slice-8 per-user/tier table + `risk_tier` lift; the **6-month tier has no
+ERD column yet** (a slice-8 gap). **Status: active** (slice 7 PR5) ([erd.md](erd.md) `user_limits`,
+[prds/remittance-mvp.md](prds/remittance-mvp.md) §10, [transfer-state-machine.md](transfer-state-machine.md),
+[glossary.md](glossary.md)).
+
 **2026-07-24 · Transfer history shows only *money-moved* transfers; abandoned sends are hidden, not
 deleted.** The sender-facing transaction history (`/dashboard/transfers`, slice-7 PR4) lists only
 transfers where payment was actually made — `FUNDED` and beyond — via a new

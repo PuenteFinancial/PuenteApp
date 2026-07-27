@@ -14,6 +14,7 @@ import {
   type TransferRow,
 } from '../../services/transfers.js'
 import { requireApprovedUser } from './recipients.js'
+import { assessTransferRisk, type RiskReason } from '../../services/risk.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 const TRANSFER_COLUMNS =
@@ -159,6 +160,23 @@ function submissionInProgressResponse(reply: FastifyReply, id: string, state: st
         'si el pago no se completa, se te reembolsará el monto total.',
     },
   })
+}
+
+// The 403 limit_exceeded body's message is display/log only — clients branch on
+// the stable code (the web maps its own localized copy, PR1). Generic + PII-free.
+function riskLimitMessage(reason: RiskReason): string {
+  switch (reason) {
+    case 'per_transaction':
+      return 'This amount is over the per-transfer limit. Try a smaller amount.'
+    case 'daily':
+      return 'This would exceed your daily sending limit. Try a smaller amount or come back later.'
+    case 'monthly':
+      return 'This would exceed your monthly sending limit.'
+    case 'semiannual':
+      return 'This would exceed your 6-month sending limit.'
+    case 'velocity_count':
+      return 'You have reached the number of transfers allowed today. Please come back later.'
+  }
 }
 
 export async function transfersRoute(server: FastifyInstance) {
@@ -374,6 +392,26 @@ export async function transfersRoute(server: FastifyInstance) {
 
       if (transfer.disclosure_accepted_at && transfer.funding_payment_ref) {
         return sendError(reply, 409, 'conflict', 'Transfer is already confirmed')
+      }
+
+      // Per-user velocity gate (slice-7 PR5): enforced here — the FIRST commit,
+      // BEFORE funding is initiated — because this is where money starts moving,
+      // so blocking now refuses an over-limit send before any dollars are pulled.
+      // Only on the first commit (disclosure_accepted_at still null): recording
+      // acceptance is what makes this a counted "committed send", so the check
+      // must precede it (else a blocked send would consume the sender's own
+      // budget), and a retry of an already-committed send keeps its slot rather
+      // than being stranded behind sends that committed since. The FUNDED→SUBMITTED
+      // backstop (payout-submit.ts) authoritatively catches the same-instant race.
+      if (!transfer.disclosure_accepted_at) {
+        const verdict = await assessTransferRisk({
+          userId,
+          sendAmountMinor: transfer.send_amount_minor,
+          excludeTransferId: transfer.id,
+        })
+        if (!verdict.ok) {
+          return sendError(reply, 403, 'limit_exceeded', riskLimitMessage(verdict.reason))
+        }
       }
 
       // Record acceptance once; a retry after a failed initiation (accepted
