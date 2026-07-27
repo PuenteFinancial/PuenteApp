@@ -12,17 +12,27 @@ import { getBridgeTransfer } from './bridge.js'
 // The PAYOUT_FAILED → REFUNDED refund-from-float tail (ledger-rules.md), lifted
 // out of the payment-event job in slice-7 PR6a so the automated path (job, gated
 // by AUTO_REFUND) and the operator path (scripts/trigger-refund.ts, run by a
-// human when the flag is off) execute the SAME code and cannot diverge.
+// human when the flag is off) execute the SAME ledger + disbursement tail and
+// cannot diverge. The two paths are not equally guarded, though: the operator
+// path additionally runs the principal-returned interlock below, while the job
+// trusts mapBridgeState's `principalReturned` on the event that triggered it.
 //
 // The policy gate lives at the CALL SITE, never here: this service has no
 // `force` parameter and no flag read, so which callers may move money stays
 // visible per caller. The job checks AUTO_REFUND; the operator IS the gate.
 //
-// Idempotent throughout: the two ledger batches are keyed (bridge_return /
-// REFUNDED) and refund() is refund_payment_ref-null-gated, so a webhook+poll
-// duplicate, a crash-replay, or a second operator run posts and disburses
-// exactly once. Any throw propagates — the job leaves its event 'received' for
-// retry, the CLI exits non-zero.
+// Replay-safe: the two ledger batches are keyed (bridge_return / REFUNDED) and
+// refund() is refund_payment_ref-null-gated, so a webhook+poll duplicate, a
+// crash-replay, or a second operator run posts and disburses once. Exactly-once
+// on the disbursement rests on the PROCESSOR's idempotency key
+// (`{idempotency_key}:refund`) — the null-gate is a read separated from its
+// write, so it is the second line, not a lock, and concurrent runs against one
+// transfer are not a supported situation (docs/runbooks/manual-refund.md).
+//
+// Any NON-BENIGN throw propagates — the job leaves its event 'received' for
+// retry, the CLI exits non-zero. A TransferRpcError of transition_conflict /
+// transfer_not_found is treated as benign by the job (it marks the event
+// processed), because another actor already advanced the row.
 
 interface RefundableTransfer {
   id: string
@@ -54,11 +64,18 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // a run that wrote nothing:
 //   refunded          — this run disbursed and settled
 //   already_disbursed — the disbursement pre-existed (crash between the persist
-//                       and the transition); this run posted the batches
+//                       and the transition); this run posted the REFUNDED batch
+//                       and settled the state (bridge_return necessarily
+//                       pre-existed too, so that post is a keyed no-op)
 //   already_settled   — already REFUNDED; this run wrote NOTHING at all
+//
+// A refusal carries the state it observed, because whether a refusal is alarming
+// depends entirely on it: at COMPLETED the transfer delivered and the sender is
+// owed nothing, at SUBMITTED something is genuinely wrong.
 export type RefundOutcome =
   | { done: true; outcome: 'refunded' | 'already_disbursed' | 'already_settled' }
-  | { done: false; reason: 'not_payout_failed' | 'transfer_not_found' }
+  | { done: false; reason: 'not_payout_failed'; state: string }
+  | { done: false; reason: 'transfer_not_found' }
 
 export type PrincipalVerdict =
   | { returned: true; bridgeState: string; eventType: string }
@@ -106,7 +123,9 @@ export async function refundPayoutFailure(input: {
 
   // The guard that matters: only refund a transfer that actually reached
   // PAYOUT_FAILED — never one that delivered.
-  if (transfer.state !== 'PAYOUT_FAILED') return { done: false, reason: 'not_payout_failed' }
+  if (transfer.state !== 'PAYOUT_FAILED') {
+    return { done: false, reason: 'not_payout_failed', state: transfer.state }
+  }
 
   // 1) Book the returned principal back to cash — a stand-alone post (state
   //    stays PAYOUT_FAILED), keyed {id}:bridge_return, idempotent on replay.
@@ -162,6 +181,13 @@ export async function refundPayoutFailure(input: {
  * wrong — a webhook can arrive for a state Bridge later reverses, and a live read
  * with no recorded event means our own pipeline never saw it. An unreachable
  * Bridge throws rather than resolving to a verdict: silence is not confirmation.
+ *
+ * This checks WHETHER the principal came back, not HOW MUCH. A partial return
+ * would still book the full `send_amount_minor` in bridge_return and make the
+ * sender whole from float, leaving the shortfall as an unreconciled receivable.
+ * Same open assumption the automated path already carries (transfers.ts:
+ * "assumes Bridge returns S, not the actual USDC draw A") — a pilot-verification
+ * item, not something to resolve from a CLI.
  */
 export async function verifyPrincipalReturned(transferId: string): Promise<PrincipalVerdict> {
   const { data, error } = await supabaseAdmin
@@ -187,10 +213,10 @@ export async function verifyPrincipalReturned(transferId: string): Promise<Princ
 }
 
 // Read-only ops surface for the CLI. Deliberately here rather than in the
-// script: every supabase query in this repo lives in services/, and the
-// column list is a PII decision (ids, amounts, timestamps — never recipient
-// names or destination details, which must not reach an operator's terminal
-// or scrollback).
+// script: nothing under scripts/ queries the database directly — DB access
+// stays under src/ — and the column list is a PII decision (ids, amounts,
+// timestamps — never recipient names or destination details, which must not
+// reach an operator's terminal or scrollback).
 export interface ParkedRefund {
   id: string
   state: string
@@ -252,7 +278,10 @@ async function loadRefundable(transferId: string): Promise<RefundableTransfer | 
 // see payment-events.ts), so match on either key. PostgREST `or` takes a filter
 // STRING, not bound parameters, so BOTH interpolated values are charset-checked
 // first: an id like `x),or(1.eq.1` would otherwise rewrite the predicate. The
-// transfer id reaches here straight from a CLI argument.
+// transfer id reaches here straight from a CLI argument. The two failure modes
+// differ on purpose — a bad transfer id THROWS, a bad provider ref is DROPPED
+// from the predicate, because narrowing the match can only produce a stricter
+// verdict, never a false confirmation.
 async function findReturnEvent(
   transferId: string,
   providerTransferRef: string,

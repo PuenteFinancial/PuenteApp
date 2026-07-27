@@ -49,6 +49,17 @@ const FAILABLE_STATES = new Set(['SUBMITTED', 'IN_FLIGHT', 'UNDER_REVIEW'])
 // has left this path (e.g. PAYOUT_FAILED) is a contradictory Bridge sequence.
 const FORWARD_STATES = new Set(['SUBMITTED', 'IN_FLIGHT', 'COMPLETED'])
 
+// States in which the sender is owed nothing further — the money was delivered,
+// returned, or never taken. A refund-tail refusal on one of these is not a
+// money-stuck event, so it must not raise the "sender still owed" page.
+const SETTLED_STATES = new Set([
+  'COMPLETED',
+  'CANCELED',
+  'REFUNDED',
+  'PAYMENT_FAILED',
+  'FUNDING_REVERSED',
+])
+
 // Benign RPC outcomes: another actor (the other arrival path, or a later
 // event) already advanced the row. The event is still successfully processed.
 const benign = (err: unknown) =>
@@ -173,14 +184,22 @@ async function driveRefund(transfer: TransferRow, event: EventRow): Promise<void
   // 'processed' either way — so nothing retries and nothing else would ever
   // notice. Every other contradictory-sequence branch in this file pages ops
   // (payout-success-after-terminal, payout-fail-after-terminal); the one that
-  // holds the sender's money must not be the silent one. Reachable when the row
-  // moves between failTransfer and the service's re-read.
-  if (!outcome.done) {
+  // holds the sender's money must not be the silent one.
+  //
+  // Reachable two ways: the row moved between failTransfer and the service's
+  // re-read, OR failTransfer declined to move it at all — a returned/refunded
+  // event on an already-COMPLETED transfer, which the fail-after-terminal
+  // branch has already alerted on. Only page when the sender could actually
+  // still be owed: at COMPLETED the money was delivered, and at the other
+  // SETTLED_STATES it was already returned or never taken, so a "sender still
+  // owed" page there is false and would train ops to ignore the real one.
+  if (!outcome.done && !(outcome.reason === 'not_payout_failed' && SETTLED_STATES.has(outcome.state))) {
     Sentry.withScope((scope) => {
       scope.setFingerprint(['payout-refund-refused', transfer.id])
       scope.setContext('payout_refund_refused', {
         transferId: transfer.id,
         reason: outcome.reason,
+        ...(outcome.reason === 'not_payout_failed' ? { observedState: outcome.state } : {}),
         bridgeState: event.event_type,
         runbook: 'docs/runbooks/manual-refund.md',
       })

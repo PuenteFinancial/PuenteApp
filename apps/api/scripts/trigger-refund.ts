@@ -2,8 +2,10 @@
 // half of the AUTO_REFUND gate (slice-7 PR6a). With AUTO_REFUND off (the prod
 // default) a payout failure parks at PAYOUT_FAILED with a `payout-refund-gated`
 // Sentry alert and stays there: the poller does not re-drive it, and flipping
-// the flag on later does NOT heal the backlog (recordEvent dedupes the
-// re-synthesized terminal event). This script is how those rows get cleared.
+// the flag on later does not heal a row whose terminal returned/refunded event
+// was ALREADY recorded while the flag was off (recordEvent dedupes the
+// re-synthesis). A row still awaiting its first terminal event would be driven
+// normally once the flag is on. This script is how the parked rows get cleared.
 //
 // It runs the SAME services/refunds.ts code the job runs, so the money moves
 // through the ledger RPC — never a bare UPDATE in the SQL editor, which would
@@ -25,7 +27,7 @@
 //   doppler run -- pnpm exec tsx scripts/trigger-refund.ts …   (staging/prod)
 //   node --env-file=.env --import tsx scripts/trigger-refund.ts …   (local)
 //
-// A script, not an HTTP surface: zero production attack surface.
+// A script, not an HTTP surface — nothing here is reachable over the network.
 import {
   refundPayoutFailure,
   verifyPrincipalReturned,
@@ -51,6 +53,12 @@ export type ParsedArgs =
  * the operator charset, and the same token satisfies the confirm check).
  */
 export function parseArgs(argv: string[]): ParsedArgs {
+  // A repeated --operator would let its second value both name the operator and
+  // (as `--confirm`) authorize the disbursement, or smuggle an unknown flag past
+  // the check below by sitting at a flag-value index.
+  if (argv.filter((t) => t === '--operator').length > 1) {
+    return { mode: 'error', message: '--operator given more than once' }
+  }
   const flagValueIndexes = new Set<number>()
   for (const [i, token] of argv.entries()) {
     if (token === '--operator') flagValueIndexes.add(i + 1)
@@ -104,9 +112,20 @@ function begin(label: string): void {
 function pass(msg: string): void {
   console.log(`✓ PASS [${step}] ${msg}`)
 }
+
+/**
+ * A failed step. Throws rather than calling process.exit directly so the
+ * refusal paths — the ones that stop a refund — are reachable from a test;
+ * main() turns it into the non-zero exit.
+ */
+export class StepError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'StepError'
+  }
+}
 function fail(msg: string): never {
-  console.error(`✗ FAIL [${step}] ${msg}`)
-  process.exit(1)
+  throw new StepError(msg)
 }
 
 const USAGE =
@@ -115,7 +134,7 @@ const USAGE =
 
 const usd = (minor: number): string => `$${(minor / 100).toFixed(2)}`
 
-async function list(): Promise<void> {
+export async function list(): Promise<void> {
   const rows = await listRefundBacklog()
   if (rows.length === 0) {
     console.log('no parked refunds — nothing at PAYOUT_FAILED awaiting a manual refund')
@@ -124,14 +143,17 @@ async function list(): Promise<void> {
   console.log(`${rows.length} parked refund(s) awaiting a manual trigger:\n`)
   for (const row of rows) {
     console.log(
+      // `created` is the transfer's creation stamp, NOT the time it failed —
+      // transfers has no failed_at column (the failure time lives in
+      // transfer_transitions). Labelled honestly so nobody triages on it.
       `  ${row.id}  ${usd(row.send_amount_minor + row.fee_amount_minor)}  ` +
-        `bridge=${row.provider_transfer_ref ?? '—'}  failed-since=${row.created_at}`,
+        `bridge=${row.provider_transfer_ref ?? '—'}  created=${row.created_at}`,
     )
   }
   console.log('\nrun with <transferId> --operator <id> to inspect one (dry run by default)')
 }
 
-async function trigger(transferId: string, operator: string, confirm: boolean): Promise<void> {
+export async function trigger(transferId: string, operator: string, confirm: boolean): Promise<void> {
   console.log(
     `refund trigger for ${transferId}\n` +
       `operator: ops:${operator}\n` +
@@ -221,10 +243,16 @@ async function main(): Promise<void> {
   await trigger(args.transferId, args.operator, args.confirm)
 }
 
-// Only run when invoked as the CLI — the parser above is imported by its test.
-if (process.argv[1]?.includes('trigger-refund')) {
+// Run only when this file IS the entrypoint — its test imports the exports
+// above, and vitest's own argv[1] is the vitest binary, so nothing executes.
+if (process.argv[1]?.endsWith('trigger-refund.ts')) {
   main().catch((err: unknown) => {
-    console.error(`✗ FAIL [${step}] uncaught: ${err instanceof Error ? err.stack : String(err)}`)
+    // A StepError is an expected refusal: print the message, not a stack.
+    console.error(
+      err instanceof StepError
+        ? `✗ FAIL [${step}] ${err.message}`
+        : `✗ FAIL [${step}] uncaught: ${err instanceof Error ? err.stack : String(err)}`,
+    )
     process.exit(1)
   })
 }

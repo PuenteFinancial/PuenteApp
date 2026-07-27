@@ -32,17 +32,24 @@ const { refundPayoutFailure, verifyPrincipalReturned, listRefundBacklog, refundL
 // ── PostgREST-ish builder: from() dispenses results per table in call order,
 // every filter method is recorded so the filters themselves can be asserted.
 const queues: Record<string, unknown[]> = {}
-const filters: Array<{ table: string; method: string; args: unknown[] }> = []
+const filters: Array<{ table: string; method: string; args: unknown[]; builder: number }> = []
 
 function q(table: string, ...results: unknown[]): void {
   queues[table] = (queues[table] ?? []).concat(results)
 }
 
+// Each from() gets its own builder id, so a filter can be attributed to the
+// query that made it — `eq` on the load must not be mistaken for `eq` on the
+// disbursement persist, whose scoping is what keeps that UPDATE from closing
+// every other parked transfer's null-gate.
+let builderId = 0
+
 function chain(table: string, result: unknown): Record<string, unknown> {
   const c: Record<string, unknown> = {}
+  const id = ++builderId
   for (const m of ['select', 'eq', 'is', 'not', 'in', 'or', 'limit', 'update']) {
     c[m] = (...args: unknown[]) => {
-      filters.push({ table, method: m, args })
+      filters.push({ table, method: m, args, builder: id })
       return c
     }
   }
@@ -169,15 +176,25 @@ describe('refundPayoutFailure', () => {
     expect(transition).toHaveBeenCalledTimes(1)
   })
 
-  it('persists the refund ref under a null-guard so a concurrent run cannot double-write', async () => {
+  it('scopes the refund-ref persist to THIS transfer and to a null gate', async () => {
     q('transfers', parked(), { data: null, error: null })
 
     await refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })
 
-    expect(filtersFor('transfers', 'update')[0]![0]).toMatchObject({
-      refund_payment_ref: 'mockrefund_x',
-    })
-    expect(filtersFor('transfers', 'is')).toContainEqual(['refund_payment_ref', null])
+    // Attributed to the UPDATE's own builder: an unscoped update would read
+    // `set refund_payment_ref = … where refund_payment_ref is null` across the
+    // WHOLE table, closing every other parked transfer's null-gate so its real
+    // refund tail skips the disbursement and settles REFUNDED without paying
+    // the sender — and the backlog would then read empty.
+    const update = filters.find((f) => f.method === 'update')
+    expect(update?.args[0]).toMatchObject({ refund_payment_ref: 'mockrefund_x' })
+    const persistFilters = filters
+      .filter((f) => f.builder === update?.builder && f.method !== 'update')
+      .map((f) => [f.method, ...f.args])
+    expect(persistFilters).toEqual([
+      ['eq', 'id', T],
+      ['is', 'refund_payment_ref', null],
+    ])
   })
 
   it('reports an already-settled transfer as done without touching the ledger', async () => {
@@ -199,7 +216,7 @@ describe('refundPayoutFailure', () => {
 
     await expect(
       refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' }),
-    ).resolves.toEqual({ done: false, reason: 'not_payout_failed' })
+    ).resolves.toEqual({ done: false, reason: 'not_payout_failed', state: 'COMPLETED' })
 
     expect(postLedger).not.toHaveBeenCalled()
     expect(refund).not.toHaveBeenCalled()

@@ -21,9 +21,11 @@ Sentry, fingerprint `payout-refund-gated`, severity **warning**:
 Context carries `transferId`, `bridgeState`, and a pointer back to this file. No PII.
 
 Note the poller does **not** clear these: with `AUTO_REFUND` off it skips `PAYOUT_FAILED` rows
-entirely, and turning the flag on later does *not* heal the existing backlog — `recordEvent` dedupes
-the re-synthesized terminal event ([payout-poll.ts](/apps/api/src/jobs/payout-poll.ts)). Every parked
-row is cleared by a human, here.
+entirely. Turning the flag on later does *not* heal a row whose terminal `returned`/`refunded` event
+was **already recorded** while the flag was off — `recordEvent` dedupes the re-synthesis
+([payout-poll.ts](/apps/api/src/jobs/payout-poll.ts)). A row still awaiting its first terminal event
+(the `no_return_event` refusal below) *would* be driven normally once the flag is on. So the rows this
+runbook exists for — the ones the interlock actually clears — are human-owned.
 
 ## Running the script
 
@@ -121,7 +123,8 @@ select t.transition, t.idempotency_key,
 ```
 
 Every `net` must be `0`, and both `{id}:bridge_return` and `{id}:REFUNDED` must be present. The
-script checks this itself and exits non-zero if either is missing.
+script checks that both **keys** are present and exits non-zero if either is missing; it never reads
+`ledger_entries`, so the net-zero check is this query's job.
 
 ## Escalation — `refund_failed` (principal stuck at Bridge)
 

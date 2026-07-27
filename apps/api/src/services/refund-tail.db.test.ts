@@ -4,9 +4,13 @@
 // TWO distinct refund batches (bridge_return + REFUNDED) posting under distinct
 // keys, every batch net-zero, per-account balances landing where the money
 // went, fx_slippage from SUBMITTED staying realized (never reversed), and a
-// replay of both refund posts adding nothing. Uses the production wrappers
-// (transitionTransfer + postLedgerTransaction via PostgREST) — the same call
-// path the payment-event.process job takes.
+// replay of both refund posts adding nothing. The T_REFUND walk posts the two
+// batches BY HAND through the production wrappers (transitionTransfer +
+// postLedgerTransaction via PostgREST), pinning the ledger shape independently
+// of any service. The slice-7 PR6a tests (T_OPS) drive services/refunds.ts —
+// the shared tail the job and the operator CLI both execute — and additionally
+// pin the ops: actor, a second run writing nothing, and a refusal on a transfer
+// that never failed.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { Client } from 'pg'
 import {
@@ -149,7 +153,9 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
     })
   }
 
-  // Walk to PAYOUT_FAILED, then drive the two-batch refund (as driveRefund does).
+  // Walk to PAYOUT_FAILED, then drive the two-batch refund the way
+  // services/refunds.ts does — replicated by hand here on purpose, so the
+  // ledger shape is asserted independently of the service under test.
   const walkToRefunded = async (transferId: string) => {
     await walkToPayoutFailed(transferId)
     // 1) bridge_return — stand-alone post, its own key {id}:bridge_return
@@ -310,7 +316,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
 
     await expect(
       refundPayoutFailure({ transferId: other, actor: 'ops:jphelps', reason: 'x' }),
-    ).resolves.toEqual({ done: false, reason: 'not_payout_failed' })
+    ).resolves.toEqual({ done: false, reason: 'not_payout_failed', state: 'PENDING_PAYMENT' })
 
     expect(await countEntries(other)).toBe(0)
   })
