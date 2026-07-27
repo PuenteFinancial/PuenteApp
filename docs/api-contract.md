@@ -156,7 +156,7 @@ reconciliation but never cross the wire.
 |---|---|---|---|---|
 | POST | `/v1/transfers` | ✓ | **required** | Create transfer from a quote (`PENDING_PAYMENT`) + generate Reg E **prepayment disclosure**. No funding set up yet. |
 | POST | `/v1/transfers/:id/confirm` | ✓ | **required** | Record disclosure acceptance → initiate funding via `FundingProcessor`. Server refuses without recorded acceptance. Returns processor-neutral funding details. |
-| GET | `/v1/transfers` | ✓ | — | List (owner-scoped). |
+| GET | `/v1/transfers` | ✓ | — | List (owner-scoped). `?scope=history` hides abandoned (never-funded) sends — `PENDING_PAYMENT`/`PAYMENT_FAILED`; `?scope=all` (default) returns everything. |
 | GET | `/v1/transfers/:id` | ✓ | — | Status, snapshotted terms, disclosure. |
 | POST | `/v1/transfers/:id/cancel` | ✓ | **required** | Only valid in `FUNDED` within the window; server re-checks state under a row lock. Else `transfer_not_cancelable`. |
 | GET | `/v1/transfers/:id/receipt` | ✓ | — | Reg E receipt. |

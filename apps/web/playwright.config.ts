@@ -18,7 +18,12 @@ export default defineConfig({
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: [
     {
-      command: 'node e2e/mock-api.mjs',
+      // --watch so edits to mock-api.mjs auto-reload the process. Without it a
+      // reused mock serves STALE code after you edit it: reuseExistingServer
+      // keeps the mock alive between local runs and a plain node server has no
+      // HMR, so a spec can pass/fail for the wrong reason until you kill :4319.
+      // CI is unaffected (reuseExistingServer is false there, always fresh).
+      command: 'node --watch e2e/mock-api.mjs',
       port: MOCK_API_PORT,
       reuseExistingServer: !process.env.CI,
       env: { MOCK_API_PORT: String(MOCK_API_PORT) },

@@ -97,7 +97,16 @@ interface QuoteForTransferRow {
 interface ListQuery {
   limit: number
   cursor?: string
+  scope?: 'all' | 'history'
 }
+
+// "History" (the user-facing transaction list) shows only transfers where
+// payment was actually made — FUNDED and beyond. Never-funded attempts
+// (PENDING_PAYMENT and its 30-min-stale reconciliation to PAYMENT_FAILED) are
+// abandoned sends, not transactions; they stay in the table + audit log but are
+// hidden from history. The raw endpoint (scope=all, the default) keeps returning
+// everything for ops. See docs/decisions.md.
+const ABANDONED_STATES = '(PENDING_PAYMENT,PAYMENT_FAILED)'
 
 interface Cursor {
   c: string
@@ -656,6 +665,7 @@ export async function transfersRoute(server: FastifyInstance) {
           properties: {
             limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
             cursor: { type: 'string' },
+            scope: { type: 'string', enum: ['all', 'history'], default: 'all' },
           },
           additionalProperties: false,
         },
@@ -673,7 +683,7 @@ export async function transfersRoute(server: FastifyInstance) {
     },
     async (request, reply) => {
       const userId = request.user!.id
-      const { limit } = request.query
+      const { limit, scope } = request.query
 
       let cursor: Cursor | null = null
       if (request.query.cursor) {
@@ -690,6 +700,11 @@ export async function transfersRoute(server: FastifyInstance) {
         .order('created_at', { ascending: false })
         .order('id', { ascending: false })
         .limit(limit + 1)
+
+      // scope=history hides abandoned (never-funded) sends; scope=all (default) is raw.
+      if (scope === 'history') {
+        query = query.not('state', 'in', ABANDONED_STATES)
+      }
 
       if (cursor) {
         query = query.or(

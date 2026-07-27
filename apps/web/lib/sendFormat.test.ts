@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { formatUsd, formatMxn, mmss, secondsUntil, isQuoteShape } from './sendFormat'
+import { formatUsd, formatMxn, mmss, secondsUntil, formatDate, isQuoteShape } from './sendFormat'
 
 describe('formatUsd', () => {
   it('formats USD minor units with grouping and two decimals', () => {
@@ -32,6 +32,17 @@ describe('secondsUntil', () => {
     expect(secondsUntil('2026-07-23T00:15:00.000Z', now)).toBe(900)
     expect(secondsUntil('2026-07-23T00:00:00.000Z', now)).toBe(0)
     expect(secondsUntil('2026-07-22T23:59:30.000Z', now)).toBe(-30)
+  })
+})
+
+describe('formatDate', () => {
+  it('formats an ISO timestamp as a localized medium date, date-only', () => {
+    const iso = '2026-07-24T20:00:00.000Z'
+    expect(formatDate(iso, 'en')).toBe('Jul 24, 2026')
+    // es-MX differs from en-US (proves the locale switch) and carries the year.
+    const es = formatDate(iso, 'es')
+    expect(es).not.toBe(formatDate(iso, 'en'))
+    expect(es).toContain('2026')
   })
 })
 
