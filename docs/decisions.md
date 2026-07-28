@@ -36,7 +36,10 @@ request in both the CLI and the service; if one genuinely must not be paid, that
 not a flag. **(3) The correction payment takes the same refund claim as the PAYOUT_FAILED tail.** Both
 disburse against `refund_payment_ref` on one transfer, so they contend on one lock rather than two
 implementations of the same predicate. **Status: active** (slice 7 PR6b)
-([runbooks/pending-cancellation.md](runbooks/pending-cancellation.md)).
+([runbooks/pending-cancellation.md](runbooks/pending-cancellation.md); supporting research incl. the
+reg text, the commentary's silence, and Remitly's request-time completion definition:
+[research/reg-e-cancellation-after-delivery.md](research/reg-e-cancellation-after-delivery.md) —
+counsel-gated via PR7).
 
 **2026-07-28 · Cancellation timeliness is RECORDED, not enforced at the door.** The 202 that answers
 a post-submission cancel fires on **state alone** — it never consults `cancelable_until` — so a cancel
