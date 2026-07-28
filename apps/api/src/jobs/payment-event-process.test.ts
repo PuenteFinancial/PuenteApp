@@ -41,6 +41,13 @@ vi.mock('../config/env.js', () => ({ env: envMock }))
 const postLedger = vi.hoisted(() => vi.fn())
 vi.mock('../services/ledger.js', () => ({ postLedgerTransaction: (...a: unknown[]) => postLedger(...a) }))
 
+const pendingCancellationFor = vi.hoisted(() => vi.fn())
+const resolveCancellationRequest = vi.hoisted(() => vi.fn())
+vi.mock('../services/cancellations.js', () => ({
+  pendingCancellationFor: (...a: unknown[]) => pendingCancellationFor(...a),
+  resolveCancellationRequest: (...a: unknown[]) => resolveCancellationRequest(...a),
+}))
+
 const refund = vi.hoisted(() => vi.fn())
 vi.mock('../services/funding/index.js', () => ({
   getFundingProcessor: () => ({ refund: (...a: unknown[]) => refund(...a) }),
@@ -119,6 +126,8 @@ beforeEach(() => {
   envMock.AUTO_REFUND = false
   postLedger.mockResolvedValue({ id: 'lt-1' })
   refund.mockResolvedValue({ provider: 'mock', ref: 'mockrefund_x', status: 'succeeded' })
+  pendingCancellationFor.mockResolvedValue(null)
+  resolveCancellationRequest.mockResolvedValue(true)
   from.mockImplementation((table: string) => {
     const next = queues[table]?.shift()
     if (next === undefined) throw new Error(`unexpected from('${table}')`)
@@ -172,6 +181,76 @@ describe('processPaymentEvent — transitions', () => {
     expect(input).toMatchObject({ fromState: 'SUBMITTED', toState: 'IN_FLIGHT', actor: 'worker:payment-event' })
     expect('ledgerEntries' in input).toBe(false)
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  // ── tail 2 of the cancellation story (slice-7 PR6b) ────────────────────
+  // The sender asked to cancel, and the payout COMPLETED anyway. A TIMELY ask is
+  // owed a full refund regardless — the accepted double-pay — so the transfer
+  // routes to UNDER_REVIEW for a human to execute the correction payment.
+  const pending = (over: Record<string, unknown> = {}) => ({
+    id: 'cr-1',
+    transfer_id: 'tr-1',
+    requested_at: new Date(Date.now() - 60_000).toISOString(),
+    requested_state: 'SUBMITTED',
+    within_window: true,
+    status: 'pending',
+    ...over,
+  })
+
+  it('timely cancellation + COMPLETED → UNDER_REVIEW with NO ledger, request left pending', async () => {
+    pendingCancellationFor.mockResolvedValue(pending())
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
+    queueReceipt()
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    const review = transition.mock.calls
+      .map((c) => (c as [Record<string, unknown>])[0])
+      .find((i) => i.toState === 'UNDER_REVIEW')
+    expect(review).toMatchObject({ fromState: 'COMPLETED', toState: 'UNDER_REVIEW', actor: 'system' })
+    // NO ledger: nothing has moved. The correction payment posts when the
+    // operator executes it; UNDER_REVIEW is a holding state, not an event.
+    expect('ledgerEntries' in review!).toBe(false)
+    // The request stays PENDING — it is not resolved until the refund happens.
+    expect(resolveCancellationRequest).not.toHaveBeenCalled()
+    expect(setFingerprint).toHaveBeenCalledWith(['cancellation-correction-owed', 'tr-1'])
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  // Denial is never automatic, and we must not flip a delivered transfer's state
+  // for a request we will not honour — that would be a lie in the state log.
+  it('OUT-of-window cancellation + COMPLETED → stays COMPLETED, different alert', async () => {
+    pendingCancellationFor.mockResolvedValue(pending({ within_window: false }))
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
+    queueReceipt()
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    const states = transition.mock.calls.map((c) => (c as [Record<string, unknown>])[0].toState)
+    expect(states).not.toContain('UNDER_REVIEW')
+    expect(setFingerprint).toHaveBeenCalledWith(['cancellation-out-of-window', 'tr-1'])
+    expect(setFingerprint).not.toHaveBeenCalledWith(['cancellation-correction-owed', 'tr-1'])
+  })
+
+  it('no cancellation request → no review, no alert at all', async () => {
+    pendingCancellationFor.mockResolvedValue(null)
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
+    queueReceipt()
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    const states = transition.mock.calls.map((c) => (c as [Record<string, unknown>])[0].toState)
+    expect(states).toEqual(['COMPLETED'])
+    // The guard that catches a mis-wired lookup: any throw inside the routing is
+    // caught and turned into an alert, so a broken query would otherwise look
+    // exactly like a healthy delivery.
+    expect(captureMessage).not.toHaveBeenCalled()
   })
 
   it('payment_processed from IN_FLIGHT posts the COMPLETED ledger batch', async () => {

@@ -23,6 +23,18 @@ vi.mock('./funding/index.js', () => ({
   getFundingProcessor: () => ({ refund: (...a: unknown[]) => refund(...a) }),
 }))
 
+const resolveCancellationRequest = vi.hoisted(() => vi.fn())
+vi.mock('./cancellations.js', () => ({
+  resolveCancellationRequest: (...a: unknown[]) => resolveCancellationRequest(...a),
+}))
+
+const captureMessage = vi.hoisted(() => vi.fn())
+const setFingerprint = vi.hoisted(() => vi.fn())
+vi.mock('@sentry/node', () => ({
+  withScope: (fn: (s: unknown) => void) => fn({ setFingerprint, setContext: vi.fn() }),
+  captureMessage: (...a: unknown[]) => captureMessage(...a),
+}))
+
 const getBridgeTransfer = vi.hoisted(() => vi.fn())
 vi.mock('./bridge.js', () => ({ getBridgeTransfer: (...a: unknown[]) => getBridgeTransfer(...a) }))
 
@@ -120,6 +132,7 @@ beforeEach(() => {
   postLedger.mockResolvedValue({ id: 'lt-1' })
   refund.mockResolvedValue({ provider: 'mock', ref: 'mockrefund_x', status: 'succeeded' })
   transition.mockResolvedValue({ id: T, state: 'REFUNDED' })
+  resolveCancellationRequest.mockResolvedValue(true)
   from.mockImplementation((table: string) =>
     chain(table, queues[table]?.shift() ?? { data: null, error: null }),
   )
@@ -522,6 +535,74 @@ describe('the refund claim', () => {
       .filter((f) => f.method === 'update')
       .filter((f) => (f.args[0] as Record<string, unknown>).refund_claimed_at === null)
     expect(clears).toHaveLength(0)
+  })
+})
+
+// ── tail 1 of the cancellation story (slice-7 PR6b) ────────────────────────
+// The sender asked to cancel, the payout then FAILED, and this tail has made
+// them whole. Nothing further is owed, so the request closes.
+describe('cancellation request settlement', () => {
+  it('closes a pending request when the refund settles', async () => {
+    q('transfers', parked(), claimWon, persistOk)
+
+    await refundPayoutFailure({ transferId: T, actor: 'worker:payment-event', reason: 'r' })
+
+    expect(resolveCancellationRequest).toHaveBeenCalledWith({
+      transferId: T,
+      status: 'resolved_refunded',
+      resolution: expect.stringContaining('refunded in full'),
+      resolvedBy: 'worker:payment-event',
+    })
+  })
+
+  // The self-heal, and the reason this hooks more than the transition. If a
+  // resolve fails after a successful transition, EVERY later run short-circuits
+  // at already_settled — so if that exit did not retry, the request would sit
+  // pending forever on a transfer that was refunded.
+  it('re-attempts the close from already_settled, which is its only retry', async () => {
+    q('transfers', parked({ state: 'REFUNDED', refund_payment_ref: 'mockrefund_prev' }))
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' }),
+    ).resolves.toEqual({ done: true, outcome: 'already_settled' })
+
+    expect(resolveCancellationRequest).toHaveBeenCalledTimes(1)
+    expect(postLedger).not.toHaveBeenCalled() // still writes NOTHING to the ledger
+  })
+
+  it('re-attempts the close from the lost-claim already_settled exit too', async () => {
+    q('transfers', parked(), claimLost, parked({ state: 'REFUNDED', refund_payment_ref: 'r1' }))
+
+    await refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' })
+
+    expect(resolveCancellationRequest).toHaveBeenCalledTimes(1)
+  })
+
+  it('does NOT close the request on any refusal — the sender has not been paid', async () => {
+    q('transfers', parked({ state: 'COMPLETED' }))
+    await refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })
+    expect(resolveCancellationRequest).not.toHaveBeenCalled()
+
+    vi.clearAllMocks()
+    resolveCancellationRequest.mockResolvedValue(true)
+    q('transfers', parked(), claimLost, parked({ refund_claimed_at: minutesAgo(2) }))
+    await refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })
+    expect(resolveCancellationRequest).not.toHaveBeenCalled()
+  })
+
+  // Bookkeeping hanging off a money path: the sender HAS been paid, and a
+  // failure to file that fact must not undo or fail the refund.
+  it('a failed close never fails the refund — it pages instead', async () => {
+    resolveCancellationRequest.mockRejectedValue(new Error('db down'))
+    q('transfers', parked(), claimWon, persistOk)
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' }),
+    ).resolves.toEqual({ done: true, outcome: 'refunded' })
+
+    expect(transition).toHaveBeenCalledTimes(1) // the refund still settled
+    expect(setFingerprint).toHaveBeenCalledWith(['cancellation-resolve-failed', T])
+    expect(captureMessage.mock.calls.at(-1)?.[1]).toBe('error')
   })
 })
 

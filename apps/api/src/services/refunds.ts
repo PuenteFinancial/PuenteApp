@@ -1,4 +1,6 @@
+import * as Sentry from '@sentry/node'
 import { supabaseAdmin } from './supabase.js'
+import { resolveCancellationRequest } from './cancellations.js'
 import {
   transitionTransfer,
   bridgeReturnLedgerEntries,
@@ -181,7 +183,13 @@ export async function refundPayoutFailure(input: {
   // disbursement are keyed, so re-posting would be a no-op anyway, but a replay
   // from a terminal state should not touch the ledger at all. Distinct from the
   // refusal below so the CLI can exit 0 here and non-zero there.
-  if (transfer.state === 'REFUNDED') return { done: true, outcome: 'already_settled' }
+  if (transfer.state === 'REFUNDED') {
+    // Writes nothing to the ledger, but DOES re-attempt the cancellation close:
+    // that is the only retry a resolve failure ever gets (see
+    // settleCancellationRequest).
+    await settleCancellationRequest(transfer.id, input.actor)
+    return { done: true, outcome: 'already_settled' }
+  }
 
   // The guard that matters: only refund a transfer that actually reached
   // PAYOUT_FAILED — never one that delivered.
@@ -250,7 +258,10 @@ export async function refundPayoutFailure(input: {
       // that in the two-operator rig before this returned early.
       const fresh = await loadRefundable(transfer.id)
       if (!fresh) return { done: false, reason: 'transfer_not_found' }
-      if (fresh.state === 'REFUNDED') return { done: true, outcome: 'already_settled' }
+      if (fresh.state === 'REFUNDED') {
+        await settleCancellationRequest(transfer.id, input.actor)
+        return { done: true, outcome: 'already_settled' }
+      }
 
       // Still unsettled. If the ref appeared between our load and our claim,
       // the winner is mid-flight between its persist and its transition — which
@@ -283,7 +294,58 @@ export async function refundPayoutFailure(input: {
     ledgerEntries: refundedLedgerEntries(transfer),
   })
 
+  await settleCancellationRequest(transfer.id, input.actor)
   return { done: true, outcome: alreadyDisbursed ? 'already_disbursed' : 'refunded' }
+}
+
+/**
+ * Tail 1 of the post-submission cancellation story (slice-7 PR6b): the sender
+ * asked to cancel a transfer already on its way to payout, the payout then
+ * FAILED, and the refund tail has now made them whole. Nothing further is owed —
+ * close the request.
+ *
+ * Called from every exit that leaves the transfer at REFUNDED, which is the
+ * transition itself AND the two `already_settled` early returns. Including the
+ * latter is what makes this self-healing: without them, a resolve that failed on
+ * a transient error after a successful transition would never be retried — every
+ * later run short-circuits at `already_settled` — and the request would sit
+ * pending forever on a transfer that was refunded. `resolveCancellationRequest`
+ * is guarded on `status = 'pending'`, so a run that closes a stale request writes
+ * once and later runs write nothing.
+ *
+ * `resolvedBy` records who CLOSED the request, not who paid: a run that observes
+ * an already-refunded transfer and closes a stale request is legitimately its
+ * resolver.
+ *
+ * Never throws. This is bookkeeping hanging off a money path — the sender has
+ * been paid, and a failure to file that fact must not undo, retry, or fail the
+ * refund. It pages instead.
+ */
+async function settleCancellationRequest(transferId: string, actor: string): Promise<void> {
+  try {
+    await resolveCancellationRequest({
+      transferId,
+      status: 'resolved_refunded',
+      resolution: 'payout failed; sender refunded in full by the refund tail',
+      resolvedBy: actor,
+    })
+  } catch (err) {
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['cancellation-resolve-failed', transferId])
+      scope.setContext('cancellation_resolve_failed', {
+        transferId,
+        tail: 'PAYOUT_FAILED->REFUNDED',
+        runbook: 'docs/runbooks/pending-cancellation.md',
+      })
+      Sentry.captureMessage(
+        'refund settled but the cancellation request was not closed — close it by hand',
+        'error',
+      )
+    })
+    // Swallowed on purpose: see the doc comment. The next run through this
+    // transfer re-attempts it from the already_settled exit.
+    void err
+  }
 }
 
 /**

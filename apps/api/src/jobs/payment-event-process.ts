@@ -8,6 +8,7 @@ import {
   TransferRpcError,
 } from '../services/transfers.js'
 import { refundPayoutFailure } from '../services/refunds.js'
+import { pendingCancellationFor } from '../services/cancellations.js'
 import { buildReceiptDisclosure } from '../services/disclosures.js'
 import { mapBridgeState, markProcessed, markIgnored } from '../services/payment-events.js'
 
@@ -338,6 +339,102 @@ async function drive(transfer: TransferRow, target: 'IN_FLIGHT' | 'COMPLETED'): 
   // receipt leaves the event 'received' and self-heals on retry. writeReceipt
   // re-reads state and no-ops unless COMPLETED, and the upsert is idempotent.
   await writeReceipt(transfer)
+
+  // slice-7 PR6b, tail 2 of the cancellation story. AFTER the receipt: the
+  // transfer DID deliver and the receipt is the record of that; routing to
+  // UNDER_REVIEW first would make writeReceipt's COMPLETED guard skip it.
+  await routeCancellationOnDelivery(transfer)
+}
+
+/**
+ * The sender asked to cancel, and the payout COMPLETED anyway.
+ *
+ * A timely request is owed a full refund even though the recipient already has
+ * the money — the accepted, bounded double-pay. We do not execute it here: it is
+ * a post-delivery correction payment against a delivered transfer, so it routes
+ * to `UNDER_REVIEW` and a human runs it (scripts/resolve-cancellation.ts). The
+ * request stays `pending`, because it is not resolved until that happens.
+ *
+ * An UNTIMELY request is owed nothing — but denial is never automatic. The
+ * transfer stays COMPLETED (flipping a delivered transfer's state for a request
+ * we will not honour would be a lie in the state log) and ops is alerted with
+ * the timeliness fact so a human denies it on the record.
+ *
+ * Never throws. `drive` has already posted the COMPLETED ledger batch and
+ * written the receipt; a failure to route a review must not undo delivery or
+ * strand the event. It pages instead — and because a claim refusal is the only
+ * thing that leaves the event 'received', this is genuinely the last chance,
+ * which is why the alert is an error rather than a warning.
+ */
+async function routeCancellationOnDelivery(transfer: TransferRow): Promise<void> {
+  try {
+    const request = await pendingCancellationFor(transfer.id)
+    if (!request) return
+
+    // Belt and braces: the cancel route cannot open a request on a COMPLETED
+    // transfer (it never reaches the 202 branch), so a request that postdates
+    // delivery should be impossible. If one exists, it is not evidence of a
+    // timely ask and must not create an obligation.
+    if (Date.parse(request.requested_at) > Date.now()) return
+
+    if (!request.within_window) {
+      Sentry.withScope((scope) => {
+        scope.setFingerprint(['cancellation-out-of-window', transfer.id])
+        scope.setContext('cancellation_out_of_window', {
+          transferId: transfer.id,
+          requestedAt: request.requested_at,
+          requestedState: request.requested_state,
+          runbook: 'docs/runbooks/pending-cancellation.md',
+        })
+        Sentry.captureMessage(
+          'cancellation request on a delivered transfer, OUT of the Reg E window — ' +
+            'no automatic refund is owed; a human must deny it on the record',
+          'warning',
+        )
+      })
+      return
+    }
+
+    await transitionTransfer({
+      transferId: transfer.id,
+      fromState: 'COMPLETED',
+      toState: 'UNDER_REVIEW',
+      actor: 'system',
+      reason: 'timely cancellation request on a delivered transfer — correction payment owed',
+      metadata: { cancellationRequestId: request.id, requestedAt: request.requested_at },
+      // NO ledger. Nothing has moved yet; the correction payment posts when the
+      // operator executes it. UNDER_REVIEW is a holding state, not an event.
+    })
+
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['cancellation-correction-owed', transfer.id])
+      scope.setContext('cancellation_correction_owed', {
+        transferId: transfer.id,
+        requestedAt: request.requested_at,
+        deadline: '3 business days from requestedAt',
+        runbook: 'docs/runbooks/pending-cancellation.md',
+      })
+      Sentry.captureMessage(
+        'timely cancellation on a DELIVERED transfer — full refund owed; ' +
+          'run resolve-cancellation.ts within 3 business days',
+        'error',
+      )
+    })
+  } catch (err) {
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['cancellation-route-failed', transfer.id])
+      scope.setContext('cancellation_route_failed', {
+        transferId: transfer.id,
+        runbook: 'docs/runbooks/pending-cancellation.md',
+      })
+      Sentry.captureMessage(
+        'failed to route a cancellation request on a delivered transfer — ' +
+          'check for a pending request by hand',
+        'error',
+      )
+    })
+    void err
+  }
 }
 
 // Write the Reg E receipt for a delivered transfer, idempotently. Guards on the
