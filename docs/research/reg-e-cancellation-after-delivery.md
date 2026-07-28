@@ -82,14 +82,93 @@ Their §13 Texas provision points the same way: cancel within 30 minutes for an 
 Caveat: a contract definition tells us Remitly's *legal posture*, not their operational practice on a
 seconds-later deposit; the latter is unobservable from outside.
 
-### Not obtained (fetch-blocked; listed for counsel rather than paraphrased from snippets)
+### Western Union — Reg E long-form disclosure (read verbatim from the PDF)
+
+[WU Error Resolution and Cancellation Disclosures](https://wucare.westernunion.com/POS_Longform_English_Print):
+
+> "We will refund your money within three business days of your request to cancel a transfer **as
+> long as the funds have not already been picked up or deposited** into a recipient's account."
+
+Model-form language; "already" anchors the condition to the request, not to WU's later processing.
+
+### Xoom (PayPal) — User Agreement (fetched)
+
+[Xoom User Agreement](https://www.xoom.com/user-agreement), US senders:
+
+> "you may cancel your Transaction for a full refund within 30 minutes of authorizing your
+> Transaction, **unless the funds have already been delivered** to the Recipient or Third-Party
+> Service Company"
+
+Same "already" anchor. Two oddities counsel may find instructive: the condition is broadened to
+delivery to a "Third-Party Service Company" (the reg's condition is pickup by the recipient or
+deposit to the recipient's account — receipt by a disbursement partner is neither), and the UA
+promises a refund within **four** business days where §1005.34(b) requires three for a remittance.
+Evidence that big-name terms drift from the reg — competitor language is practice, not law.
+
+### Felix Pago — the closest competitor, and the most instructive document
+
+[Felix Technologies Terms of Use](https://www.felixpago.com/en/legal/terms-of-use) — WhatsApp-based
+USD→MXN/CentAm, instant delivery ("less than 30 minutes"), i.e. the same race we have. Their terms
+contain **both readings at once**:
+
+> "We will issue a refund within three (3) Business Days of your request, provided that the funds
+> have not been picked up by the designated recipient **prior to our receipt of your request** for a
+> refund."
+
+…explicit request-time evaluation for **cash pickup** — and then, unanchored:
+
+> "For the avoidance of doubt, you may not cancel a Transfer **under any circumstances** if the
+> funds have been **disbursed or deposited** to the recipient."
+
+Read literally against a bank deposit landing *after* a timely request, that catch-all claims the
+aggressive reading — deposit defeats the cancel regardless of when the request arrived. Counsel
+should weigh it against the EFTA anti-waiver provision (15 U.S.C. §1693l: an agreement cannot waive
+rights the Act confers) — if §1005.34 confers the refund on a timely pre-deposit request, a T&C
+clause cannot extinguish it, and Felix's clause would be unenforceable in exactly our race window
+rather than evidence the right dies. Their practical reliance is probably simpler: at instant-delivery
+speed, most deposits land *before* any cancel is tapped, so the clause mostly governs cases where the
+right genuinely never arose.
+
+### Wise — product posture (help articles; US Reg E disclosure not obtained verbatim)
+
+[Can I cancel my transfer?](https://www.wise.com/help/articles/2978023/Can%20I%20cancel%20my%20transfer):
+cancellation is available while the money is with Wise ("your transfer's set up, your money's on its
+way to us, or your money's being processed"); "our conversion process is fast — and sometimes it's too
+late to cancel"; once complete, the money has left their system and recovery goes through the
+recipient's bank, with a refund if the funds come back. Denial-by-product-state rather than an
+explicit legal position on the race.
+
+### Comparison
+
+| Provider | Rail speed | Condition wording | Timing anchor |
+|---|---|---|---|
+| **Remitly** | mixed | completion = picked up/deposited "**at the time of your cancellation request**" | **request time, explicit** |
+| **Western Union** | mixed, big pickup network | "have not **already** been picked up or deposited" | request time ("already") |
+| **Xoom** | mixed | "have **already** been delivered" (+ nonstandard broadening) | request time ("already") |
+| **Felix Pago** | instant (our corridor) | pickup: "**prior to our receipt of your request**"; deposit: "under any circumstances" catch-all | **split** — request time for pickup, unanchored for deposit |
+| **Wise** | fast | product blocks cancel past point-of-no-return; refund if funds return | operational, not stated |
+| **Puente (PR6b)** | instant (SPEI) | `within_window` computed at request receipt, frozen; timely + delivered ⇒ correction payment | request time, explicit |
+
+No provider's obtained text affirmatively adopts "evaluated when we process it." Three anchor to the
+request explicitly or via "already"; Felix's deposit catch-all is the lone aggressive clause, and it
+is in tension with both its own pickup clause and (arguably) §1693l.
+
+### What competitors do differently *operationally*
+
+- **Remitly / WU** hold large cash-pickup networks: an uncollected pickup can genuinely be
+  intercepted, so their cancel is synchronous — check the partner, void or refuse on the spot. Our
+  rail can't do that (Bridge payouts are never cancelable after creation), which is why we record and
+  resolve on settlement.
+- **Felix** (instant, same corridor) papers the race over with the catch-all clause; nobody publicly
+  commits to paying twice. **Our implemented posture is the most conservative of the set** — costlier
+  per incident (bounded: send+fee, only for ≤30-min-old requests, race window of seconds-to-minutes),
+  strongest legally, and the only one that keeps affirmative evidence of every request.
+
+### Not obtained
 
 - **Xe** US Error Resolution and Cancellation Disclosure — 403.
   [help.xe.com article](https://help.xe.com/hc/articles/4403064056209-US-Error-Resolution-and-Cancellation-Disclosure)
-- **Wise / Western Union / Xoom / MoneyGram** US terms — not fetched verbatim this pass. Their
-  receipts all carry the CFPB model-form line ("You can cancel for a full refund within 30 minutes of
-  payment, unless the funds have been picked up or deposited"), which carries the same ambiguity as
-  the reg itself.
+- **Wise's US Reg E disclosure** verbatim (help articles only, above); **MoneyGram** not fetched.
 
 ## The steelman for the other side
 
@@ -108,5 +187,7 @@ right, since any provider could "process" slowly enough for the deposit to win. 
 2. Confirm the denial evidence standard for untimely requests: our own `cancelable_until` versus
    Bridge's deposit timestamp, and which needs to be preserved.
 3. Review the 202 body copy and the `underReview`/banner strings (already staged for the package).
-4. Obtain Wise/WU/Xoom terms through channels that aren't bot-blocked, if more triangulation is
-   wanted.
+4. Whether a Felix-style "avoidance of doubt" clause (deposit defeats cancellation, unanchored) is
+   (a) desirable for our terms and (b) enforceable at all given 15 U.S.C. §1693l — or whether our
+   terms should state the request-time anchor plainly, as Remitly's do.
+5. Obtain Wise's US Reg E disclosure and MoneyGram/Xe terms if more triangulation is wanted.
