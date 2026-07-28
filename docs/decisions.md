@@ -6,6 +6,54 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-28 · A post-submission cancel routes through `UNDER_REVIEW` on the COMPLETED tail ONLY —
+and that is not a return to "cancellation = error resolution."** Slice-7 PR6b records every
+post-submission cancel as a `cancellation_requests` row and resolves it when the payout settles. The
+shape needs defending because an earlier design said post-submission cancels route through
+`UNDER_REVIEW` generally, and [transfer-state-machine.md](transfer-state-machine.md) superseded that
+as **wrong on the law**: §1005.34 cancellation is not §1005.33 error resolution. They have different
+clocks, different remedies, and different lawful denials. Treating a cancellation as a dispute would
+put the sender on the wrong clock and invite us to "investigate" a request that needs no
+investigation — they have an unconditional right, exercised in time or not. So the binding rule is
+**state-keyed**: a timely cancel at `SUBMITTED`/`IN_FLIGHT` owes a full refund once the payout
+resolves, whichever way it resolves. Two tails follow. **Payout fails** → the existing refund tail
+already makes the sender whole; nothing further is owed and the request just closes. **Payout
+completes** → we owe a full refund *anyway*, so the recipient keeps the money and the sender gets
+theirs back. That accepted, bounded double-pay is the price of the statutory right.
+`UNDER_REVIEW` appears on that second tail alone, and **not because the cancel is a dispute** —
+because `COMPLETED → UNDER_REVIEW → REFUNDED` is the only modeled post-delivery correction path and
+already carries the right ledger treatment. It is a holding state meaning "a human owes this transfer
+a decision," not a claim that anything is being adjudicated. Three consequences. **(1) The correction
+gets its own expense account.** `loss_cancellation_correction`, not the existing
+`loss_funding_reversed`: an ACH return is a credit/fraud loss, this is a compliance cost, and sharing
+a bucket means the ledger cannot answer "what did Reg E cost us" without a per-transfer join. Cheap
+to separate while PR6b is the only writer; a data migration over append-only entries later. **(2)
+Denial is never automatic, and a timely request can never be denied at all.** An out-of-window request
+on a delivered transfer leaves the transfer at `COMPLETED` — flipping a delivered transfer's state for
+a request we will not honour would be a lie in the state log — and pages a human to deny it on the
+record with Bridge's deposit timestamp as evidence. The resolution tool refuses `--deny` on a timely
+request in both the CLI and the service; if one genuinely must not be paid, that is an escalation,
+not a flag. **(3) The correction payment takes the same refund claim as the PAYOUT_FAILED tail.** Both
+disburse against `refund_payment_ref` on one transfer, so they contend on one lock rather than two
+implementations of the same predicate. **Status: active** (slice 7 PR6b)
+([runbooks/pending-cancellation.md](runbooks/pending-cancellation.md)).
+
+**2026-07-28 · Cancellation timeliness is RECORDED, not enforced at the door.** The 202 that answers
+a post-submission cancel fires on **state alone** — it never consults `cancelable_until` — so a cancel
+tapped on a transfer stalled at `IN_FLIGHT` for days gets the same 202 as one tapped a minute after
+submission. Two ways to handle that, and we picked the second. **Rejected: gate the 202 on the
+window**, answering a flat 409 once it has passed. That refuses to even acknowledge a request the
+sender is entitled to make, and destroys the evidence that they made it — which is exactly what a
+regulator would ask us to produce. **Chosen: record every request, and stamp it `within_window`.**
+The wire shape does not change; the row carries the fact. Only a timely request creates an automatic
+obligation; an untimely one is still recorded, still visible, and still resolved by a human on the
+record. `within_window` is computed inside `record_cancellation_request` from the row being recorded,
+so timeliness is evaluated atomically with the record rather than read separately by a caller whose
+view may already be stale — and once written it is frozen, because the answer to "was this in time"
+must not change with the clock. The corollary is that recording must never fail the request: a
+persistence error logs, pages, and still returns the 202, because our bookkeeping problem must not
+present to the sender as a rejection of their statutory ask. **Status: active** (slice 7 PR6b).
+
 **2026-07-28 · Two atomic claims that behave OPPOSITELY when stale — and that asymmetry is the
 decision.** Slice-7 PR6b-0 adds the **refund claim** (`transfers.refund_claimed_at` /
 `refund_claimed_by`): a guarded UPDATE one run wins before calling the funding processor. It closes a

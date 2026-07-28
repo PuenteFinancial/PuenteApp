@@ -244,6 +244,12 @@ console"). **Split into two PRs** (2026-07-27): PR6a is self-contained and close
 immediately; PR6b carries a migration, the repo's first `UNDER_REVIEW` writer, a web change, and a
 compliance review, and branches from fresh `main` *after* PR6a merges (it edits `services/refunds.ts`).
 
+In the event PR6b split again: **PR6b-0** (the atomic refund claim, #123) shipped first as a bug fix
+on live money-moving code with no legal surface, so it would not wait behind a compliance review.
+PR6b then carries the cancellation story whole (decided 2026-07-28: not split further — counsel reads
+the record and both resolutions together). PR6b DOES have a small web change, contrary to the "no UI"
+note above: the pending-cancellation banner and the `UNDER_REVIEW` badge retone.
+
 ### PR6a — AUTO_REFUND ops trigger *(shipped)*
 
 No migration, no new route, no new queue. The `PAYOUT_FAILED → REFUNDED` tail moves out of the
