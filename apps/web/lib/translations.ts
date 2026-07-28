@@ -545,7 +545,12 @@ const en: Translations = {
           // path outside Supabase Auth), so that was a promise nothing could
           // keep. The polling tracker DOES update in place, so that is what we
           // say. See the glossary's "Truthful pending copy".
-          body: 'Your transfer was delivered, and you asked to cancel it. We’re sorting out your refund — this page will update when it’s done.',
+          // Outcome-neutral on purpose (compliance review 2026-07-28): a
+          // review can lawfully end in denial — the request beat our deposit
+          // EVIDENCE but Bridge's authoritative timestamp can still show the
+          // deposit came first — so "your refund" would pre-promise the very
+          // question the review decides.
+          body: 'Your transfer was delivered, and you asked to cancel it. We’re reviewing your request — this page will update when it’s resolved.',
         },
       },
     },
@@ -873,7 +878,7 @@ const es: Translations = {
         },
         underReview: {
           title: 'Procesando tu cancelación',
-          body: 'Tu transferencia se entregó y pediste cancelarla. Estamos gestionando tu reembolso; esta página se actualizará cuando esté listo.',
+          body: 'Tu transferencia se entregó y pediste cancelarla. Estamos revisando tu solicitud; esta página se actualizará cuando se resuelva.',
         },
       },
     },
