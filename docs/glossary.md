@@ -132,12 +132,14 @@ refer back as needed.
   clock starts when they FIRST asked and must never restart. Explicitly **not** a dispute; see
   [decisions.md](decisions.md) 2026-07-28.
 - **Timely cancellation request** (`within_window`) — a request made before the transfer's
-  `cancelable_until`. Computed once, inside the recording RPC, and then frozen: the answer to "was
-  this in time" must not change with the clock. Only a timely request creates an automatic
-  full-refund obligation; an untimely one is still recorded and still resolved by a human on the
-  record. Timeliness is **recorded, not enforced at the door** — the 202 fires on state alone.
-- **Correction payment** — the post-delivery refund owed on a TIMELY cancellation whose payout
-  COMPLETED anyway: the recipient keeps the money and the sender is made whole regardless, the
+  `cancelable_until`: §1005.34's **first** condition (the 30-minute clock), computed once inside the
+  recording RPC and then frozen. The statute's **second** condition — the request preceded the
+  deposit — is evaluated at resolution against deposit evidence, because only Bridge knows the
+  deposit time. Both must hold for an automatic obligation; a request failing either is still
+  recorded and still resolved by a human on the record. Timeliness is **recorded, not enforced at
+  the door** — the 202 fires on state alone.
+- **Correction payment** — the post-delivery refund owed on a cancellation that was in-window AND
+  **beat the deposit**, whose payout COMPLETED anyway: the recipient keeps the money and the sender is made whole regardless, the
   accepted bounded double-pay. Booked `DR loss_cancellation_correction / CR cash_clearing` — a NEW
   expense against Puente, not a reversal, because the `COMPLETED` batch already discharged
   `transfer_payable` and delivered history is never rewritten. Contrast **Refund** (the payout

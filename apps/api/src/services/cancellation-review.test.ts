@@ -220,17 +220,38 @@ describe('refundCancellation', () => {
 })
 
 describe('denyCancellation', () => {
-  // The legal guard: a timely cancellation on a delivered transfer is owed a
-  // full refund, and no denial path may close it.
-  it('REFUSES to deny a timely request', async () => {
+  // The legal guard, now both statutory conditions: in-window AND before the
+  // deposit means the refund is owed, and no denial path may close it. The
+  // request here is 09:00; the operator cites a 10:00 deposit — the ask beat it.
+  it('REFUSES to deny a request that beat the deposit', async () => {
     pendingCancellationFor.mockResolvedValue(request({ within_window: true }))
     q('transfers', reviewing())
 
     await expect(
       denyCancellation({ transferId: T, operator: 'jphelps', depositedAt: '2026-07-28T10:00:00.000Z' }),
-    ).resolves.toEqual({ done: false, reason: 'request_is_timely' })
+    ).resolves.toEqual({ done: false, reason: 'request_precedes_deposit' })
     expect(transition).not.toHaveBeenCalled()
     expect(resolveCancellationRequest).not.toHaveBeenCalled()
+  })
+
+  // The newly-lawful (and, on an instant rail, COMMON) denial: in-window by the
+  // clock, but Bridge deposited at 08:59 — a minute before the 09:00 ask.
+  // Condition (2) failed at request time, so nothing is owed. The evidence the
+  // operator cited is what makes it provable, so it must reach the resolution.
+  it('denies an in-window request when the deposit preceded it, naming that ground', async () => {
+    pendingCancellationFor.mockResolvedValue(request({ within_window: true }))
+    q('transfers', reviewing())
+
+    await expect(
+      denyCancellation({ transferId: T, operator: 'jphelps', depositedAt: '2026-07-28T08:59:00.000Z' }),
+    ).resolves.toEqual({ done: true, outcome: 'denied' })
+
+    expect(resolveCancellationRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'resolved_denied',
+        resolution: expect.stringContaining('before the request'),
+      }),
+    )
   })
 
   it('returns an out-of-window review to COMPLETED with NO ledger, recording the evidence', async () => {

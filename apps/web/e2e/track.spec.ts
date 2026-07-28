@@ -103,11 +103,18 @@ test('a cancel that needs support shows the server-authored Reg E copy', async (
   await expect(
     page.getByText(/recorded your cancellation request|registramos tu solicitud/i),
   ).toBeVisible()
-  // And the refund must NOT be conditioned on the payout failing — a timely
-  // request is refunded either way, including after delivery.
+  // The refund promise must state BOTH §1005.34 conditions — the 30-minute
+  // window AND before-delivery — and no more. An earlier draft promised a
+  // refund even after delivery, which overstates the rule.
   await expect(
-    page.getByText(/already been delivered|ya se entregó/i),
+    page.getByText(/within 30 minutes of paying|dentro de los 30 minutos/i),
   ).toBeVisible()
+  await expect(
+    page.getByText(/before the money was delivered|antes de que se entregara/i),
+  ).toBeVisible()
+  await expect(
+    page.getByText(/we'll still refund you|igual te reembolsaremos/i),
+  ).toHaveCount(0)
   await expect(
     page.getByText(/being sent for payout|se está enviando para su pago/i),
   ).toHaveCount(0)

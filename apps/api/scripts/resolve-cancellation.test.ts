@@ -141,16 +141,28 @@ describe('resolve', () => {
     expect(denyCancellation).not.toHaveBeenCalled()
   })
 
-  // THE legal guard of this tool. A timely cancellation on a delivered transfer
-  // is owed a full refund; letting an operator close one by typing a denial is
-  // the single most expensive mistake this CLI could permit.
-  it('REFUSES to deny a timely request, even before the service is called', async () => {
+  // THE legal guard of this tool, enforced in the SERVICE: a request that beat
+  // the deposit is owed a full refund, and typing a denial must not close it.
+  // The CLI no longer pre-blocks on the clock alone — in-window requests are
+  // deniable when the deposit came first — so the guard the operator hits is
+  // the service's two-condition comparison, surfaced verbatim.
+  it('surfaces the service refusal when the request beat the deposit', async () => {
     listPendingReviews.mockResolvedValue([review({ within_window: true })])
+    denyCancellation.mockResolvedValue({ done: false, reason: 'request_precedes_deposit' })
 
     await expect(
       resolve(args({ action: 'deny', depositedAt: DEPOSITED })),
-    ).rejects.toThrow(/TIMELY/)
-    expect(denyCancellation).not.toHaveBeenCalled()
+    ).rejects.toThrow(/refund is owed/)
+    expect(denyCancellation).toHaveBeenCalled()
+  })
+
+  it('warns on an in-window deny that the deposit timestamp is what decides it', async () => {
+    listPendingReviews.mockResolvedValue([review({ within_window: true })])
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    await resolve(args({ action: 'deny', depositedAt: DEPOSITED }))
+
+    expect(log.mock.calls.flat().join('\n')).toContain('checked against')
   })
 
   it('denies an out-of-window request, passing the operator’s evidence through', async () => {
@@ -204,10 +216,14 @@ describe('resolve', () => {
 })
 
 describe('list', () => {
-  it('marks a timely request as owing a refund', async () => {
+  it('marks an in-window request as owed only IF it beat the deposit', async () => {
+    // The list must not restate the old clock-only conflation: within_window is
+    // condition (1); whether the refund is owed also depends on condition (2).
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
     await list()
-    expect(log.mock.calls.flat().join('\n')).toMatch(/TIMELY — a full refund is owed/)
+    const printed = log.mock.calls.flat().join('\n')
+    expect(printed).toMatch(/IN-WINDOW — owed IF it beat the deposit/)
+    expect(printed).not.toMatch(/TIMELY — a full refund is owed/)
   })
 
   it('says so plainly when nothing is open', async () => {

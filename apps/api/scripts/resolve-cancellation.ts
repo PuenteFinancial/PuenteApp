@@ -207,11 +207,11 @@ function refusalMessage(outcome: Extract<ReviewOutcome, { done: false }>): strin
         'there is no open cancellation request on this transfer. The request is the authority for ' +
         'the payment; without one there is nothing to honour.'
       )
-    case 'request_is_timely':
+    case 'request_precedes_deposit':
       return (
-        'this request was made INSIDE the Reg E window, so it cannot be denied — a timely ' +
-        'cancellation on a delivered transfer is owed a full refund. Re-run with --refund, or ' +
-        'escalate if you believe it must not be paid.'
+        'this request was made INSIDE the Reg E window AND before the deposit timestamp you ' +
+        'supplied — both §1005.34 conditions held, so a full refund is owed and it cannot be ' +
+        'denied. Re-run with --refund, or escalate if you believe it must not be paid.'
       )
     case 'claim_taken':
       return (
@@ -239,7 +239,7 @@ export async function list(): Promise<void> {
       `  ${row.transfer_id}  ${usd(row.send_amount_minor + row.fee_amount_minor)}  ` +
         `state=${row.state}  asked=${row.requested_at}  ` +
         (row.within_window
-          ? '⚠ TIMELY — a full refund is owed (--refund)'
+          ? '⚠ IN-WINDOW — owed IF it beat the deposit (see the alert; --refund or --deny with evidence)'
           : 'out-of-window — deny with evidence (--deny)') +
         (row.refund_payment_ref ? '  [disbursement already recorded]' : ''),
     )
@@ -271,11 +271,16 @@ export async function resolve(args: Extract<ParsedArgs, { mode: 'resolve' }>): P
     console.log('   ⚠ this request is OUT of the Reg E window — no refund is owed. --deny is the exit.')
   }
   if (args.action === 'deny' && open.within_window) {
-    // The service refuses this too; failing here means a dry run says so as well.
-    fail(
-      'this request is TIMELY, so it cannot be denied — a timely cancellation on a delivered ' +
-        'transfer is owed a full refund. Re-run with --refund, or escalate.',
+    // In-window is only condition (1). Denial can still be lawful if Bridge's
+    // deposit preceded the request — which is exactly what --deposited-at is
+    // checked against in the service. Tell the operator what will decide it.
+    console.log(
+      `   ⚠ in-window request — denial is lawful ONLY if the deposit preceded the ask ` +
+        `(${open.requested_at}). Your --deposited-at will be checked against it.`,
     )
+    if (args.depositedAt && Date.parse(args.depositedAt) > Date.parse(open.requested_at)) {
+      console.log('   ⚠ the timestamp you supplied is AFTER the request — the service will refuse.')
+    }
   }
   pass('request loaded')
 

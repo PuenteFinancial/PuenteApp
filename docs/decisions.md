@@ -18,8 +18,16 @@ investigation — they have an unconditional right, exercised in time or not. So
 **state-keyed**: a timely cancel at `SUBMITTED`/`IN_FLIGHT` owes a full refund once the payout
 resolves, whichever way it resolves. Two tails follow. **Payout fails** → the existing refund tail
 already makes the sender whole; nothing further is owed and the request just closes. **Payout
-completes** → we owe a full refund *anyway*, so the recipient keeps the money and the sender gets
-theirs back. That accepted, bounded double-pay is the price of the statutory right.
+completes** → §1005.34's second condition decides it: the refund is owed only if the request was
+made **before the funds were deposited** (both conditions are evaluated as of the request — see the
+research memo). On an instant rail that matters enormously: SPEI deposits in seconds while the
+window runs 30 minutes, so most in-window cancels arrive *after* the deposit and are owed nothing —
+a human denies them on the record with Bridge's deposit timestamp as evidence. Only a request that
+genuinely **beat the deposit** is owed the full refund — the recipient keeps the money and the
+sender gets theirs back. That accepted, bounded double-pay is the price of the statutory right,
+now confined to a seconds-wide race. (Initially implemented on the clock condition alone, which
+over-committed to paying twice on every in-window cancel; corrected 2026-07-28 same-day, before
+merge.)
 `UNDER_REVIEW` appears on that second tail alone, and **not because the cancel is a dispute** —
 because `COMPLETED → UNDER_REVIEW → REFUNDED` is the only modeled post-delivery correction path and
 already carries the right ledger treatment. It is a holding state meaning "a human owes this transfer
@@ -28,12 +36,14 @@ gets its own expense account.** `loss_cancellation_correction`, not the existing
 `loss_funding_reversed`: an ACH return is a credit/fraud loss, this is a compliance cost, and sharing
 a bucket means the ledger cannot answer "what did Reg E cost us" without a per-transfer join. Cheap
 to separate while PR6b is the only writer; a data migration over append-only entries later. **(2)
-Denial is never automatic, and a timely request can never be denied at all.** An out-of-window request
-on a delivered transfer leaves the transfer at `COMPLETED` — flipping a delivered transfer's state for
-a request we will not honour would be a lie in the state log — and pages a human to deny it on the
-record with Bridge's deposit timestamp as evidence. The resolution tool refuses `--deny` on a timely
-request in both the CLI and the service; if one genuinely must not be paid, that is an escalation,
-not a flag. **(3) The correction payment takes the same refund claim as the PAYOUT_FAILED tail.** Both
+Denial is never automatic, and a request that beat the deposit can never be denied at all.** Denial
+has exactly two lawful grounds, mirroring the statute's two conditions: out-of-window (provable from
+our own `cancelable_until`) and deposit-preceded-request (provable only from Bridge's deposit
+timestamp — which is why `--deposited-at` is load-bearing in the deny guard, compared against
+`requested_at`, not merely recorded). Either way the transfer stays/returns to `COMPLETED` — flipping
+a delivered transfer's state for a request we will not honour would be a lie in the state log. The
+resolution tool refuses `--deny` when both conditions held; if such a request genuinely must not be
+paid, that is an escalation, not a flag. **(3) The correction payment takes the same refund claim as the PAYOUT_FAILED tail.** Both
 disburse against `refund_payment_ref` on one transfer, so they contend on one lock rather than two
 implementations of the same predicate. **Status: active** (slice 7 PR6b)
 ([runbooks/pending-cancellation.md](runbooks/pending-cancellation.md); supporting research incl. the

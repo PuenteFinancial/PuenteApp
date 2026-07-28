@@ -65,7 +65,7 @@ function q(table: string, ...results: unknown[]) {
 const upsertCalls: unknown[][] = []
 function chain(result: unknown) {
   const c: Record<string, unknown> = {}
-  for (const m of ['select', 'eq', 'in', 'is', 'update']) c[m] = () => c
+  for (const m of ['select', 'eq', 'in', 'is', 'order', 'limit', 'update']) c[m] = () => c
   c.upsert = (...args: unknown[]) => {
     upsertCalls.push(args)
     return c
@@ -197,11 +197,17 @@ describe('processPaymentEvent — transitions', () => {
     ...over,
   })
 
-  it('timely cancellation + COMPLETED → UNDER_REVIEW with NO ledger, request left pending', async () => {
+  it('timely PRE-DEPOSIT cancellation + COMPLETED → UNDER_REVIEW with NO ledger, request left pending', async () => {
+    // The true race: the ask (60s ago) beat our earliest deposit evidence (30s
+    // ago). Both §1005.34 conditions held → owed → routed for the correction.
     pendingCancellationFor.mockResolvedValue(pending())
     q('payment_events', event({ event_type: 'payment_processed' }))
     q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
     queueReceipt()
+    q('payment_events', {
+      data: [{ received_at: new Date(Date.now() - 30_000).toISOString() }],
+      error: null,
+    }) // earliest deposit evidence — AFTER the request
     transition.mockResolvedValue({})
 
     await processPaymentEvent('ev-1')
@@ -216,6 +222,31 @@ describe('processPaymentEvent — transitions', () => {
     // The request stays PENDING — it is not resolved until the refund happens.
     expect(resolveCancellationRequest).not.toHaveBeenCalled()
     expect(setFingerprint).toHaveBeenCalledWith(['cancellation-correction-owed', 'tr-1'])
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  // Condition (2) of §1005.34, and the COMMON case on an instant rail: the
+  // deposit landed before the sender asked. In-window by the clock, owed
+  // NOTHING — the transfer must stay COMPLETED and a human denies with
+  // Bridge's timestamp. Before this bucket existed, every in-window cancel on
+  // a delivered transfer routed to the correction payment — paying twice in
+  // cases the reg never required.
+  it('in-window but AFTER-deposit cancellation → stays COMPLETED, deny-with-evidence alert', async () => {
+    pendingCancellationFor.mockResolvedValue(pending())
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
+    queueReceipt()
+    q('payment_events', {
+      data: [{ received_at: new Date(Date.now() - 120_000).toISOString() }],
+      error: null,
+    }) // earliest deposit evidence — BEFORE the request (60s ago)
+
+    await processPaymentEvent('ev-1')
+
+    const states = transition.mock.calls.map((c) => (c as [Record<string, unknown>])[0].toState)
+    expect(states).not.toContain('UNDER_REVIEW')
+    expect(setFingerprint).toHaveBeenCalledWith(['cancellation-after-deposit', 'tr-1'])
+    expect(setFingerprint).not.toHaveBeenCalledWith(['cancellation-correction-owed', 'tr-1'])
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
   })
 

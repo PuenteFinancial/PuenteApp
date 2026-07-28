@@ -10,16 +10,19 @@ Background: [transfer-state-machine.md](../transfer-state-machine.md) (post-subm
 
 ## The rule you are enforcing
 
-**§1005.34 cancellation is not §1005.33 error resolution.** There is nothing to investigate. The
-sender either exercised an unconditional right in time or they did not, and the only question is
-which:
+**§1005.34 cancellation is not §1005.33 error resolution.** There is nothing to investigate — only
+two facts to establish. The refund is owed only when **both** of §1005.34's conditions held at the moment the sender asked:
 
-- **Timely** (`within_window = true`) → **a full refund is owed**, regardless of how the payout
-  turned out. If it failed, the refund tail already handled it. If it **delivered**, we pay the
-  sender back anyway and the recipient keeps the money. That double-pay is deliberate and accepted —
-  it is the price of the statutory right, not a mistake to be argued out of.
-- **Untimely** (`within_window = false`) → nothing is owed, but **denial is never automatic**. A human
-  denies it on the record, with evidence.
+- **In window** (`within_window = true`) — asked within 30 minutes of paying, **and**
+- **Before the deposit** — the funds had not yet reached the recipient when they asked.
+
+If the payout **failed**, the refund tail already made them whole either way. If it **delivered**:
+a request that met both conditions is owed the full refund even though the recipient keeps the
+money — that double-pay is deliberate and accepted, the price of the statutory right, and on our
+rail it is confined to the seconds between submission and SPEI deposit. A request failing either
+condition is owed **nothing** — but **denial is never automatic**: a human denies it on the record,
+with the evidence for whichever condition failed (our `cancelable_until` for the clock; **Bridge's
+deposit timestamp** for the deposit).
 
 **Never do this with SQL.** A bare `UPDATE ... set status = 'resolved_refunded'` closes the request
 without paying anyone and without posting the correction batch — the books would say we refunded a
@@ -32,7 +35,8 @@ All fingerprinted per transfer, so repeated re-drives collapse into one issue.
 
 | Fingerprint | Severity | Means | Go to |
 |---|---|---|---|
-| `cancellation-correction-owed` | **error** | a TIMELY request on a **delivered** transfer; it is now `UNDER_REVIEW` and a full refund is owed | [Refund](#refund) — **3 business days** |
+| `cancellation-correction-owed` | **error** | an in-window request that **beat the deposit** on a delivered transfer; it is now `UNDER_REVIEW` and a full refund is owed | [Refund](#refund) — **3 business days** |
+| `cancellation-after-deposit` | warning | in-window by the clock, but our evidence says the **deposit came first** — nothing is owed | confirm the exact deposit time in the Bridge dashboard, then [Deny](#deny) with it |
 | `cancellation-out-of-window` | warning | an out-of-window request on a delivered transfer; it stayed `COMPLETED` | [Deny](#deny) |
 | `cancellation-record-failed` | **error** | the sender asked and we **failed to persist it**; they still got their 202 | [Record it by hand](#a-request-that-was-never-recorded) |
 | `cancellation-resolve-failed` | **error** | a refund settled but its request did not close | usually self-heals on the next run through that transfer; check `--list` |
@@ -46,7 +50,9 @@ doppler run -- pnpm exec tsx scripts/resolve-cancellation.ts --list
 
 Read-only. Every open request, with the fact that decides the exit:
 
-- **`⚠ TIMELY — a full refund is owed (--refund)`** — go to [Refund](#refund).
+- **`⚠ IN-WINDOW — owed IF it beat the deposit`** — check which alert fired for the transfer:
+  `cancellation-correction-owed` → [Refund](#refund); `cancellation-after-deposit` → confirm the
+  deposit time in Bridge, then [Deny](#deny).
 - **`out-of-window — deny with evidence (--deny)`** — go to [Deny](#deny).
 - **`[disbursement already recorded]`** — a previous run paid the sender but did not settle the
   state. Re-running `--refund` finishes it and disburses nothing further.
@@ -65,7 +71,7 @@ no audit-plugin rows, so this is the only durable record of who decided. Use you
 (`^[a-z0-9._-]{2,32}$`), never a shared one.
 
 <a id="refund"></a>
-## 3a. Refund — a timely request on a delivered transfer
+## 3a. Refund — a request that beat the deposit
 
 ```bash
 doppler run -- pnpm exec tsx scripts/resolve-cancellation.ts <transferId> --operator <your-id> --refund --confirm
@@ -88,11 +94,18 @@ history. That account exists specifically so this cost is separable from ACH-ret
 | `claim_abandoned` | a refund was claimed and never completed — **the sender may already have been paid** | stop. Follow [manual-refund.md](manual-refund.md) → *Abandoned claims* before doing anything else |
 
 <a id="deny"></a>
-## 3b. Deny — an out-of-window request
+## 3b. Deny — a request that failed either condition
 
-You need Bridge's **deposit timestamp** first: the evidence that delivery preceded the ask. It is not
-available from our API (`getBridgeTransfer` returns only id/state/sourceAmount) — read it from the
-Bridge dashboard.
+Two lawful grounds, and the tool checks them:
+
+- **Out of window** — provable from our own `cancelable_until` (`--list` shows it).
+- **Deposit preceded the request** — the common case on an instant rail. Provable **only** from
+  Bridge's deposit timestamp, so `--deposited-at` is **load-bearing**: the service compares it to
+  `requested_at` and refuses the denial if the request came first. A wrong-but-earlier timestamp can
+  only make the tool refuse more, never deny more.
+
+You need Bridge's **deposit timestamp** first. It is not available from our API
+(`getBridgeTransfer` returns only id/state/sourceAmount) — read it from the Bridge dashboard.
 
 ```bash
 doppler run -- pnpm exec tsx scripts/resolve-cancellation.ts <transferId> --operator <your-id> \
@@ -103,9 +116,9 @@ The transfer returns to `COMPLETED` (or stays there, if it was never routed), no
 the request closes `resolved_denied` with your evidence in both the resolution text and the transition
 metadata.
 
-**The tool will refuse to deny a TIMELY request**, in both the CLI and the service. That is not a bug
-to work around. If you believe a timely request must not be paid, escalate — do not reach for another
-tool.
+**The tool will refuse to deny a request that was in-window AND beat the deposit** — both statutory
+conditions held, so the refund is owed. That is not a bug to work around. If you believe such a
+request must not be paid, escalate — do not reach for another tool.
 
 ## 4. Verify
 

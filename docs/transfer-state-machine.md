@@ -282,8 +282,14 @@ The request resolves when the payout does, and what we owe differs by which way:
 | Payout resolves as | What we owe | Mechanism |
 |---|---|---|
 | `PAYOUT_FAILED` | nothing extra — the refund tail already makes the sender whole | request closes `resolved_refunded` when the transfer reaches `REFUNDED` |
-| `COMPLETED`, request timely | a **full refund anyway** — the accepted, bounded double-pay | `COMPLETED → UNDER_REVIEW`, then a human runs the **correction payment** → `REFUNDED` |
-| `COMPLETED`, request untimely | nothing | **stays `COMPLETED`**; ops is alerted and a human denies it on the record |
+| `COMPLETED`, request in-window **and before the deposit** | a **full refund anyway** — the accepted, bounded double-pay, confined to the seconds-wide race | `COMPLETED → UNDER_REVIEW`, then a human runs the **correction payment** → `REFUNDED` |
+| `COMPLETED`, request in-window but **after the deposit** | nothing — §1005.34's second condition failed at request time | **stays `COMPLETED`**; ops confirms the deposit time in the Bridge dashboard and denies with it as evidence |
+| `COMPLETED`, request out of window | nothing | **stays `COMPLETED`**; ops is alerted and a human denies it on the record |
+
+The deposit comparison uses our **earliest evidence** of it (the first `payment_processed` event's
+`received_at`) so ambiguity breaks toward the sender: the true deposit happened at or before our
+evidence, so the automatic path can over-route into review (a human then denies with Bridge's exact
+timestamp) but can never deny a request the reg entitles.
 
 `UNDER_REVIEW` appears on the middle row only, and **not because a cancellation is a dispute** —
 §1005.34 cancellation is not §1005.33 error resolution (see Cancellation above, which supersedes the

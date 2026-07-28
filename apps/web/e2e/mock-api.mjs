@@ -203,8 +203,8 @@ const server = createServer(async (req, res) => {
         code: 'cancellation_requires_support',
         requestedAt: '2026-07-28T12:00:00.000Z',
         messages: {
-          en: "This transfer is already on its way to your recipient, so it can't be stopped automatically. We've recorded your cancellation request. If the payout hasn't been delivered yet, you'll get your money back in full — and if it has already been delivered, we'll still refund you in full. This page will update when it's resolved.",
-          es: 'Esta transferencia ya va camino a tu destinatario, así que no se puede detener automáticamente. Registramos tu solicitud de cancelación. Si el pago aún no se ha entregado, recibirás tu dinero completo; y si ya se entregó, igual te reembolsaremos el monto total. Esta página se actualizará cuando se resuelva.',
+          en: "This transfer is already on its way to your recipient, so it can't be stopped automatically. We've recorded your cancellation request. If you asked within 30 minutes of paying and before the money was delivered, you'll get a full refund. This page will update when it's resolved.",
+          es: 'Esta transferencia ya va camino a tu destinatario, así que no se puede detener automáticamente. Registramos tu solicitud de cancelación. Si la hiciste dentro de los 30 minutos después de pagar y antes de que se entregara el dinero, recibirás un reembolso completo. Esta página se actualizará cuando se resuelva.',
         },
       })
     }

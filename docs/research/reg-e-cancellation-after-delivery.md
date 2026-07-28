@@ -18,10 +18,25 @@ said refund; [runbooks/payout-holds.md](../runbooks/payout-holds.md) step 4 said
 
 ## What we implemented (PR6b)
 
-Timeliness is evaluated **once, at the moment the request is received** (`within_window`, computed
-inside the recording RPC against `cancelable_until`, then frozen). A timely request whose payout
-completes anyway routes `COMPLETED → UNDER_REVIEW` and a human pays a **correction payment** — the
-accepted, bounded double-pay. Denial is lawful only for an untimely request.
+Both §1005.34 conditions, each evaluated as of the request:
+
+1. **The clock** — `within_window`, computed inside the recording RPC against `cancelable_until`,
+   then frozen.
+2. **Before the deposit** — at resolution, `requested_at` is compared against our earliest deposit
+   evidence (the first `payment_processed` event's `received_at`), which errs toward the sender;
+   the operator's denial cites Bridge's authoritative timestamp, which the deny guard compares to
+   `requested_at` before permitting the denial.
+
+Only a request meeting **both** routes `COMPLETED → UNDER_REVIEW` for the human-executed
+**correction payment** — the accepted double-pay, confined to the seconds-wide submission→deposit
+race. Denial is lawful on either failed condition, never automatic, and never available for a
+request that beat the deposit.
+
+*(History: the first build keyed the owed path on the clock alone — over-committing to the
+double-pay on every in-window cancel, including ones made long after the deposit. Found while
+answering "how do competitors avoid paying twice" and corrected the same day, 2026-07-28, before
+merge. The competitor answer, incidentally, is largely "condition 2": on an instant rail most
+in-window cancels arrive after the deposit and are owed nothing.)*
 
 ## The regulation
 

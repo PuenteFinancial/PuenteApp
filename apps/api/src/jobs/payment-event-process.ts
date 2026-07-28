@@ -347,35 +347,66 @@ async function drive(transfer: TransferRow, target: 'IN_FLIGHT' | 'COMPLETED'): 
 }
 
 /**
+ * The earliest moment we can EVIDENCE the deposit: the received_at of the first
+ * `payment_processed` event for this transfer (webhook or poll-synthesized).
+ *
+ * The actual SPEI deposit happened AT OR BEFORE this — Bridge deposited, then
+ * told us — so comparing the request against it errs in the SENDER'S favour: a
+ * request earlier than our evidence might still postdate the true deposit, and
+ * that ambiguous sliver stays on the owed path for a human holding Bridge's
+ * authoritative timestamp to resolve. What it can never do is deny a request
+ * the reg entitles. Falls back to now() (= "no evidence, treat the request as
+ * first") if no event is found, which should be unreachable — reaching
+ * COMPLETED requires processing exactly such an event.
+ */
+async function earliestDepositEvidence(transferId: string): Promise<string> {
+  const { data, error } = await supabaseAdmin
+    .from('payment_events')
+    .select('received_at')
+    .eq('transfer_id', transferId)
+    .eq('event_type', 'payment_processed')
+    .order('received_at', { ascending: true })
+    .limit(1)
+  if (error) throw new Error(`deposit-evidence query failed: ${error.message}`)
+  const rows = (data ?? []) as Array<{ received_at: string }>
+  return rows[0]?.received_at ?? new Date().toISOString()
+}
+
+/**
  * The sender asked to cancel, and the payout COMPLETED anyway.
  *
- * A timely request is owed a full refund even though the recipient already has
- * the money — the accepted, bounded double-pay. We do not execute it here: it is
- * a post-delivery correction payment against a delivered transfer, so it routes
- * to `UNDER_REVIEW` and a human runs it (scripts/resolve-cancellation.ts). The
- * request stays `pending`, because it is not resolved until that happens.
+ * §1005.34 owes the refund only when BOTH conditions held at the moment the
+ * request was received: (1) within 30 minutes of payment (`within_window`,
+ * frozen at record time) AND (2) the funds not yet deposited. Condition (2) is
+ * the one an instant rail makes decisive — SPEI deposits in seconds while the
+ * window runs 30 minutes, so most in-window cancels arrive AFTER the deposit
+ * and are owed nothing. Three buckets:
  *
- * An UNTIMELY request is owed nothing — but denial is never automatic. The
- * transfer stays COMPLETED (flipping a delivered transfer's state for a request
- * we will not honour would be a lie in the state log) and ops is alerted with
- * the timeliness fact so a human denies it on the record.
+ *   out of window          → owed nothing; alert; a human denies on the record.
+ *   in window, request AT/AFTER our earliest deposit evidence
+ *                          → owed nothing (the deposit had already happened when
+ *                            they asked); alert; a human confirms the exact
+ *                            deposit time in the Bridge dashboard and denies
+ *                            with it as evidence. The transfer STAYS COMPLETED.
+ *   in window, request BEFORE our earliest deposit evidence
+ *                          → the true race: the ask may genuinely have beaten
+ *                            the deposit. Owed posture: route to `UNDER_REVIEW`
+ *                            for the correction payment — the accepted, bounded
+ *                            double-pay, now confined to a seconds-wide sliver.
+ *
+ * Denial is never automatic in any bucket, and no bucket flips a delivered
+ * transfer's state for a request we will not honour.
  *
  * Never throws. `drive` has already posted the COMPLETED ledger batch and
- * written the receipt; a failure to route a review must not undo delivery or
- * strand the event. It pages instead — and because a claim refusal is the only
- * thing that leaves the event 'received', this is genuinely the last chance,
- * which is why the alert is an error rather than a warning.
+ * written the receipt; a failure to route must not undo delivery or strand the
+ * event. It pages instead — and because a claim refusal is the only thing that
+ * leaves the event 'received', this is genuinely the last chance, which is why
+ * the owed-path alert is an error rather than a warning.
  */
 async function routeCancellationOnDelivery(transfer: TransferRow): Promise<void> {
   try {
     const request = await pendingCancellationFor(transfer.id)
     if (!request) return
-
-    // Belt and braces: the cancel route cannot open a request on a COMPLETED
-    // transfer (it never reaches the 202 branch), so a request that postdates
-    // delivery should be impossible. If one exists, it is not evidence of a
-    // timely ask and must not create an obligation.
-    if (Date.parse(request.requested_at) > Date.now()) return
 
     if (!request.within_window) {
       Sentry.withScope((scope) => {
@@ -395,13 +426,39 @@ async function routeCancellationOnDelivery(transfer: TransferRow): Promise<void>
       return
     }
 
+    // Condition (2): was the deposit already done when they asked? Compare
+    // against our EARLIEST evidence of it, so ambiguity breaks toward the
+    // sender (see earliestDepositEvidence).
+    const depositEvidenceAt = await earliestDepositEvidence(transfer.id)
+    if (Date.parse(request.requested_at) >= Date.parse(depositEvidenceAt)) {
+      Sentry.withScope((scope) => {
+        scope.setFingerprint(['cancellation-after-deposit', transfer.id])
+        scope.setContext('cancellation_after_deposit', {
+          transferId: transfer.id,
+          requestedAt: request.requested_at,
+          depositEvidenceAt,
+          runbook: 'docs/runbooks/pending-cancellation.md',
+        })
+        Sentry.captureMessage(
+          'cancellation request arrived after the deposit — no refund is owed; confirm the ' +
+            'exact deposit time in the Bridge dashboard and deny with it as evidence',
+          'warning',
+        )
+      })
+      return
+    }
+
     await transitionTransfer({
       transferId: transfer.id,
       fromState: 'COMPLETED',
       toState: 'UNDER_REVIEW',
       actor: 'system',
-      reason: 'timely cancellation request on a delivered transfer — correction payment owed',
-      metadata: { cancellationRequestId: request.id, requestedAt: request.requested_at },
+      reason: 'timely pre-deposit cancellation on a delivered transfer — correction payment owed',
+      metadata: {
+        cancellationRequestId: request.id,
+        requestedAt: request.requested_at,
+        depositEvidenceAt,
+      },
       // NO ledger. Nothing has moved yet; the correction payment posts when the
       // operator executes it. UNDER_REVIEW is a holding state, not an event.
     })
@@ -411,11 +468,12 @@ async function routeCancellationOnDelivery(transfer: TransferRow): Promise<void>
       scope.setContext('cancellation_correction_owed', {
         transferId: transfer.id,
         requestedAt: request.requested_at,
+        depositEvidenceAt,
         deadline: '3 business days from requestedAt',
         runbook: 'docs/runbooks/pending-cancellation.md',
       })
       Sentry.captureMessage(
-        'timely cancellation on a DELIVERED transfer — full refund owed; ' +
+        'timely PRE-DEPOSIT cancellation on a delivered transfer — full refund owed; ' +
           'run resolve-cancellation.ts within 3 business days',
         'error',
       )

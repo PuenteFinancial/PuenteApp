@@ -45,7 +45,10 @@ export type ReviewOutcome =
   | { done: false; reason: 'transfer_not_found' }
   | { done: false; reason: 'not_under_review'; state: string }
   | { done: false; reason: 'no_pending_request' }
-  | { done: false; reason: 'request_is_timely' }
+  // The refund-owed guard: the request satisfied BOTH §1005.34 conditions —
+  // inside the 30-minute window AND made before the deposit the operator is
+  // citing. Such a request cannot be denied by any tool.
+  | { done: false; reason: 'request_precedes_deposit' }
   | { done: false; reason: 'claim_taken'; claimedAt: string | null; claimedBy: string | null }
   | { done: false; reason: 'claim_abandoned'; claimedAt: string | null; claimedBy: string | null }
 
@@ -152,20 +155,27 @@ export async function refundCancellation(input: {
 }
 
 /**
- * Deny an UNTIMELY request. The transfer returns to COMPLETED (or stays there,
- * if the job never routed it) and the request closes with the operator's
- * evidence.
+ * Deny a request that is owed nothing. Two lawful grounds, mirroring §1005.34's
+ * two conditions, and only these:
  *
- * REFUSES to deny a timely request. That is the legal guard of this whole file:
- * a timely cancellation on a delivered transfer is owed a refund, full stop, and
- * the tool must not let an operator close one by typing a denial instead. If a
- * timely request genuinely must not be paid, that is an escalation, not a CLI
- * flag.
+ *   out of window            — the 30-minute clock was missed. Provable from our
+ *                              own `cancelable_until` (within_window = false).
+ *   deposit preceded request — inside the window, but the funds were already
+ *                              deposited when the sender asked. Provable ONLY
+ *                              from Bridge's deposit timestamp, which is why
+ *                              `depositedAt` is load-bearing here, not just
+ *                              recorded: the guard compares it to requested_at.
  *
- * `depositedAt` is Bridge's deposit timestamp, supplied by the operator from the
- * Bridge dashboard (getBridgeTransfer returns only id/state/sourceAmount). It is
- * the evidence that delivery preceded the ask; recorded in the resolution and
- * the transition metadata so the denial is provable later.
+ * REFUSES to deny a request that beat the deposit. That is the legal guard of
+ * this whole file: in-window AND pre-deposit means the refund is owed, full
+ * stop, and the tool must not let an operator close one by typing a denial
+ * instead. If such a request genuinely must not be paid, that is an escalation,
+ * not a CLI flag.
+ *
+ * `depositedAt` comes from the Bridge dashboard (getBridgeTransfer returns only
+ * id/state/sourceAmount); it is recorded in the resolution and the transition
+ * metadata so the denial is provable later. An operator who fat-fingers it
+ * earlier than reality can only make the tool REFUSE more, never deny more.
  */
 export async function denyCancellation(input: {
   transferId: string
@@ -179,8 +189,12 @@ export async function denyCancellation(input: {
   const request = await pendingCancellationFor(transfer.id)
   if (!request) return { done: false, reason: 'no_pending_request' }
 
-  // The guard that matters here.
-  if (request.within_window) return { done: false, reason: 'request_is_timely' }
+  // The guard that matters here: both statutory conditions held → owed → cannot
+  // be denied. (within_window is condition 1, frozen at record time; the
+  // deposit comparison is condition 2, against the operator's cited timestamp.)
+  if (request.within_window && Date.parse(input.depositedAt) > Date.parse(request.requested_at)) {
+    return { done: false, reason: 'request_precedes_deposit' }
+  }
 
   // Out-of-window requests on a COMPLETED transfer were never routed, so there
   // may be nothing to transition — the state is already correct. Only move a row
@@ -203,10 +217,15 @@ export async function denyCancellation(input: {
     return { done: false, reason: 'not_under_review', state: transfer.state }
   }
 
+  // Name the ground actually relied on — the two denials are provable from
+  // different sources, and an auditor should not have to reconstruct which.
+  const ground = request.within_window
+    ? `funds deposited at ${input.depositedAt}, before the request at ${request.requested_at}`
+    : `request made after the Reg E window; Bridge deposited at ${input.depositedAt}`
   await resolveCancellationRequest({
     transferId: transfer.id,
     status: 'resolved_denied',
-    resolution: `denied — request made after the Reg E window; Bridge deposited at ${input.depositedAt}`,
+    resolution: `denied — ${ground}`,
     resolvedBy: actor,
   })
   return { done: true, outcome: 'denied' }

@@ -261,7 +261,8 @@ row has no postings and no funds moved — a dead row, not lost money).
 | Worker (gate passes) | `FUNDED → SUBMITTED` (Bridge payout call, idempotent) |
 | `POST /transfers/:id/cancel` (pre-claim `FUNDED`) | `FUNDED → CANCELED → REFUNDED` |
 | `POST /transfers/:id/cancel` (`SUBMITTED`/`IN_FLIGHT`/`FUNDED`-post-claim) | **no transition** — 202, request RECORDED (slice-7 PR6b) |
-| Bridge webhook: delivered, timely request open | `COMPLETED → UNDER_REVIEW` (system; no ledger) |
+| Bridge webhook: delivered, in-window request that **beat the deposit** | `COMPLETED → UNDER_REVIEW` (system; no ledger) |
+| Bridge webhook: delivered, request in-window but **after the deposit** | **no transition** — stays `COMPLETED`, ops alerted to deny with Bridge's timestamp |
 | Bridge webhook: delivered, request out of window | **no transition** — stays `COMPLETED`, ops alerted to deny |
 | `resolve-cancellation.ts --refund` (ops) | `UNDER_REVIEW → REFUNDED` (correction payment) |
 | `resolve-cancellation.ts --deny` (ops) | `UNDER_REVIEW → COMPLETED`, or no transition if never routed |
