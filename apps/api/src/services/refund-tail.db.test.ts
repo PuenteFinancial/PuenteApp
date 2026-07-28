@@ -11,7 +11,13 @@
 // the shared tail the job and the operator CLI both execute — and additionally
 // pin the ops: actor, a second run writing nothing, and a refusal on a transfer
 // that never failed.
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+//
+// The slice-7 PR6b-0 tests (T_CLAIM) pin the refund CLAIM, which is the one
+// guarantee no mocked test can establish: only real Postgres row locking
+// serializes two runs that both read `refund_payment_ref is null`, and
+// MockFundingProcessor.refund() ignores the idempotency key by design, so
+// nothing downstream would dedupe a second payment.
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { Client } from 'pg'
 import {
   transitionTransfer,
@@ -22,7 +28,32 @@ import {
 } from './transfers.js'
 import { submittedLedgerEntries } from './payouts.js'
 import { postLedgerTransaction, type LedgerEntryInput } from './ledger.js'
-import { refundPayoutFailure } from './refunds.js'
+import { refundPayoutFailure, releaseStaleRefundClaim } from './refunds.js'
+
+// Count processor calls without changing processor BEHAVIOUR: the real
+// MockFundingProcessor still runs, we just observe it. Without this the suite
+// cannot see a double payment at all — the mock mints a fresh ref per call and
+// the ref persist is null-gated, so two disbursements leave exactly the same
+// database state as one, and "disbursed once" would be inferred only from the
+// returned outcomes. A mutation moving the claim to AFTER the processor call
+// survives every other assertion in this file.
+const refundCalls: unknown[] = []
+vi.mock('./funding/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./funding/index.js')>()
+  return {
+    ...actual,
+    getFundingProcessor: () =>
+      new Proxy(actual.getFundingProcessor(), {
+        get(target, prop, recv) {
+          if (prop !== 'refund') return Reflect.get(target, prop, recv)
+          return (input: unknown) => {
+            refundCalls.push(input)
+            return (target as { refund: (i: unknown) => unknown }).refund(input)
+          }
+        },
+      }),
+  }
+})
 
 const runDb = process.env.RUN_DB_TESTS === '1'
 
@@ -33,6 +64,8 @@ const T_REFUND = '00000000-0000-4000-8000-000000000081'
 // slice-7 PR6a: the same tail driven through services/refunds.ts by an operator
 // (AUTO_REFUND off — the service reads no flag; the gate lives at the caller).
 const T_OPS = '00000000-0000-4000-8000-000000000082'
+// slice-7 PR6b-0: the refund claim, proven against real Postgres row locking.
+const T_CLAIM = '00000000-0000-4000-8000-000000000085'
 
 const S = 19801 // quoted send principal
 const FEE = 199
@@ -60,10 +93,21 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
     await db.query(
       `insert into public.transfers (id, user_id, payout_destination_id, quote_id,
          send_amount_minor, send_currency, receive_amount_minor, receive_currency,
-         fee_amount_minor, fee_currency, fx_rate, fx_rate_at, idempotency_key, state)
+         fee_amount_minor, fee_currency, fx_rate, fx_rate_at, idempotency_key, state,
+         funding_payment_ref)
        values ($1, $2, $3, $4, ${S}, 'USD', 396014, 'MXN', ${FEE}, 'USD', 19.9997, now(), $5,
-         'PENDING_PAYMENT')`,
-      [transferId, USER, destinationId, quote.rows[0].id, `refund-tail-test-${transferId}`],
+         'PENDING_PAYMENT', $6)`,
+      [
+        transferId,
+        USER,
+        destinationId,
+        quote.rows[0].id,
+        `refund-tail-test-${transferId}`,
+        // Set at confirm in the real flow, so every transfer that can reach
+        // PAYOUT_FAILED carries one. The tail refuses to disburse without it
+        // rather than sending the processor an empty payment reference.
+        `mockpay_${transferId}`,
+      ],
     )
   }
 
@@ -301,6 +345,137 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       (await db.query('select refund_payment_ref from public.transfers where id = $1', [T_OPS]))
         .rows[0].refund_payment_ref,
     ).toBe(beforeRef)
+  })
+
+  // ── the refund claim (slice-7 PR6b-0) ────────────────────────────────────
+  // The bug this exists for cannot be caught by a mocked test: two runs both
+  // read `refund_payment_ref is null` and both disburse. Only a real Postgres
+  // UPDATE serializes them, and MockFundingProcessor.refund() ignores the
+  // idempotency key on purpose, so nothing downstream would dedupe the second
+  // payment. Two genuinely concurrent calls, one sender, one disbursement.
+  it('two concurrent runs disburse exactly ONCE and post exactly one set of batches', async () => {
+    const destination = await db.query(
+      `select pd.id from public.payout_destinations pd
+         join public.recipients r on r.id = pd.recipient_id where r.user_id = $1 limit 1`,
+      [USER],
+    )
+    await seedFundedTransfer(T_CLAIM, destination.rows[0].id)
+    await walkToPayoutFailed(T_CLAIM)
+
+    refundCalls.length = 0
+    const results = await Promise.all([
+      refundPayoutFailure({ transferId: T_CLAIM, actor: 'ops:one', reason: 'race' }),
+      refundPayoutFailure({ transferId: T_CLAIM, actor: 'worker:payment-event', reason: 'race' }),
+    ])
+
+    // Exactly one winner; the loser refuses rather than reporting a refund it
+    // did not make. (Either may win — assert the shape, not the order.)
+    // EXACTLY ONE run may report that it moved the money, and the loser must
+    // report only what IT did. Both loser outcomes are non-writing:
+    //   claim_taken     — the winner is still mid-flight
+    //   already_settled — the winner finished first
+    // `already_disbursed` must NOT appear: it means "this run settled the
+    // state", and the loser settles nothing. The transitions table below is the
+    // proof — exactly one actor, and it is the winner's.
+    const outcomes = results.map((r) => (r.done ? r.outcome : r.reason))
+    expect(outcomes.filter((o) => o === 'refunded')).toHaveLength(1)
+    const loser = outcomes.find((o) => o !== 'refunded')!
+    expect(['claim_taken', 'already_settled']).toContain(loser)
+
+    // THE invariant, and the only assertion here that can see a double payment:
+    // the sender's money left our processor exactly once. Everything else in
+    // this test observes database state, which looks identical whether the
+    // processor was called once or twice.
+    expect(refundCalls).toHaveLength(1)
+
+    const transitions = await db.query(
+      `select actor from public.transfer_transitions
+        where transfer_id = $1 and to_state = 'REFUNDED'`,
+      [T_CLAIM],
+    )
+    expect(transitions.rows).toHaveLength(1)
+
+    const row = (
+      await db.query(
+        'select refund_payment_ref, refund_claimed_at, refund_claimed_by, state from public.transfers where id = $1',
+        [T_CLAIM],
+      )
+    ).rows[0]
+    expect(row.refund_payment_ref).toMatch(/^mockrefund_/)
+    expect(row.state).toBe('REFUNDED')
+    // The claim is kept after success, not cleared: it is the record of when
+    // the money left, and refund_payment_ref is what gates from here on.
+    expect(row.refund_claimed_at).not.toBeNull()
+    expect(['ops:one', 'worker:payment-event']).toContain(row.refund_claimed_by)
+
+    const perTx = await db.query(
+      `select t.transition, count(*)::int as n
+         from public.ledger_transactions t where t.transfer_id = $1 group by t.transition`,
+      [T_CLAIM],
+    )
+    for (const r of perTx.rows) expect(r.n).toBe(1)
+    expect(perTx.rows.map((r) => r.transition).sort()).toEqual(
+      ['FUNDED', 'REFUNDED', 'SUBMITTED', 'bridge_return'].sort(),
+    )
+  })
+
+  it('lifecycle claim columns are writable — the frozen-terms trigger does not guard them', async () => {
+    // Same class as submit_attempted_at / refunded_at. If the trigger ever grew
+    // to cover these, every claim would raise instead of gating a refund.
+    // `.resolves.toBeDefined()` would pass on any resolution — assert the write
+    // actually landed on the row.
+    const updated = await db.query(
+      `update public.transfers set refund_claimed_at = now(), refund_claimed_by = 'ops:x'
+        where id = $1 returning refund_claimed_by`,
+      [T_OPS],
+    )
+    expect(updated.rows).toHaveLength(1)
+    expect(updated.rows[0].refund_claimed_by).toBe('ops:x')
+    await db.query(
+      `update public.transfers set refund_claimed_at = null, refund_claimed_by = null where id = $1`,
+      [T_OPS],
+    )
+  })
+
+  it('releaseStaleRefundClaim clears an abandoned claim but never a live one', async () => {
+    const target = '00000000-0000-4000-8000-000000000084'
+    const destination = await db.query(
+      `select pd.id from public.payout_destinations pd
+         join public.recipients r on r.id = pd.recipient_id where r.user_id = $1 limit 1`,
+      [USER],
+    )
+    await seedFundedTransfer(target, destination.rows[0].id)
+
+    const claimedAt = async (): Promise<string | null> =>
+      (await db.query('select refund_claimed_at from public.transfers where id = $1', [target]))
+        .rows[0].refund_claimed_at
+
+    // Live claim: a run may be mid-disbursement, so clearing it would let a
+    // second payment go out underneath it.
+    await db.query(
+      `update public.transfers set refund_claimed_at = now() - interval '29 minutes',
+         refund_claimed_by = 'ops:x' where id = $1`,
+      [target],
+    )
+    await expect(releaseStaleRefundClaim(target)).resolves.toBe(false)
+    expect(await claimedAt()).not.toBeNull()
+
+    // Abandoned: nobody is coming back for it.
+    await db.query(
+      `update public.transfers set refund_claimed_at = now() - interval '31 minutes' where id = $1`,
+      [target],
+    )
+    await expect(releaseStaleRefundClaim(target)).resolves.toBe(true)
+    expect(await claimedAt()).toBeNull()
+
+    // A recorded disbursement is untouchable at any age — the money is out.
+    await db.query(
+      `update public.transfers set refund_claimed_at = now() - interval '99 minutes',
+         refund_payment_ref = 'mockrefund_already' where id = $1`,
+      [target],
+    )
+    await expect(releaseStaleRefundClaim(target)).resolves.toBe(false)
+    expect(await claimedAt()).not.toBeNull()
   })
 
   it('refuses a transfer that never failed and writes nothing', async () => {

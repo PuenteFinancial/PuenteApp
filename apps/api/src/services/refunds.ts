@@ -21,13 +21,23 @@ import { getBridgeTransfer } from './bridge.js'
 // `force` parameter and no flag read, so which callers may move money stays
 // visible per caller. The job checks AUTO_REFUND; the operator IS the gate.
 //
-// Replay-safe: the two ledger batches are keyed (bridge_return / REFUNDED) and
-// refund() is refund_payment_ref-null-gated, so a webhook+poll duplicate, a
-// crash-replay, or a second operator run posts and disburses once. Exactly-once
-// on the disbursement rests on the PROCESSOR's idempotency key
-// (`{idempotency_key}:refund`) — the null-gate is a read separated from its
-// write, so it is the second line, not a lock, and concurrent runs against one
-// transfer are not a supported situation (docs/runbooks/manual-refund.md).
+// Replay-safe AND concurrency-safe: the two ledger batches are keyed
+// (bridge_return / REFUNDED), and the disbursement is gated by the REFUND CLAIM
+// — a guarded UPDATE on refund_claimed_at (slice-7 PR6b-0) that exactly one run
+// wins. A webhook+poll duplicate, a crash-replay, or two operators running at
+// once post and disburse once, so concurrent runs ARE supported. The PROCESSOR's
+// idempotency key (`{idempotency_key}:refund`) is now the LAST line of defence
+// rather than the only one — which matters, because the mock funding processor
+// ignores that key outright (funding/mock.ts).
+//
+// The claim is NEVER released. A processor throw leaves it standing on purpose:
+// a thrown timeout is indistinguishable from a definitive rejection (the
+// FundingProcessor seam has no error taxonomy), so releasing would green-light a
+// retry that may double-pay. After CLAIM_STALE_AFTER_MS an unfinished claim is
+// ABANDONED — an ops decision, never an automatic retry. That is the deliberate
+// asymmetry with the submit claim, whose stale path re-POSTs to Bridge
+// idempotently and so can afford to heal itself (docs/decisions.md 2026-07-28,
+// docs/runbooks/manual-refund.md).
 //
 // Any NON-BENIGN throw propagates — the job leaves its event 'received' for
 // retry, the CLI exits non-zero. A TransferRpcError of transition_conflict /
@@ -42,11 +52,40 @@ interface RefundableTransfer {
   refund_payment_ref: string | null
   funding_payment_ref: string | null
   idempotency_key: string
+  refund_claimed_at: string | null
+  refund_claimed_by: string | null
 }
 
 const REFUNDABLE_COLUMNS =
   'id, state, send_amount_minor, fee_amount_minor, refund_payment_ref, ' +
-  'funding_payment_ref, idempotency_key'
+  'funding_payment_ref, idempotency_key, refund_claimed_at, refund_claimed_by'
+
+// How long an unfinished claim stays "in progress" before it is ABANDONED.
+//
+// 30 minutes, against the submit claim's 10 (transfer-state-machine.md), because
+// the two stale paths cost different things. A stale submit claim costs an
+// idempotent re-POST; a stale refund claim costs an operator's attention, so it
+// must not fire on a call that is merely slow. Neither the funding processor nor
+// bridge.ts sets an AbortSignal, so both inherit undici's ~300s headers + ~300s
+// body defaults — a hung-but-alive refund can legitimately hold a claim for
+// something like ten minutes.
+export const CLAIM_STALE_AFTER_MS = 30 * 60 * 1000
+
+/**
+ * A claim this old with no disbursement recorded is abandoned, not in flight.
+ *
+ * An UNPARSEABLE stamp reads as abandoned, not as in-flight. `Date.parse`
+ * returns NaN on garbage and every NaN comparison is false, so the natural
+ * expression would quietly classify a corrupt row as "someone is refunding it
+ * right now" — forever, since that state is the silent one. Wrong in the only
+ * direction that hides a stuck transfer from ops.
+ */
+export function isClaimAbandoned(claimedAt: string | null, now = Date.now()): boolean {
+  if (claimedAt === null) return false
+  const at = Date.parse(claimedAt)
+  if (Number.isNaN(at)) return true
+  return now - at >= CLAIM_STALE_AFTER_MS
+}
 
 // Terminal Bridge states that mean the principal is back with us — the same two
 // that carry `principalReturned` in mapBridgeState (payment-events.ts).
@@ -72,10 +111,33 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // A refusal carries the state it observed, because whether a refusal is alarming
 // depends entirely on it: at COMPLETED the transfer delivered and the sender is
 // owed nothing, at SUBMITTED something is genuinely wrong.
+//
+// The two claim refusals are NOT interchangeable, and no caller may collapse
+// them — they are the difference between silence and paging a human:
+//   claim_taken     — another run holds a live claim and is disbursing right
+//                     now. Benign. Nothing to do; it will settle.
+//   claim_abandoned — a claim older than CLAIM_STALE_AFTER_MS with no
+//                     disbursement recorded. The claimant died somewhere between
+//                     taking the claim and persisting the ref, so the sender may
+//                     or may not have been paid. Only a human can tell, by
+//                     checking the processor (runbooks/manual-refund.md).
+//
+// Neither is reported as `already_disbursed`. That outcome means "the
+// disbursement pre-existed AND THIS RUN settled the state" — the CLI prints
+// exactly that — so using it for a run that wrote nothing would be a lie.
 export type RefundOutcome =
   | { done: true; outcome: 'refunded' | 'already_disbursed' | 'already_settled' }
   | { done: false; reason: 'not_payout_failed'; state: string }
   | { done: false; reason: 'transfer_not_found' }
+  // Two ARMS, not one arm with a union of reasons, because callers must be
+  // unable to collapse them: `claim_taken` is silent and `claim_abandoned`
+  // pages, and getting that backwards means either an alert storm on healthy
+  // concurrency or a sender stranded with no signal. Separate arms make
+  // `Extract<RefundOutcome, {reason:'claim_abandoned'}>` usable and let the job
+  // switch exhaustively with an assertNever default, so a future third refusal
+  // breaks the build instead of silently taking someone else's branch.
+  | { done: false; reason: 'claim_taken'; claimedAt: string | null; claimedBy: string | null }
+  | { done: false; reason: 'claim_abandoned'; claimedAt: string | null; claimedBy: string | null }
 
 export type PrincipalVerdict =
   | { returned: true; bridgeState: string; eventType: string }
@@ -136,24 +198,77 @@ export async function refundPayoutFailure(input: {
     entries: toLedgerInput(bridgeReturnLedgerEntries(transfer)),
   })
 
-  // 2) Return the collected funds to the sender. null-gated so a duplicate
-  //    never double-refunds; keyed off the transfer's stable bridge idempotency
-  //    key so a retry dedupes against the real processor (slice 7).
+  // 2) Return the collected funds to the sender — behind the CLAIM, so exactly
+  //    one run can reach the processor. Keyed off the transfer's stable bridge
+  //    idempotency key so a retry also dedupes against a real processor.
+  //
+  //    A ref that ALREADY exists needs no claim: the disbursement happened, and
+  //    all that is left is the state, which step 3 settles. That is the
+  //    crash-recovery path listRefundBacklog exists to surface, and it behaves
+  //    exactly as it did before the claim landed.
   const alreadyDisbursed = transfer.refund_payment_ref !== null
   if (!alreadyDisbursed) {
-    const undo = await getFundingProcessor().refund({
-      transferId: transfer.id,
-      paymentRef: transfer.funding_payment_ref ?? '',
-      amountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,
-      currency: 'USD',
-      idempotencyKey: `${transfer.idempotency_key}:refund`,
-    })
-    const { error } = await supabaseAdmin
-      .from('transfers')
-      .update({ refund_payment_ref: undo.ref, refunded_at: new Date().toISOString() })
-      .eq('id', transfer.id)
-      .is('refund_payment_ref', null)
-    if (error) throw new Error(`refund ref persist failed: ${error.message}`)
+    // Refuse to disburse against a missing funding ref rather than coercing it
+    // to ''. Unreachable in practice — reaching PAYOUT_FAILED means the transfer
+    // was FUNDED, which sets this — so a null here means the row is corrupt, and
+    // the fallback would send the processor an empty payment reference: a real
+    // Stripe adapter rejects it, and a lenient one refunds against nothing.
+    // Checked BEFORE the claim so a row we cannot pay never holds one. Throws
+    // rather than returning a refusal because this is a data-integrity fault,
+    // not a business outcome — same shape as the load/persist failures here.
+    if (transfer.funding_payment_ref === null) {
+      throw new Error(`refund aborted: transfer ${transfer.id} has no funding_payment_ref`)
+    }
+    if (await claimRefund(transfer.id, input.actor)) {
+      // No try/catch, deliberately. A throw here leaves the claim standing —
+      // see the header: releasing it would green-light a retry that may
+      // double-pay, because a timeout and a rejection throw identically.
+      const undo = await getFundingProcessor().refund({
+        transferId: transfer.id,
+        paymentRef: transfer.funding_payment_ref,
+        amountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,
+        currency: 'USD',
+        idempotencyKey: `${transfer.idempotency_key}:refund`,
+      })
+      const { error } = await supabaseAdmin
+        .from('transfers')
+        .update({ refund_payment_ref: undo.ref, refunded_at: new Date().toISOString() })
+        .eq('id', transfer.id)
+        .is('refund_payment_ref', null)
+      if (error) throw new Error(`refund ref persist failed: ${error.message}`)
+    } else {
+      // Someone holds the claim. ONE re-read tells us which of three it is —
+      // our own load is already stale by the time the claim comes back.
+      // A run that lost the claim WRITES NOTHING. Not the disbursement, and not
+      // the transition either — that is the subtle one. Falling through to
+      // transitionTransfer here looks harmless because the RPC treats a
+      // transition whose target is the current state as a replay (returns the
+      // row, appends nothing, posts nothing), but the caller cannot tell that
+      // from a real settle: it would report `already_disbursed`, the CLI would
+      // print "state settled by this run" and "refunded by ops:<you>", and the
+      // verify query would show somebody else as the actor. Observed exactly
+      // that in the two-operator rig before this returned early.
+      const fresh = await loadRefundable(transfer.id)
+      if (!fresh) return { done: false, reason: 'transfer_not_found' }
+      if (fresh.state === 'REFUNDED') return { done: true, outcome: 'already_settled' }
+
+      // Still unsettled. If the ref appeared between our load and our claim,
+      // the winner is mid-flight between its persist and its transition — which
+      // is exactly `claim_taken`: someone else owns this and will finish it. And
+      // if the winner dies in that gap, the row is left with a ref set and the
+      // state open, which the PRE-LOAD branch above heals on the next run.
+      //
+      // A null claimedAt would mean the holder released the claim between our
+      // attempt and this read, which only releaseStaleRefundClaim does. Read it
+      // as taken rather than crashing: the caller's two responses are "stay
+      // quiet" and "page a human", and quiet is the safe one to be wrong with.
+      return {
+        done: false,
+        reason: isClaimAbandoned(fresh.refund_claimed_at) ? 'claim_abandoned' : 'claim_taken',
+        claimedAt: fresh.refund_claimed_at,
+        claimedBy: fresh.refund_claimed_by,
+      }
+    }
   }
 
   // 3) Recognize + pay the refund and settle REFUNDED — a DISTINCT posting key
@@ -217,6 +332,15 @@ export async function verifyPrincipalReturned(transferId: string): Promise<Princ
 // stays under src/ — and the column list is a PII decision (ids, amounts,
 // timestamps — never recipient names or destination details, which must not
 // reach an operator's terminal or scrollback).
+/**
+ * `unclaimed` — free; the next run takes it.
+ * `claimed`   — a run is disbursing right now. Leave it alone.
+ * `abandoned` — claimed over CLAIM_STALE_AFTER_MS ago and never finished. The
+ *               sender may or may not have been paid; an operator confirms in
+ *               the processor, then `--reclaim`.
+ */
+export type ClaimStatus = 'unclaimed' | 'claimed' | 'abandoned'
+
 export interface ParkedRefund {
   id: string
   send_amount_minor: number
@@ -225,10 +349,21 @@ export interface ParkedRefund {
   /** Non-null = the sender was already paid but the state never settled. */
   refund_payment_ref: string | null
   created_at: string
+  refund_claimed_at: string | null
+  refund_claimed_by: string | null
+  /** Derived from refund_claimed_at — the window belongs to the service. */
+  claimStatus: ClaimStatus
 }
 
+// One string literal, not a concatenation: supabase-js parses the column list at
+// the TYPE level, and splitting it collapses the row type to GenericStringError.
 const PARKED_COLUMNS =
-  'id, send_amount_minor, fee_amount_minor, provider_transfer_ref, refund_payment_ref, created_at'
+  'id, send_amount_minor, fee_amount_minor, provider_transfer_ref, refund_payment_ref, created_at, refund_claimed_at, refund_claimed_by'
+
+// Classifying here rather than in the CLI keeps CLAIM_STALE_AFTER_MS in one
+// place: an operator must never be handed the window arithmetic to do by eye.
+const classifyClaim = (claimedAt: string | null): ClaimStatus =>
+  claimedAt === null ? 'unclaimed' : isClaimAbandoned(claimedAt) ? 'abandoned' : 'claimed'
 
 /**
  * The parked-refund backlog: every transfer stuck at `PAYOUT_FAILED` after the
@@ -256,7 +391,61 @@ export async function listRefundBacklog(): Promise<ParkedRefund[]> {
   if (error || data == null) {
     throw new Error(`refund backlog query failed: ${error?.message ?? 'no rows returned'}`)
   }
-  return data as ParkedRefund[]
+  return (data as Omit<ParkedRefund, 'claimStatus'>[]).map((row) => ({
+    ...row,
+    claimStatus: classifyClaim(row.refund_claimed_at),
+  }))
+}
+
+/**
+ * The claim on ONE transfer — what the CLI's dry run reports, so an operator
+ * learns a claim is abandoned before they reach for `--confirm`.
+ */
+export async function refundClaimStatus(
+  transferId: string,
+): Promise<{ claimStatus: ClaimStatus; claimedAt: string | null; claimedBy: string | null } | null> {
+  const { data, error } = await supabaseAdmin
+    .from('transfers')
+    .select('refund_claimed_at, refund_claimed_by')
+    .eq('id', transferId)
+    .maybeSingle()
+  if (error) throw new Error(`refund claim status query failed: ${error.message}`)
+  const row = data as { refund_claimed_at: string | null; refund_claimed_by: string | null } | null
+  if (!row) return null
+  return {
+    claimStatus: classifyClaim(row.refund_claimed_at),
+    claimedAt: row.refund_claimed_at,
+    claimedBy: row.refund_claimed_by,
+  }
+}
+
+/**
+ * Clear an ABANDONED claim so the tail can be re-driven. The only code anywhere
+ * that clears a claim, and the operator's only exit from one.
+ *
+ * NOT a `force` flag on refundPayoutFailure — the PR6a ADR rejected that shape
+ * because a bypass parameter on a money-moving service invites the next caller
+ * to use it. This is a separate named operation the job never calls, and it
+ * bypasses no policy: the principal-returned interlock, the PAYOUT_FAILED guard,
+ * `--operator` and `--confirm` all still run afterwards.
+ *
+ * Guarded three ways, so it can only ever undo the situation it is named for:
+ * the ref must still be null (never disturb a completed disbursement), and the
+ * claim must be genuinely older than the window (never yank a live one out from
+ * under a run that is mid-flight). Returns false when nothing moved — the
+ * caller must re-refuse rather than assume it worked.
+ */
+export async function releaseStaleRefundClaim(transferId: string): Promise<boolean> {
+  const staleBefore = new Date(Date.now() - CLAIM_STALE_AFTER_MS).toISOString()
+  const { data, error } = await supabaseAdmin
+    .from('transfers')
+    .update({ refund_claimed_at: null, refund_claimed_by: null })
+    .eq('id', transferId)
+    .is('refund_payment_ref', null)
+    .lt('refund_claimed_at', staleBefore)
+    .select('id')
+  if (error) throw new Error(`refund claim release failed: ${error.message}`)
+  return (data ?? []).length === 1
 }
 
 /** The posting batches on a transfer — the operator's proof both keys landed. */
@@ -271,6 +460,31 @@ export async function refundLedgerBatches(
     throw new Error(`refund ledger batch query failed: ${error?.message ?? 'no rows returned'}`)
   }
   return data as Array<{ transition: string | null; idempotency_key: string }>
+}
+
+// The atomic claim — the shape of claimForSubmission (jobs/payout-submit.ts),
+// deliberately WITHOUT a staleness term in the predicate. `refund_claimed_at is
+// null` is the whole guard: a claim is never retaken by a machine, only cleared
+// by releaseStaleRefundClaim after a human has looked. The window lives in
+// isClaimAbandoned, in the backlog classification, and in the job's alert —
+// never here.
+async function claimRefund(transferId: string, actor: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from('transfers')
+    .update({ refund_claimed_at: new Date().toISOString(), refund_claimed_by: actor })
+    .eq('id', transferId)
+    .is('refund_payment_ref', null)
+    .is('refund_claimed_at', null)
+    .select('id')
+  // Fail closed: a broken claim query must never read as a lost race, which
+  // would silently downgrade a database fault to "someone else has it".
+  // `data == null` is in the throw for the same reason — a null-without-error
+  // would otherwise coalesce to [] and read as a loss, the exact fail-open this
+  // comment forbids (matches listRefundBacklog / findReturnEvent).
+  if (error || data == null) {
+    throw new Error(`refund claim failed: ${error?.message ?? 'no rows returned'}`)
+  }
+  return data.length === 1
 }
 
 async function loadRefundable(transferId: string): Promise<RefundableTransfer | null> {

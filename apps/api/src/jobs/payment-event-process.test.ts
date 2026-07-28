@@ -100,6 +100,9 @@ const transfer = (state: string, over: Record<string, unknown> = {}) => ({
   error: null,
 })
 const stateRow = (state: string) => ({ data: { state }, error: null })
+// The refund claim's guarded UPDATE (slice-7 PR6b-0) sits between the tail's
+// row re-read and the ref persist, so any drive that DISBURSES queues it.
+const claimWon = { data: [{ id: 'tr-1' }], error: null }
 
 // Queue writeReceipt's tail for a COMPLETED drive: its currentState re-read
 // (transfers), the user locale load (users), and the receipt upsert (disclosures).
@@ -289,6 +292,7 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
       transfer('SUBMITTED'), // resolveTransfer
       stateRow('SUBMITTED'), // failTransfer currentState
       transfer('PAYOUT_FAILED'), // refundPayoutFailure re-reads the full row
+      claimWon, // the refund claim
       { data: null, error: null }, // refund_payment_ref persist
     )
     transition.mockResolvedValue({})
@@ -382,6 +386,97 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
   })
 
+  // The claim's two refusals are NOT one signal. The poller re-drives every
+  // PAYOUT_FAILED row whose refund_payment_ref is null, so a live claim would
+  // page on every re-drive until the winner finished — and an ops queue that
+  // cries wolf on healthy concurrency is how the real alert gets ignored.
+  it('claim_taken → silent: a live claim is healthy concurrency, not an incident', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('PAYOUT_FAILED'), // resolveTransfer
+      stateRow('PAYOUT_FAILED'), // failTransfer no-op
+      transfer('PAYOUT_FAILED'), // refundPayoutFailure re-read
+      { data: [], error: null }, // claim LOST
+      transfer('PAYOUT_FAILED', {
+        refund_claimed_at: new Date(Date.now() - 2 * 60_000).toISOString(),
+        refund_claimed_by: 'ops:jphelps',
+      }), // re-read: a live claim
+    )
+
+    await processPaymentEvent('ev-1')
+
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+    expect(captureMessage).not.toHaveBeenCalled()
+    // The event must stay 'received'. markProcessed drops it out of
+    // payout-sweep's selection (it takes status='received' only), and nothing
+    // else re-drives a refund — payout-poll enqueues only when recordEvent
+    // reports `inserted`, i.e. at most once per (source,state). Retiring it
+    // here is the difference between "the sweep finishes this refund" and
+    // "the sender is never paid and no alert ever fires".
+    expect(markProcessed).not.toHaveBeenCalled()
+  })
+
+  it('claim_abandoned → its OWN alert, because the sender may already be paid', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('PAYOUT_FAILED'),
+      stateRow('PAYOUT_FAILED'),
+      transfer('PAYOUT_FAILED'),
+      { data: [], error: null }, // claim LOST
+      transfer('PAYOUT_FAILED', {
+        refund_claimed_at: new Date(Date.now() - 31 * 60_000).toISOString(),
+        refund_claimed_by: 'worker:payment-event',
+      }), // re-read: abandoned
+    )
+
+    await processPaymentEvent('ev-1')
+
+    expect(refund).not.toHaveBeenCalled()
+    // Fingerprinted per transfer so the poller's repeated re-drives collapse
+    // into ONE issue, and distinct from payout-refund-refused because the
+    // response differs in kind: this one cannot be auto-retried.
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-refund-claim-abandoned', 'tr-1'])
+    expect(setFingerprint).not.toHaveBeenCalledWith(['payout-refund-refused', 'tr-1'])
+    expect(captureMessage).toHaveBeenCalledTimes(1)
+    // 'error', not 'warning': this is a sender who may still be owed, the same
+    // class as payout-refund-refused. Alert routing that pages on error only
+    // would otherwise drop the one branch documented as "page a human".
+    expect(captureMessage.mock.calls[0]![1]).toBe('error')
+    // Same as claim_taken: unresolved, so the sweep must keep re-driving it.
+    // That is also what keeps the alert firing until a human --reclaims.
+    expect(markProcessed).not.toHaveBeenCalled()
+  })
+
+  // The deterministic stranding this pair exists to prevent: a processor throw
+  // leaves the claim standing (by design), pg-boss retries ~15s later, and that
+  // retry loses the claim to ITS OWN dead claim — well inside the 30-minute
+  // window, so it reads as claim_taken rather than claim_abandoned.
+  it('a processor throw then its own retry does NOT retire the event', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('PAYOUT_FAILED'),
+      stateRow('PAYOUT_FAILED'),
+      transfer('PAYOUT_FAILED'),
+      { data: [], error: null }, // claim LOST — to the dead claim from the throw
+      transfer('PAYOUT_FAILED', {
+        refund_claimed_at: new Date(Date.now() - 15_000).toISOString(),
+        refund_claimed_by: 'worker:payment-event',
+      }),
+    )
+
+    await processPaymentEvent('ev-1')
+
+    expect(markProcessed).not.toHaveBeenCalled()
+    expect(captureMessage).not.toHaveBeenCalled()
+  })
+
   it('refund_payment_ref already set (webhook+poll duplicate) → skips refund(), still settles REFUNDED', async () => {
     envMock.AUTO_REFUND = true
     q('payment_events', event({ event_type: 'refunded' }))
@@ -412,6 +507,7 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
       transfer('PAYOUT_FAILED'), // already failed via a prior error event
       stateRow('PAYOUT_FAILED'), // failTransfer no-op
       transfer('PAYOUT_FAILED'), // refundPayoutFailure re-read
+      claimWon, // the refund claim
       { data: null, error: null }, // persist
     )
     transition.mockResolvedValue({})

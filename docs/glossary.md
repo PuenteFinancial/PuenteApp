@@ -95,7 +95,24 @@ refer back as needed.
   so flipping it later requires no rework. See the state machine doc.
 - **Submit claim** — the guarded UPDATE (`state = 'FUNDED' AND payout_hold_reason IS NULL AND
   submit_attempted_at IS NULL`) the payout job wins before calling Bridge; it serializes submission
-  against the slice-6 cancel so both can never happen. See the state machine doc.
+  against the slice-6 cancel so both can never happen. A *stale* submit claim (>10 min, no
+  `provider_transfer_ref`) is re-enqueued and recovered by an idempotent Bridge re-POST — safe because
+  Bridge dedupes on the key. Contrast the **Refund claim**, which resolves the same situation the
+  opposite way and for a specific reason ([decisions.md](decisions.md) 2026-07-28). See the state
+  machine doc.
+- **Refund claim** — the guarded UPDATE (`refund_payment_ref IS NULL AND refund_claimed_at IS NULL`)
+  one run wins before calling the funding processor's refund, recording `refund_claimed_at` and
+  `refund_claimed_by`. It is what makes the `PAYOUT_FAILED → REFUNDED` disbursement exactly-once: the
+  `refund_payment_ref` null-check alone is a read separated from its write, and the mock processor
+  ignores the idempotency key. Kept after success (it records when the money left); cleared in exactly
+  one place, `releaseStaleRefundClaim`. See [ledger-rules.md](ledger-rules.md) and the state machine doc.
+- **Abandoned refund claim** — a **Refund claim** over 30 minutes old with no `refund_payment_ref`: the
+  run that took it died between claiming and recording the disbursement, so the sender **may or may not
+  have been paid**. Never retaken automatically — ops confirms in the processor, then re-runs
+  `trigger-refund.ts --reclaim` ([runbooks/manual-refund.md](runbooks/manual-refund.md)). Distinct from
+  a **Payout hold** (a `FUNDED` transfer ops releases) and from *stuck at Bridge* (the principal never
+  came back — escalate, never refund). A claim under 30 minutes is simply *taken*: a healthy in-flight
+  refund, nothing to do.
 - **Void** — the undo of an *uncleared* funding collection: a `FUNDED`-pre-claim transfer the sender
   cancels within the Reg E window; the inbound ACH is canceled before it settles, so no money moved
   and the ledger is a **clean reversal** of the `FUNDED` batch (no `refunds_payable`, no float).

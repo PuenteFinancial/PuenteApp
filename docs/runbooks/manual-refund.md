@@ -1,6 +1,7 @@
 # Runbook — Manual Refund (`AUTO_REFUND` off)
 
-**Date:** 2026-07-27 · **Status:** live process (slice 7 PR6a)
+**Date:** 2026-07-27 · **Updated:** 2026-07-28 (slice 7 PR6b-0 — the refund claim, `--reclaim`)
+· **Status:** live process
 
 `AUTO_REFUND` is **off in production** by design ([decisions.md](../decisions.md) 2026-07-21): a real
 payout failure stops at `PAYOUT_FAILED` and a human decides. This runbook is how that human returns
@@ -12,13 +13,26 @@ without posting the two ledger batches and **without returning any money to the 
 would say we refunded them and their bank would disagree. `scripts/trigger-refund.ts` runs the same
 `services/refunds.ts` code the automated path runs, through the ledger RPC.
 
-## The alert
+## The alerts
 
 Sentry, fingerprint `payout-refund-gated`, severity **warning**:
 
 > payout failed, principal returned — AUTO_REFUND off, manual refund required
 
 Context carries `transferId`, `bridgeState`, and a pointer back to this file. No PII.
+
+There is a second, rarer one — fingerprint `payout-refund-claim-abandoned`, severity **error**:
+
+> refund claim abandoned — a disbursement may have gone out; ops must confirm before reclaiming
+
+It carries `transferId`, `claimedAt`, `claimedBy`. `error`, matching `payout-refund-refused` rather
+than the routine `payout-refund-gated` warning, because both mean a sender may still be owed.
+
+It fires only with `AUTO_REFUND` **on**; with the flag off the job never reaches the refund tail, so
+`--list` is where abandoned claims show up. It **keeps firing** until the situation is resolved: a
+claim refusal does not retire the payment event, so `payout.sweep` re-drives it every 5 minutes and
+re-raises the alert (Sentry dedupes on the fingerprint). Once you `--reclaim` and the transfer settles,
+the next re-drive resolves the event and the alert stops. See [Abandoned claims](#abandoned-claims).
 
 Note the poller does **not** clear these: with `AUTO_REFUND` off it skips `PAYOUT_FAILED` rows
 entirely. Turning the flag on later does *not* heal a row whose terminal `returned`/`refunded` event
@@ -54,6 +68,14 @@ stays open and **the ledger is currently wrong about that transfer**. Treat it a
 the normal `--confirm` below finishes it and disburses nothing further (step 2 will say "the
 disbursement had already gone out").
 
+Rows also carry their **refund claim**, which is what stops two runs paying the sender twice:
+
+| Marker | Meaning | What to do |
+|---|---|---|
+| *(none)* | unclaimed | proceed normally |
+| **`⏳ claim in progress by … since …`** | a run is disbursing **right now** | **nothing.** Wait and re-run `--list`; it should settle on its own. This is healthy, not an incident. |
+| **`⚠ CLAIM ABANDONED by … at …`** | a run took the claim over 30 minutes ago and never recorded a disbursement | see [Abandoned claims](#abandoned-claims) — **do not reclaim before reading it** |
+
 ### 2. Dry run — check the interlock
 
 ```bash
@@ -83,6 +105,8 @@ means it is still on its way — wait for the terminal event.
 | `not_submitted` | never sent to Bridge — Bridge holds nothing of ours | wrong runbook; this is not a payout failure |
 | `not_payout_failed` | the transfer is not parked at `PAYOUT_FAILED` | check the id. **A `COMPLETED` transfer must never be reversed here.** |
 | `transfer_not_found` | no transfer with that id | check the id against `--list` |
+| `claim_taken` | another run holds a live refund claim and is disbursing now | **wait.** Nothing was written. Re-check `--list`; do not reach for `--reclaim` — a healthy in-flight refund is not stuck |
+| `claim_abandoned` | a claim over 30 minutes old that never recorded a disbursement | see [Abandoned claims](#abandoned-claims) below |
 
 ### 3. Execute
 
@@ -103,9 +127,43 @@ credit for you:
 | `the disbursement had already gone out — no second payment; state settled by this run` | a previous attempt paid the sender but crashed before settling; this run finished it |
 | `ALREADY REFUNDED before this run — nothing was written` | it was already done; the actor in `transfer_transitions` is someone else's |
 
-**Run one trigger at a time.** Exactly-once on the disbursement rests on the processor's idempotency
-key (`{idempotency_key}:refund`); the `refund_payment_ref` null-guard is the second line, not a lock.
-Two operators refunding the same transfer concurrently is not a supported situation.
+**Concurrent runs are safe.** Before calling the processor a run takes the **refund claim** — a guarded
+UPDATE exactly one run can win — so two operators, or an operator racing the automated path, cannot
+both pay the sender. The loser writes nothing and says so (`claim_taken`). The processor's idempotency
+key (`{idempotency_key}:refund`) is the last line of defence behind the claim, not the only one, which
+matters because the mock processor ignores it outright.
+
+The claim is **kept** after a successful refund — it records when the money left — and is never cleared
+automatically. There is deliberately no release when the processor errors: a timeout and a rejection
+look identical from here, so a failed run leaves its claim standing rather than letting the next run
+pay a second time. That is what produces an abandoned claim.
+
+<a id="abandoned-claims"></a>
+### Abandoned claims — read before using `--reclaim`
+
+A claim over 30 minutes old with no `refund_payment_ref` means a run died between taking the claim and
+recording the disbursement. **The sender may already have been paid.** Our own data cannot tell you:
+the ref is the only thing we write after the processor call, and it is missing precisely because the
+run did not get that far.
+
+1. **Check the funding processor** for a refund against this transfer (`{idempotency_key}:refund`, or
+   the transfer id in the processor dashboard). This step is not optional.
+2. **A refund DID go out** → do **not** reclaim. A second one would pay twice. Escalate: the state
+   needs settling without a new disbursement, which no CLI path does today (the ref was never recorded,
+   so the `already_disbursed` path cannot see it).
+3. **No refund went out** → clear the claim and refund in one command:
+
+```bash
+doppler run -- pnpm exec tsx scripts/trigger-refund.ts <transferId> --operator <your-id> --confirm --reclaim
+```
+
+`--reclaim` requires `--confirm` and clears **only** an abandoned claim on an undisbursed transfer — it
+cannot take a live claim away from a run that is mid-flight, and it cannot touch a transfer whose
+disbursement was recorded. If it clears nothing the run refuses again rather than reporting success.
+
+With `AUTO_REFUND` on, an abandoned claim also pages ops as `payout-refund-claim-abandoned`
+(fingerprinted per transfer). With the flag off — the current default — the job never reaches the
+refund tail at all, so **`--list` is the only place an abandoned claim surfaces.**
 
 ### 4. Verify
 
