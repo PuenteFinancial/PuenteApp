@@ -101,7 +101,8 @@ describe.skipIf(!runDb)('receipt disclosure (integration, local Supabase)', () =
   afterAll(async () => {
     await db.query(
       `truncate table public.ledger_entries, public.ledger_transactions, public.payment_events,
-       public.disputes, public.disclosures, public.transfer_transitions, public.transfers,
+       public.disputes, public.disclosures, public.transfer_transitions,
+       public.cancellation_requests, public.transfers,
        public.quotes, public.payout_destinations, public.recipients`,
     )
     await db.query('delete from auth.users where id in ($1, $2)', [USER_A, USER_B])
@@ -111,7 +112,8 @@ describe.skipIf(!runDb)('receipt disclosure (integration, local Supabase)', () =
   beforeEach(async () => {
     await db.query(
       `truncate table public.ledger_entries, public.ledger_transactions, public.payment_events,
-       public.disputes, public.disclosures, public.transfer_transitions, public.transfers,
+       public.disputes, public.disclosures, public.transfer_transitions,
+       public.cancellation_requests, public.transfers,
        public.quotes, public.payout_destinations, public.recipients`,
     )
     transferId = await seedTransfer(USER_A)
