@@ -208,13 +208,24 @@ export async function refundPayoutFailure(input: {
   //    exactly as it did before the claim landed.
   const alreadyDisbursed = transfer.refund_payment_ref !== null
   if (!alreadyDisbursed) {
+    // Refuse to disburse against a missing funding ref rather than coercing it
+    // to ''. Unreachable in practice — reaching PAYOUT_FAILED means the transfer
+    // was FUNDED, which sets this — so a null here means the row is corrupt, and
+    // the fallback would send the processor an empty payment reference: a real
+    // Stripe adapter rejects it, and a lenient one refunds against nothing.
+    // Checked BEFORE the claim so a row we cannot pay never holds one. Throws
+    // rather than returning a refusal because this is a data-integrity fault,
+    // not a business outcome — same shape as the load/persist failures here.
+    if (transfer.funding_payment_ref === null) {
+      throw new Error(`refund aborted: transfer ${transfer.id} has no funding_payment_ref`)
+    }
     if (await claimRefund(transfer.id, input.actor)) {
       // No try/catch, deliberately. A throw here leaves the claim standing —
       // see the header: releasing it would green-light a retry that may
       // double-pay, because a timeout and a rejection throw identically.
       const undo = await getFundingProcessor().refund({
         transferId: transfer.id,
-        paymentRef: transfer.funding_payment_ref ?? '',
+        paymentRef: transfer.funding_payment_ref,
         amountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,
         currency: 'USD',
         idempotencyKey: `${transfer.idempotency_key}:refund`,

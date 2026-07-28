@@ -93,10 +93,21 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
     await db.query(
       `insert into public.transfers (id, user_id, payout_destination_id, quote_id,
          send_amount_minor, send_currency, receive_amount_minor, receive_currency,
-         fee_amount_minor, fee_currency, fx_rate, fx_rate_at, idempotency_key, state)
+         fee_amount_minor, fee_currency, fx_rate, fx_rate_at, idempotency_key, state,
+         funding_payment_ref)
        values ($1, $2, $3, $4, ${S}, 'USD', 396014, 'MXN', ${FEE}, 'USD', 19.9997, now(), $5,
-         'PENDING_PAYMENT')`,
-      [transferId, USER, destinationId, quote.rows[0].id, `refund-tail-test-${transferId}`],
+         'PENDING_PAYMENT', $6)`,
+      [
+        transferId,
+        USER,
+        destinationId,
+        quote.rows[0].id,
+        `refund-tail-test-${transferId}`,
+        // Set at confirm in the real flow, so every transfer that can reach
+        // PAYOUT_FAILED carries one. The tail refuses to disburse without it
+        // rather than sending the processor an empty payment reference.
+        `mockpay_${transferId}`,
+      ],
     )
   }
 

@@ -466,6 +466,20 @@ describe('the refund claim', () => {
     expect(refund).not.toHaveBeenCalled()
   })
 
+  it('refuses to disburse against a missing funding ref, and takes no claim', async () => {
+    q('transfers', parked({ funding_payment_ref: null }))
+
+    await expect(refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })).rejects.toThrow(
+      /no funding_payment_ref/,
+    )
+
+    // Never send the processor an empty payment reference, and never hold a
+    // claim on a row we cannot pay — the claim would age into an abandoned
+    // alert about a disbursement that was never even attempted.
+    expect(refund).not.toHaveBeenCalled()
+    expect(updateWith(filters, 'refund_claimed_at')).toBeUndefined()
+  })
+
   it('fails closed on a null-without-error claim result too', async () => {
     // `(data ?? []).length === 1` would coalesce this to a lost race and refuse
     // silently — the same fail-open the error branch above exists to prevent.
