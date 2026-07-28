@@ -530,7 +530,11 @@ export async function refundLedgerBatches(
 // by releaseStaleRefundClaim after a human has looked. The window lives in
 // isClaimAbandoned, in the backlog classification, and in the job's alert —
 // never here.
-async function claimRefund(transferId: string, actor: string): Promise<boolean> {
+// Exported so the slice-7 PR6b correction payment (services/cancellation-review)
+// takes the SAME claim rather than re-deriving the predicate. Both disburse
+// against `refund_payment_ref` on one transfer, so they must contend on one
+// lock; two claim implementations would be two chances to get it subtly wrong.
+export async function claimRefund(transferId: string, actor: string): Promise<boolean> {
   const { data, error } = await supabaseAdmin
     .from('transfers')
     .update({ refund_claimed_at: new Date().toISOString(), refund_claimed_by: actor })

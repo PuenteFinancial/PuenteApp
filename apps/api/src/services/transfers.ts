@@ -239,6 +239,46 @@ export function refundedLedgerEntries(transfer: {
   return entries
 }
 
+// UNDER_REVIEW → REFUNDED entered from COMPLETED: the post-delivery CORRECTION
+// PAYMENT (slice-7 PR6b, ledger-rules.md). Structurally different from
+// refundedLedgerEntries even though the sender receives the same amount.
+//
+// That one REVERSES an obligation we still owed: the payout failed, so
+// transfer_payable was still open and the debit closes it. Here the transfer
+// DELIVERED — transfer_payable was already discharged by the COMPLETED batch and
+// there is nothing to reverse. Paying the sender again is a NEW expense against
+// Puente, so it debits an expense account, and the original COMPLETED entries
+// are never touched. We do not rewrite delivered history.
+//
+// Its own account rather than loss_funding_reversed: that bucket is a
+// credit/fraud loss (an ACH return after delivery), while this is a compliance
+// cost (honouring a timely cancellation on a delivered transfer). Mixing them
+// means the ledger cannot answer "what did Reg E cost us" without a per-transfer
+// join, and the accounts get harder to separate the longer we wait.
+//
+// The fee rides with it: the sender is made whole, so send + fee both come back.
+// Nets to zero.
+export function correctionRefundLedgerEntries(transfer: {
+  send_amount_minor: number
+  fee_amount_minor: number
+}): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  return [
+    {
+      account_code: 'loss_cancellation_correction',
+      direction: 'debit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+    {
+      account_code: 'cash_clearing',
+      direction: 'credit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+  ]
+}
+
 export async function createTransferFromQuote(input: {
   quoteId: string
   userId: string
