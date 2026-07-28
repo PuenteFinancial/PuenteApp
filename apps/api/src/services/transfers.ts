@@ -62,6 +62,10 @@ export interface TransferRow {
   payout_hold_reason: string | null
   payout_held_at: string | null
   submit_attempted_at: string | null
+  // Set when the sender asks to cancel a transfer already on its way to payout
+  // (slice-7 PR6b). A FLAG ORTHOGONAL TO STATE, not a state: the payout keeps
+  // advancing while a request is pending, and the request resolves separately.
+  cancellation_requested_at: string | null
   completed_at: string | null
   created_at: string
 }
@@ -344,6 +348,7 @@ export function toApiTransfer(row: TransferRow) {
     disclosureAcceptedAt: row.disclosure_accepted_at,
     paymentAt: row.payment_at,
     cancelableUntil: row.cancelable_until,
+    cancellationRequestedAt: row.cancellation_requested_at,
     providerTransferRef: row.provider_transfer_ref,
     completedAt: row.completed_at,
     createdAt: row.created_at,
