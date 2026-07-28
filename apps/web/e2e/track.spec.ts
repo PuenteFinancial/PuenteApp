@@ -92,21 +92,25 @@ test('a cancel that needs support shows the server-authored Reg E copy', async (
   await page.getByRole('button', { name: /cancel transfer|cancelar transferencia/i }).click()
   await page.getByRole('button', { name: /tap again|toca de nuevo/i }).click()
 
-  // The 202 is NOT an error: the server's own wording is shown verbatim, and it
-  // affirms the refund-if-the-payout-fails tail. Assert on the distinctive tail
-  // rather than "contact support" — that phrase also appears in our own mapped
-  // fallback string AND in the support link, so matching it proves nothing
-  // about which copy actually rendered.
+  // The 202 is NOT an error: the server's own wording is shown verbatim. Assert
+  // on the distinctive tail rather than "contact support" — that phrase also
+  // appears in our own mapped fallback string AND in the support link, so
+  // matching it proves nothing about which copy actually rendered.
+  //
+  // slice-7 PR6b changed what this copy SAYS, and the change is the point: the
+  // tap IS the request now, so it must confirm we recorded it rather than
+  // sending the sender off to an inbox to ask again.
+  await expect(
+    page.getByText(/recorded your cancellation request|registramos tu solicitud/i),
+  ).toBeVisible()
+  // And the refund must NOT be conditioned on the payout failing — a timely
+  // request is refunded either way, including after delivery.
+  await expect(
+    page.getByText(/already been delivered|ya se entregó/i),
+  ).toBeVisible()
   await expect(
     page.getByText(/being sent for payout|se está enviando para su pago/i),
-  ).toBeVisible()
-  await expect(page.getByText(/refunded in full|reembolsará el monto total/i)).toBeVisible()
-
-  // A message telling the sender to contact support must come with a route to
-  // do so, pointing at the SAME address as the Reg E disclosure's contact line.
-  await expect(
-    page.getByRole('link', { name: /contact support|comunícate con soporte/i }),
-  ).toHaveAttribute('href', 'mailto:support@puentefinancial.com')
+  ).toHaveCount(0)
 })
 
 test('a cancel past the window shows the refusal reason', async ({ context, page }) => {
@@ -119,4 +123,34 @@ test('a cancel past the window shows the refusal reason', async ({ context, page
   await expect(
     page.getByText(/can no longer be canceled|ya no se puede cancelar/i),
   ).toBeVisible()
+})
+
+// slice-7 PR6b. The banner is a flag ORTHOGONAL to state: the payout keeps
+// advancing while the request is open, so it must ride ABOVE the timeline
+// rather than replacing it — and must stop once the outcome banner takes over.
+test('a pending cancellation shows a banner without hiding the timeline', async ({ context, page }) => {
+  await signIn(context)
+  await page.goto('/dashboard/send/transfer-e2e-cancel-pending')
+
+  await expect(
+    page.getByText(/got your request to cancel|recibimos tu solicitud para cancelar/i),
+  ).toBeVisible()
+
+  // The timeline is still rendered: where the money got to is still true, and
+  // still the honest thing to show.
+  await expect(page.getByText(/on its way|en camino/i).first()).toBeVisible()
+})
+
+test('the banner stops once the transfer settles, leaving the outcome to speak', async ({
+  context,
+  page,
+}) => {
+  await signIn(context)
+  await page.goto('/dashboard/send/transfer-e2e-cancel-settled')
+
+  // The request is resolved by now — the outcome banner carries the story, and
+  // a lingering "we're working on your cancellation" would contradict it.
+  await expect(
+    page.getByText(/got your request to cancel|recibimos tu solicitud para cancelar/i),
+  ).toHaveCount(0)
 })

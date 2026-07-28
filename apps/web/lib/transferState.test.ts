@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   TIMELINE_STEPS,
   badgeTone,
+  hasPendingCancellation,
   canRequestCancel,
   classifyCancelResponse,
   isOnHappyPath,
@@ -276,8 +277,43 @@ describe('badgeTone', () => {
   })
 
   it('flags states that need attention as error', () => {
-    for (const state of ['PAYOUT_FAILED', 'FUNDING_REVERSED', 'UNDER_REVIEW'] as const) {
+    for (const state of ['PAYOUT_FAILED', 'FUNDING_REVERSED'] as const) {
       expect(badgeTone(state)).toBe('error')
+    }
+  })
+
+  // `error` means "needs attention" — and under review the sender can do
+  // nothing AND their transfer was delivered successfully. It is us working
+  // through a cancellation they asked for, so it reads as motion, not fault.
+  it('shows UNDER_REVIEW as progress, not error', () => {
+    expect(badgeTone('UNDER_REVIEW')).toBe('progress')
+  })
+})
+
+describe('hasPendingCancellation', () => {
+  // The flag is ORTHOGONAL to state: the payout keeps advancing while the
+  // request is open, so it must not depend on where the money got to.
+  it('is true on every in-flight state once the sender has asked', () => {
+    for (const state of ['FUNDED', 'SUBMITTED', 'IN_FLIGHT', 'UNDER_REVIEW'] as const) {
+      expect(
+        hasPendingCancellation({ state, cancellationRequestedAt: '2026-07-28T09:00:00.000Z' }),
+      ).toBe(true)
+    }
+  })
+
+  it('is false when nothing was ever asked', () => {
+    expect(hasPendingCancellation({ state: 'SUBMITTED', cancellationRequestedAt: null })).toBe(false)
+    expect(hasPendingCancellation({ state: 'SUBMITTED' })).toBe(false)
+  })
+
+  // Once settled the request has been resolved either way and the OUTCOME
+  // banner carries the story; a lingering "we're working on your cancellation"
+  // over a REFUNDED transfer would contradict it.
+  it('stops once the transfer settles, so it cannot contradict the outcome', () => {
+    for (const state of ['COMPLETED', 'REFUNDED', 'PAYMENT_FAILED', 'FUNDING_REVERSED'] as const) {
+      expect(
+        hasPendingCancellation({ state, cancellationRequestedAt: '2026-07-28T09:00:00.000Z' }),
+      ).toBe(false)
     }
   })
 })

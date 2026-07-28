@@ -194,6 +194,10 @@ export type Translations = {
       // to support. Without it those messages instruct a sender to exercise a
       // statutory right with no route to do so.
       supportCta: string
+      // The pending-cancellation banner (slice-7 PR6b). A flag ORTHOGONAL to
+      // state: the payout keeps advancing while the request is open, so this
+      // rides above the timeline rather than replacing it.
+      cancellationRequested: { title: string; body: string }
       outcomes: {
         completed: { title: string; body: string }
         canceled: { title: string; body: string }
@@ -504,6 +508,10 @@ const en: Translations = {
       done: 'Back to dashboard',
       viewReceipt: 'View receipt',
       supportCta: 'Contact support',
+      cancellationRequested: {
+        title: 'Cancellation requested',
+        body: 'We got your request to cancel this transfer. It was already on its way, so we’re working through it — this page will update when it’s resolved.',
+      },
       outcomes: {
         completed: {
           title: 'Delivered',
@@ -530,8 +538,14 @@ const en: Translations = {
           body: 'Your bank reversed the payment for this transfer. Contact support so we can sort it out with you.',
         },
         underReview: {
-          title: 'Under review',
-          body: 'We’re looking into this transfer. We’ll contact you as soon as the review is done.',
+          title: 'Working on your cancellation',
+          // Promises ONLY what exists. The previous body said "we'll contact
+          // you as soon as the review is done" — there is no outbound
+          // notification mechanism in this codebase (no email service, no SMS
+          // path outside Supabase Auth), so that was a promise nothing could
+          // keep. The polling tracker DOES update in place, so that is what we
+          // say. See the glossary's "Truthful pending copy".
+          body: 'Your transfer was delivered, and you asked to cancel it. We’re sorting out your refund — this page will update when it’s done.',
         },
       },
     },
@@ -828,6 +842,10 @@ const es: Translations = {
       done: 'Volver al panel',
       viewReceipt: 'Ver recibo',
       supportCta: 'Comunícate con soporte',
+      cancellationRequested: {
+        title: 'Cancelación solicitada',
+        body: 'Recibimos tu solicitud para cancelar esta transferencia. Ya iba en camino, así que la estamos gestionando; esta página se actualizará cuando se resuelva.',
+      },
       outcomes: {
         completed: {
           title: 'Entregada',
@@ -854,8 +872,8 @@ const es: Translations = {
           body: 'Tu banco revirtió el pago de esta transferencia. Comunícate con soporte para que lo resolvamos juntos.',
         },
         underReview: {
-          title: 'En revisión',
-          body: 'Estamos revisando esta transferencia. Te contactaremos en cuanto termine la revisión.',
+          title: 'Procesando tu cancelación',
+          body: 'Tu transferencia se entregó y pediste cancelarla. Estamos gestionando tu reembolso; esta página se actualizará cuando esté listo.',
         },
       },
     },

@@ -12,6 +12,7 @@ import { SUPPORT_EMAIL } from '@/lib/support'
 import {
   canRequestCancel,
   classifyCancelResponse,
+  hasPendingCancellation,
   isOnHappyPath,
   isSettled,
   isTransferShape,
@@ -226,6 +227,7 @@ export default function TransferTracker({
   }
 
   const outcome = outcomeFor(transfer.state)
+  const cancellationPending = hasPendingCancellation(transfer)
   const steps = timelineFor(transfer.state)
 
   // Outcomes whose copy tells the sender to contact us. Each must render a real
@@ -280,6 +282,31 @@ export default function TransferTracker({
 
       {/* Outcome banner. role="status" so a state change that lands while the
           user is watching is announced, not just repainted. */}
+      {/* A pending cancellation is a flag ORTHOGONAL to state, so it rides ABOVE
+          the timeline rather than replacing it: the payout keeps advancing while
+          the request is open, and both facts are true at once. It disappears
+          once the transfer settles, because the outcome banner then carries the
+          story and two competing messages would contradict each other. */}
+      {cancellationPending && (
+        <div
+          role="status"
+          style={{
+            margin: '0 0 16px',
+            padding: '12px 14px',
+            borderRadius: 10,
+            background: 'var(--surface-2, #f5f5f4)',
+            border: '1px solid var(--line, #e7e5e4)',
+          }}
+        >
+          <h2 style={{ fontFamily: 'var(--font)', fontSize: 15, fontWeight: 700, margin: '0 0 4px', color: 'var(--ink)' }}>
+            {s.cancellationRequested.title}
+          </h2>
+          <p style={{ fontSize: 14, color: 'var(--muted)', margin: 0, lineHeight: 1.6 }}>
+            {s.cancellationRequested.body}
+          </p>
+        </div>
+      )}
+
       {outcome && (
         <div role="status" style={{ margin: '0 0 16px' }}>
           <h2 style={{ fontFamily: 'var(--font)', fontSize: 17, fontWeight: 700, margin: '0 0 4px', color: 'var(--ink)' }}>
