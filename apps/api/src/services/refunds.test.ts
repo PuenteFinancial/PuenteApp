@@ -26,8 +26,16 @@ vi.mock('./funding/index.js', () => ({
 const getBridgeTransfer = vi.hoisted(() => vi.fn())
 vi.mock('./bridge.js', () => ({ getBridgeTransfer: (...a: unknown[]) => getBridgeTransfer(...a) }))
 
-const { refundPayoutFailure, verifyPrincipalReturned, listRefundBacklog, refundLedgerBatches } =
-  await import('./refunds.js')
+const {
+  refundPayoutFailure,
+  verifyPrincipalReturned,
+  listRefundBacklog,
+  refundLedgerBatches,
+  releaseStaleRefundClaim,
+  refundClaimStatus,
+  isClaimAbandoned,
+  CLAIM_STALE_AFTER_MS,
+} = await import('./refunds.js')
 
 // ── PostgREST-ish builder: from() dispenses results per table in call order,
 // every filter method is recorded so the filters themselves can be asserted.
@@ -47,7 +55,7 @@ let builderId = 0
 function chain(table: string, result: unknown): Record<string, unknown> {
   const c: Record<string, unknown> = {}
   const id = ++builderId
-  for (const m of ['select', 'eq', 'is', 'not', 'in', 'or', 'limit', 'update']) {
+  for (const m of ['select', 'eq', 'is', 'not', 'in', 'or', 'lt', 'limit', 'update']) {
     c[m] = (...args: unknown[]) => {
       filters.push({ table, method: m, args, builder: id })
       return c
@@ -86,8 +94,24 @@ const verifiable = (over: Record<string, unknown> = {}) => ({
   error: null,
 })
 
+// The claim sits between the load and the ref persist, so a full disbursement
+// run dispenses THREE `transfers` results: parked(), claimWon, persistOk.
+const claimWon = { data: [{ id: T }], error: null }
+const claimLost = { data: [], error: null }
+const persistOk = { data: null, error: null }
+
+const minutesAgo = (n: number) => new Date(Date.now() - n * 60_000).toISOString()
+
 const filtersFor = (table: string, method: string) =>
   filters.filter((f) => f.table === table && f.method === method).map((f) => f.args)
+
+// There are now TWO update builders on `transfers` in a disbursement run — the
+// claim and the ref persist — so tests must name the one they mean by the column
+// it sets, never by "the first update".
+const updateWith = (all: typeof filters, column: string) =>
+  all.find(
+    (f) => f.method === 'update' && Object.hasOwn(f.args[0] as Record<string, unknown>, column),
+  )
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -103,7 +127,7 @@ beforeEach(() => {
 
 describe('refundPayoutFailure', () => {
   it('posts both batches under distinct keys, disburses once, and settles REFUNDED', async () => {
-    q('transfers', parked(), { data: null, error: null }) // load, then the ref persist
+    q('transfers', parked(), claimWon, persistOk) // load, claim, ref persist
 
     await expect(
       refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'operator-triggered' }),
@@ -150,7 +174,7 @@ describe('refundPayoutFailure', () => {
   })
 
   it('threads the caller’s actor and reason to the transition (the only durable record of who did this)', async () => {
-    q('transfers', parked(), { data: null, error: null })
+    q('transfers', parked(), claimWon, persistOk)
 
     await refundPayoutFailure({
       transferId: T,
@@ -177,7 +201,7 @@ describe('refundPayoutFailure', () => {
   })
 
   it('scopes the refund-ref persist to THIS transfer and to a null gate', async () => {
-    q('transfers', parked(), { data: null, error: null })
+    q('transfers', parked(), claimWon, persistOk)
 
     await refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })
 
@@ -186,7 +210,7 @@ describe('refundPayoutFailure', () => {
     // WHOLE table, closing every other parked transfer's null-gate so its real
     // refund tail skips the disbursement and settles REFUNDED without paying
     // the sender — and the backlog would then read empty.
-    const update = filters.find((f) => f.method === 'update')
+    const update = updateWith(filters, 'refund_payment_ref')
     expect(update?.args[0]).toMatchObject({ refund_payment_ref: 'mockrefund_x' })
     const persistFilters = filters
       .filter((f) => f.builder === update?.builder && f.method !== 'update')
@@ -244,12 +268,310 @@ describe('refundPayoutFailure', () => {
   })
 
   it('throws when the refund-ref persist fails (leaves the caller to retry)', async () => {
-    q('transfers', parked(), { data: null, error: { message: 'persist boom' } })
+    q('transfers', parked(), claimWon, { data: null, error: { message: 'persist boom' } })
 
     await expect(refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })).rejects.toThrow(
       /refund ref persist failed/,
     )
     expect(transition).not.toHaveBeenCalled() // never settles REFUNDED on an unrecorded disbursement
+  })
+})
+
+// ── the refund claim (slice-7 PR6b-0) ──────────────────────────────────────
+// The disbursement gate. Before this, `refund_payment_ref is null` was a read
+// separated from its write and two concurrent runs both paid the sender — and
+// nothing caught it, because MockFundingProcessor.refund() ignores the
+// idempotency key by design.
+describe('the refund claim', () => {
+  it('takes the claim before calling the processor, with the caller’s actor', async () => {
+    q('transfers', parked(), claimWon, persistOk)
+
+    await refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' })
+
+    const claim = updateWith(filters, 'refund_claimed_at')
+    expect(claim?.args[0]).toMatchObject({ refund_claimed_by: 'ops:jphelps' })
+    expect((claim?.args[0] as Record<string, unknown>).refund_claimed_at).toEqual(expect.any(String))
+
+    // THE predicate. `refund_claimed_at is null` and nothing else: no staleness
+    // term, because a machine must never retake a claim — only
+    // releaseStaleRefundClaim clears one, and only after a human has looked.
+    const claimFilters = filters
+      .filter((f) => f.builder === claim?.builder && f.method !== 'update')
+      .map((f) => [f.method, ...f.args])
+    expect(claimFilters).toEqual([
+      ['eq', 'id', T],
+      ['is', 'refund_payment_ref', null],
+      ['is', 'refund_claimed_at', null],
+      ['select', 'id'],
+    ])
+  })
+
+  it('claims BEFORE disbursing, never after', async () => {
+    q('transfers', parked(), claimWon, persistOk)
+    const order: string[] = []
+    from.mockImplementation((table: string) => {
+      const result = queues[table]?.shift() ?? { data: null, error: null }
+      const c = chain(table, result)
+      const update = c.update as (...a: unknown[]) => unknown
+      c.update = (...a: unknown[]) => {
+        if (Object.hasOwn(a[0] as Record<string, unknown>, 'refund_claimed_at')) order.push('claim')
+        return update(...a)
+      }
+      return c
+    })
+    refund.mockImplementation(() => {
+      order.push('refund')
+      return Promise.resolve({ provider: 'mock', ref: 'mockrefund_x', status: 'succeeded' })
+    })
+
+    await refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })
+
+    expect(order).toEqual(['claim', 'refund'])
+  })
+
+  it('a loser never reaches the processor and never settles the state', async () => {
+    // load → claim lost → re-read shows a LIVE claim held by someone else
+    q(
+      'transfers',
+      parked(),
+      claimLost,
+      parked({ refund_claimed_at: minutesAgo(2), refund_claimed_by: 'worker:payment-event' }),
+    )
+
+    const outcome = await refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' })
+
+    expect(outcome).toMatchObject({
+      done: false,
+      reason: 'claim_taken',
+      claimedBy: 'worker:payment-event',
+    })
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled() // must NOT settle a refund it did not make
+  })
+
+  it('reports an abandoned claim distinctly — it is the one a human must judge', async () => {
+    q(
+      'transfers',
+      parked(),
+      claimLost,
+      parked({ refund_claimed_at: minutesAgo(31), refund_claimed_by: 'ops:someone' }),
+    )
+
+    const outcome = await refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' })
+
+    expect(outcome).toMatchObject({ done: false, reason: 'claim_abandoned', claimedBy: 'ops:someone' })
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+  })
+
+  // The RPC treats a transition whose target IS the current state as a replay:
+  // it returns the row and appends/posts NOTHING. So a loser that fell through
+  // to it would write nothing and still report `already_disbursed`, which the
+  // CLI prints as "state settled by this run" — credit for a run that did
+  // nothing, and the verify query would show a different actor.
+  it('reports already_settled — not already_disbursed — when the winner already finished', async () => {
+    q(
+      'transfers',
+      parked(),
+      claimLost,
+      parked({ state: 'REFUNDED', refund_payment_ref: 'mockrefund_winner' }),
+    )
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' }),
+    ).resolves.toEqual({ done: true, outcome: 'already_settled' })
+
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+  })
+
+  // The bug the two-operator rig caught. The loser used to fall through to the
+  // transition here; the RPC treats a transition to the CURRENT state as a
+  // replay (appends nothing, posts nothing) and returns the row either way, so
+  // the loser reported `already_disbursed` — printed as "state settled by this
+  // run" and "refunded by ops:<loser>" — while transfer_transitions recorded
+  // somebody else. A loser must write nothing and say nothing happened.
+  it('a loser whose winner persisted the ref mid-flight still writes NOTHING', async () => {
+    q(
+      'transfers',
+      parked(),
+      claimLost,
+      parked({
+        refund_payment_ref: 'mockrefund_winner',
+        refund_claimed_at: minutesAgo(1),
+        refund_claimed_by: 'ops:winner',
+      }),
+    )
+
+    const outcome = await refundPayoutFailure({ transferId: T, actor: 'ops:loser', reason: 'r' })
+
+    expect(outcome).toMatchObject({ done: false, reason: 'claim_taken', claimedBy: 'ops:winner' })
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+  })
+
+  // The genuine crash-recovery heal, which is a DIFFERENT shape: no claim is
+  // contended because the ref was already set on the FIRST load, so this run is
+  // alone and really does finish the state.
+  it('still heals a crashed run whose ref was set before this run loaded it', async () => {
+    q('transfers', parked({ refund_payment_ref: 'mockrefund_prev' }))
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' }),
+    ).resolves.toEqual({ done: true, outcome: 'already_disbursed' })
+
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).toHaveBeenCalledTimes(1)
+  })
+
+  // Documented at length in the service: a null stamp on the re-read would mean
+  // the holder released the claim between our attempt and the read, which only
+  // releaseStaleRefundClaim does. It must read as TAKEN (silent), because being
+  // wrong toward silence is safe here and being wrong toward a page is not.
+  it('reads a released-in-the-gap claim as taken, not abandoned', async () => {
+    q('transfers', parked(), claimLost, parked({ refund_claimed_at: null, refund_claimed_by: null }))
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' }),
+    ).resolves.toEqual({ done: false, reason: 'claim_taken', claimedAt: null, claimedBy: null })
+    expect(refund).not.toHaveBeenCalled()
+  })
+
+  it('reports a transfer that vanished under the re-read', async () => {
+    q('transfers', parked(), claimLost, { data: null, error: null })
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' }),
+    ).resolves.toEqual({ done: false, reason: 'transfer_not_found' })
+    expect(refund).not.toHaveBeenCalled()
+  })
+
+  it('takes NO claim when the disbursement already exists', async () => {
+    q('transfers', parked({ refund_payment_ref: 'mockrefund_prev' }))
+
+    await refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })
+
+    // The crash-recovery path is untouched by the claim: nothing to gate, since
+    // the money is already out and only the state is missing.
+    expect(updateWith(filters, 'refund_claimed_at')).toBeUndefined()
+    expect(transition).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed on a claim error — a broken query must not read as a lost race', async () => {
+    q('transfers', parked(), { data: null, error: { message: 'claim boom' } })
+
+    await expect(refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })).rejects.toThrow(
+      /refund claim failed/,
+    )
+    expect(refund).not.toHaveBeenCalled()
+  })
+
+  it('fails closed on a null-without-error claim result too', async () => {
+    // `(data ?? []).length === 1` would coalesce this to a lost race and refuse
+    // silently — the same fail-open the error branch above exists to prevent.
+    q('transfers', parked(), { data: null, error: null })
+
+    await expect(refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })).rejects.toThrow(
+      /refund claim failed/,
+    )
+    expect(refund).not.toHaveBeenCalled()
+  })
+
+  it('does NOT release the claim when the processor throws', async () => {
+    q('transfers', parked(), claimWon)
+    refund.mockRejectedValue(new Error('processor timeout'))
+
+    await expect(refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })).rejects.toThrow(
+      /processor timeout/,
+    )
+
+    // The whole point. A timeout and a definitive rejection throw identically
+    // (FundingProcessor has no error taxonomy), so the money MAY have gone out.
+    // Releasing here would hand the next run a green light to pay twice; instead
+    // the claim stands and goes abandoned for a human to judge.
+    const writes = filters.filter((f) => f.method === 'update').map((f) => f.args[0])
+    expect(writes).toHaveLength(1) // the claim itself, and nothing after it
+    expect(writes[0]).toMatchObject({ refund_claimed_by: 'a' })
+    expect(transition).not.toHaveBeenCalled()
+  })
+
+  it('leaves the claim standing when the ref persist throws', async () => {
+    q('transfers', parked(), claimWon, { data: null, error: { message: 'persist boom' } })
+
+    await expect(refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' })).rejects.toThrow(
+      /refund ref persist failed/,
+    )
+
+    // Worst case of all: the sender WAS paid and we failed to record it. The
+    // claim must survive so the row goes abandoned rather than free.
+    const clears = filters
+      .filter((f) => f.method === 'update')
+      .filter((f) => (f.args[0] as Record<string, unknown>).refund_claimed_at === null)
+    expect(clears).toHaveLength(0)
+  })
+})
+
+describe('isClaimAbandoned', () => {
+  it('is exclusive of the window and inclusive at it', () => {
+    const now = Date.now()
+    expect(isClaimAbandoned(null, now)).toBe(false)
+    expect(isClaimAbandoned(new Date(now - CLAIM_STALE_AFTER_MS + 1000).toISOString(), now)).toBe(
+      false,
+    )
+    expect(isClaimAbandoned(new Date(now - CLAIM_STALE_AFTER_MS).toISOString(), now)).toBe(true)
+  })
+
+  // Date.parse returns NaN on garbage and EVERY NaN comparison is false, so the
+  // natural expression silently classifies a corrupt stamp as "in flight" — the
+  // SILENT branch — forever. It would never age into claim_abandoned, so the
+  // sweep would re-drive it every 5 minutes with no alert, indefinitely. Fail
+  // toward the branch that fetches a human.
+  it('treats an unparseable stamp as abandoned, never as in-flight', () => {
+    expect(isClaimAbandoned('not-a-timestamp')).toBe(true)
+    expect(isClaimAbandoned('')).toBe(true)
+  })
+
+  it('does not treat a future stamp as abandoned', () => {
+    const now = Date.now()
+    expect(isClaimAbandoned(new Date(now + 60_000).toISOString(), now)).toBe(false)
+  })
+})
+
+describe('releaseStaleRefundClaim', () => {
+  it('clears only an abandoned claim on an undisbursed transfer', async () => {
+    q('transfers', { data: [{ id: T }], error: null })
+
+    await expect(releaseStaleRefundClaim(T)).resolves.toBe(true)
+
+    const update = updateWith(filters, 'refund_claimed_at')
+    expect(update?.args[0]).toEqual({ refund_claimed_at: null, refund_claimed_by: null })
+    const guards = filters
+      .filter((f) => f.builder === update?.builder && f.method !== 'update')
+      .map((f) => [f.method, ...f.args.slice(0, 2)])
+    // Never disturb a completed disbursement; never yank a LIVE claim out from
+    // under a run that is mid-flight.
+    // values asserted too: `.is('refund_payment_ref', 'x')` would satisfy a
+    // name-only check while no longer gating on an undisbursed transfer.
+    expect(guards.map((g) => g.slice(0, 3))).toEqual([
+      ['eq', 'id', T],
+      ['is', 'refund_payment_ref', null],
+      ['lt', 'refund_claimed_at', expect.any(String)],
+      ['select', 'id'],
+    ])
+    const lt = filters.find((f) => f.method === 'lt')
+    expect(Date.now() - Date.parse(lt?.args[1] as string)).toBeGreaterThanOrEqual(
+      CLAIM_STALE_AFTER_MS,
+    )
+  })
+
+  it('reports false when nothing moved, so the caller re-refuses', async () => {
+    q('transfers', { data: [], error: null })
+    await expect(releaseStaleRefundClaim(T)).resolves.toBe(false)
+  })
+
+  it('throws on a release error rather than reporting a silent no-op', async () => {
+    q('transfers', { data: null, error: { message: 'boom' } })
+    await expect(releaseStaleRefundClaim(T)).rejects.toThrow(/refund claim release failed/)
   })
 })
 
@@ -367,6 +689,8 @@ describe('listRefundBacklog', () => {
     provider_transfer_ref: 'bridge_tr_1',
     refund_payment_ref: null,
     created_at: '2026-07-27T00:00:00.000Z',
+    refund_claimed_at: null,
+    refund_claimed_by: null,
     ...over,
   })
 
@@ -376,12 +700,16 @@ describe('listRefundBacklog', () => {
     const rows = await listRefundBacklog()
 
     expect(rows).toHaveLength(1)
-    // ids, amounts and timestamps only — never names, phone, or destination details
+    // ids, amounts and timestamps only — never names, phone, or destination
+    // details. refund_claimed_by is an operator id, not a person's name.
     expect(Object.keys(rows[0]!).sort()).toEqual([
+      'claimStatus',
       'created_at',
       'fee_amount_minor',
       'id',
       'provider_transfer_ref',
+      'refund_claimed_at',
+      'refund_claimed_by',
       'refund_payment_ref',
       'send_amount_minor',
     ])
@@ -403,9 +731,70 @@ describe('listRefundBacklog', () => {
     expect(filtersFor('transfers', 'is')).not.toContainEqual(['refund_payment_ref', null])
   })
 
+  // The window belongs to the service: an operator reading --list must never be
+  // handed two timestamps and asked to do the arithmetic by eye.
+  it('classifies each row so the operator is never given raw window arithmetic', async () => {
+    q('transfers', {
+      data: [
+        parkedRow({ id: 'a' }),
+        parkedRow({ id: 'b', refund_claimed_at: minutesAgo(2), refund_claimed_by: 'ops:x' }),
+        parkedRow({ id: 'c', refund_claimed_at: minutesAgo(31), refund_claimed_by: 'ops:y' }),
+      ],
+      error: null,
+    })
+
+    const rows = await listRefundBacklog()
+
+    expect(rows.map((r) => r.claimStatus)).toEqual(['unclaimed', 'claimed', 'abandoned'])
+    expect(rows[2]!.refund_claimed_by).toBe('ops:y')
+  })
+
   it('fails closed rather than reporting an empty backlog', async () => {
     q('transfers', { data: null, error: { message: 'db down' } })
     await expect(listRefundBacklog()).rejects.toThrow(/refund backlog query failed/)
+  })
+})
+
+describe('refundClaimStatus', () => {
+  it('classifies one transfer, so a dry run can warn before --confirm', async () => {
+    q('transfers', {
+      data: { refund_claimed_at: minutesAgo(31), refund_claimed_by: 'ops:y' },
+      error: null,
+    })
+
+    await expect(refundClaimStatus(T)).resolves.toEqual({
+      claimStatus: 'abandoned',
+      claimedAt: expect.any(String),
+      claimedBy: 'ops:y',
+    })
+  })
+
+  it('reports unclaimed for a free transfer, and null for one that is gone', async () => {
+    q(
+      'transfers',
+      { data: { refund_claimed_at: null, refund_claimed_by: null }, error: null },
+      { data: null, error: null },
+    )
+
+    await expect(refundClaimStatus(T)).resolves.toMatchObject({ claimStatus: 'unclaimed' })
+    await expect(refundClaimStatus(T)).resolves.toBeNull()
+  })
+
+  it('classifies a live claim as claimed, which is what the CLI renders as IN PROGRESS', async () => {
+    q('transfers', {
+      data: { refund_claimed_at: minutesAgo(2), refund_claimed_by: 'worker:payment-event' },
+      error: null,
+    })
+
+    await expect(refundClaimStatus(T)).resolves.toMatchObject({
+      claimStatus: 'claimed',
+      claimedBy: 'worker:payment-event',
+    })
+  })
+
+  it('throws on a read error rather than reporting "unclaimed"', async () => {
+    q('transfers', { data: null, error: { message: 'db down' } })
+    await expect(refundClaimStatus(T)).rejects.toThrow(/refund claim status query failed/)
   })
 })
 

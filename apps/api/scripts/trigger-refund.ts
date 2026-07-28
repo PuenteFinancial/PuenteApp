@@ -21,6 +21,11 @@
 //                   transfer_transitions — the ONLY durable record of who did
 //                   this (jobs and scripts write no audit-plugin rows)
 //   --confirm       actually disburse; WITHOUT it this is a dry run
+//   --reclaim       clear an ABANDONED refund claim first (slice-7 PR6b-0).
+//                   ONLY after confirming in the processor that no disbursement
+//                   went out — an abandoned claim means a run died mid-refund
+//                   and the sender may already have been paid. Requires
+//                   --confirm; clears nothing on a live claim.
 //
 // This imports src/services/*, so config/env.ts validates the full environment
 // and exits on anything missing (SUPABASE_*, BRIDGE_API_KEY, …):
@@ -34,14 +39,23 @@ import {
   verifyPrincipalReturned,
   listRefundBacklog,
   refundLedgerBatches,
+  refundClaimStatus,
+  releaseStaleRefundClaim,
+  type RefundOutcome,
 } from '../src/services/refunds.js'
 
-const KNOWN_FLAGS = ['--list', '--operator', '--confirm']
+const KNOWN_FLAGS = ['--list', '--operator', '--confirm', '--reclaim']
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export type ParsedArgs =
   | { mode: 'list' }
-  | { mode: 'trigger'; transferId: string; operator: string; confirm: boolean }
+  | {
+      mode: 'trigger'
+      transferId: string
+      operator: string
+      confirm: boolean
+      reclaim: boolean
+    }
   | { mode: 'error'; message: string }
 
 /**
@@ -108,11 +122,19 @@ export function parseArgs(argv: string[]): ParsedArgs {
   // renders lowercase. The step-3 key check would then miss and report FAIL
   // *after* the sender was paid, which is the one outcome this script must
   // never produce.
+  // --reclaim clears an abandoned claim so a refund can be re-driven; on a dry
+  // run there is no refund to re-drive, so accepting it there would imply the
+  // claim had been dealt with when nothing was written.
+  if (has('--reclaim') && !has('--confirm')) {
+    return { mode: 'error', message: '--reclaim requires --confirm (there is nothing to reclaim on a dry run)' }
+  }
+
   return {
     mode: 'trigger',
     transferId: transferId.toLowerCase(),
     operator,
     confirm: has('--confirm'),
+    reclaim: has('--reclaim'),
   }
 }
 
@@ -142,7 +164,7 @@ function fail(msg: string): never {
 
 const USAGE =
   'usage: tsx scripts/trigger-refund.ts --list\n' +
-  '       tsx scripts/trigger-refund.ts <transferId> --operator <id> [--confirm]'
+  '       tsx scripts/trigger-refund.ts <transferId> --operator <id> [--confirm] [--reclaim]'
 
 const usd = (amountMinor: number): string => formatMoney({ amountMinor, currency: 'USD' }, 'en-US')
 
@@ -163,17 +185,60 @@ export async function list(): Promise<void> {
         // A set ref means a prior run paid the sender and died before settling:
         // the money is gone but {id}:REFUNDED was never posted, so the ledger is
         // currently WRONG about this transfer. Re-running finishes it.
-        (row.refund_payment_ref ? '  ⚠ ALREADY DISBURSED — needs settling only' : ''),
+        (row.refund_payment_ref ? '  ⚠ ALREADY DISBURSED — needs settling only' : '') +
+        // The claim, rendered rather than left as a timestamp to subtract by
+        // eye — this is the signal that explains a claim_taken/claim_abandoned
+        // refusal, and with AUTO_REFUND off it is the ONLY place an abandoned
+        // claim surfaces (the job's alert cannot fire while the flag is off).
+        (row.claimStatus === 'claimed'
+          ? `  ⏳ claim in progress by ${row.refund_claimed_by ?? '?'} since ${row.refund_claimed_at}`
+          : '') +
+        (row.claimStatus === 'abandoned'
+          ? `  ⚠ CLAIM ABANDONED by ${row.refund_claimed_by ?? '?'} at ${row.refund_claimed_at}` +
+            ' — a disbursement MAY have gone out; confirm in the processor, then --reclaim'
+          : ''),
     )
   }
   console.log('\nrun with <transferId> --operator <id> to inspect one (dry run by default)')
 }
 
-export async function trigger(transferId: string, operator: string, confirm: boolean): Promise<void> {
+/** The refusal copy. Each says what happened AND what the operator does next. */
+function refusalMessage(outcome: Extract<RefundOutcome, { done: false }>): string {
+  switch (outcome.reason) {
+    case 'claim_taken':
+      return (
+        `another run is refunding this transfer RIGHT NOW (claimed at ${outcome.claimedAt} by ` +
+        `${outcome.claimedBy ?? 'unknown'}). Nothing was written. Wait and re-check --list; it ` +
+        'should settle on its own.'
+      )
+    case 'claim_abandoned':
+      return (
+        `a refund was claimed at ${outcome.claimedAt} by ${outcome.claimedBy ?? 'unknown'} and ` +
+        'NEVER COMPLETED. The sender MAY ALREADY HAVE BEEN PAID — the claim is released only ' +
+        'when a disbursement is recorded, and no ref was recorded here.\n' +
+        '  Confirm in the funding processor whether a refund went out for this transfer:\n' +
+        '    · it DID   → do NOT reclaim. The money is out; escalate per ' +
+        'docs/runbooks/manual-refund.md so the state is settled without a second payment.\n' +
+        '    · it did NOT → re-run this command with --reclaim to clear the claim and refund.'
+      )
+    case 'not_payout_failed':
+      return `the transfer is ${outcome.state}, not PAYOUT_FAILED — only a failed payout can be refunded`
+    case 'transfer_not_found':
+      return 'no transfer with that id — check it against --list'
+  }
+}
+
+export async function trigger(
+  transferId: string,
+  operator: string,
+  confirm: boolean,
+  reclaim = false,
+): Promise<void> {
   console.log(
     `refund trigger for ${transferId}\n` +
       `operator: ops:${operator}\n` +
-      `mode: ${confirm ? 'EXECUTE (--confirm)' : 'DRY RUN (no --confirm)'}`,
+      `mode: ${confirm ? 'EXECUTE (--confirm)' : 'DRY RUN (no --confirm)'}` +
+      `${reclaim ? '\nreclaim: YES — will clear an abandoned claim first' : ''}`,
   )
 
   // 1) The principal-returned interlock. bridge_return books
@@ -197,11 +262,42 @@ export async function trigger(transferId: string, operator: string, confirm: boo
   }
   pass(`principal returned (event=${verdict.eventType}, bridge=${verdict.bridgeState})`)
 
-  // 2) Execute, or stop here on a dry run.
+  // 2) The claim. Reported BEFORE the dry run returns, so an operator learns a
+  //    claim is abandoned while they are still deciding — not after --confirm.
+  begin('check the refund claim')
+  const claim = await refundClaimStatus(transferId)
+  if (claim === null) fail('no transfer with that id — check it against --list')
+  if (claim.claimStatus === 'abandoned') {
+    console.log(
+      `⚠ claim abandoned: taken at ${claim.claimedAt} by ${claim.claimedBy ?? 'unknown'}`,
+    )
+  }
+  pass(
+    {
+      unclaimed: 'no claim on this transfer',
+      claimed: `a refund is IN PROGRESS (${claim.claimedBy ?? 'unknown'} since ${claim.claimedAt})`,
+      abandoned: `claim ABANDONED by ${claim.claimedBy ?? 'unknown'} at ${claim.claimedAt}`,
+    }[claim.claimStatus],
+  )
+
+  // 3) Execute, or stop here on a dry run.
   begin(confirm ? 'refund the sender and settle REFUNDED' : 'dry run — no writes')
   if (!confirm) {
     pass('interlock satisfied; re-run with --confirm to disburse. Nothing was written.')
     return
+  }
+
+  // --reclaim clears the claim so the tail below can take a fresh one. Guarded
+  // in the service to only-if-abandoned, so this cannot yank a live claim from a
+  // run that is mid-disbursement — if it clears nothing, the tail refuses again
+  // and the operator is told why rather than being reported a success.
+  if (reclaim) {
+    const released = await releaseStaleRefundClaim(transferId)
+    console.log(
+      released
+        ? '   abandoned claim cleared — re-driving the refund'
+        : '   nothing to reclaim (the claim is live, or a disbursement was recorded)',
+    )
   }
 
   const outcome = await refundPayoutFailure({
@@ -210,7 +306,7 @@ export async function trigger(transferId: string, operator: string, confirm: boo
     reason: 'operator-triggered refund — AUTO_REFUND off',
   })
   if (!outcome.done) {
-    fail(`refund refused: ${outcome.reason} (only a transfer at PAYOUT_FAILED can be refunded)`)
+    fail(`refund refused: ${outcome.reason} — ${refusalMessage(outcome)}`)
   }
   pass(
     {
@@ -256,7 +352,7 @@ async function main(): Promise<void> {
   }
   // One transfer per run, on purpose: no --all. Looping disbursements from a
   // CLI is how ten refunds go out at once.
-  await trigger(args.transferId, args.operator, args.confirm)
+  await trigger(args.transferId, args.operator, args.confirm, args.reclaim)
 }
 
 // Run only when this file IS the entrypoint — its test imports the exports

@@ -135,7 +135,11 @@ async function route(event: EventRow): Promise<void> {
   // tail (gated). Before markProcessed so a throw leaves the event 'received'
   // for pg-boss retry / poll self-heal to re-run — every step is idempotent.
   if (action.principalReturned) {
-    await driveRefund(transfer, event)
+    // false = the refund has NOT happened (a claim refusal). Leave the event
+    // 'received' so payout-sweep keeps re-driving it; retiring it here is what
+    // would strand the sender with no alert (see driveRefund).
+    const resolved = await driveRefund(transfer, event)
+    if (!resolved) return
   }
   await markProcessed(event.id)
 }
@@ -150,13 +154,17 @@ async function route(event: EventRow): Promise<void> {
 // at this call site rather than inside the service: a `force` parameter on a
 // money-moving service would make the policy invisible to the next caller.
 // Any throw propagates (non-benign) to leave the event 'received' for retry.
-async function driveRefund(transfer: TransferRow, event: EventRow): Promise<void> {
+//
+// Returns whether the event may be RETIRED. `false` means "not resolved yet —
+// leave the row 'received' so payout-sweep re-drives it"; the only such cases
+// are the two claim refusals, where the refund provably has not happened.
+async function driveRefund(transfer: TransferRow, event: EventRow): Promise<boolean> {
   if (!env.AUTO_REFUND) {
     // failTransfer alerts + no-ops a fail-after-COMPLETED, so re-read before
     // alerting: "manual refund required" must never fire for a transfer that
     // actually delivered. (On the ON path the service does this re-read itself.)
     const current = (await currentState(transfer.id)) ?? transfer.state
-    if (current !== 'PAYOUT_FAILED') return
+    if (current !== 'PAYOUT_FAILED') return true
 
     Sentry.withScope((scope) => {
       scope.setFingerprint(['payout-refund-gated', transfer.id])
@@ -171,7 +179,9 @@ async function driveRefund(transfer: TransferRow, event: EventRow): Promise<void
         'warning',
       )
     })
-    return
+    // Retire the event: with the flag off a human owns this row via the runbook,
+    // and re-driving it every 5 minutes would re-alert without changing anything.
+    return true
   }
 
   const outcome = await refundPayoutFailure({
@@ -179,6 +189,54 @@ async function driveRefund(transfer: TransferRow, event: EventRow): Promise<void
     actor: 'worker:payment-event',
     reason: 'refund completed — sender made whole',
   })
+
+  // The refund claim (slice-7 PR6b-0) produces two refusals of its own. Both
+  // mean THE REFUND HAS NOT HAPPENED YET, so neither may retire the event — the
+  // caller skips markProcessed on a `false` return and the row stays 'received'
+  // for payout-sweep to re-drive (it selects only status='received', :37).
+  //
+  // Retiring the event here strands the sender, deterministically. The sequence:
+  // the processor throws (the claim stands, by design), the event stays
+  // 'received', pg-boss retries ~15s later, and that retry loses the claim to
+  // ITS OWN dead claim — 15s is far inside CLAIM_STALE_AFTER_MS, so it reads as
+  // `claim_taken`. Marking processed there would drop the row out of the sweep's
+  // selection, and nothing else re-drives it: payout-poll only enqueues when
+  // recordEvent reports `inserted`, so it fires at most once per (source,state),
+  // not repeatedly. `refundPayoutFailure` would then never run again, the claim
+  // would never age into `claim_abandoned`, and the alert below would never
+  // fire — sender unpaid, zero open alerts, the pg-boss job green.
+  //
+  // The two are still not the same SIGNAL:
+  //   claim_taken     — a live claim; another run is disbursing right now.
+  //     Silent: healthy concurrency, and the sweep re-drive resolves it to
+  //     `already_settled` (done → processed) once the winner finishes.
+  //   claim_abandoned — a claim past CLAIM_STALE_AFTER_MS that never finished.
+  //     Alerts, because the response differs in kind: the sender may ALREADY
+  //     have been paid, so it cannot be auto-retried and needs a human to check
+  //     the processor before `--reclaim`. Fingerprinted per transfer, so the
+  //     sweep's repeated re-drives collapse into one issue; it keeps firing
+  //     until a human resolves it, which is the point.
+  if (!outcome.done && (outcome.reason === 'claim_taken' || outcome.reason === 'claim_abandoned')) {
+    if (outcome.reason === 'claim_abandoned') {
+      Sentry.withScope((scope) => {
+        scope.setFingerprint(['payout-refund-claim-abandoned', transfer.id])
+        scope.setContext('payout_refund_claim_abandoned', {
+          transferId: transfer.id,
+          claimedAt: outcome.claimedAt,
+          claimedBy: outcome.claimedBy,
+          runbook: 'docs/runbooks/manual-refund.md',
+        })
+        // 'error', matching payout-refund-refused below rather than the routine
+        // payout-refund-gated warning: both mean a sender may still be owed and
+        // a human must act. A page that reads as advisory defeats the branch.
+        Sentry.captureMessage(
+          'refund claim abandoned — a disbursement may have gone out; ops must confirm before reclaiming',
+          'error',
+        )
+      })
+    }
+    return false
+  }
 
   // A refusal means the sender was NOT refunded, and the caller marks the event
   // 'processed' either way — so nothing retries and nothing else would ever
@@ -209,6 +267,10 @@ async function driveRefund(transfer: TransferRow, event: EventRow): Promise<void
       )
     })
   }
+  // Everything reaching here is terminal for the event: either the tail settled
+  // it, or it refused for a reason a re-drive cannot change (wrong state, no
+  // such transfer) and ops has been paged where that could still owe a sender.
+  return true
 }
 
 // Resolve our transfer for the event: the ingest path usually set transfer_id;

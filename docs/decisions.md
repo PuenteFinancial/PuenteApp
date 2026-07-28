@@ -6,6 +6,45 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-28 · Two atomic claims that behave OPPOSITELY when stale — and that asymmetry is the
+decision.** Slice-7 PR6b-0 adds the **refund claim** (`transfers.refund_claimed_at` /
+`refund_claimed_by`): a guarded UPDATE one run wins before calling the funding processor. It closes a
+real hole in PR6a — `refund_payment_ref IS NULL` was a *read separated from its write*, so a poller
+re-drive and an operator's `trigger-refund.ts` could both read null and both pay the sender. That was
+survivable only in theory: the exactly-once guarantee rested on the processor's idempotency key, and
+[`MockFundingProcessor.refund()`](/apps/api/src/services/funding/mock.ts) **ignores that key by
+design**, so today the claim is the *only* defence, not a second one. The shape mirrors the shipped
+**submit claim** ([`claimForSubmission`](/apps/api/src/jobs/payout-submit.ts)) — and then deliberately
+diverges on the one question that matters: **what a stale claim means.** A stale submit claim means
+*re-POST to Bridge idempotently and skip the guards*, because Bridge dedupes on the key, so recovery
+cannot double-pay; the sweep can safely treat 10 minutes as stale and re-enqueue. A stale refund claim
+means **stop and page a human**, because nothing gives the funding seam that guarantee: a claim that
+was taken but never recorded a `refund_payment_ref` may mean the sender was already paid, and only a
+person checking the processor can tell. So it is never retaken by a machine. Four consequences worth
+recording. **(1) The window is NOT in the claim predicate.** The guard is bare
+`refund_claimed_at IS NULL`; the 30 minutes lives in the backlog classification, the alert, and
+`releaseStaleRefundClaim`. Putting it in the predicate would silently restore auto-retake — the exact
+behaviour this rejects — so a test asserts the predicate has no staleness term. **(2) There is no
+release-on-throw.** An earlier draft cleared the claim when the processor threw, to keep transient
+errors from becoming pages. Dropped: `FundingProcessor` has no error taxonomy, so a timeout (money may
+have left) and a definitive rejection (it did not) throw identically, and releasing would green-light
+a retry that may pay twice. A processor throw leaves the claim standing and it goes abandoned. **(3) A claim refusal must not retire the payment
+event.** Both claim refusals mean the refund has *not* happened, so the job leaves the event
+`received` for `payout.sweep` to re-drive. Marking it processed strands the sender deterministically:
+the processor throws (claim stands, by design), pg-boss retries ~15s later, and that retry loses the
+claim to *its own* dead claim — well inside the window, so it reads as `claim_taken`. Retiring it there
+drops the row out of the sweep's `status='received'` selection, and nothing else re-drives it
+(`payout.poll` enqueues only when `recordEvent` reports `inserted`, i.e. at most once per
+`(source,state)`), so the claim never ages into `claim_abandoned` and no alert ever fires. **(4)
+The operator exit is a separate named operation, not a `force` flag** — `releaseStaleRefundClaim`,
+guarded to only-if-abandoned and only-if-undisbursed, reached by `--reclaim`. It bypasses no policy
+(the principal interlock, the `PAYOUT_FAILED` guard, `--operator` and `--confirm` all still run), which
+is what keeps it clear of the bypass-parameter shape the entry below rejects. **30 minutes, not 10**,
+because no Bridge or processor call sets an `AbortSignal` — they inherit undici's ~300s defaults, so a
+hung-but-alive refund can hold a claim ~10 minutes, and an alert that needs a human must not fire on a
+call that is merely slow. **Status: active** (slice 7 PR6b-0)
+([runbooks/manual-refund.md](runbooks/manual-refund.md)).
+
 **2026-07-27 · One refund implementation, with the policy gate at the caller — and an operator CLI,
 not an ops endpoint.** Slice-7 PR6a lifts the `PAYOUT_FAILED → REFUNDED` tail out of the
 payment-event job into [`services/refunds.ts`](/apps/api/src/services/refunds.ts), so the automated

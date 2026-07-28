@@ -134,6 +134,35 @@ straight to the idempotent Bridge re-POST (same idempotency key, byte-identical 
 returns the existing transfer) and the RPC transition. The sweep treats claims older than 10 min
 with no `provider_transfer_ref` as stale and re-enqueues.
 
+### The refund claim (slice 7 PR6b-0)
+
+The `PAYOUT_FAILED → REFUNDED` tail has the same problem one step later — two runs (a poller re-drive
+and an operator's `trigger-refund.ts`, or two webhook deliveries) both reading `refund_payment_ref IS
+NULL` and both paying the sender. So it takes its own claim before calling the funding processor:
+
+```sql
+UPDATE transfers SET refund_claimed_at = now(), refund_claimed_by = $2
+WHERE id = $1
+  AND refund_payment_ref IS NULL
+  AND refund_claimed_at IS NULL
+```
+
+0 rows means someone else owns the disbursement. One re-read then says which of three: the ref is now
+set and the state settled (**nothing to do**), the ref is set but unsettled (**finish the state**), or
+neither (**refuse** — `claim_taken` if the claim is live, `claim_abandoned` if it is over 30 minutes
+old). A claim survives success: `refund_payment_ref` gates from there, and the stamp records when the
+money left.
+
+**A stale refund claim is the exact opposite of a stale submit claim, on purpose.** Submit recovers by
+re-POSTing to Bridge, which dedupes on the idempotency key, so a stale claim is safely retaken by a
+machine. Nothing gives the funding seam that guarantee — the mock processor ignores the key outright —
+so an *abandoned* refund claim may mean the sender was already paid, and only a human checking the
+processor can tell. It is never retaken automatically: ops confirms, then clears it via
+`--reclaim` ([runbooks/manual-refund.md](runbooks/manual-refund.md)). Note there is also **no
+release-on-throw**: a processor timeout and a processor rejection throw identically, so the claim is
+left standing rather than handing the next run a green light. Full rationale in
+[decisions.md](decisions.md) (2026-07-28).
+
 ### Contract for slice 6 (cancel) — binding
 
 User cancel must be a guarded UPDATE with `state = 'FUNDED' AND submit_attempted_at IS NULL`
