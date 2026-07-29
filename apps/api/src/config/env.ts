@@ -125,6 +125,15 @@ const envSchema = z.object({
   RISK_MONTHLY_MAX_MINOR: z.coerce.number().int().min(0).default(300_000), // $3,000 / rolling 30d
   RISK_SEMIANNUAL_MAX_MINOR: z.coerce.number().int().min(0).default(1_800_000), // $18,000 / rolling 180d
   RISK_VELOCITY_MAX_COUNT: z.coerce.number().int().min(1).default(5), // sends / rolling 24h
+  // Aggregate Reg E correction-loss trend guard (ledger.correction-watch cron):
+  // page when the rolling-window signed sum of loss_cancellation_correction
+  // reaches this. HARD defaults (RISK_* style, not FLOAT_CEILING's
+  // required-at-use) so the tripwire stays armed even when unset. $200 ≈ one
+  // max-size correction at launch limits — fires around the second one.
+  LOSS_CORRECTION_ALERT_MINOR: z.coerce.number().int().min(0).default(20_000), // $200 / window
+  // Rolling window for that sum. The cap keeps a fat-fingered value from
+  // turning the hourly select into an unbounded scan as entries accumulate.
+  LOSS_CORRECTION_WINDOW_DAYS: z.coerce.number().int().min(1).max(90).default(7),
   // Cadence of the payout.poll Bridge reconciliation cron. 300 in prod;
   // set 60 in dev via env. Floor of 10 keeps a fat-fingered value from
   // hammering the Bridge API.

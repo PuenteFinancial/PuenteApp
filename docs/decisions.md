@@ -6,6 +6,21 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-29 · The aggregate Reg E double-pay guard is an hourly cron over the ledger, not an
+alert at write time.** `ledger.correction-watch` sums `loss_cancellation_correction` over a rolling
+window (`LOSS_CORRECTION_WINDOW_DAYS`, default 7) and pages `loss-correction-threshold` (warning)
+at `LOSS_CORRECTION_ALERT_MINOR` (default 20000 = $200 — about the second correction at launch
+limits). Why a cron and not the write path: the write is a human-driven CLI that already pages
+per-transfer at owed-time and executes deliberately — a TREND question belongs on the aggregate,
+where it also catches anything a future writer posts to the account. The sum is SIGNED
+(debits − credits, the account's normal balance): the append-only ledger reverses an erroneous
+correction with a new credit, and a debit-only sum would keep alarming on money already clawed
+back. Reads fail closed (a broken read throws to pg-boss retry, never "no corrections"); two
+queries instead of an embedded join so a typo'd account code throws via `.single()` instead of
+reading as a quiet week. Knobs are hard-defaulted (RISK_* style) so the tripwire stays armed when
+unset; episode dedupe is the global Sentry fingerprint (float-ceiling mechanism), no persisted
+state. **Status: active** (slice-7 debt pass)
+
 **2026-07-29 · Every Bridge call gets a hard deadline, and the refund-claim staleness window drops
 30 → 10 minutes.** `bridgeFetch` now sets `AbortSignal.timeout(BRIDGE_TIMEOUT_SECONDS × 1000)`
 (default 15s, env-tunable 1–120) — the one helper all nine Bridge functions route through, so the

@@ -18,6 +18,7 @@ export const JOB_PAYOUT_SWEEP = 'payout.sweep'
 export const JOB_PAYOUT_POLL = 'payout.poll'
 export const JOB_RECONCILE_PENDING = 'transfer.reconcile-pending'
 export const JOB_IDEMPOTENCY_PURGE = 'idempotency.purge'
+export const JOB_LOSS_CORRECTION_WATCH = 'ledger.correction-watch'
 
 export interface PayoutSubmitPayload {
   transferId: string
@@ -84,6 +85,7 @@ export async function ensureQueues(): Promise<void> {
       await boss.createQueue(JOB_PAYOUT_POLL, CRON_RETRY)
       await boss.createQueue(JOB_RECONCILE_PENDING, CRON_RETRY)
       await boss.createQueue(JOB_IDEMPOTENCY_PURGE, CRON_RETRY)
+      await boss.createQueue(JOB_LOSS_CORRECTION_WATCH, CRON_RETRY)
     })().catch((err: unknown) => {
       queuesPromise = undefined
       throw err
