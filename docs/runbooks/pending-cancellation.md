@@ -31,7 +31,9 @@ the rest of the system runs, through the ledger RPC.
 
 ## The alerts
 
-All fingerprinted per transfer, so repeated re-drives collapse into one issue.
+All fingerprinted per transfer, so repeated re-drives collapse into one issue — except the
+aggregate `loss-correction-threshold` row, which is fingerprinted **globally** and fires once per
+episode (the hourly re-checks group into one Sentry issue while the window stays over threshold).
 
 | Fingerprint | Severity | Means | Go to |
 |---|---|---|---|
@@ -41,6 +43,7 @@ All fingerprinted per transfer, so repeated re-drives collapse into one issue.
 | `cancellation-record-failed` | **error** | the sender asked and we **failed to persist it**; they still got their 202 | [Record it by hand](#a-request-that-was-never-recorded) |
 | `cancellation-resolve-failed` | **error** | a refund settled but its request did not close | usually self-heals on the next run through that transfer; check `--list` |
 | `cancellation-route-failed` | **error** | we could not evaluate a delivered transfer's pending request at all | check `--list` for that transfer |
+| `loss-correction-threshold` | warning | rolling `LOSS_CORRECTION_WINDOW_DAYS`-day Reg E correction losses reached `LOSS_CORRECTION_ALERT_MINOR` | [Aggregate exposure](#aggregate-exposure) |
 
 ## 1. Triage — what is open?
 
@@ -148,6 +151,34 @@ select t.transition, t.idempotency_key,
  where t.transfer_id = '<transfer-id>'
  group by t.id, t.transition, t.idempotency_key;
 ```
+
+<a id="aggregate-exposure"></a>
+## Aggregate exposure — the `loss-correction-threshold` alert
+
+The hourly `ledger.correction-watch` cron sums `loss_cancellation_correction` over a rolling
+`LOSS_CORRECTION_WINDOW_DAYS` window (signed: a posted reversal credit subtracts) and pages at
+`LOSS_CORRECTION_ALERT_MINOR` (defaults: **$200 over 7 days** — roughly the second correction at
+launch limits). That account exists specifically so this question is answerable without a
+per-transfer join — this alert is the mechanism that asks it on a schedule.
+
+**A trip is a TREND signal, not a breakage.** Every underlying payment was individually
+human-approved through this runbook and individually paged when it became owed; nothing here needs
+undoing. What the alert says is: the deliberate, bounded double-pay is happening often enough that
+someone should look at it as a pattern.
+
+1. Pull the recent corrections and look for the pattern:
+   `select transfer_id, resolved_at, resolved_by, resolution from public.cancellation_requests
+    where status = 'resolved_refunded' order by resolved_at desc limit 20;` — same sender? same
+   recipient? asks clustered right at submission (a UX problem teaching senders to cancel late)?
+2. If the pattern is abuse-shaped, the levers are slice-8's risk engine (per-user caps already
+   count `UNDER_REVIEW` toward velocity); if it is UX-shaped, that is product work, not ops.
+3. The knobs are Doppler-tunable (`LOSS_CORRECTION_ALERT_MINOR`, `LOSS_CORRECTION_WINDOW_DAYS`,
+   code defaults 20000 / 7). **Raising the threshold = accepting more aggregate Reg E cost — only
+   with Joshua's sign-off**, same rule as the float ceiling.
+
+Resolving the Sentry issue while the window is still over threshold reopens it on the next hourly
+tick — that is deliberate (the episode is still live). It goes quiet on its own as old corrections
+age out of the window.
 
 ## A request that was never recorded
 

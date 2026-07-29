@@ -6,6 +6,36 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-29 · The aggregate Reg E double-pay guard is an hourly cron over the ledger, not an
+alert at write time.** `ledger.correction-watch` sums `loss_cancellation_correction` over a rolling
+window (`LOSS_CORRECTION_WINDOW_DAYS`, default 7) and pages `loss-correction-threshold` (warning)
+at `LOSS_CORRECTION_ALERT_MINOR` (default 20000 = $200 — about the second correction at launch
+limits). Why a cron and not the write path: the write is a human-driven CLI that already pages
+per-transfer at owed-time and executes deliberately — a TREND question belongs on the aggregate,
+where it also catches anything a future writer posts to the account. The sum is SIGNED
+(debits − credits, the account's normal balance): the append-only ledger reverses an erroneous
+correction with a new credit, and a debit-only sum would keep alarming on money already clawed
+back. Reads fail closed (a broken read throws to pg-boss retry, never "no corrections"); two
+queries instead of an embedded join so a typo'd account code throws via `.single()` instead of
+reading as a quiet week. Knobs are hard-defaulted (RISK_* style) so the tripwire stays armed when
+unset; episode dedupe is the global Sentry fingerprint (float-ceiling mechanism), no persisted
+state. **Status: active** (slice-7 debt pass)
+
+**2026-07-29 · Every Bridge call gets a hard deadline, and the refund-claim staleness window drops
+30 → 10 minutes.** `bridgeFetch` now sets `AbortSignal.timeout(BRIDGE_TIMEOUT_SECONDS × 1000)`
+(default 15s, env-tunable 1–120) — the one helper all nine Bridge functions route through, so the
+bound is universal. A fired timeout rejects on the SAME non-`BridgeApiError` path as undici's
+network `TypeError`, and no caller branches on either class (routes map to 502/503, jobs rethrow
+into pg-boss retry), so the only behavior change is failing in seconds instead of undici's ~300s
+defaults. The `FundingProcessor` seam gains a matching contract: network-bound adapters (Stripe,
+slice 4b) MUST bound their own calls. That removes the entire basis of the 2026-07-28 entry's
+"**30 minutes, not 10**" derivation for `CLAIM_STALE_AFTER_MS` — the window existed to keep an
+abandoned-claim page from firing on a merely-slow call, and bounded calls cannot be 10-minutes
+slow. It now matches the submit claim's 10 minutes; the asymmetry that REMAINS is what stale
+*means* (submit self-heals by idempotent re-POST; an abandoned refund claim pages a human, is
+never machine-retaken, and the sender may already have been paid — so page sooner). Caller error
+mapping deliberately NOT redesigned here. **Status: active** (slice-7 debt pass)
+
 **2026-07-28 · A post-submission cancel routes through `UNDER_REVIEW` on the COMPLETED tail ONLY —
 and that is not a return to "cancellation = error resolution."** Slice-7 PR6b records every
 post-submission cancel as a `cancellation_requests` row and resolves it when the payout settles. The
@@ -83,7 +113,8 @@ means **stop and page a human**, because nothing gives the funding seam that gua
 was taken but never recorded a `refund_payment_ref` may mean the sender was already paid, and only a
 person checking the processor can tell. So it is never retaken by a machine. Four consequences worth
 recording. **(1) The window is NOT in the claim predicate.** The guard is bare
-`refund_claimed_at IS NULL`; the 30 minutes lives in the backlog classification, the alert, and
+`refund_claimed_at IS NULL`; the staleness window *(30 minutes at the time — 10 since 2026-07-29,
+see above)* lives in the backlog classification, the alert, and
 `releaseStaleRefundClaim`. Putting it in the predicate would silently restore auto-retake — the exact
 behaviour this rejects — so a test asserts the predicate has no staleness term. **(2) There is no
 release-on-throw.** An earlier draft cleared the claim when the processor threw, to keep transient
@@ -103,7 +134,8 @@ guarded to only-if-abandoned and only-if-undisbursed, reached by `--reclaim`. It
 is what keeps it clear of the bypass-parameter shape the entry below rejects. **30 minutes, not 10**,
 because no Bridge or processor call sets an `AbortSignal` — they inherit undici's ~300s defaults, so a
 hung-but-alive refund can hold a claim ~10 minutes, and an alert that needs a human must not fire on a
-call that is merely slow. **Status: active** (slice 7 PR6b-0)
+call that is merely slow. *(Amended 2026-07-29 — see above: 10 minutes once every Bridge call is
+bounded; the derivation's premise no longer holds.)* **Status: active** (slice 7 PR6b-0)
 ([runbooks/manual-refund.md](runbooks/manual-refund.md)).
 
 **2026-07-27 · One refund implementation, with the policy gate at the caller — and an operator CLI,

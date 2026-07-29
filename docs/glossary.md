@@ -106,12 +106,12 @@ refer back as needed.
   `refund_payment_ref` null-check alone is a read separated from its write, and the mock processor
   ignores the idempotency key. Kept after success (it records when the money left); cleared in exactly
   one place, `releaseStaleRefundClaim`. See [ledger-rules.md](ledger-rules.md) and the state machine doc.
-- **Abandoned refund claim** — a **Refund claim** over 30 minutes old with no `refund_payment_ref`: the
+- **Abandoned refund claim** — a **Refund claim** over 10 minutes old with no `refund_payment_ref`: the
   run that took it died between claiming and recording the disbursement, so the sender **may or may not
   have been paid**. Never retaken automatically — ops confirms in the processor, then re-runs
   `trigger-refund.ts --reclaim` ([runbooks/manual-refund.md](runbooks/manual-refund.md)). Distinct from
   a **Payout hold** (a `FUNDED` transfer ops releases) and from *stuck at Bridge* (the principal never
-  came back — escalate, never refund). A claim under 30 minutes is simply *taken*: a healthy in-flight
+  came back — escalate, never refund). A claim under 10 minutes is simply *taken*: a healthy in-flight
   refund, nothing to do.
 - **Void** — the undo of an *uncleared* funding collection: a `FUNDED`-pre-claim transfer the sender
   cancels within the Reg E window; the inbound ACH is canceled before it settles, so no money moved

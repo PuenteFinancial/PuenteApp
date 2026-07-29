@@ -74,7 +74,7 @@ Rows also carry their **refund claim**, which is what stops two runs paying the 
 |---|---|---|
 | *(none)* | unclaimed | proceed normally |
 | **`⏳ claim in progress by … since …`** | a run is disbursing **right now** | **nothing.** Wait and re-run `--list`; it should settle on its own. This is healthy, not an incident. |
-| **`⚠ CLAIM ABANDONED by … at …`** | a run took the claim over 30 minutes ago and never recorded a disbursement | see [Abandoned claims](#abandoned-claims) — **do not reclaim before reading it** |
+| **`⚠ CLAIM ABANDONED by … at …`** | a run took the claim over 10 minutes ago and never recorded a disbursement | see [Abandoned claims](#abandoned-claims) — **do not reclaim before reading it** |
 
 ### 2. Dry run — check the interlock
 
@@ -106,7 +106,7 @@ means it is still on its way — wait for the terminal event.
 | `not_payout_failed` | the transfer is not parked at `PAYOUT_FAILED` | check the id. **A `COMPLETED` transfer must never be reversed here.** |
 | `transfer_not_found` | no transfer with that id | check the id against `--list` |
 | `claim_taken` | another run holds a live refund claim and is disbursing now | **wait.** Nothing was written. Re-check `--list`; do not reach for `--reclaim` — a healthy in-flight refund is not stuck |
-| `claim_abandoned` | a claim over 30 minutes old that never recorded a disbursement | see [Abandoned claims](#abandoned-claims) below |
+| `claim_abandoned` | a claim over 10 minutes old that never recorded a disbursement | see [Abandoned claims](#abandoned-claims) below |
 
 ### 3. Execute
 
@@ -141,7 +141,7 @@ pay a second time. That is what produces an abandoned claim.
 <a id="abandoned-claims"></a>
 ### Abandoned claims — read before using `--reclaim`
 
-A claim over 30 minutes old with no `refund_payment_ref` means a run died between taking the claim and
+A claim over 10 minutes old with no `refund_payment_ref` means a run died between taking the claim and
 recording the disbursement. **The sender may already have been paid.** Our own data cannot tell you:
 the ref is the only thing we write after the processor call, and it is missing precisely because the
 run did not get that far.

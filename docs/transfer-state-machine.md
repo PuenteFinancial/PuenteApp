@@ -155,7 +155,7 @@ WHERE id = $1
 
 0 rows means someone else owns the disbursement. One re-read then says which of three: the ref is now
 set and the state settled (**nothing to do**), the ref is set but unsettled (**finish the state**), or
-neither (**refuse** — `claim_taken` if the claim is live, `claim_abandoned` if it is over 30 minutes
+neither (**refuse** — `claim_taken` if the claim is live, `claim_abandoned` if it is over 10 minutes
 old). A claim survives success: `refund_payment_ref` gates from there, and the stamp records when the
 money left.
 

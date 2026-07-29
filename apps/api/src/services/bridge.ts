@@ -27,6 +27,16 @@ export class BridgeApiError extends Error {
 async function bridgeFetch(path: string, init: RequestInit = {}): Promise<unknown> {
   const res = await fetch(`${env.BRIDGE_API_BASE}${path}`, {
     ...init,
+    // Bounded waiting, nothing else. A fired timeout rejects with the signal's
+    // reason (DOMException 'TimeoutError'), which travels the SAME
+    // non-BridgeApiError path as undici's TypeError('fetch failed') — no
+    // caller branches on either class (routes map it to 502/503, jobs rethrow
+    // into pg-boss retry) — so the only behavior change is failing in
+    // BRIDGE_TIMEOUT_SECONDS instead of undici's ~300s defaults. Placed after
+    // the spread so the bound is unconditional — a caller-supplied init.signal
+    // would be CLOBBERED, deliberately (none exists; every call site lives in
+    // this file). If one ever appears, compose with AbortSignal.any instead.
+    signal: AbortSignal.timeout(env.BRIDGE_TIMEOUT_SECONDS * 1000),
     headers: {
       'Api-Key': env.BRIDGE_API_KEY,
       'Content-Type': 'application/json',

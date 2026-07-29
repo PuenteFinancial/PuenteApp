@@ -487,6 +487,31 @@ describe('POST /v1/users/me/kyc-link/retry', () => {
     await app.close()
   })
 
+  // The debt-pass review fix: with Bridge calls bounded, a TimeoutError is the
+  // COMMON failure — and the old BridgeApiError-only refund guard silently ate
+  // one of the user's lifetime retries on every timeout (no refund, no log; two
+  // timeouts from "Retry limit reached" without ever failing KYC).
+  it('refunds the retry on a NON-BridgeApiError throw too (timeout), still 500', async () => {
+    const refund = guardedUpdateResult({ error: null })
+    from
+      .mockReturnValueOnce(selectResult({ data: rejectedRow, error: null }))
+      .mockReturnValueOnce(guardedUpdateReturningResult({ data: { kyc_retry_count: 2 }, error: null }))
+      .mockReturnValueOnce(refund)
+    getKycLink.mockRejectedValue(new DOMException('signal timed out', 'TimeoutError'))
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({})
+
+    // The response class is unchanged (error-mapping redesign is out of
+    // scope) — what must not happen is the silent consumption.
+    expect(res.status).toBe(500)
+    expect(refund.update).toHaveBeenCalledWith({ kyc_retry_count: 1 })
+    await app.close()
+  })
+
   it('returns 404 when the user row is missing', async () => {
     from.mockReturnValueOnce(selectResult({ data: null, error: { code: 'PGRST116' } }))
     const app = await buildApp()

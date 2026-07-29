@@ -42,6 +42,15 @@ export interface FundingUndo {
 // The seam Stripe drops into (slice 4b): initiation on confirm, plus the
 // webhook-side verify + normalize. Implementations never throw from
 // verifySignature; parseEvent returns null for anything unusable.
+//
+// TIMEOUT CONTRACT (debt pass 2026-07-29): every network-bound implementation
+// MUST enforce its own bounded per-request timeout (Stripe adapter: the SDK's
+// `timeout` option). CLAIM_STALE_AFTER_MS in services/refunds.ts (10 min) is
+// derived assuming no in-flight processor call outlives its bound by minutes —
+// an adapter with unbounded calls silently breaks that derivation and can make
+// a LIVE refund read as an abandoned claim (a human gets paged to judge a
+// disbursement that is still in flight). The mock is synchronous and trivially
+// satisfies this.
 export interface FundingProcessor {
   readonly provider: string
   initiateFunding(input: {

@@ -675,7 +675,7 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
 
   // The deterministic stranding this pair exists to prevent: a processor throw
   // leaves the claim standing (by design), pg-boss retries ~15s later, and that
-  // retry loses the claim to ITS OWN dead claim — well inside the 30-minute
+  // retry loses the claim to ITS OWN dead claim — well inside the 10-minute
   // window, so it reads as claim_taken rather than claim_abandoned.
   it('a processor throw then its own retry does NOT retire the event', async () => {
     envMock.AUTO_REFUND = true

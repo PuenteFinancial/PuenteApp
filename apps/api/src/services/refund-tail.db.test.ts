@@ -370,17 +370,22 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
 
     // Exactly one winner; the loser refuses rather than reporting a refund it
     // did not make. (Either may win — assert the shape, not the order.)
-    // EXACTLY ONE run may report that it moved the money, and the loser must
-    // report only what IT did. Both loser outcomes are non-writing:
-    //   claim_taken     — the winner is still mid-flight
-    //   already_settled — the winner finished first
-    // `already_disbursed` must NOT appear: it means "this run settled the
-    // state", and the loser settles nothing. The transitions table below is the
-    // proof — exactly one actor, and it is the winner's.
+    // EXACTLY ONE run may report that it moved the money. Three loser
+    // outcomes, all non-writing:
+    //   claim_taken       — the winner is still mid-flight
+    //   already_settled   — the winner finished before the loser's re-read
+    //   already_disbursed — the winner's ref persist landed before the loser's
+    //     FIRST load (observed ~1-in-12 under the full-suite run, where the
+    //     shared PostgREST connection pool can serialize the loser's initial
+    //     read behind the winner's whole disbursement; 4th sighting 2026-07-29,
+    //     accepted per the watch-item's plan of record). The loser then takes
+    //     the crash-recovery-heal path: its transition is a replay no-op that
+    //     writes nothing. The invariants that matter are pinned below either
+    //     way — ONE processor call, ONE transition row, the winner's actor.
     const outcomes = results.map((r) => (r.done ? r.outcome : r.reason))
     expect(outcomes.filter((o) => o === 'refunded')).toHaveLength(1)
     const loser = outcomes.find((o) => o !== 'refunded')!
-    expect(['claim_taken', 'already_settled']).toContain(loser)
+    expect(['claim_taken', 'already_settled', 'already_disbursed']).toContain(loser)
 
     // THE invariant, and the only assertion here that can see a double payment:
     // the sender's money left our processor exactly once. Everything else in
@@ -450,19 +455,20 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       (await db.query('select refund_claimed_at from public.transfers where id = $1', [target]))
         .rows[0].refund_claimed_at
 
-    // Live claim: a run may be mid-disbursement, so clearing it would let a
-    // second payment go out underneath it.
+    // Live claim (just inside the 10-min CLAIM_STALE_AFTER_MS window): a run
+    // may be mid-disbursement, so clearing it would let a second payment go
+    // out underneath it.
     await db.query(
-      `update public.transfers set refund_claimed_at = now() - interval '29 minutes',
+      `update public.transfers set refund_claimed_at = now() - interval '9 minutes',
          refund_claimed_by = 'ops:x' where id = $1`,
       [target],
     )
     await expect(releaseStaleRefundClaim(target)).resolves.toBe(false)
     expect(await claimedAt()).not.toBeNull()
 
-    // Abandoned: nobody is coming back for it.
+    // Abandoned (just past the window): nobody is coming back for it.
     await db.query(
-      `update public.transfers set refund_claimed_at = now() - interval '31 minutes' where id = $1`,
+      `update public.transfers set refund_claimed_at = now() - interval '11 minutes' where id = $1`,
       [target],
     )
     await expect(releaseStaleRefundClaim(target)).resolves.toBe(true)

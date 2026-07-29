@@ -148,7 +148,7 @@ slippage (see ledger `fx_slippage`).
 - `idempotency_key` TEXT UNIQUE — for the Bridge submission
 - `provider_transfer_ref` TEXT — Bridge transfer id
 - `funding_payment_ref` TEXT — funding processor payment id
-- `refund_claimed_at` / `refund_claimed_by` — the **Refund claim** (slice-7 PR6b-0); the guarded UPDATE one run wins before calling the processor's refund. Never cleared on success; cleared only by `releaseStaleRefundClaim` after 30 min. Deliberately asymmetric to `submit_attempted_at` — see [decisions.md](decisions.md) 2026-07-28. Service-role mutated (not frozen)
+- `refund_claimed_at` / `refund_claimed_by` — the **Refund claim** (slice-7 PR6b-0); the guarded UPDATE one run wins before calling the processor's refund. Never cleared on success; cleared only by `releaseStaleRefundClaim` after 10 min. Deliberately asymmetric to `submit_attempted_at` — see [decisions.md](decisions.md) 2026-07-28. Service-role mutated (not frozen)
 - `cancellation_requested_at` timestamptz — denormalized flag: the sender asked to cancel a transfer already on its way to payout (slice-7 PR6b). A flag **orthogonal to state**, not a state — the payout keeps advancing while the request is open. Keeps the FIRST ask's timestamp. Service-role mutated (not frozen)
 - `completed_at` timestamptz
 - **RLS:** owner **reads** own; **all writes service-role only** (clients never mutate transfer state).
