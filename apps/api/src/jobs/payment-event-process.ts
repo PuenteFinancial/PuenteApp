@@ -8,8 +8,14 @@ import {
   TransferRpcError,
 } from '../services/transfers.js'
 import { refundPayoutFailure } from '../services/refunds.js'
+import { pendingCancellationFor } from '../services/cancellations.js'
 import { buildReceiptDisclosure } from '../services/disclosures.js'
-import { mapBridgeState, markProcessed, markIgnored } from '../services/payment-events.js'
+import {
+  mapBridgeState,
+  markProcessed,
+  markIgnored,
+  earliestDepositEvidenceAt,
+} from '../services/payment-events.js'
 
 // The `payment-event.process` job — the ONE path that turns a recorded Bridge
 // event (webhook OR poll-synthesized) into a transfer transition + ledger post.
@@ -43,7 +49,17 @@ interface TransferRow {
 // States a fail event can legally advance from. COMPLETED is absent on
 // purpose: a fail arriving after we already completed must never reverse it
 // (that would be a slice-6 refund, ledger-posted, not a silent state move).
-const FAILABLE_STATES = new Set(['SUBMITTED', 'IN_FLIGHT', 'UNDER_REVIEW'])
+// UNDER_REVIEW is absent for the SAME reason (PR6b review fix): since PR6b its
+// only writer is the cancellation routing on a DELIVERED transfer — the
+// COMPLETED batch is posted and the receipt written. Treating it as failable
+// let a late Bridge fail event silently drive UNDER_REVIEW → PAYOUT_FAILED and
+// (AUTO_REFUND on) run the payout-failure tail against delivered books:
+// bridge_return + REFUNDED batches that assume the SUBMITTED shape, and the
+// Reg E request closed with a false "payout failed" resolution. A fail event
+// here is a contradictory sequence like any other post-delivery fail — it
+// PAGES (payout-fail-after-terminal) and a human resolves through the review
+// exits, which post the correct correction ledger if a refund is really owed.
+const FAILABLE_STATES = new Set(['SUBMITTED', 'IN_FLIGHT'])
 
 // The linear payout happy-path. A forward (success) event for a transfer that
 // has left this path (e.g. PAYOUT_FAILED) is a contradictory Bridge sequence.
@@ -338,6 +354,160 @@ async function drive(transfer: TransferRow, target: 'IN_FLIGHT' | 'COMPLETED'): 
   // receipt leaves the event 'received' and self-heals on retry. writeReceipt
   // re-reads state and no-ops unless COMPLETED, and the upsert is idempotent.
   await writeReceipt(transfer)
+
+  // slice-7 PR6b, tail 2 of the cancellation story. AFTER the receipt: the
+  // transfer DID deliver and the receipt is the record of that; routing to
+  // UNDER_REVIEW first would make writeReceipt's COMPLETED guard skip it.
+  await routeCancellationOnDelivery(transfer)
+}
+
+/**
+ * The earliest moment we can EVIDENCE the deposit (shared query in
+ * services/payment-events.ts — denyCancellation bounds the operator's cited
+ * timestamp against the same evidence).
+ *
+ * The actual SPEI deposit happened AT OR BEFORE this — Bridge deposited, then
+ * told us — so comparing the request against it errs in the SENDER'S favour: a
+ * request earlier than our evidence might still postdate the true deposit, and
+ * that ambiguous sliver stays on the owed path for a human holding Bridge's
+ * authoritative timestamp to resolve. What it can never do is deny a request
+ * the reg entitles. Falls back to now() (= "no evidence, treat the request as
+ * first") if no event is found, which should be unreachable — reaching
+ * COMPLETED requires processing exactly such an event.
+ */
+async function earliestDepositEvidence(transferId: string): Promise<string> {
+  return (await earliestDepositEvidenceAt(transferId)) ?? new Date().toISOString()
+}
+
+/**
+ * The sender asked to cancel, and the payout COMPLETED anyway.
+ *
+ * §1005.34 owes the refund only when BOTH conditions held at the moment the
+ * request was received: (1) within 30 minutes of payment (`within_window`,
+ * frozen at record time) AND (2) the funds not yet deposited. Condition (2) is
+ * the one an instant rail makes decisive — SPEI deposits in seconds while the
+ * window runs 30 minutes, so most in-window cancels arrive AFTER the deposit
+ * and are owed nothing. Three buckets:
+ *
+ *   out of window          → owed nothing; alert; a human denies on the record.
+ *   in window, request strictly AFTER our earliest deposit evidence
+ *                          → owed nothing (the deposit had already happened when
+ *                            they asked); alert; a human confirms the exact
+ *                            deposit time in the Bridge dashboard and denies
+ *                            with it as evidence. The transfer STAYS COMPLETED.
+ *   in window, request AT OR BEFORE our earliest deposit evidence
+ *                          → the true race: the ask may genuinely have beaten
+ *                            the deposit. Owed posture: route to `UNDER_REVIEW`
+ *                            for the correction payment — the accepted, bounded
+ *                            double-pay, now confined to a seconds-wide sliver.
+ *                            A tie is ambiguous by construction (Date.parse
+ *                            truncates Postgres µs to ms, and evidence lags the
+ *                            true deposit), and ambiguity breaks toward the
+ *                            sender — review, never auto-deny (PR6b review fix:
+ *                            was `>=`, which sent ties to the not-owed bucket).
+ *
+ * Denial is never automatic in any bucket, and no bucket flips a delivered
+ * transfer's state for a request we will not honour.
+ *
+ * Never throws. `drive` has already posted the COMPLETED ledger batch and
+ * written the receipt; a failure to route must not undo delivery or strand the
+ * event. It pages instead — and because a claim refusal is the only thing that
+ * leaves the event 'received', this is genuinely the last chance, which is why
+ * the owed-path alert is an error rather than a warning.
+ */
+async function routeCancellationOnDelivery(transfer: TransferRow): Promise<void> {
+  try {
+    const request = await pendingCancellationFor(transfer.id)
+    if (!request) return
+
+    if (!request.within_window) {
+      Sentry.withScope((scope) => {
+        scope.setFingerprint(['cancellation-out-of-window', transfer.id])
+        scope.setContext('cancellation_out_of_window', {
+          transferId: transfer.id,
+          requestedAt: request.requested_at,
+          requestedState: request.requested_state,
+          runbook: 'docs/runbooks/pending-cancellation.md',
+        })
+        Sentry.captureMessage(
+          'cancellation request on a delivered transfer, OUT of the Reg E window — ' +
+            'no automatic refund is owed; a human must deny it on the record',
+          'warning',
+        )
+      })
+      return
+    }
+
+    // Condition (2): was the deposit already done when they asked? Compare
+    // against our EARLIEST evidence of it, so ambiguity breaks toward the
+    // sender (see earliestDepositEvidence).
+    const depositEvidenceAt = await earliestDepositEvidence(transfer.id)
+    if (Date.parse(request.requested_at) > Date.parse(depositEvidenceAt)) {
+      Sentry.withScope((scope) => {
+        scope.setFingerprint(['cancellation-after-deposit', transfer.id])
+        scope.setContext('cancellation_after_deposit', {
+          transferId: transfer.id,
+          requestedAt: request.requested_at,
+          depositEvidenceAt,
+          runbook: 'docs/runbooks/pending-cancellation.md',
+        })
+        Sentry.captureMessage(
+          'cancellation request arrived after the deposit — no refund is owed; confirm the ' +
+            'exact deposit time in the Bridge dashboard and deny with it as evidence',
+          'warning',
+        )
+      })
+      return
+    }
+
+    await transitionTransfer({
+      transferId: transfer.id,
+      fromState: 'COMPLETED',
+      toState: 'UNDER_REVIEW',
+      actor: 'system',
+      reason: 'timely pre-deposit cancellation on a delivered transfer — correction payment owed',
+      metadata: {
+        cancellationRequestId: request.id,
+        requestedAt: request.requested_at,
+        depositEvidenceAt,
+      },
+      // NO ledger. Nothing has moved yet; the correction payment posts when the
+      // operator executes it. UNDER_REVIEW is a holding state, not an event.
+    })
+
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['cancellation-correction-owed', transfer.id])
+      scope.setContext('cancellation_correction_owed', {
+        transferId: transfer.id,
+        requestedAt: request.requested_at,
+        depositEvidenceAt,
+        deadline: '3 business days from requestedAt',
+        runbook: 'docs/runbooks/pending-cancellation.md',
+      })
+      Sentry.captureMessage(
+        'timely PRE-DEPOSIT cancellation on a delivered transfer — full refund owed; ' +
+          'run resolve-cancellation.ts within 3 business days',
+        'error',
+      )
+    })
+  } catch (err) {
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['cancellation-route-failed', transfer.id])
+      scope.setContext('cancellation_route_failed', {
+        transferId: transfer.id,
+        // The page is the ONLY place this error surfaces (the catch is the
+        // sanctioned swallow), so it must carry the reason — a PostgREST or
+        // service message, ids and constraint names, no PII.
+        error: err instanceof Error ? err.message : String(err),
+        runbook: 'docs/runbooks/pending-cancellation.md',
+      })
+      Sentry.captureMessage(
+        'failed to route a cancellation request on a delivered transfer — ' +
+          'check for a pending request by hand',
+        'error',
+      )
+    })
+  }
 }
 
 // Write the Reg E receipt for a delivered transfer, idempotently. Guards on the

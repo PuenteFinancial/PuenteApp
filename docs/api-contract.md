@@ -158,7 +158,31 @@ reconciliation but never cross the wire.
 | POST | `/v1/transfers/:id/confirm` | ✓ | **required** | Record disclosure acceptance → initiate funding via `FundingProcessor`. Server refuses without recorded acceptance. Returns processor-neutral funding details. |
 | GET | `/v1/transfers` | ✓ | — | List (owner-scoped). `?scope=history` hides abandoned (never-funded) sends — `PENDING_PAYMENT`/`PAYMENT_FAILED`; `?scope=all` (default) returns everything. |
 | GET | `/v1/transfers/:id` | ✓ | — | Status, snapshotted terms, disclosure. |
-| POST | `/v1/transfers/:id/cancel` | ✓ | **required** | Only valid in `FUNDED` within the window; server re-checks state under a row lock. Else `transfer_not_cancelable`. |
+| POST | `/v1/transfers/:id/cancel` | ✓ | **required** | Pre-claim `FUNDED` → cancels. `SUBMITTED`/`IN_FLIGHT`/`FUNDED`-post-claim → **202**, request recorded (below). Else `transfer_not_cancelable`. |
+
+**202 `cancellation_requires_support`** — the payout is already with Bridge, so the cancel is
+*recorded* and resolved when the payout settles (slice-7 PR6b). The wire shape is unchanged from
+slice 6 apart from `requestedAt`; the shipped web client branches on `code`, so that string is stable.
+
+```jsonc
+{
+  "id": "uuid",
+  "state": "SUBMITTED",
+  "code": "cancellation_requires_support",
+  "requestedAt": "2026-07-28T12:00:00Z",  // when the ask was recorded — the statutory clock.
+                                          // ABSENT (not null) if recording failed: we do not
+                                          // assert a clock we did not start.
+  "messages": { "en": "…", "es": "…" }    // server-authored, rendered verbatim
+}
+```
+
+Recording is best-effort **in one direction only**: a persistence failure logs, pages ops, and still
+returns the 202 — our bookkeeping problem must not present to the sender as a rejection of a
+statutory ask. It is the only sanctioned swallow on this path. Note the idempotency interaction:
+the plugin caches any 2xx for 24h, so a record-failure 202 (no `requestedAt`) is what a same-key
+retry replays — **the client's own retry can never re-attempt the record**. Recovery is the
+`cancellation-record-failed` page plus manual entry per the runbook, or a fresh key from a new tap;
+do not assume "the client will just retry" heals it.
 | GET | `/v1/transfers/:id/receipt` | ✓ | — | Reg E receipt. |
 | POST | `/v1/transfers/:id/disputes` | ✓ | — | Open error resolution. Body `{ type, description }`. Moves the transfer to `UNDER_REVIEW` only from `FUNDED`/`SUBMITTED`/`IN_FLIGHT`/`COMPLETED` (per state machine); a dispute on an already-terminal transfer (`REFUNDED`, `PAYMENT_FAILED`, …) is recorded in `disputes` without a state change. |
 | GET | `/v1/transfers/:id/disputes` | ✓ | — | List. |
@@ -182,6 +206,8 @@ reconciliation but never cross the wire.
   "fundingCleared": false,
   "paymentAt": null,            // set at FUNDED (funding captured/initiated)
   "cancelableUntil": null,      // set at FUNDED; close of the 30-min cancel window
+  "cancellationRequestedAt": null, // set when a post-submission cancel is RECORDED (slice-7 PR6b);
+                                //   a flag orthogonal to state — the payout keeps advancing
   "providerTransferRef": null,  // the Bridge transfer id, set at SUBMITTED
   "completedAt": null,          // set when Bridge confirms the SPEI deposit
   "disclosure": { "id": "uuid", "type": "prepayment", "locale": "es", "presentedAt": "..." }
@@ -237,12 +263,18 @@ row has no postings and no funds moved — a dead row, not lost money).
 | Funding webhook: payment ok | `PENDING_PAYMENT → FUNDED` |
 | Funding webhook: payment fail | `PENDING_PAYMENT → PAYMENT_FAILED` |
 | Worker (gate passes) | `FUNDED → SUBMITTED` (Bridge payout call, idempotent) |
-| `POST /transfers/:id/cancel` | `FUNDED → CANCELED → REFUNDED` |
+| `POST /transfers/:id/cancel` (pre-claim `FUNDED`) | `FUNDED → CANCELED → REFUNDED` |
+| `POST /transfers/:id/cancel` (`SUBMITTED`/`IN_FLIGHT`/`FUNDED`-post-claim) | **no transition** — 202, request RECORDED (slice-7 PR6b) |
+| Bridge webhook: delivered, in-window request that **beat the deposit** | `COMPLETED → UNDER_REVIEW` (system; no ledger) |
+| Bridge webhook: delivered, request in-window but **after the deposit** | **no transition** — stays `COMPLETED`, ops alerted to deny with Bridge's timestamp |
+| Bridge webhook: delivered, request out of window | **no transition** — stays `COMPLETED`, ops alerted to deny |
+| `resolve-cancellation.ts --refund` (ops) | `UNDER_REVIEW → REFUNDED` (correction payment) |
+| `resolve-cancellation.ts --deny` (ops) | `UNDER_REVIEW → COMPLETED`, or no transition if never routed |
 | Bridge webhook: accepted | `SUBMITTED → IN_FLIGHT` |
 | Bridge webhook: delivered | `IN_FLIGHT → COMPLETED` |
 | Bridge webhook: failed | `SUBMITTED/IN_FLIGHT → PAYOUT_FAILED → REFUNDED` |
 | Funding webhook: ACH return | `COMPLETED → FUNDING_REVERSED` |
-| `POST /transfers/:id/disputes` | `FUNDED`/`SUBMITTED`/`IN_FLIGHT`/`COMPLETED` → `UNDER_REVIEW` (terminal states: dispute recorded, no transition) |
+| `POST /transfers/:id/disputes` *(not built — deferred)* | `FUNDED`/`SUBMITTED`/`IN_FLIGHT`/`COMPLETED` → `UNDER_REVIEW` (terminal states: dispute recorded, no transition) |
 
 ## Cross-cutting (per CLAUDE.md)
 

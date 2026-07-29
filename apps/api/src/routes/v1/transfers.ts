@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
+import * as Sentry from '@sentry/node'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { buildPrepaymentDisclosure } from '../../services/disclosures.js'
@@ -13,6 +14,10 @@ import {
   TransferRpcError,
   type TransferRow,
 } from '../../services/transfers.js'
+import {
+  recordCancellationRequest,
+  type CancellationRequestState,
+} from '../../services/cancellations.js'
 import { requireApprovedUser } from './recipients.js'
 import { assessTransferRisk, type RiskReason } from '../../services/risk.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
@@ -22,7 +27,8 @@ const TRANSFER_COLUMNS =
   'receive_amount_minor, receive_currency, fee_amount_minor, fee_currency, fx_rate, ' +
   'funding_source_type, funding_cleared, disclosure_accepted_at, payment_at, ' +
   'cancelable_until, idempotency_key, funding_payment_ref, provider_transfer_ref, ' +
-  'refund_payment_ref, refunded_at, submit_attempted_at, completed_at, created_at'
+  'refund_payment_ref, refunded_at, submit_attempted_at, cancellation_requested_at, ' +
+  'completed_at, created_at'
 
 const moneySchema = (currency: string) =>
   ({
@@ -60,6 +66,7 @@ const transferResponseSchema = {
     disclosureAcceptedAt: { type: ['string', 'null'] },
     paymentAt: { type: ['string', 'null'] },
     cancelableUntil: { type: ['string', 'null'] },
+    cancellationRequestedAt: { type: ['string', 'null'] },
     providerTransferRef: { type: ['string', 'null'] },
     completedAt: { type: ['string', 'null'] },
     createdAt: { type: 'string' },
@@ -144,20 +151,80 @@ function fundingConfigured(): boolean {
 // HTTP 202: the cancellation request is accepted for out-of-band handling, not
 // denied. NOTE (slice-7): the actual pending-cancel resolution track this points
 // into is deferred work.
-function submissionInProgressResponse(reply: FastifyReply, id: string, state: string) {
+/**
+ * The post-submission cancel answer: the payout is already with Bridge, so the
+ * request is RECORDED and resolved once the payout settles either way.
+ *
+ * Records before replying (slice-7 PR6b). The old copy was written when this
+ * response was pure, and both of its sentences went wrong the moment the
+ * mechanism shipped: "contact support to exercise your cancellation right"
+ * misdirects, because the tap they just made IS the request; and "if the payout
+ * does not complete, you will be refunded" understates what we owe, because a
+ * timely request is refunded either way — including when the payout completes.
+ *
+ * A persistence failure must NOT turn the sender's statutory ask into a 500.
+ * This is the only sanctioned swallow in this PR, and it is loud: the sender
+ * still gets their 202, and ops gets paged to record the ask by hand.
+ */
+async function submissionInProgressResponse(
+  server: FastifyInstance,
+  reply: FastifyReply,
+  transfer: { id: string; state: string; user_id: string },
+) {
+  let requestedAt: string | null = null
+  try {
+    const request = await recordCancellationRequest({
+      transferId: transfer.id,
+      userId: transfer.user_id,
+      state: transfer.state as CancellationRequestState,
+    })
+    requestedAt = request.requested_at
+  } catch (err) {
+    server.log.error(
+      { transferId: transfer.id, err },
+      'cancel: failed to record cancellation request — sender asked and we did not persist it',
+    )
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['cancellation-record-failed', transfer.id])
+      scope.setContext('cancellation_record_failed', {
+        transferId: transfer.id,
+        state: transfer.state,
+        // Mirrored into the Sentry event, not just the server log — the page
+        // must carry its own diagnosis. Service/PostgREST message, no PII.
+        error: err instanceof Error ? err.message : String(err),
+        runbook: 'docs/runbooks/pending-cancellation.md',
+      })
+      Sentry.captureMessage(
+        'cancellation request not recorded — sender asked, nothing persisted; record it by hand',
+        'error',
+      )
+    })
+  }
+
   return reply.status(202).send({
-    id,
-    state,
+    id: transfer.id,
+    state: transfer.state,
+    // Stable code the shipped web client branches on (apps/web/lib/apiError.ts).
+    // Do not rename without changing that mapping.
     code: 'cancellation_requires_support',
+    ...(requestedAt ? { requestedAt } : {}),
+    // Tracks BOTH §1005.34 conditions and promises nothing beyond them: the
+    // refund is owed when the request was inside the 30-minute window AND made
+    // before the deposit. An earlier draft promised the refund even when the
+    // payout "has already been delivered" — that overstates the rule (delivery
+    // before the ask defeats the right) and was pulled 2026-07-28. Staged for
+    // PR7 counsel review with the rest of the cancellation strings.
     messages: {
       en:
-        "This transfer is being sent for payout and can't be canceled automatically. " +
-        'Contact support to exercise your cancellation right — if the payout does not ' +
-        'complete, you will be refunded in full.',
+        "This transfer is already on its way to your recipient, so it can't be stopped " +
+        'automatically. We\'ve recorded your cancellation request. If you asked within 30 ' +
+        'minutes of paying and before the money was delivered, you\'ll get a full refund. ' +
+        'This page will update when it\'s resolved.',
       es:
-        'Esta transferencia se está enviando para su pago y no se puede cancelar ' +
-        'automáticamente. Comunícate con soporte para ejercer tu derecho de cancelación: ' +
-        'si el pago no se completa, se te reembolsará el monto total.',
+        'Esta transferencia ya va camino a tu destinatario, así que no se puede detener ' +
+        'automáticamente. Registramos tu solicitud de cancelación. Si la hiciste dentro de ' +
+        'los 30 minutos después de pagar y antes de que se entregara el dinero, recibirás un ' +
+        'reembolso completo. Esta página se actualizará cuando se resuelva.',
     },
   })
 }
@@ -515,13 +582,20 @@ export async function transfersRoute(server: FastifyInstance) {
         },
         response: {
           200: transferResponseSchema,
-          // being-submitted / SUBMITTED / IN_FLIGHT → compliant support routing.
+          // being-submitted / SUBMITTED / IN_FLIGHT → the request is RECORDED
+          // and resolved once the payout settles (slice-7 PR6b).
           202: {
             type: 'object',
             properties: {
               id: { type: 'string' },
               state: { type: 'string' },
               code: { type: 'string' },
+              // When the sender's ask was recorded — the statutory clock. Absent
+              // (not null) when the record failed, which is the one case the
+              // handler swallows; the serializer drops it rather than asserting
+              // a clock we did not start. Must be declared here or Fastify's
+              // response serializer strips it from the body entirely.
+              requestedAt: { type: 'string' },
               messages: {
                 type: 'object',
                 properties: { en: { type: 'string' }, es: { type: 'string' } },
@@ -575,7 +649,7 @@ export async function transfersRoute(server: FastifyInstance) {
         transfer.state === 'IN_FLIGHT' ||
         (transfer.state === 'FUNDED' && transfer.submit_attempted_at !== null)
       ) {
-        return submissionInProgressResponse(reply, transfer.id, transfer.state)
+        return submissionInProgressResponse(server, reply, transfer)
       }
 
       // FUNDED → the guarded cancel: race-safe against the payout submit claim
@@ -623,7 +697,9 @@ export async function transfersRoute(server: FastifyInstance) {
                   f.state === 'IN_FLIGHT' ||
                   (f.state === 'FUNDED' && f.submit_attempted_at !== null))
               ) {
-                return submissionInProgressResponse(reply, transfer.id, f.state)
+                // `f` is the FRESH re-read: its state is what the request must
+                // record, not the stale pre-RPC one this handler opened with.
+                return submissionInProgressResponse(server, reply, f)
               }
               return sendError(
                 reply,

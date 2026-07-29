@@ -31,6 +31,16 @@ const FIXED = new Map([
   ['transfer-e2e-completed', 'COMPLETED'],
   // Delivered, but its receipt row 404s (write race) — for the receipt error path.
   ['transfer-e2e-completed-noreceipt', 'COMPLETED'],
+  // slice-7 PR6b: a transfer still in flight with an OPEN cancellation request,
+  // for the pending-cancellation banner.
+  ['transfer-e2e-cancel-pending', 'IN_FLIGHT'],
+  // …and the same request on a transfer that has since settled, to prove the
+  // banner stops rather than contradicting the outcome.
+  ['transfer-e2e-cancel-settled', 'REFUNDED'],
+  // …and one parked at UNDER_REVIEW (delivered, timely pre-deposit request):
+  // the outcome banner IS the cancellation story there, so exactly ONE banner
+  // may render (PR6b review fix — the pair used to stack and contradict).
+  ['transfer-e2e-cancel-review', 'UNDER_REVIEW'],
 ])
 const mutableStates = new Map()
 
@@ -73,6 +83,11 @@ function transferBody(id, state = stateOf(id)) {
     // that goes stale mid-run.
     cancelableUntil: state === 'FUNDED' ? new Date(Date.now() + 30 * 60 * 1000).toISOString() : null,
     providerTransferRef: null,
+    // A flag ORTHOGONAL to state — set on both an in-flight and a settled
+    // fixture, because the banner must key off the request AND the state.
+    cancellationRequestedAt: id.startsWith('transfer-e2e-cancel-')
+      ? new Date(START).toISOString()
+      : null,
     completedAt: state === 'COMPLETED' ? new Date().toISOString() : null,
     createdAt: new Date(START).toISOString(),
     disclosures: [],
@@ -190,9 +205,10 @@ const server = createServer(async (req, res) => {
         id,
         state: 'SUBMITTED',
         code: 'cancellation_requires_support',
+        requestedAt: '2026-07-28T12:00:00.000Z',
         messages: {
-          en: "This transfer is being sent for payout and can't be canceled automatically. Contact support to exercise your cancellation right — if the payout does not complete, you will be refunded in full.",
-          es: 'Esta transferencia se está enviando para su pago y no se puede cancelar automáticamente. Comunícate con soporte para ejercer tu derecho de cancelación: si el pago no se completa, se te reembolsará el monto total.',
+          en: "This transfer is already on its way to your recipient, so it can't be stopped automatically. We've recorded your cancellation request. If you asked within 30 minutes of paying and before the money was delivered, you'll get a full refund. This page will update when it's resolved.",
+          es: 'Esta transferencia ya va camino a tu destinatario, así que no se puede detener automáticamente. Registramos tu solicitud de cancelación. Si la hiciste dentro de los 30 minutos después de pagar y antes de que se entregara el dinero, recibirás un reembolso completo. Esta página se actualizará cuando se resuelva.',
         },
       })
     }

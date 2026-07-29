@@ -138,8 +138,17 @@ Not a hold, but it lands here (decision 2026-07-20): Bridge compliance review ca
    cancel/return the funds. Do not double-move money on an assumption.
 3. If Bridge confirms the funds were not (and will not be) deposited → issue the full refund
    within the 3-business-day window.
-4. If Bridge completes the payout during review → the right has extinguished at deposit; the
-   state-keyed refund rule's `COMPLETED` branch (lawful denial) applies.
+4. If Bridge completes the payout during review → **the refund is still owed.** Corrected
+   2026-07-28 (slice 7 PR6b); this step previously read "the right has extinguished at deposit …
+   lawful denial applies," which is wrong for this case. The right extinguishes at deposit for a
+   request made AFTER deposit — but a request recorded here was necessarily made while the transfer
+   was pre-`COMPLETED`, i.e. while the funds were undeposited, so both §1005.34 conditions were met
+   at the moment the sender asked and the obligation attached then. Bridge completing the payout
+   afterwards is us failing to stop it, not the right expiring. The system now enforces this: the
+   transfer routes `COMPLETED → UNDER_REVIEW` and ops pays a correction payment. Lawful denial
+   applies only when `within_window = false`. See
+   [pending-cancellation.md](pending-cancellation.md) and
+   [transfer-state-machine.md](../transfer-state-machine.md).
 5. Record the outcome in the transfer's transition metadata / audit trail.
 
 ## Float-ceiling Sentry alert

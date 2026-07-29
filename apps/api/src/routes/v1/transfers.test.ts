@@ -11,6 +11,18 @@ vi.mock('../../services/supabase.js', () => ({
   },
 }))
 
+const captureMessage = vi.hoisted(() => vi.fn())
+const setFingerprint = vi.hoisted(() => vi.fn())
+vi.mock('@sentry/node', () => ({
+  withScope: (fn: (s: unknown) => void) => fn({ setFingerprint, setContext: vi.fn() }),
+  captureMessage: (...a: unknown[]) => captureMessage(...a),
+}))
+
+const recordCancellationRequest = vi.fn()
+vi.mock('../../services/cancellations.js', () => ({
+  recordCancellationRequest: (...a: unknown[]) => recordCancellationRequest(...a),
+}))
+
 const createTransferFromQuote = vi.fn()
 const cancelTransfer = vi.fn()
 const transitionTransfer = vi.fn()
@@ -72,6 +84,7 @@ function chain(result: { data?: unknown; error?: unknown }) {
 const QUOTE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
 const TRANSFER_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2'
 const DISCLOSURE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3'
+const USER_ID = 'user-123'
 const FUTURE = '2036-01-01T00:00:00.000Z'
 
 const approvedUser = {
@@ -167,6 +180,18 @@ beforeEach(() => {
   voidFunding.mockResolvedValue({ provider: 'mock', ref: 'mockvoid_test', status: 'succeeded' })
   assessTransferRisk.mockReset()
   assessTransferRisk.mockResolvedValue({ ok: true })
+  recordCancellationRequest.mockReset()
+  recordCancellationRequest.mockResolvedValue({
+    id: 'cr-1',
+    transfer_id: TRANSFER_ID,
+    user_id: USER_ID,
+    requested_at: '2026-07-28T12:00:00.000Z',
+    requested_state: 'SUBMITTED',
+    within_window: true,
+    status: 'pending',
+  })
+  captureMessage.mockReset()
+  setFingerprint.mockReset()
 })
 
 describe('POST /v1/transfers', () => {
@@ -505,20 +530,56 @@ describe('POST /v1/transfers/:id/cancel', () => {
   })
 
   it.each(['SUBMITTED', 'IN_FLIGHT'] as const)(
-    '%s → 202 compliant support routing (en+es), never a flat denial',
+    '%s → 202 that RECORDS the request (en+es), never a flat denial',
     async (state) => {
       routeTables({ transfers: () => chain({ data: { ...fundedRow, state } }) })
       const app = await buildApp()
       const res = await cancel(app)
       expect(res.status).toBe(202)
       expect(res.body).toMatchObject({ id: TRANSFER_ID, state, code: 'cancellation_requires_support' })
-      expect(res.body.messages.en).toMatch(/support/i)
-      expect(res.body.messages.es).toMatch(/soporte/i)
+
+      // Exactly one request, stamped with the state that produced it — the
+      // whole point of the 202 is now that it leaves evidence.
+      expect(recordCancellationRequest).toHaveBeenCalledTimes(1)
+      expect(recordCancellationRequest).toHaveBeenCalledWith({
+        transferId: TRANSFER_ID,
+        userId: USER_ID,
+        state,
+      })
+      expect(res.body.requestedAt).toBe('2026-07-28T12:00:00.000Z')
+
+      // The copy must NOT send them to support any more: the tap they just made
+      // IS the request, and the old wording misdirected them to an inbox that
+      // does not exist yet. It must also not condition the refund on the payout
+      // failing — a timely request is refunded either way.
+      expect(res.body.messages.en).not.toMatch(/support/i)
+      expect(res.body.messages.es).not.toMatch(/soporte/i)
+      expect(res.body.messages.en).toMatch(/recorded your cancellation request/i)
+      expect(res.body.messages.es).toMatch(/registramos tu solicitud/i)
+
       expect(cancelTransfer).not.toHaveBeenCalled()
       expect(voidFunding).not.toHaveBeenCalled()
       await app.close()
     },
   )
+
+  // The sender exercised a statutory right. If OUR bookkeeping fails, that is
+  // our problem to page ourselves about — it must never surface as a 500 that
+  // makes them think the request did not land.
+  it('still answers 202 when recording the request fails, and pages ops', async () => {
+    recordCancellationRequest.mockRejectedValueOnce(new Error('db down'))
+    routeTables({ transfers: () => chain({ data: { ...fundedRow, state: 'SUBMITTED' } }) })
+    const app = await buildApp()
+    const res = await cancel(app)
+
+    expect(res.status).toBe(202)
+    expect(res.body.code).toBe('cancellation_requires_support')
+    // …but without a requestedAt, because we do not know one.
+    expect(res.body.requestedAt).toBeUndefined()
+    expect(setFingerprint).toHaveBeenCalledWith(['cancellation-record-failed', TRANSFER_ID])
+    expect(captureMessage.mock.calls.at(-1)?.[1]).toBe('error')
+    await app.close()
+  })
 
   it('claimed-but-still-FUNDED (submit_attempted_at set) → 202, never the cancel path', async () => {
     // the submit job set submit_attempted_at while state is still FUNDED — a
@@ -530,6 +591,13 @@ describe('POST /v1/transfers/:id/cancel', () => {
     const res = await cancel(app)
     expect(res.status).toBe(202)
     expect(res.body.code).toBe('cancellation_requires_support')
+    // The record must carry the state that produced this 202: FUNDED here
+    // means FUNDED-post-claim, and requested_state is statutory evidence.
+    expect(recordCancellationRequest).toHaveBeenCalledWith({
+      transferId: TRANSFER_ID,
+      userId: USER_ID,
+      state: 'FUNDED',
+    })
     expect(cancelTransfer).not.toHaveBeenCalled()
     await app.close()
   })
@@ -556,6 +624,14 @@ describe('POST /v1/transfers/:id/cancel', () => {
     const res = await cancel(app)
     expect(res.status).toBe(202)
     expect(res.body.code).toBe('cancellation_requires_support')
+    // The record must reflect the FRESH re-read (SUBMITTED), not the stale
+    // pre-RPC row (FUNDED): requested_state is statutory evidence, and passing
+    // the stale row would record false evidence on every lost race.
+    expect(recordCancellationRequest).toHaveBeenCalledWith({
+      transferId: TRANSFER_ID,
+      userId: USER_ID,
+      state: 'SUBMITTED',
+    })
     expect(voidFunding).not.toHaveBeenCalled()
     await app.close()
   })

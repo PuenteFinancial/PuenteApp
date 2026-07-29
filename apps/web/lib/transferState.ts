@@ -34,6 +34,12 @@ export interface TrackedTransfer {
   paymentAt: string | null
   /** Set at FUNDED — the end of the Reg E cancellation window. */
   cancelableUntil: string | null
+  /**
+   * Set when the sender asked to cancel a transfer already on its way to payout
+   * (slice-7 PR6b). Optional because history rows predating the column, and
+   * older cached responses, simply do not carry it.
+   */
+  cancellationRequestedAt?: string | null
   completedAt: string | null
   createdAt: string
 }
@@ -113,11 +119,48 @@ const BADGE_TONES: Record<TransferState, BadgeTone> = {
   PAYMENT_FAILED: 'neutral',
   PAYOUT_FAILED: 'error',
   FUNDING_REVERSED: 'error',
-  UNDER_REVIEW: 'error',
+  // 'progress', not 'error'. `error` means "needs attention" — and the sender
+  // can do nothing here AND their transfer was delivered successfully. This is
+  // us working through a cancellation they asked for, so it reads as motion,
+  // not fault. Cheap to correct now because slice-7 PR6b is the repo's first
+  // writer of this state: no sender has ever seen it.
+  UNDER_REVIEW: 'progress',
 }
 
 export function badgeTone(state: TransferState): BadgeTone {
   return BADGE_TONES[state]
+}
+
+/**
+ * Whether the tracker should show the pending-cancellation banner.
+ *
+ * The underlying fact is A FLAG ORTHOGONAL TO STATE, deliberately not a
+ * timeline step and not an outcome: the payout keeps advancing while the
+ * request is pending, so the timeline stays the honest thing to render and
+ * this rides above it. Folding it into the state machine would force the
+ * tracker to choose between showing where the money is and showing that the
+ * sender asked to stop it — and both are true at once.
+ *
+ * Named for what it DECIDES, not what it knows (PR6b review fix — formerly
+ * `hasPendingCancellation`): the flag records "has ever asked", and a request
+ * can still be open on states where this returns false. The banner shows only
+ * while no outcome banner speaks:
+ *  - settled states: the request resolved with the transfer, and the outcome
+ *    carries the story.
+ *  - UNDER_REVIEW: the outcome banner IS the cancellation story ("working on
+ *    your cancellation") — stacking this banner over it repeated the promise
+ *    and contradicted it ("already on its way" vs "was delivered").
+ *  - COMPLETED with the request still open (the out-of-window / after-deposit
+ *    buckets awaiting a human denial): deliberately plain "Delivered" — a
+ *    "we're working on it" banner would imply hope for a request that ops will
+ *    deny; the page still updates in place when the denial closes it.
+ */
+export function showCancellationBanner(transfer: {
+  state: TransferState
+  cancellationRequestedAt?: string | null
+}): boolean {
+  if (!transfer.cancellationRequestedAt) return false
+  return !isSettled(transfer.state) && outcomeFor(transfer.state) === null
 }
 
 // Step-by-step progress for a happy-path state. Deliberately NOT defined for

@@ -125,6 +125,26 @@ refer back as needed.
 - **`REFUNDED`** — the terminal "sender made whole" state, reached from `CANCELED` (via a void) or
   `PAYOUT_FAILED` (via a refund); the ledger shows which. See
   [transfer-state-machine.md](transfer-state-machine.md).
+- **Pending cancellation request** — a row in `cancellation_requests` recording that the sender asked
+  to cancel a transfer already on its way to payout (the `SUBMITTED`/`IN_FLIGHT`/`FUNDED`-post-claim
+  202). It is EVIDENCE, not a movement: nothing posts to the ledger while one is open. At most one is
+  open per transfer (a partial unique index), so a second tap resolves to the first — the statutory
+  clock starts when they FIRST asked and must never restart. Explicitly **not** a dispute; see
+  [decisions.md](decisions.md) 2026-07-28.
+- **Timely cancellation request** (`within_window`) — a request made before the transfer's
+  `cancelable_until`: §1005.34's **first** condition (the 30-minute clock), computed once inside the
+  recording RPC and then frozen. The statute's **second** condition — the request preceded the
+  deposit — is evaluated at resolution against deposit evidence, because only Bridge knows the
+  deposit time. Both must hold for an automatic obligation; a request failing either is still
+  recorded and still resolved by a human on the record. Timeliness is **recorded, not enforced at
+  the door** — the 202 fires on state alone.
+- **Correction payment** — the post-delivery refund owed on a cancellation that was in-window AND
+  **beat the deposit**, whose payout COMPLETED anyway: the recipient keeps the money and the sender is made whole regardless, the
+  accepted bounded double-pay. Booked `DR loss_cancellation_correction / CR cash_clearing` — a NEW
+  expense against Puente, not a reversal, because the `COMPLETED` batch already discharged
+  `transfer_payable` and delivered history is never rewritten. Contrast **Refund** (the payout
+  failed, so an obligation was still open to reverse). Executed by a human via
+  [runbooks/pending-cancellation.md](runbooks/pending-cancellation.md), never automatically.
 - **Payout hold** — a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`,
   or `submit_error`); the sweep skips it until ops releases it via
   [runbooks/payout-holds.md](runbooks/payout-holds.md).
@@ -141,6 +161,9 @@ refer back as needed.
   funding gate and limits once the risk engine exists; MVP users are all `trusted`.
 - **Truthful pending copy** — the product rule that status screens never promise what the system
   doesn't do (e.g. no "we'll email you" until email exists); established in lifecycle slice 5 (#48).
+  Applied again in slice-7 PR6b: the shipped `underReview` body said *"we'll contact you as soon as
+  the review is done"* with no outbound notification mechanism in the codebase, and now promises only
+  what the polling tracker actually does — update in place.
 - **Transaction history** — the sender-facing list of their *money-moved* transfers (`FUNDED` and
   beyond), served by `GET /v1/transfers?scope=history`; never-funded attempts
   (`PENDING_PAYMENT`/`PAYMENT_FAILED`) are filtered out. A product VIEW, not the `transfers` table —

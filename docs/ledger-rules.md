@@ -135,14 +135,26 @@ FUNDING_REVERSED  (ACH return after COMPLETED — money already delivered, irrev
    unrecoverable. This is the loss the risk engine exists to prevent.)
 
 UNDER_REVIEW → REFUNDED  (entry from COMPLETED — post-delivery Reg E correction, NOT a reversal)
-  DR loss_funding_reversed   X      ← or a dedicated correction-expense account
-  CR cash_clearing           X
+  DR loss_cancellation_correction  S+F
+  CR cash_clearing                 S+F
   (A correction payment is a NEW debit against Puente. The original COMPLETED entries remain
-   intact — we never rewrite delivered history.)
+   intact — we never rewrite delivered history. Structurally unlike the PAYOUT_FAILED refund
+   below it: that one DEBITS transfer_payable because the obligation was still open, whereas
+   here the COMPLETED batch already discharged it and there is nothing left to reverse.
+   Fee rides with it — the sender is made whole.)
 
-  Pre-delivery exits (entry from FUNDED, SUBMITTED, or IN_FLIGHT) use the CANCELED or
-  PAYOUT_FAILED posting for the corresponding stage — those paths are TBD pending
-  full design of the ops console and pre-delivery dispute handling.
+  Its OWN account, not loss_funding_reversed (slice-7 PR6b). Both are post-delivery losses,
+  but an ACH return is a credit/fraud loss while this is a COMPLIANCE cost — we chose to
+  honour a timely cancellation on a transfer that had already been delivered. Sharing one
+  bucket means the ledger cannot answer "what did Reg E cost us" without a per-transfer join,
+  and the two get harder to separate the longer they are mixed.
+
+  Pre-delivery exits (entry from FUNDED, SUBMITTED, or IN_FLIGHT) never reach UNDER_REVIEW at
+  all — that is the point of the state-keyed rule. A cancel at FUNDED pre-claim is a CANCELED
+  void; a cancel at SUBMITTED/IN_FLIGHT is RECORDED as a pending cancellation_request and
+  waits for the payout to resolve, then takes the PAYOUT_FAILED refund posting (payout failed)
+  or the correction posting above (payout delivered). Nothing about a cancellation posts to
+  the ledger before the payout resolves — an open request is evidence, not a movement.
 ```
 
 ## Invariants (must always hold)

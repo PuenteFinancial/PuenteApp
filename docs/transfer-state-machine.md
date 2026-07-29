@@ -1,6 +1,6 @@
 # Transfer State Machine — USD → MXN Remittance
 
-**Date:** 2026-06-25 · **Updated:** 2026-07-21 (slice 5 — immediate payout, submit claim contract, payout holds, Bridge event mapping)
+**Date:** 2026-06-25 · **Updated:** 2026-07-28 (slice 7 PR6b — post-submission cancellation record + both resolution tails; PR6b-0 refund claim)
 **Status:** v2 — matches the slice-5 implementation
 
 The lifecycle of a single remittance transfer, from an accepted quote to delivery (or refund).
@@ -26,7 +26,7 @@ stateDiagram-v2
     CANCELED --> REFUNDED
     PAYOUT_FAILED --> REFUNDED
     COMPLETED --> FUNDING_REVERSED: ACH return / chargeback (post-payout)
-    COMPLETED --> UNDER_REVIEW: Reg E error / dispute
+    COMPLETED --> UNDER_REVIEW: timely cancellation (PR6b) / Reg E dispute (future)
     PAYMENT_FAILED --> [*]
     REFUNDED --> [*]
     COMPLETED --> [*]
@@ -35,6 +35,12 @@ stateDiagram-v2
 
 `UNDER_REVIEW` (Reg E error resolution) can also be opened from `FUNDED`, `SUBMITTED`, and
 `IN_FLIGHT`, not just `COMPLETED`; shown once above for diagram clarity.
+
+**As implemented, there is exactly ONE writer of `UNDER_REVIEW`: the cancellation COMPLETED tail
+(slice 7 PR6b, below).** The dispute paths in this section are design, not code — no `disputes` table
+exists and `POST /:id/disputes` is deliberately out of scope. Do not read the two as the same
+mechanism: §1005.34 cancellation is not §1005.33 error resolution, and conflating them puts the sender
+on the wrong clock.
 
 ### UNDER_REVIEW exit paths
 
@@ -258,6 +264,56 @@ hard gate before slice-7 real money.
   ~1 min of sweep latency, never correctness. See [decisions.md](decisions.md), 2026-07-20.
 - Webhooks (Stripe, Bridge) are the source of truth for `FUNDED`, `IN_FLIGHT`, `COMPLETED`,
   `PAYOUT_FAILED`; handlers are idempotent (providers redeliver).
+
+## Post-submission cancellation (slice 7 PR6b)
+
+A cancel tapped at `SUBMITTED`/`IN_FLIGHT` — or at `FUNDED` after the submit job claimed the row —
+cannot be honoured on the spot: the payout is already with Bridge. The API answers `202` and
+**records** a `cancellation_requests` row. That row is EVIDENCE, not a movement; nothing posts to the
+ledger while it is open.
+
+**Timeliness is recorded, not enforced at the door.** The 202 fires on state alone and never consults
+`cancelable_until`, so a cancel on a transfer stalled at `IN_FLIGHT` for days gets one too. The row
+carries `within_window`, computed once inside the recording RPC and then frozen. Only a timely request
+creates an automatic obligation.
+
+The request resolves when the payout does, and what we owe differs by which way:
+
+| Payout resolves as | What we owe | Mechanism |
+|---|---|---|
+| `PAYOUT_FAILED` | nothing extra — the refund tail already makes the sender whole | request closes `resolved_refunded` when the transfer reaches `REFUNDED` |
+| `COMPLETED`, request in-window **and before the deposit** | a **full refund anyway** — the accepted, bounded double-pay, confined to the seconds-wide race | `COMPLETED → UNDER_REVIEW`, then a human runs the **correction payment** → `REFUNDED` |
+| `COMPLETED`, request in-window but **after the deposit** | nothing — §1005.34's second condition failed at request time | **stays `COMPLETED`**; ops confirms the deposit time in the Bridge dashboard and denies with it as evidence |
+| `COMPLETED`, request out of window | nothing | **stays `COMPLETED`**; ops is alerted and a human denies it on the record |
+
+The deposit comparison uses our **earliest evidence** of it (the first `payment_processed` event's
+`received_at`) so ambiguity breaks toward the sender: the true deposit happened at or before our
+evidence, so the automatic path can over-route into review (a human then denies with Bridge's exact
+timestamp) but can never deny a request the reg entitles.
+
+`UNDER_REVIEW` appears on the middle row only, and **not because a cancellation is a dispute** —
+§1005.34 cancellation is not §1005.33 error resolution (see Cancellation above, which supersedes the
+older "post-submission cancel routes through UNDER_REVIEW" design). It is used because
+`COMPLETED → UNDER_REVIEW → REFUNDED` is the only modeled post-delivery correction path and already
+carries the right ledger treatment. Read it as "a human owes this transfer a decision," not as a claim
+that anything is being adjudicated. PR6b is the repo's **first writer** of this state.
+
+An untimely request deliberately does NOT transition: flipping a delivered transfer's state for a
+request we will not honour would be a lie in the state log.
+
+Interactions with the event processor (revised 2026-07-28, PR6b review):
+`FAILABLE_STATES` does **not** include `UNDER_REVIEW`. Its only writer is the cancellation routing on
+a *delivered* transfer — the COMPLETED ledger batch is posted and the receipt written — so a later
+Bridge fail event there is a contradictory sequence like any other post-delivery fail: it **pages**
+(`payout-fail-after-terminal`) and moves nothing, and a human resolves through the review exits
+(which post the correct correction ledger if a refund really is owed). The earlier design let the
+event silently drive `UNDER_REVIEW → PAYOUT_FAILED` and run the payout-failure refund tail against
+delivered books. Success events at `UNDER_REVIEW` likewise page (`payout-success-after-terminal`).
+`risk.ts` deliberately keeps `UNDER_REVIEW` counting toward velocity, because the sender was charged
+and the money has not come back yet.
+
+Both exits are human-only, via [runbooks/pending-cancellation.md](runbooks/pending-cancellation.md).
+A timely request can never be denied — the tool refuses it in both the CLI and the service.
 
 ## Ledger hooks (see ledger-rules.md for the authoritative posting rules)
 
