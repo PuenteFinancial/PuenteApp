@@ -132,24 +132,35 @@ export function badgeTone(state: TransferState): BadgeTone {
 }
 
 /**
- * Whether a cancellation request is open on this transfer.
+ * Whether the tracker should show the pending-cancellation banner.
  *
- * A FLAG ORTHOGONAL TO STATE, deliberately not a timeline step and not an
- * outcome: the payout keeps advancing while the request is pending, so the
- * timeline stays the honest thing to render and this rides above it. Folding it
- * into the state machine would force the tracker to choose between showing
- * where the money is and showing that the sender asked to stop it — and both
- * are true at once.
+ * The underlying fact is A FLAG ORTHOGONAL TO STATE, deliberately not a
+ * timeline step and not an outcome: the payout keeps advancing while the
+ * request is pending, so the timeline stays the honest thing to render and
+ * this rides above it. Folding it into the state machine would force the
+ * tracker to choose between showing where the money is and showing that the
+ * sender asked to stop it — and both are true at once.
+ *
+ * Named for what it DECIDES, not what it knows (PR6b review fix — formerly
+ * `hasPendingCancellation`): the flag records "has ever asked", and a request
+ * can still be open on states where this returns false. The banner shows only
+ * while no outcome banner speaks:
+ *  - settled states: the request resolved with the transfer, and the outcome
+ *    carries the story.
+ *  - UNDER_REVIEW: the outcome banner IS the cancellation story ("working on
+ *    your cancellation") — stacking this banner over it repeated the promise
+ *    and contradicted it ("already on its way" vs "was delivered").
+ *  - COMPLETED with the request still open (the out-of-window / after-deposit
+ *    buckets awaiting a human denial): deliberately plain "Delivered" — a
+ *    "we're working on it" banner would imply hope for a request that ops will
+ *    deny; the page still updates in place when the denial closes it.
  */
-export function hasPendingCancellation(transfer: {
+export function showCancellationBanner(transfer: {
   state: TransferState
   cancellationRequestedAt?: string | null
 }): boolean {
   if (!transfer.cancellationRequestedAt) return false
-  // Once the transfer settles, the request has been resolved one way or the
-  // other and the outcome banner carries the story — a lingering "we're working
-  // on your cancellation" over a REFUNDED transfer would contradict it.
-  return !isSettled(transfer.state)
+  return !isSettled(transfer.state) && outcomeFor(transfer.state) === null
 }
 
 // Step-by-step progress for a happy-path state. Deliberately NOT defined for

@@ -112,6 +112,10 @@ test('a cancel that needs support shows the server-authored Reg E copy', async (
   await expect(
     page.getByText(/before the money was delivered|antes de que se entregara/i),
   ).toBeVisible()
+  // Guards REINTRODUCTION of a withdrawn draft ("we'll still refund you…" —
+  // pulled 2026-07-28 for overstating the right); the phrase has never shipped,
+  // so this can only fail if someone brings it back. The positive assertions
+  // above are what pin the copy that DID ship.
   await expect(
     page.getByText(/we'll still refund you|igual te reembolsaremos/i),
   ).toHaveCount(0)
@@ -155,8 +159,32 @@ test('the banner stops once the transfer settles, leaving the outcome to speak',
   await signIn(context)
   await page.goto('/dashboard/send/transfer-e2e-cancel-settled')
 
+  // Positive first: prove the page actually rendered the outcome — without
+  // this the negative below passes vacuously on a blank page.
+  await expect(page.getByText(/refunded|reembolsada/i).first()).toBeVisible()
+
   // The request is resolved by now — the outcome banner carries the story, and
   // a lingering "we're working on your cancellation" would contradict it.
+  await expect(
+    page.getByText(/got your request to cancel|recibimos tu solicitud para cancelar/i),
+  ).toHaveCount(0)
+})
+
+// PR6b review fix. At UNDER_REVIEW the outcome banner IS the cancellation
+// story — before the fix BOTH banners rendered, repeating the promise and
+// contradicting each other ("already on its way" over "was delivered").
+test('UNDER_REVIEW shows exactly one banner: the outcome owns the cancellation story', async ({
+  context,
+  page,
+}) => {
+  await signIn(context)
+  await page.goto('/dashboard/send/transfer-e2e-cancel-review')
+
+  await expect(
+    page.getByText(/working on your cancellation|procesando tu cancelación/i),
+  ).toBeVisible()
+
+  // The pending banner yields — one story, told once.
   await expect(
     page.getByText(/got your request to cancel|recibimos tu solicitud para cancelar/i),
   ).toHaveCount(0)

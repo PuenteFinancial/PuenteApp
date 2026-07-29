@@ -37,6 +37,10 @@ const FIXED = new Map([
   // …and the same request on a transfer that has since settled, to prove the
   // banner stops rather than contradicting the outcome.
   ['transfer-e2e-cancel-settled', 'REFUNDED'],
+  // …and one parked at UNDER_REVIEW (delivered, timely pre-deposit request):
+  // the outcome banner IS the cancellation story there, so exactly ONE banner
+  // may render (PR6b review fix — the pair used to stack and contradict).
+  ['transfer-e2e-cancel-review', 'UNDER_REVIEW'],
 ])
 const mutableStates = new Map()
 

@@ -12,7 +12,7 @@ import { SUPPORT_EMAIL } from '@/lib/support'
 import {
   canRequestCancel,
   classifyCancelResponse,
-  hasPendingCancellation,
+  showCancellationBanner,
   isOnHappyPath,
   isSettled,
   isTransferShape,
@@ -227,7 +227,7 @@ export default function TransferTracker({
   }
 
   const outcome = outcomeFor(transfer.state)
-  const cancellationPending = hasPendingCancellation(transfer)
+  const cancellationPending = showCancellationBanner(transfer)
   const steps = timelineFor(transfer.state)
 
   // Outcomes whose copy tells the sender to contact us. Each must render a real
@@ -285,8 +285,11 @@ export default function TransferTracker({
       {/* A pending cancellation is a flag ORTHOGONAL to state, so it rides ABOVE
           the timeline rather than replacing it: the payout keeps advancing while
           the request is open, and both facts are true at once. It disappears
-          once the transfer settles, because the outcome banner then carries the
-          story and two competing messages would contradict each other. */}
+          whenever an OUTCOME banner speaks — settled states, and UNDER_REVIEW,
+          whose outcome IS the cancellation story — because two competing
+          messages would contradict each other (showCancellationBanner owns the
+          rule; at UNDER_REVIEW the stacked pair literally disagreed: "already
+          on its way" over "was delivered"). */}
       {cancellationPending && (
         <div
           role="status"
