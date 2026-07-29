@@ -42,14 +42,16 @@ describe.skipIf(!runDb)('correction-watch (integration, local Supabase)', () => 
   })
 
   it('counts in-window signed corrections, excludes out-of-window rows, and matches the SQL sum', async () => {
-    // In-window, through the PRODUCTION write path: a $200 correction and a
-    // $50 reversal-shaped credit (the append-only ledger's undo).
+    // In-window, through the PRODUCTION write path: a $250 correction and a
+    // $50 reversal-shaped credit (the append-only ledger's undo) — net $200,
+    // exactly the default threshold, so the alert fires even on a freshly
+    // reset database (leftovers from prior runs can only add to it).
     await postLedgerTransaction({
       idempotencyKey: `corr-watch-test-${crypto.randomUUID()}`,
       description: 'correction-watch db test — in-window correction',
       entries: [
-        { accountCode: 'loss_cancellation_correction', direction: 'debit', money: { amountMinor: 20_000, currency: 'USD' } },
-        { accountCode: 'cash_clearing', direction: 'credit', money: { amountMinor: 20_000, currency: 'USD' } },
+        { accountCode: 'loss_cancellation_correction', direction: 'debit', money: { amountMinor: 25_000, currency: 'USD' } },
+        { accountCode: 'cash_clearing', direction: 'credit', money: { amountMinor: 25_000, currency: 'USD' } },
       ],
     })
     await postLedgerTransaction({
@@ -106,10 +108,10 @@ describe.skipIf(!runDb)('correction-watch (integration, local Supabase)', () => 
     const expectedTotal = Number(sql.rows[0].total)
     expect(count).toBe(sql.rows[0].n)
 
-    // Our seeds: +20000 − 5000 in-window (leftovers from prior runs may add
+    // Our seeds: +25000 − 5000 in-window (leftovers from prior runs may add
     // more — the window sum floor proves ours counted), and the out-of-window
     // 7777 debit must NOT be in the DB sum the job agreed with.
-    expect(expectedTotal).toBeGreaterThanOrEqual(15_000)
+    expect(expectedTotal).toBeGreaterThanOrEqual(20_000)
 
     // ≥ $200 in-window → the alert fired, with the job's total matching SQL's.
     expect(captureMessage).toHaveBeenCalledWith(
