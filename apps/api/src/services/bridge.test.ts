@@ -416,3 +416,55 @@ describe('getExchangeRate', () => {
     await expect(getExchangeRate('usd', 'mxn')).rejects.toBeInstanceOf(BridgeApiError)
   })
 })
+
+// ── the request deadline (slice-7 debt pass) ────────────────────────────────
+// Every Bridge call is bounded by BRIDGE_TIMEOUT_SECONDS via AbortSignal.timeout
+// in bridgeFetch. Without it, fetches inherit undici's ~300s defaults — the
+// absence CLAIM_STALE_AFTER_MS's 30-minute era was derived from.
+describe('bridgeFetch timeout + failure propagation', () => {
+  it('attaches an abort signal to GETs', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { midmarket_rate: '20', buy_rate: '20', sell_rate: '20', updated_at: 'x' }))
+
+    await getExchangeRate('usd', 'mxn')
+
+    const [, init] = fetchMock.mock.calls[0]!
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('attaches an abort signal to POSTs', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, { id: 'cust_abc' }))
+
+    await createBridgeCustomer({
+      firstName: 'Test',
+      lastName: 'User',
+      email: 'test@example.com',
+      signedAgreementId: 'agr_123',
+    })
+
+    const [, init] = fetchMock.mock.calls[0]!
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  // The spy calls through, so the instance assertions above stay honest; the
+  // test env leaves BRIDGE_TIMEOUT_SECONDS unset, so this pins the zod default.
+  it('derives the deadline from BRIDGE_TIMEOUT_SECONDS (default 15s)', async () => {
+    const spy = vi.spyOn(AbortSignal, 'timeout')
+    fetchMock.mockResolvedValue(jsonResponse(200, { id: 't1', state: 'payment_submitted', source: { amount: '1' } }))
+
+    await getBridgeTransfer('t1')
+
+    expect(spy).toHaveBeenCalledWith(15_000)
+    spy.mockRestore()
+  })
+
+  // Network-level failures (undici TypeError, a fired TimeoutError) propagate
+  // UNWRAPPED — they are not BridgeApiError, and callers treat that class
+  // generically (routes → 502/503, jobs → pg-boss retry). A wrapper here would
+  // change every caller's branch; bounded waiting must not.
+  it('propagates a rejected fetch unwrapped, never as BridgeApiError', async () => {
+    fetchMock.mockRejectedValue(new TypeError('fetch failed'))
+
+    await expect(getBridgeTransfer('t1')).rejects.toThrow(TypeError)
+    await expect(getBridgeTransfer('t1')).rejects.not.toBeInstanceOf(BridgeApiError)
+  })
+})

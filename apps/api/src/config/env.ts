@@ -30,6 +30,14 @@ const envSchema = z.object({
     .refine((b) => b.length === 32, 'must be 32 bytes of base64'),
   BRIDGE_API_KEY: z.string().min(1),
   BRIDGE_API_BASE: z.string().url().default('https://api.bridge.xyz'),
+  // Hard deadline on every Bridge HTTP call (AbortSignal.timeout in
+  // services/bridge.ts). Without it fetches inherit undici's ~300s defaults —
+  // the absence this bound removes is what forced CLAIM_STALE_AFTER_MS to 30
+  // minutes (services/refunds.ts, re-derived to 10 alongside this knob). Floor
+  // of 1 keeps a fat-fingered 0/blank from aborting every call instantly; cap
+  // of 120 keeps the bound far inside the 10-minute refund-claim staleness
+  // window, so a merely-slow Bridge call can never age into an abandoned claim.
+  BRIDGE_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(120).default(15),
   // PEM public key issued by Bridge when the webhook endpoint is registered
   // post-deploy — webhook route returns 503 until it is set. Escaped \n
   // sequences are normalized so the PEM can live in a single-line env var.

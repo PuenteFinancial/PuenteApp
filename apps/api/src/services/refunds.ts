@@ -64,14 +64,21 @@ const REFUNDABLE_COLUMNS =
 
 // How long an unfinished claim stays "in progress" before it is ABANDONED.
 //
-// 30 minutes, against the submit claim's 10 (transfer-state-machine.md), because
-// the two stale paths cost different things. A stale submit claim costs an
-// idempotent re-POST; a stale refund claim costs an operator's attention, so it
-// must not fire on a call that is merely slow. Neither the funding processor nor
-// bridge.ts sets an AbortSignal, so both inherit undici's ~300s headers + ~300s
-// body defaults — a hung-but-alive refund can legitimately hold a claim for
-// something like ten minutes.
-export const CLAIM_STALE_AFTER_MS = 30 * 60 * 1000
+// 10 minutes, matching the submit claim (payout-sweep.ts STALE_CLAIM_MS). It
+// was 30 while no Bridge or processor call set an AbortSignal — undici's ~300s
+// defaults meant a hung-but-alive refund could legitimately hold a claim for
+// ~10 minutes, and an alert that fetches a human must not fire on a call that
+// is merely slow. That basis is gone (decisions.md 2026-07-29): every Bridge
+// call is bounded by BRIDGE_TIMEOUT_SECONDS (~15s), the processor leg is pure
+// today (mock), and the FundingProcessor seam requires future adapters to
+// bound their own calls — so nothing legitimately alive holds a claim for
+// minutes, and a long window only delays the page on a run that genuinely
+// crashed, where the sender MAY ALREADY HAVE BEEN PAID. Page sooner.
+//
+// The asymmetry that REMAINS vs the submit claim is what stale MEANS: a stale
+// submit claim self-heals by idempotent re-POST; an abandoned refund claim
+// pages a human and is never machine-retaken.
+export const CLAIM_STALE_AFTER_MS = 10 * 60 * 1000
 
 /**
  * A claim this old with no disbursement recorded is abandoned, not in flight.

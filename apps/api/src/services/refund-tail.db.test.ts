@@ -450,19 +450,20 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       (await db.query('select refund_claimed_at from public.transfers where id = $1', [target]))
         .rows[0].refund_claimed_at
 
-    // Live claim: a run may be mid-disbursement, so clearing it would let a
-    // second payment go out underneath it.
+    // Live claim (just inside the 10-min CLAIM_STALE_AFTER_MS window): a run
+    // may be mid-disbursement, so clearing it would let a second payment go
+    // out underneath it.
     await db.query(
-      `update public.transfers set refund_claimed_at = now() - interval '29 minutes',
+      `update public.transfers set refund_claimed_at = now() - interval '9 minutes',
          refund_claimed_by = 'ops:x' where id = $1`,
       [target],
     )
     await expect(releaseStaleRefundClaim(target)).resolves.toBe(false)
     expect(await claimedAt()).not.toBeNull()
 
-    // Abandoned: nobody is coming back for it.
+    // Abandoned (just past the window): nobody is coming back for it.
     await db.query(
-      `update public.transfers set refund_claimed_at = now() - interval '31 minutes' where id = $1`,
+      `update public.transfers set refund_claimed_at = now() - interval '11 minutes' where id = $1`,
       [target],
     )
     await expect(releaseStaleRefundClaim(target)).resolves.toBe(true)
