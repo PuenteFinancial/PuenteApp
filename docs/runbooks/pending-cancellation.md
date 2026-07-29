@@ -101,8 +101,16 @@ Two lawful grounds, and the tool checks them:
 - **Out of window** — provable from our own `cancelable_until` (`--list` shows it).
 - **Deposit preceded the request** — the common case on an instant rail. Provable **only** from
   Bridge's deposit timestamp, so `--deposited-at` is **load-bearing**: the service compares it to
-  `requested_at` and refuses the denial if the request came first. A wrong-but-earlier timestamp can
-  only make the tool refuse more, never deny more.
+  `requested_at` and refuses the denial if the request came first.
+
+> ⚠️ **The dangerous typo direction is EARLIER.** (This section previously claimed the opposite —
+> corrected 2026-07-28.) An earlier-than-reality timestamp makes the "request came first" check
+> *less* likely to fire, i.e. it makes the tool **deny more**, and a wrongful denial of an owed
+> refund is the worst outcome this runbook can produce. Read the dashboard value carefully; the dry
+> run shows the request time it will be compared against. The service refuses values that are
+> provably impossible — before the sender's payment, or after the moment we received Bridge's
+> deposit confirmation (`deposit_evidence_conflict`) — but a wrong value *inside* that range is on
+> the operator.
 
 You need Bridge's **deposit timestamp** first. It is not available from our API
 (`getBridgeTransfer` returns only id/state/sourceAmount) — read it from the Bridge dashboard.

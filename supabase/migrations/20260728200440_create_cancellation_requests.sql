@@ -62,7 +62,14 @@ create table public.cancellation_requests (
   resolved_by     text check (resolved_by is null or char_length(resolved_by) between 1 and 100),
 
   created_at      timestamptz not null default now(),
-  updated_at      timestamptz not null default now()
+  updated_at      timestamptz not null default now(),
+
+  -- A pending request has no resolution moment; a resolved one always does.
+  -- Application code cannot produce the bad row (the RPC insert sets none of
+  -- the resolution fields; resolveCancellationRequest sets them atomically) —
+  -- this guards the residual writer, the by-hand SQL the runbooks contemplate.
+  constraint cancellation_requests_resolution_consistency
+    check ((status = 'pending') = (resolved_at is null))
 );
 
 -- ONE open request per transfer. Partial so a resolved request never blocks a

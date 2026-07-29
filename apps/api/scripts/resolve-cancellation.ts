@@ -51,15 +51,21 @@ import {
 const KNOWN_FLAGS = ['--list', '--operator', '--confirm', '--refund', '--deny', '--deposited-at']
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+// The resolve variant splits on `action` so the parser's hardest-won runtime
+// invariant — `--deposited-at` iff `--deny` — is also the compiler's: a deny
+// without a deposit timestamp is unrepresentable, so no consumer can smuggle
+// `undefined` into denyCancellation's legal guard (PR6b review fix; the old
+// shape needed `args.depositedAt!` at the call site).
 export type ParsedArgs =
   | { mode: 'list' }
+  | { mode: 'resolve'; action: 'refund'; transferId: string; operator: string; confirm: boolean }
   | {
       mode: 'resolve'
+      action: 'deny'
       transferId: string
       operator: string
       confirm: boolean
-      action: 'refund' | 'deny'
-      depositedAt?: string
+      depositedAt: string
     }
   | { mode: 'error'; message: string }
 
@@ -131,9 +137,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
   }
 
-  let depositedAt: string | undefined
+  // Lowercase it: ledger idempotency keys are built as `p_transfer_id::text` in
+  // the RPC and uuid::text always renders lowercase, so an uppercase id would
+  // move money and then fail the key check afterwards.
+  const common = {
+    transferId: transferId.toLowerCase(),
+    operator,
+    confirm: has('--confirm'),
+  }
+
   if (action === 'deny') {
-    depositedAt = valueOf('--deposited-at')
+    const depositedAt = valueOf('--deposited-at')
     if (depositedAt === undefined || depositedAt.startsWith('-')) {
       return {
         mode: 'error',
@@ -145,22 +159,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (Number.isNaN(Date.parse(depositedAt))) {
       return { mode: 'error', message: `--deposited-at "${depositedAt}" is not a valid timestamp` }
     }
-  } else if (has('--deposited-at')) {
+    return { mode: 'resolve', action: 'deny', ...common, depositedAt }
+  }
+
+  if (has('--deposited-at')) {
     // Accepting it silently on a refund would imply it was recorded somewhere.
     return { mode: 'error', message: '--deposited-at applies only to --deny' }
   }
-
-  // Lowercase it: ledger idempotency keys are built as `p_transfer_id::text` in
-  // the RPC and uuid::text always renders lowercase, so an uppercase id would
-  // move money and then fail the key check afterwards.
-  return {
-    mode: 'resolve',
-    transferId: transferId.toLowerCase(),
-    operator,
-    confirm: has('--confirm'),
-    action,
-    ...(depositedAt ? { depositedAt } : {}),
-  }
+  return { mode: 'resolve', action: 'refund', ...common }
 }
 
 let step = 0
@@ -213,6 +219,15 @@ function refusalMessage(outcome: Extract<ReviewOutcome, { done: false }>): strin
         'supplied — both §1005.34 conditions held, so a full refund is owed and it cannot be ' +
         'denied. Re-run with --refund, or escalate if you believe it must not be paid.'
       )
+    case 'deposit_evidence_conflict':
+      return (
+        `the deposit timestamp you supplied is outside what is physically possible for this ` +
+        `transfer: the deposit cannot precede the sender's payment` +
+        (outcome.paymentAt ? ` (${outcome.paymentAt})` : '') +
+        ` and cannot postdate the moment Bridge told us it had happened` +
+        (outcome.depositEvidenceAt ? ` (${outcome.depositEvidenceAt})` : '') +
+        '. Nothing was written. Re-read the exact timestamp from the Bridge dashboard.'
+      )
     case 'claim_taken':
       return (
         `another run is refunding this transfer right now (claimed at ${outcome.claimedAt} by ` +
@@ -252,7 +267,7 @@ export async function resolve(args: Extract<ParsedArgs, { mode: 'resolve' }>): P
     `cancellation resolution for ${args.transferId}\n` +
       `operator: ops:${args.operator}\n` +
       `action:   ${args.action.toUpperCase()}` +
-      (args.depositedAt ? `  (Bridge deposited at ${args.depositedAt})` : '') +
+      (args.action === 'deny' ? `  (Bridge deposited at ${args.depositedAt})` : '') +
       `\nmode:     ${args.confirm ? 'EXECUTE (--confirm)' : 'DRY RUN (no --confirm)'}`,
   )
 
@@ -278,7 +293,7 @@ export async function resolve(args: Extract<ParsedArgs, { mode: 'resolve' }>): P
       `   ⚠ in-window request — denial is lawful ONLY if the deposit preceded the ask ` +
         `(${open.requested_at}). Your --deposited-at will be checked against it.`,
     )
-    if (args.depositedAt && Date.parse(args.depositedAt) > Date.parse(open.requested_at)) {
+    if (Date.parse(args.depositedAt) > Date.parse(open.requested_at)) {
       console.log('   ⚠ the timestamp you supplied is AFTER the request — the service will refuse.')
     }
   }
@@ -297,13 +312,15 @@ export async function resolve(args: Extract<ParsedArgs, { mode: 'resolve' }>): P
     return
   }
 
+  // The union split on `action` is what makes this narrowing work: in the deny
+  // branch depositedAt is a plain string, no assertion needed.
   const outcome =
     args.action === 'refund'
       ? await refundCancellation({ transferId: args.transferId, operator: args.operator })
       : await denyCancellation({
           transferId: args.transferId,
           operator: args.operator,
-          depositedAt: args.depositedAt!,
+          depositedAt: args.depositedAt,
         })
 
   if (!outcome.done) {
@@ -312,7 +329,14 @@ export async function resolve(args: Extract<ParsedArgs, { mode: 'resolve' }>): P
   pass(
     {
       refunded: 'sender paid the correction payment (send + fee) and state settled REFUNDED',
-      already_refunded: 'ALREADY REFUNDED before this run — nothing was written',
+      // The disbursement pre-existed (a prior run crashed after paying) — this
+      // run settled the state and closed the request but moved NO money.
+      // Confirm the original payment in the funding processor.
+      already_disbursed:
+        'disbursement already existed — this run settled REFUNDED and closed the request; ' +
+        'no money moved. Confirm the original payment in the funding processor.',
+      already_refunded:
+        'ALREADY REFUNDED before this run — any dangling request was closed; no payment was made by this run',
       denied: 'request denied and closed; the transfer remains COMPLETED',
     }[outcome.outcome],
   )
@@ -321,7 +345,7 @@ export async function resolve(args: Extract<ParsedArgs, { mode: 'resolve' }>): P
   // a different actor and make the tool look like it lied.
   console.log(
     outcome.outcome === 'already_refunded'
-      ? `\n✅ ${args.transferId} was already refunded — this run changed nothing`
+      ? `\n✅ ${args.transferId} was already refunded — this run made no payment`
       : `\n✅ ${args.transferId} resolved by ops:${args.operator}`,
   )
   console.log(

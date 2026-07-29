@@ -3,6 +3,7 @@ import { transitionTransfer, correctionRefundLedgerEntries } from './transfers.j
 import { getFundingProcessor } from './funding/index.js'
 import { claimRefund, isClaimAbandoned } from './refunds.js'
 import { pendingCancellationFor, resolveCancellationRequest } from './cancellations.js'
+import { earliestDepositEvidenceAt } from './payment-events.js'
 
 // The two lawful exits from UNDER_REVIEW for a cancellation request, and only
 // those (slice-7 PR6b).
@@ -30,6 +31,7 @@ interface ReviewableTransfer {
   state: string
   send_amount_minor: number
   fee_amount_minor: number
+  payment_at: string | null
   refund_payment_ref: string | null
   funding_payment_ref: string | null
   idempotency_key: string
@@ -38,10 +40,15 @@ interface ReviewableTransfer {
 }
 
 const REVIEWABLE_COLUMNS =
-  'id, state, send_amount_minor, fee_amount_minor, refund_payment_ref, funding_payment_ref, idempotency_key, refund_claimed_at, refund_claimed_by'
+  'id, state, send_amount_minor, fee_amount_minor, payment_at, refund_payment_ref, funding_payment_ref, idempotency_key, refund_claimed_at, refund_claimed_by'
 
 export type ReviewOutcome =
-  | { done: true; outcome: 'refunded' | 'already_refunded' | 'denied' }
+  // `already_disbursed` = the money left in a PRIOR run (a crash between the
+  // ref persist and the transition); this run settled the state and closed the
+  // request but paid nothing. Distinct from `refunded` for the same reason the
+  // PAYOUT_FAILED tail distinguishes them: a tool that says "sender paid" for
+  // a run that moved no money is lying about the only fact that matters here.
+  | { done: true; outcome: 'refunded' | 'already_disbursed' | 'already_refunded' | 'denied' }
   | { done: false; reason: 'transfer_not_found' }
   | { done: false; reason: 'not_under_review'; state: string }
   | { done: false; reason: 'no_pending_request' }
@@ -49,6 +56,16 @@ export type ReviewOutcome =
   // inside the 30-minute window AND made before the deposit the operator is
   // citing. Such a request cannot be denied by any tool.
   | { done: false; reason: 'request_precedes_deposit' }
+  // The cited deposit timestamp is provably wrong: before the sender even
+  // paid, or after the moment we RECEIVED Bridge's deposit confirmation (the
+  // true deposit cannot postdate our evidence of it). Refused so a denial can
+  // never be recorded against impossible evidence.
+  | {
+      done: false
+      reason: 'deposit_evidence_conflict'
+      paymentAt: string | null
+      depositEvidenceAt: string | null
+    }
   | { done: false; reason: 'claim_taken'; claimedAt: string | null; claimedBy: string | null }
   | { done: false; reason: 'claim_abandoned'; claimedAt: string | null; claimedBy: string | null }
 
@@ -82,9 +99,13 @@ export async function refundCancellation(input: {
   const transfer = await loadReviewable(input.transferId)
   if (!transfer) return { done: false, reason: 'transfer_not_found' }
 
-  // Idempotent terminal: already made whole. Writes nothing.
+  // Idempotent terminal: already made whole. Writes nothing but the close —
+  // and the close must not claim a correction payment, because REFUNDED may
+  // have been reached by the PAYOUT_FAILED tail (its resolve failed and paged;
+  // the runbook sends the operator here). On that transfer nothing delivered
+  // and no correction exists, so the resolution text stays neutral.
   if (transfer.state === 'REFUNDED') {
-    await closeRequest(transfer.id, actor)
+    await closeRequest(transfer.id, actor, ALREADY_REFUNDED_RESOLUTION)
     return { done: true, outcome: 'already_refunded' }
   }
 
@@ -126,7 +147,7 @@ export async function refundCancellation(input: {
       const fresh = await loadReviewable(transfer.id)
       if (!fresh) return { done: false, reason: 'transfer_not_found' }
       if (fresh.state === 'REFUNDED') {
-        await closeRequest(transfer.id, actor)
+        await closeRequest(transfer.id, actor, ALREADY_REFUNDED_RESOLUTION)
         return { done: true, outcome: 'already_refunded' }
       }
       // A losing run writes nothing at all — the PR6b-0 rule.
@@ -150,8 +171,13 @@ export async function refundCancellation(input: {
     ledgerEntries: correctionRefundLedgerEntries(transfer),
   })
 
-  await closeRequest(transfer.id, actor)
-  return { done: true, outcome: 'refunded' }
+  await closeRequest(
+    transfer.id,
+    actor,
+    'timely cancellation on a delivered transfer — correction payment issued',
+  )
+  // alreadyDisbursed = the money left in a PRIOR run; this run only settled.
+  return { done: true, outcome: alreadyDisbursed ? 'already_disbursed' : 'refunded' }
 }
 
 /**
@@ -174,14 +200,32 @@ export async function refundCancellation(input: {
  *
  * `depositedAt` comes from the Bridge dashboard (getBridgeTransfer returns only
  * id/state/sourceAmount); it is recorded in the resolution and the transition
- * metadata so the denial is provable later. An operator who fat-fingers it
- * earlier than reality can only make the tool REFUSE more, never deny more.
+ * metadata so the denial is provable later.
+ *
+ * ⚠️ The dangerous direction of a typo is EARLIER (PR6b review fix — this text
+ * previously claimed the opposite): an earlier-than-reality timestamp makes
+ * `depositedAt > requested_at` LESS likely to hold, i.e. makes the tool DENY
+ * more, not refuse more. Two nets narrow that: garbage input throws (below —
+ * `Date.parse(garbage)` is NaN and every NaN comparison is false, which would
+ * fail the guard OPEN), and the cited value is bounded to what is physically
+ * possible: no earlier than the sender's payment, no later than the moment we
+ * received Bridge's deposit confirmation. Inside those bounds the timestamp is
+ * the operator's judgment — read it carefully; the CLI's dry run shows the
+ * request time it will be compared against.
  */
 export async function denyCancellation(input: {
   transferId: string
   operator: string
   depositedAt: string
 }): Promise<ReviewOutcome> {
+  // Fail CLOSED on unparseable input before any comparison sees it. This is a
+  // money-adjacent legal guard reachable from any future caller, not just the
+  // CLI (which validates upstream) — and NaN would skip the owed-guard below.
+  if (Number.isNaN(Date.parse(input.depositedAt))) {
+    throw new Error(
+      `denyCancellation: depositedAt "${input.depositedAt}" is not a parseable timestamp`,
+    )
+  }
   const actor = `ops:${input.operator}`
   const transfer = await loadReviewable(input.transferId)
   if (!transfer) return { done: false, reason: 'transfer_not_found' }
@@ -194,6 +238,27 @@ export async function denyCancellation(input: {
   // deposit comparison is condition 2, against the operator's cited timestamp.)
   if (request.within_window && Date.parse(input.depositedAt) > Date.parse(request.requested_at)) {
     return { done: false, reason: 'request_precedes_deposit' }
+  }
+
+  // Plausibility bounds on the cited evidence (PR6b review fix). The true
+  // deposit lies in [payment_at, earliest payment_processed received_at]: it
+  // cannot precede the sender's payment, and it cannot postdate the moment
+  // Bridge TOLD us it had happened. A value outside that range is provably
+  // wrong, and a denial must never be recorded against impossible evidence —
+  // refuse and send the operator back to the dashboard. (Inside the range a
+  // fat-finger is still possible; these bounds are a net, not proof.)
+  const depositEvidenceAt = await earliestDepositEvidenceAt(transfer.id)
+  const cited = Date.parse(input.depositedAt)
+  if (
+    (transfer.payment_at !== null && cited < Date.parse(transfer.payment_at)) ||
+    (depositEvidenceAt !== null && cited > Date.parse(depositEvidenceAt))
+  ) {
+    return {
+      done: false,
+      reason: 'deposit_evidence_conflict',
+      paymentAt: transfer.payment_at,
+      depositEvidenceAt,
+    }
   }
 
   // Out-of-window requests on a COMPLETED transfer were never routed, so there
@@ -231,12 +296,18 @@ export async function denyCancellation(input: {
   return { done: true, outcome: 'denied' }
 }
 
+// The already-refunded close must not assert facts that may be false on this
+// transfer: REFUNDED can be the PAYOUT_FAILED tail's doing (nothing delivered,
+// no correction payment exists). Neutral text states only what is known.
+const ALREADY_REFUNDED_RESOLUTION =
+  'sender already refunded before this review; request closed — no correction payment was made by this run'
+
 /** Close the request as refunded. Idempotent; guarded on pending in the service. */
-async function closeRequest(transferId: string, actor: string): Promise<void> {
+async function closeRequest(transferId: string, actor: string, resolution: string): Promise<void> {
   await resolveCancellationRequest({
     transferId,
     status: 'resolved_refunded',
-    resolution: 'timely cancellation on a delivered transfer — correction payment issued',
+    resolution,
     resolvedBy: actor,
   })
 }

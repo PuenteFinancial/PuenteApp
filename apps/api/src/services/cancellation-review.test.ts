@@ -42,7 +42,9 @@ function q(table: string, ...results: unknown[]): void {
 }
 function chain(result: unknown): Record<string, unknown> {
   const c: Record<string, unknown> = {}
-  for (const m of ['select', 'eq', 'is', 'not', 'in', 'or', 'lt', 'limit', 'update']) {
+  // `order` joined the list when denyCancellation grew the deposit-evidence
+  // bounds (the shared earliestDepositEvidenceAt query orders by received_at).
+  for (const m of ['select', 'eq', 'is', 'not', 'in', 'or', 'lt', 'order', 'limit', 'update']) {
     c[m] = () => c
   }
   c.maybeSingle = () => Promise.resolve(result)
@@ -62,6 +64,9 @@ const reviewing = (over: Record<string, unknown> = {}) => ({
     state: 'UNDER_REVIEW',
     send_amount_minor: S,
     fee_amount_minor: FEE,
+    // The lower plausibility bound for denial evidence: a deposit cannot
+    // precede the sender's payment.
+    payment_at: '2026-07-28T08:00:00.000Z',
     refund_payment_ref: null,
     funding_payment_ref: 'mockpay_1',
     idempotency_key: 'bridge-key-1',
@@ -107,7 +112,14 @@ describe('refundCancellation', () => {
     // refund_payment_ref on one transfer, so they must contend on one lock.
     expect(claimRefund).toHaveBeenCalledWith(T, 'ops:jphelps')
     expect(refund).toHaveBeenCalledWith(
-      expect.objectContaining({ amountMinor: S + FEE, idempotencyKey: 'bridge-key-1:refund' }),
+      // paymentRef pinned too (review fix): disbursing against the wrong ref
+      // (refund_payment_ref, provider_transfer_ref) passes the mock processor
+      // but not a real one.
+      expect.objectContaining({
+        amountMinor: S + FEE,
+        paymentRef: 'mockpay_1',
+        idempotencyKey: 'bridge-key-1:refund',
+      }),
     )
 
     const settle = transition.mock.calls[0]![0] as Record<string, unknown>
@@ -161,7 +173,7 @@ describe('refundCancellation', () => {
     expect(refund).not.toHaveBeenCalled()
   })
 
-  it('is idempotent at REFUNDED — writes nothing, still closes a stale request', async () => {
+  it('is idempotent at REFUNDED — writes nothing, still closes a stale request NEUTRALLY', async () => {
     q('transfers', reviewing({ state: 'REFUNDED', refund_payment_ref: 'mockrefund_prev' }))
 
     await expect(refundCancellation({ transferId: T, operator: 'jphelps' })).resolves.toEqual({
@@ -170,7 +182,13 @@ describe('refundCancellation', () => {
     })
     expect(refund).not.toHaveBeenCalled()
     expect(transition).not.toHaveBeenCalled()
+    // REFUNDED may be the PAYOUT_FAILED tail's doing (its resolve failed and
+    // paged; the runbook sends the operator here). On that transfer nothing
+    // delivered and no correction exists — the close must not assert one.
     expect(resolveCancellationRequest).toHaveBeenCalledTimes(1)
+    const close = resolveCancellationRequest.mock.calls[0]![0] as Record<string, unknown>
+    expect(close.resolution).toContain('already refunded')
+    expect(close.resolution).not.toContain('correction payment issued')
   })
 
   it('a losing claim writes NOTHING — not the payment, not the transition', async () => {
@@ -196,12 +214,17 @@ describe('refundCancellation', () => {
     })
   })
 
-  it('skips the claim when a disbursement is already recorded, and just settles', async () => {
+  it('reports already_disbursed — not refunded — when it only settles a pre-existing disbursement', async () => {
+    // The crash-recovery heal: a prior run paid the sender and died before the
+    // transition. This run settles the state but moves NO money, and must say
+    // so — `refunded` here would make the CLI print "sender paid the
+    // correction payment" for a run that paid nothing (the same lie the
+    // PAYOUT_FAILED tail's already_disbursed outcome exists to prevent).
     q('transfers', reviewing({ refund_payment_ref: 'mockrefund_prev' }))
 
     await expect(refundCancellation({ transferId: T, operator: 'jphelps' })).resolves.toEqual({
       done: true,
-      outcome: 'refunded',
+      outcome: 'already_disbursed',
     })
     expect(claimRefund).not.toHaveBeenCalled()
     expect(refund).not.toHaveBeenCalled()
@@ -295,5 +318,57 @@ describe('denyCancellation', () => {
     await expect(
       denyCancellation({ transferId: T, operator: 'jphelps', depositedAt: '2026-07-28T10:00:00.000Z' }),
     ).resolves.toEqual({ done: false, reason: 'no_pending_request' })
+  })
+
+  // The fail-open the type-design review caught: Date.parse(garbage) is NaN and
+  // every NaN comparison is false, so without this throw the owed-guard would
+  // silently SKIP and an in-window request could be denied with the garbage
+  // string recorded as "evidence". The CLI validates upstream; this service's
+  // contract is that it does not trust callers.
+  it('THROWS on an unparseable depositedAt before any comparison — never fails open', async () => {
+    await expect(
+      denyCancellation({ transferId: T, operator: 'jphelps', depositedAt: 'not-a-timestamp' }),
+    ).rejects.toThrow(/not a parseable timestamp/)
+    expect(from).not.toHaveBeenCalled() // refused before even loading the row
+    expect(transition).not.toHaveBeenCalled()
+    expect(resolveCancellationRequest).not.toHaveBeenCalled()
+  })
+
+  // Plausibility bounds: the true deposit lies in [payment_at, our earliest
+  // payment_processed received_at]. Values outside are provably wrong and a
+  // denial must never be recorded against impossible evidence. (An in-range
+  // fat-finger is still possible — the bounds are a net, not proof.)
+  it('refuses a cited deposit EARLIER than the sender’s payment, writing nothing', async () => {
+    pendingCancellationFor.mockResolvedValue(request({ within_window: false }))
+    q('transfers', reviewing()) // payment_at 08:00
+
+    await expect(
+      denyCancellation({ transferId: T, operator: 'jphelps', depositedAt: '2026-07-28T07:59:00.000Z' }),
+    ).resolves.toEqual({
+      done: false,
+      reason: 'deposit_evidence_conflict',
+      paymentAt: '2026-07-28T08:00:00.000Z',
+      depositEvidenceAt: null,
+    })
+    expect(transition).not.toHaveBeenCalled()
+    expect(resolveCancellationRequest).not.toHaveBeenCalled()
+  })
+
+  it('refuses a cited deposit LATER than our evidence of it, writing nothing', async () => {
+    pendingCancellationFor.mockResolvedValue(request({ within_window: false }))
+    q('transfers', reviewing())
+    // Bridge told us at 09:30 — the deposit cannot have happened after that.
+    q('payment_events', { data: [{ received_at: '2026-07-28T09:30:00.000Z' }], error: null })
+
+    await expect(
+      denyCancellation({ transferId: T, operator: 'jphelps', depositedAt: '2026-07-28T09:45:00.000Z' }),
+    ).resolves.toEqual({
+      done: false,
+      reason: 'deposit_evidence_conflict',
+      paymentAt: '2026-07-28T08:00:00.000Z',
+      depositEvidenceAt: '2026-07-28T09:30:00.000Z',
+    })
+    expect(transition).not.toHaveBeenCalled()
+    expect(resolveCancellationRequest).not.toHaveBeenCalled()
   })
 })

@@ -131,6 +131,33 @@ export async function recordEvent(
   return { id: (existing as { id: string }).id, inserted: false }
 }
 
+// ── Deposit evidence ────────────────────────────────────────────────────────
+
+/**
+ * The received_at of the FIRST `payment_processed` event for this transfer
+ * (webhook or poll-synthesized) — the earliest moment we can EVIDENCE the
+ * deposit. The true deposit happened at or before it (Bridge deposited, then
+ * told us). Null when no such event exists; callers own their fallback
+ * posture (the delivery-routing job treats no-evidence as "the request came
+ * first"; denyCancellation treats it as "no upper bound to check").
+ *
+ * Shared between payment-event-process (condition 2 of the §1005.34 routing)
+ * and denyCancellation (plausibility bound on the operator's cited deposit
+ * timestamp) so the two sides of the decision read the SAME evidence.
+ */
+export async function earliestDepositEvidenceAt(transferId: string): Promise<string | null> {
+  const { data, error } = await supabaseAdmin
+    .from('payment_events')
+    .select('received_at')
+    .eq('transfer_id', transferId)
+    .eq('event_type', 'payment_processed')
+    .order('received_at', { ascending: true })
+    .limit(1)
+  if (error) throw new Error(`deposit-evidence query failed: ${error.message}`)
+  const rows = (data ?? []) as Array<{ received_at: string }>
+  return rows[0]?.received_at ?? null
+}
+
 // ── Status mark helpers ─────────────────────────────────────────────────────
 // Terminal status writes for a processed event; processed_at stamps the
 // resolution. The moddatetime trigger moves updated_at.

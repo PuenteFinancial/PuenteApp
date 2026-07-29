@@ -591,6 +591,13 @@ describe('POST /v1/transfers/:id/cancel', () => {
     const res = await cancel(app)
     expect(res.status).toBe(202)
     expect(res.body.code).toBe('cancellation_requires_support')
+    // The record must carry the state that produced this 202: FUNDED here
+    // means FUNDED-post-claim, and requested_state is statutory evidence.
+    expect(recordCancellationRequest).toHaveBeenCalledWith({
+      transferId: TRANSFER_ID,
+      userId: USER_ID,
+      state: 'FUNDED',
+    })
     expect(cancelTransfer).not.toHaveBeenCalled()
     await app.close()
   })
@@ -617,6 +624,14 @@ describe('POST /v1/transfers/:id/cancel', () => {
     const res = await cancel(app)
     expect(res.status).toBe(202)
     expect(res.body.code).toBe('cancellation_requires_support')
+    // The record must reflect the FRESH re-read (SUBMITTED), not the stale
+    // pre-RPC row (FUNDED): requested_state is statutory evidence, and passing
+    // the stale row would record false evidence on every lost race.
+    expect(recordCancellationRequest).toHaveBeenCalledWith({
+      transferId: TRANSFER_ID,
+      userId: USER_ID,
+      state: 'SUBMITTED',
+    })
     expect(voidFunding).not.toHaveBeenCalled()
     await app.close()
   })

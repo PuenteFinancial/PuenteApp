@@ -301,8 +301,14 @@ that anything is being adjudicated. PR6b is the repo's **first writer** of this 
 An untimely request deliberately does NOT transition: flipping a delivered transfer's state for a
 request we will not honour would be a lie in the state log.
 
-Two existing interactions hold unchanged, and are pinned by tests rather than altered:
-`FAILABLE_STATES` includes `UNDER_REVIEW`, so a later Bridge failure still drives `PAYOUT_FAILED`; and
+Interactions with the event processor (revised 2026-07-28, PR6b review):
+`FAILABLE_STATES` does **not** include `UNDER_REVIEW`. Its only writer is the cancellation routing on
+a *delivered* transfer — the COMPLETED ledger batch is posted and the receipt written — so a later
+Bridge fail event there is a contradictory sequence like any other post-delivery fail: it **pages**
+(`payout-fail-after-terminal`) and moves nothing, and a human resolves through the review exits
+(which post the correct correction ledger if a refund really is owed). The earlier design let the
+event silently drive `UNDER_REVIEW → PAYOUT_FAILED` and run the payout-failure refund tail against
+delivered books. Success events at `UNDER_REVIEW` likewise page (`payout-success-after-terminal`).
 `risk.ts` deliberately keeps `UNDER_REVIEW` counting toward velocity, because the sender was charged
 and the money has not come back yet.
 

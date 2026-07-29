@@ -335,6 +335,9 @@ async function settleCancellationRequest(transferId: string, actor: string): Pro
       scope.setContext('cancellation_resolve_failed', {
         transferId,
         tail: 'PAYOUT_FAILED->REFUNDED',
+        // The page is the only place this error surfaces (the swallow is the
+        // point) — carry the reason. Service/PostgREST message, no PII.
+        error: err instanceof Error ? err.message : String(err),
         runbook: 'docs/runbooks/pending-cancellation.md',
       })
       Sentry.captureMessage(

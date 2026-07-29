@@ -239,9 +239,14 @@ describe.skipIf(!runDb)('cancellation review exits (integration, local Supabase)
       refundCancellation({ transferId, operator: 'dbtest' }),
     ).resolves.toEqual({ done: true, outcome: 'refunded' })
 
-    // The sender was actually paid, exactly once, send + fee.
+    // The sender was actually paid, exactly once, send + fee, against the
+    // ORIGINAL funding payment — not some other ref the mock wouldn't notice.
     expect(refundCalls).toHaveLength(1)
-    expect(refundCalls[0]).toMatchObject({ amountMinor: S + FEE, currency: 'USD' })
+    expect(refundCalls[0]).toMatchObject({
+      amountMinor: S + FEE,
+      currency: 'USD',
+      paymentRef: `mockpay_${transferId}`,
+    })
     const transfer = (
       await db.query(
         'select state, refund_payment_ref, refunded_at from public.transfers where id = $1',
@@ -351,22 +356,48 @@ describe.skipIf(!runDb)('cancellation review exits (integration, local Supabase)
   it('denies an UNDER_REVIEW request whose deposit preceded it: state back to COMPLETED, NO ledger', async () => {
     const transferId = await seedTransfer()
     const request = await walkToCompletedWithRequest(transferId)
+    // The delivery date this denial must NOT rewrite (the blocker the review
+    // caught: transition_transfer used to restamp completed_at on ANY entry
+    // into COMPLETED, so the deny round-trip falsified the Reg E receipt date).
+    const row = (
+      await db.query('select completed_at, payment_at from public.transfers where id = $1', [
+        transferId,
+      ])
+    ).rows[0]
+    const completedAtBefore = row.completed_at
+    expect(completedAtBefore).not.toBeNull()
     await parkUnderReview(transferId)
 
     const entriesBefore = await allEntries(transferId)
-    // Bridge's dashboard timestamp, one minute BEFORE the ask: condition (2)
-    // failed at request time, so denial is lawful despite within_window=true.
-    const depositedAt = new Date(Date.parse(request.requested_at) - 60_000).toISOString()
+    // Bridge's dashboard timestamp, BEFORE the ask: condition (2) failed at
+    // request time, so denial is lawful despite within_window=true. Computed
+    // as the midpoint of the plausibility bounds rather than a fixed offset —
+    // the walk from seed (payment_at) to record (requested_at) can complete in
+    // single-digit milliseconds on loopback, so any guessed margin flakes.
+    // node-pg hands timestamptz back as a JS Date; Date.parse(dateObject)
+    // coerces through toString() and DROPS sub-second precision, which put the
+    // midpoint below the real bound — use getTime() on the pg side and
+    // Date.parse only on the PostgREST ISO string.
+    const depositedAt = new Date(
+      Math.floor((new Date(row.payment_at).getTime() + Date.parse(request.requested_at)) / 2),
+    ).toISOString()
 
     await expect(
       denyCancellation({ transferId, operator: 'dbtest', depositedAt }),
     ).resolves.toEqual({ done: true, outcome: 'denied' })
 
     const state = (
-      await db.query('select state, refund_payment_ref from public.transfers where id = $1', [transferId])
+      await db.query(
+        'select state, refund_payment_ref, completed_at from public.transfers where id = $1',
+        [transferId],
+      )
     ).rows[0]
     expect(state.state).toBe('COMPLETED')
     expect(state.refund_payment_ref).toBeNull() // no money moved
+    // Write-once: the return trip keeps the ORIGINAL delivery moment.
+    expect(new Date(state.completed_at).toISOString()).toBe(
+      new Date(completedAtBefore).toISOString(),
+    )
 
     // NO ledger: the UNDER_REVIEW → COMPLETED transition posts nothing, and
     // nothing else did either — the books still say exactly "delivered".

@@ -10,7 +10,12 @@ import {
 import { refundPayoutFailure } from '../services/refunds.js'
 import { pendingCancellationFor } from '../services/cancellations.js'
 import { buildReceiptDisclosure } from '../services/disclosures.js'
-import { mapBridgeState, markProcessed, markIgnored } from '../services/payment-events.js'
+import {
+  mapBridgeState,
+  markProcessed,
+  markIgnored,
+  earliestDepositEvidenceAt,
+} from '../services/payment-events.js'
 
 // The `payment-event.process` job — the ONE path that turns a recorded Bridge
 // event (webhook OR poll-synthesized) into a transfer transition + ledger post.
@@ -44,7 +49,17 @@ interface TransferRow {
 // States a fail event can legally advance from. COMPLETED is absent on
 // purpose: a fail arriving after we already completed must never reverse it
 // (that would be a slice-6 refund, ledger-posted, not a silent state move).
-const FAILABLE_STATES = new Set(['SUBMITTED', 'IN_FLIGHT', 'UNDER_REVIEW'])
+// UNDER_REVIEW is absent for the SAME reason (PR6b review fix): since PR6b its
+// only writer is the cancellation routing on a DELIVERED transfer — the
+// COMPLETED batch is posted and the receipt written. Treating it as failable
+// let a late Bridge fail event silently drive UNDER_REVIEW → PAYOUT_FAILED and
+// (AUTO_REFUND on) run the payout-failure tail against delivered books:
+// bridge_return + REFUNDED batches that assume the SUBMITTED shape, and the
+// Reg E request closed with a false "payout failed" resolution. A fail event
+// here is a contradictory sequence like any other post-delivery fail — it
+// PAGES (payout-fail-after-terminal) and a human resolves through the review
+// exits, which post the correct correction ledger if a refund is really owed.
+const FAILABLE_STATES = new Set(['SUBMITTED', 'IN_FLIGHT'])
 
 // The linear payout happy-path. A forward (success) event for a transfer that
 // has left this path (e.g. PAYOUT_FAILED) is a contradictory Bridge sequence.
@@ -347,8 +362,9 @@ async function drive(transfer: TransferRow, target: 'IN_FLIGHT' | 'COMPLETED'): 
 }
 
 /**
- * The earliest moment we can EVIDENCE the deposit: the received_at of the first
- * `payment_processed` event for this transfer (webhook or poll-synthesized).
+ * The earliest moment we can EVIDENCE the deposit (shared query in
+ * services/payment-events.ts — denyCancellation bounds the operator's cited
+ * timestamp against the same evidence).
  *
  * The actual SPEI deposit happened AT OR BEFORE this — Bridge deposited, then
  * told us — so comparing the request against it errs in the SENDER'S favour: a
@@ -360,16 +376,7 @@ async function drive(transfer: TransferRow, target: 'IN_FLIGHT' | 'COMPLETED'): 
  * COMPLETED requires processing exactly such an event.
  */
 async function earliestDepositEvidence(transferId: string): Promise<string> {
-  const { data, error } = await supabaseAdmin
-    .from('payment_events')
-    .select('received_at')
-    .eq('transfer_id', transferId)
-    .eq('event_type', 'payment_processed')
-    .order('received_at', { ascending: true })
-    .limit(1)
-  if (error) throw new Error(`deposit-evidence query failed: ${error.message}`)
-  const rows = (data ?? []) as Array<{ received_at: string }>
-  return rows[0]?.received_at ?? new Date().toISOString()
+  return (await earliestDepositEvidenceAt(transferId)) ?? new Date().toISOString()
 }
 
 /**
@@ -383,16 +390,21 @@ async function earliestDepositEvidence(transferId: string): Promise<string> {
  * and are owed nothing. Three buckets:
  *
  *   out of window          → owed nothing; alert; a human denies on the record.
- *   in window, request AT/AFTER our earliest deposit evidence
+ *   in window, request strictly AFTER our earliest deposit evidence
  *                          → owed nothing (the deposit had already happened when
  *                            they asked); alert; a human confirms the exact
  *                            deposit time in the Bridge dashboard and denies
  *                            with it as evidence. The transfer STAYS COMPLETED.
- *   in window, request BEFORE our earliest deposit evidence
+ *   in window, request AT OR BEFORE our earliest deposit evidence
  *                          → the true race: the ask may genuinely have beaten
  *                            the deposit. Owed posture: route to `UNDER_REVIEW`
  *                            for the correction payment — the accepted, bounded
  *                            double-pay, now confined to a seconds-wide sliver.
+ *                            A tie is ambiguous by construction (Date.parse
+ *                            truncates Postgres µs to ms, and evidence lags the
+ *                            true deposit), and ambiguity breaks toward the
+ *                            sender — review, never auto-deny (PR6b review fix:
+ *                            was `>=`, which sent ties to the not-owed bucket).
  *
  * Denial is never automatic in any bucket, and no bucket flips a delivered
  * transfer's state for a request we will not honour.
@@ -430,7 +442,7 @@ async function routeCancellationOnDelivery(transfer: TransferRow): Promise<void>
     // against our EARLIEST evidence of it, so ambiguity breaks toward the
     // sender (see earliestDepositEvidence).
     const depositEvidenceAt = await earliestDepositEvidence(transfer.id)
-    if (Date.parse(request.requested_at) >= Date.parse(depositEvidenceAt)) {
+    if (Date.parse(request.requested_at) > Date.parse(depositEvidenceAt)) {
       Sentry.withScope((scope) => {
         scope.setFingerprint(['cancellation-after-deposit', transfer.id])
         scope.setContext('cancellation_after_deposit', {
@@ -483,6 +495,10 @@ async function routeCancellationOnDelivery(transfer: TransferRow): Promise<void>
       scope.setFingerprint(['cancellation-route-failed', transfer.id])
       scope.setContext('cancellation_route_failed', {
         transferId: transfer.id,
+        // The page is the ONLY place this error surfaces (the catch is the
+        // sanctioned swallow), so it must carry the reason — a PostgREST or
+        // service message, ids and constraint names, no PII.
+        error: err instanceof Error ? err.message : String(err),
         runbook: 'docs/runbooks/pending-cancellation.md',
       })
       Sentry.captureMessage(
@@ -491,7 +507,6 @@ async function routeCancellationOnDelivery(transfer: TransferRow): Promise<void>
         'error',
       )
     })
-    void err
   }
 }
 

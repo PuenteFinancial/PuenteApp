@@ -178,7 +178,11 @@ slice 6 apart from `requestedAt`; the shipped web client branches on `code`, so 
 
 Recording is best-effort **in one direction only**: a persistence failure logs, pages ops, and still
 returns the 202 — our bookkeeping problem must not present to the sender as a rejection of a
-statutory ask. It is the only sanctioned swallow on this path.
+statutory ask. It is the only sanctioned swallow on this path. Note the idempotency interaction:
+the plugin caches any 2xx for 24h, so a record-failure 202 (no `requestedAt`) is what a same-key
+retry replays — **the client's own retry can never re-attempt the record**. Recovery is the
+`cancellation-record-failed` page plus manual entry per the runbook, or a fresh key from a new tap;
+do not assume "the client will just retry" heals it.
 | GET | `/v1/transfers/:id/receipt` | ✓ | — | Reg E receipt. |
 | POST | `/v1/transfers/:id/disputes` | ✓ | — | Open error resolution. Body `{ type, description }`. Moves the transfer to `UNDER_REVIEW` only from `FUNDED`/`SUBMITTED`/`IN_FLIGHT`/`COMPLETED` (per state machine); a dispute on an already-terminal transfer (`REFUNDED`, `PAYMENT_FAILED`, …) is recorded in `disputes` without a state change. |
 | GET | `/v1/transfers/:id/disputes` | ✓ | — | List. |

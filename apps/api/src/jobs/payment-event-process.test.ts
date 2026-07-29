@@ -63,9 +63,21 @@ function q(table: string, ...results: unknown[]) {
 }
 // captures the receipt disclosures.upsert(payload, opts) calls for assertions
 const upsertCalls: unknown[][] = []
-function chain(result: unknown) {
+// Every filter method is recorded with a per-builder id (the cancellations.ts
+// harness idiom) so a query's CONTRACT can be asserted — the deposit-evidence
+// query's filters are the sole input to §1005.34 condition (2), and a dropped
+// event_type filter or a flipped sort order must fail a test, not route money.
+const filters: Array<{ table: string; method: string; args: unknown[]; builder: number }> = []
+let builderId = 0
+function chain(table: string, result: unknown) {
   const c: Record<string, unknown> = {}
-  for (const m of ['select', 'eq', 'in', 'is', 'order', 'limit', 'update']) c[m] = () => c
+  const id = ++builderId
+  for (const m of ['select', 'eq', 'in', 'is', 'order', 'limit', 'update']) {
+    c[m] = (...args: unknown[]) => {
+      filters.push({ table, method: m, args, builder: id })
+      return c
+    }
+  }
   c.upsert = (...args: unknown[]) => {
     upsertCalls.push(args)
     return c
@@ -123,6 +135,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   for (const k of Object.keys(queues)) delete queues[k]
   upsertCalls.length = 0
+  filters.length = 0
   envMock.AUTO_REFUND = false
   postLedger.mockResolvedValue({ id: 'lt-1' })
   refund.mockResolvedValue({ provider: 'mock', ref: 'mockrefund_x', status: 'succeeded' })
@@ -131,7 +144,7 @@ beforeEach(() => {
   from.mockImplementation((table: string) => {
     const next = queues[table]?.shift()
     if (next === undefined) throw new Error(`unexpected from('${table}')`)
-    return chain(next)
+    return chain(table, next)
   })
 })
 
@@ -223,6 +236,104 @@ describe('processPaymentEvent — transitions', () => {
     expect(resolveCancellationRequest).not.toHaveBeenCalled()
     expect(setFingerprint).toHaveBeenCalledWith(['cancellation-correction-owed', 'tr-1'])
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
+
+    // The evidence query's CONTRACT — the sole input to condition (2). Dropping
+    // the event_type filter makes the earliest *any* event (e.g. one recorded
+    // at submission) the "deposit", killing the owed bucket entirely; flipping
+    // the sort routes on the LATEST evidence and over-pays. Attributed to the
+    // one builder that ordered by received_at.
+    const evidence = filters.find(
+      (f) => f.table === 'payment_events' && f.method === 'order',
+    )
+    const evidenceFilters = filters
+      .filter((f) => f.builder === evidence?.builder && f.method !== 'select')
+      .map((f) => [f.method, ...f.args])
+    expect(evidenceFilters).toEqual([
+      ['eq', 'transfer_id', 'tr-1'],
+      ['eq', 'event_type', 'payment_processed'],
+      ['order', 'received_at', { ascending: true }],
+      ['limit', 1],
+    ])
+  })
+
+  // The tie. Date.parse truncates Postgres µs to ms, so two distinct DB
+  // instants inside the same millisecond compare EQUAL — ties are realistic,
+  // not academic. Ambiguity breaks toward the sender: a tie routes to review
+  // for a human with Bridge's authoritative timestamp, never to the not-owed
+  // bucket (review fix — `>=` used to send ties there).
+  it('a request whose timestamp TIES the deposit evidence routes to UNDER_REVIEW', async () => {
+    const instant = new Date(Date.now() - 60_000).toISOString()
+    pendingCancellationFor.mockResolvedValue(pending({ requested_at: instant }))
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
+    queueReceipt()
+    q('payment_events', { data: [{ received_at: instant }], error: null })
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    const states = transition.mock.calls.map((c) => (c as [Record<string, unknown>])[0].toState)
+    expect(states).toContain('UNDER_REVIEW')
+    expect(setFingerprint).toHaveBeenCalledWith(['cancellation-correction-owed', 'tr-1'])
+    expect(setFingerprint).not.toHaveBeenCalledWith(['cancellation-after-deposit', 'tr-1'])
+  })
+
+  // The documented legal posture of the fallback: no evidence at all = "treat
+  // the request as first" = the owed path. A refactor inverting it (epoch, or
+  // null read as "no deposit race") would silently send the no-evidence case
+  // to the deny bucket.
+  it('no deposit evidence at all → the request is treated as first and routes to UNDER_REVIEW', async () => {
+    pendingCancellationFor.mockResolvedValue(pending())
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
+    queueReceipt()
+    q('payment_events', { data: [], error: null }) // nothing recorded
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    const states = transition.mock.calls.map((c) => (c as [Record<string, unknown>])[0].toState)
+    expect(states).toContain('UNDER_REVIEW')
+    expect(setFingerprint).toHaveBeenCalledWith(['cancellation-correction-owed', 'tr-1'])
+  })
+
+  // Receipt-before-routing, pinned with a STATEFUL mock (review fix — the
+  // ordering was previously guarded only by a comment). Routing first would
+  // move the row to UNDER_REVIEW, writeReceipt's COMPLETED guard would skip,
+  // the event would retire processed, and the Reg E receipt would be
+  // permanently lost for exactly the transfers under legal review (the deny
+  // exit returns to COMPLETED without writing one either).
+  it('writes the Reg E receipt BEFORE routing to UNDER_REVIEW — a swap loses the receipt', async () => {
+    pendingCancellationFor.mockResolvedValue(pending())
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
+    queueReceipt()
+    q('payment_events', {
+      data: [{ received_at: new Date(Date.now() - 30_000).toISOString() }],
+      error: null,
+    })
+    // Once the routing transition lands, every later transfers read sees
+    // UNDER_REVIEW — exactly what the real database would show.
+    let reviewed = false
+    transition.mockImplementation((input: { toState?: string }) => {
+      if (input.toState === 'UNDER_REVIEW') reviewed = true
+      return Promise.resolve({})
+    })
+    from.mockImplementation((table: string) => {
+      let next = queues[table]?.shift()
+      if (next === undefined) throw new Error(`unexpected from('${table}')`)
+      const asState = next as { data?: { state?: string } | null }
+      if (table === 'transfers' && reviewed && asState?.data?.state) {
+        next = { data: { ...asState.data, state: 'UNDER_REVIEW' }, error: null }
+      }
+      return chain(table, next)
+    })
+
+    await processPaymentEvent('ev-1')
+
+    expect(upsertCalls).toHaveLength(1) // the receipt landed despite the routing
+    const states = transition.mock.calls.map((c) => (c as [Record<string, unknown>])[0].toState)
+    expect(states).toContain('UNDER_REVIEW')
   })
 
   // Condition (2) of §1005.34, and the COMMON case on an instant rail: the
@@ -672,6 +783,53 @@ describe('processPaymentEvent — refund tail (PR2)', () => {
     expect(transition).not.toHaveBeenCalled()
     expect(postLedger).not.toHaveBeenCalled()
     expect(refund).not.toHaveBeenCalled()
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  // The blocker the silent-failure review caught. UNDER_REVIEW's only writer
+  // (since PR6b) is the cancellation routing on a DELIVERED transfer — the
+  // COMPLETED batch is posted. FAILABLE_STATES used to list it as pre-delivery,
+  // so this exact event silently drove UNDER_REVIEW → PAYOUT_FAILED and (flag
+  // on) ran the payout-failure tail against delivered books, closing the Reg E
+  // request with a false "payout failed" resolution. It must PAGE and freeze,
+  // like every other post-delivery contradictory sequence.
+  it('a fail event at UNDER_REVIEW pages and does NOT move the row or touch money', async () => {
+    envMock.AUTO_REFUND = true
+    q('payment_events', event({ event_type: 'refunded' }))
+    q(
+      'transfers',
+      transfer('UNDER_REVIEW'), // resolveTransfer
+      stateRow('UNDER_REVIEW'), // failTransfer currentState → not failable → page
+      stateRow('UNDER_REVIEW'), // driveRefund's own re-read under AUTO_REFUND
+    )
+    q('transfers', transfer('UNDER_REVIEW')) // refundPayoutFailure load → refuses (not PAYOUT_FAILED)
+
+    await processPaymentEvent('ev-1')
+
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-fail-after-terminal'])
+    expect(transition).not.toHaveBeenCalled() // the row does not move
+    expect(refund).not.toHaveBeenCalled() // and no money moves
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(resolveCancellationRequest).not.toHaveBeenCalled() // the request stays open for the review exits
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  // The success-side sibling, pinned per the plan: UNDER_REVIEW is outside
+  // FORWARD_STATES, so a late success event (a poller race can synthesize one)
+  // pages the contradictory-sequence warning rather than silently acting.
+  it('a success event at UNDER_REVIEW pages payout-success-after-terminal and moves nothing', async () => {
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q(
+      'transfers',
+      transfer('UNDER_REVIEW'), // resolveTransfer
+      stateRow('UNDER_REVIEW'), // drive currentState → not forward → page
+    )
+
+    await processPaymentEvent('ev-1')
+
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-success-after-terminal'])
+    expect(transition).not.toHaveBeenCalled()
+    expect(upsertCalls).toHaveLength(0) // no receipt rewrite either
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
   })
 

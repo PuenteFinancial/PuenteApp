@@ -189,6 +189,9 @@ async function submissionInProgressResponse(
       scope.setContext('cancellation_record_failed', {
         transferId: transfer.id,
         state: transfer.state,
+        // Mirrored into the Sentry event, not just the server log — the page
+        // must carry its own diagnosis. Service/PostgREST message, no PII.
+        error: err instanceof Error ? err.message : String(err),
         runbook: 'docs/runbooks/pending-cancellation.md',
       })
       Sentry.captureMessage(
