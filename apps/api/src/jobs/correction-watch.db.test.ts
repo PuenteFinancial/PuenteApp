@@ -31,6 +31,10 @@ const DB_URL = process.env.TEST_DB_URL ?? 'postgresql://postgres:postgres@127.0.
 
 describe.skipIf(!runDb)('correction-watch (integration, local Supabase)', () => {
   let db: Client
+  // This run's out-of-window transaction — test 2 asserts on THIS id, not on
+  // all-time DB state (review fix: a bare older-than-cutoff count passed on
+  // leftovers from earlier runs even when this run seeded nothing).
+  let oldTxId: string
 
   beforeAll(async () => {
     db = new Client({ connectionString: DB_URL })
@@ -75,13 +79,14 @@ describe.skipIf(!runDb)('correction-watch (integration, local Supabase)', () => 
          values ($1, 'correction-watch db test — out-of-window') returning id`,
         [`corr-watch-test-old-${crypto.randomUUID()}`],
       )
+      oldTxId = tx.rows[0].id
       await db.query(
         `insert into public.ledger_entries (ledger_transaction_id, account_id, direction, amount_minor, currency, created_at)
          select $1, a.id, v.direction, v.amount_minor, 'USD', now() - ($2 || ' days')::interval
            from (values ('debit', 7777, 'loss_cancellation_correction'),
                         ('credit', 7777, 'cash_clearing')) as v(direction, amount_minor, code)
            join public.ledger_accounts a on a.code = v.code`,
-        [tx.rows[0].id, String(oldDays)],
+        [oldTxId, String(oldDays)],
       )
       await db.query('commit')
     } catch (err) {
@@ -94,8 +99,11 @@ describe.skipIf(!runDb)('correction-watch (integration, local Supabase)', () => 
 
     const count = await watchLossCorrections()
 
-    // The independently-written aggregate over the SAME window — the job's
-    // number must agree with the database's.
+    // An independently-written aggregate over the same window (approximately —
+    // the SQL's now() runs moments after the job's Date.now(), and interval
+    // arithmetic vs epoch math could differ near a boundary; our rows sit 0
+    // and 8 days from it, nowhere close). The job's number must agree with
+    // the database's.
     const sql = await db.query(
       `select coalesce(sum(case when e.direction = 'debit' then e.amount_minor else -e.amount_minor end), 0)::bigint as total,
               count(*)::int as n
@@ -118,20 +126,23 @@ describe.skipIf(!runDb)('correction-watch (integration, local Supabase)', () => 
       'Reg E correction losses at/above aggregate threshold',
       'warning',
     )
-    const context = setContext.mock.calls.at(-1)![1] as { totalMinor: number; correctionCount: number }
+    const context = setContext.mock.calls.at(-1)![1] as { totalMinor: number; entryCount: number }
     expect(context.totalMinor).toBe(expectedTotal)
-    expect(context.correctionCount).toBe(sql.rows[0].n)
+    expect(context.entryCount).toBe(sql.rows[0].n)
   })
 
-  it('the out-of-window seed is really older than the cutoff (the exclusion is not vacuous)', async () => {
+  it('THIS run’s out-of-window seed is really older than the cutoff (the exclusion is not vacuous)', async () => {
+    // Scoped to the transaction test 1 inserted — an all-time count passed on
+    // prior runs' leftovers even when this run's seed failed to land.
     const res = await db.query(
       `select count(*)::int as n
          from public.ledger_entries e
          join public.ledger_accounts a on a.id = e.account_id
-        where a.code = 'loss_cancellation_correction'
-          and e.created_at < now() - ($1 || ' days')::interval`,
-      [String(env.LOSS_CORRECTION_WINDOW_DAYS)],
+        where e.ledger_transaction_id = $1
+          and a.code = 'loss_cancellation_correction'
+          and e.created_at < now() - ($2 || ' days')::interval`,
+      [oldTxId, String(env.LOSS_CORRECTION_WINDOW_DAYS)],
     )
-    expect(res.rows[0].n).toBeGreaterThanOrEqual(1)
+    expect(res.rows[0].n).toBe(1)
   })
 })

@@ -315,19 +315,24 @@ export async function usersRoute(server: FastifyInstance) {
         )
         return { url }
       } catch (err) {
+        // Refund the consumed retry on ANY throw, not just BridgeApiError
+        // (debt-pass review fix): with Bridge calls bounded, a TimeoutError is
+        // the COMMON failure mode, and the old BridgeApiError-only guard
+        // silently ate one of the user's lifetime retries on every timeout —
+        // no refund, no log, straight to "Retry limit reached" for a user who
+        // never failed KYC. Best-effort; a crash here costs one retry,
+        // recoverable by an admin resetting the column.
+        const { error: refundError } = await supabaseAdmin
+          .from('users')
+          .update({ kyc_retry_count: user.kyc_retry_count })
+          .eq('id', userId)
+          .eq('kyc_retry_count', user.kyc_retry_count + 1)
+
+        if (refundError) {
+          server.log.warn({ userId, supabaseError: refundError.code }, 'kyc retry refund failed')
+        }
+
         if (err instanceof BridgeApiError) {
-          // Refund the consumed retry — best-effort; a crash here costs one
-          // retry, recoverable by an admin resetting the column.
-          const { error: refundError } = await supabaseAdmin
-            .from('users')
-            .update({ kyc_retry_count: user.kyc_retry_count })
-            .eq('id', userId)
-            .eq('kyc_retry_count', user.kyc_retry_count + 1)
-
-          if (refundError) {
-            server.log.warn({ userId, supabaseError: refundError.code }, 'kyc retry refund failed')
-          }
-
           const bridgeCode = (err.body as { code?: string } | null)?.code
           server.log.error({ userId, bridgeStatus: err.status, bridgeCode }, 'bridge request failed')
           return sendError(reply, 502, 'provider_unavailable', 'Identity verification is unavailable, try again shortly')

@@ -71,9 +71,13 @@ const REFUNDABLE_COLUMNS =
 // is merely slow. That basis is gone (decisions.md 2026-07-29): every Bridge
 // call is bounded by BRIDGE_TIMEOUT_SECONDS (~15s), the processor leg is pure
 // today (mock), and the FundingProcessor seam requires future adapters to
-// bound their own calls — so nothing legitimately alive holds a claim for
-// minutes, and a long window only delays the page on a run that genuinely
-// crashed, where the sender MAY ALREADY HAVE BEEN PAID. Page sooner.
+// bound their own calls. The one leg still unbounded inside the claimed
+// section is the PostgREST ref-persist (supabase-js over undici, ~300s
+// default): worst case ≈ a future processor bound (Stripe SDK default 80s)
+// + ~300s ≈ 6.3 min — inside 10 on headroom, not absence. So nothing
+// legitimately alive holds a claim for the full window, and a long window
+// only delays the page on a run that genuinely crashed, where the sender MAY
+// ALREADY HAVE BEEN PAID. Page sooner.
 //
 // The asymmetry that REMAINS vs the submit claim is what stale MEANS: a stale
 // submit claim self-heals by idempotent re-POST; an abandoned refund claim

@@ -41,7 +41,8 @@ function mockQueries(
   const accountEq = vi.fn().mockReturnValue({ single })
   const accountSelect = vi.fn().mockReturnValue({ eq: accountEq })
 
-  const gte = vi.fn().mockResolvedValue(entriesResult)
+  const limit = vi.fn().mockResolvedValue(entriesResult)
+  const gte = vi.fn().mockReturnValue({ limit })
   const entriesEq = vi.fn().mockReturnValue({ gte })
   const entriesSelect = vi.fn().mockReturnValue({ eq: entriesEq })
 
@@ -50,12 +51,14 @@ function mockQueries(
     if (table === 'ledger_entries') return { select: entriesSelect }
     throw new Error(`unexpected supabase.from('${table}')`)
   })
-  return { accountSelect, accountEq, single, entriesSelect, entriesEq, gte }
+  return { accountSelect, accountEq, single, entriesSelect, entriesEq, gte, limit }
 }
 
 const account = { data: { id: ACCOUNT_ID }, error: null }
 const debit = (amount_minor: number) => ({ amount_minor, direction: 'debit' as const })
 const credit = (amount_minor: number) => ({ amount_minor, direction: 'credit' as const })
+
+let warnSpy: ReturnType<typeof vi.spyOn>
 
 beforeEach(() => {
   from.mockReset()
@@ -64,18 +67,24 @@ beforeEach(() => {
   setContext.mockReset()
   envMock.LOSS_CORRECTION_ALERT_MINOR = 20_000
   envMock.LOSS_CORRECTION_WINDOW_DAYS = 7
+  // The trip branch console.warns (local evidence for a Sentry outage) —
+  // silenced here, asserted in its dedicated test.
+  warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(new Date('2026-07-29T12:00:00.000Z'))
 })
 
-afterEach(() => vi.useRealTimers())
+afterEach(() => {
+  warnSpy.mockRestore()
+  vi.useRealTimers()
+})
 
 describe('watchLossCorrections', () => {
   it('looks the account up by code and windows the entries select on the cutoff', async () => {
-    const { accountSelect, accountEq, entriesSelect, entriesEq, gte } = mockQueries(account, {
-      data: [],
-      error: null,
-    })
+    const { accountSelect, accountEq, entriesSelect, entriesEq, gte, limit } = mockQueries(
+      account,
+      { data: [], error: null },
+    )
 
     const count = await watchLossCorrections()
 
@@ -86,6 +95,8 @@ describe('watchLossCorrections', () => {
     expect(entriesEq).toHaveBeenCalledWith('account_id', ACCOUNT_ID)
     // 7 rolling days before the frozen clock — the exact string, not a matcher.
     expect(gte).toHaveBeenCalledWith('created_at', '2026-07-22T12:00:00.000Z')
+    // One past max_rows, so truncation is detectable rather than silent.
+    expect(limit).toHaveBeenCalledWith(1001)
   })
 
   it('an empty window alerts nothing and returns 0', async () => {
@@ -145,12 +156,36 @@ describe('watchLossCorrections', () => {
       windowDays: 7,
       totalMinor: 40_000,
       thresholdMinor: 20_000,
-      correctionCount: 3,
+      entryCount: 3,
       runbook: 'docs/runbooks/pending-cancellation.md',
     })
     expect(captureMessage).toHaveBeenCalledWith(
       'Reg E correction losses at/above aggregate threshold',
       'warning',
+    )
+  })
+
+  // The one read that could fail OPEN: PostgREST caps responses at max_rows
+  // (1000) with no error and no signal — row 1001+ would silently vanish from
+  // the sum exactly when exposure is highest. The job reads limit(1001) and
+  // throws on overflow instead.
+  it('throws when the window exceeds the 1000-row read bound rather than under-summing', async () => {
+    const flood = Array.from({ length: 1001 }, () => debit(1_000))
+    mockQueries(account, { data: flood, error: null })
+
+    await expect(watchLossCorrections()).rejects.toThrow(/1000-row read bound/)
+    expect(captureMessage).not.toHaveBeenCalled()
+  })
+
+  it('leaves local evidence on a trip — the console.warn beside the capture', async () => {
+    mockQueries(account, { data: [debit(20_000)], error: null })
+
+    await watchLossCorrections()
+
+    // A Sentry outage drops captureMessage silently; worker stdout is the
+    // fallback record of the trip.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('loss-correction-threshold tripped'),
     )
   })
 

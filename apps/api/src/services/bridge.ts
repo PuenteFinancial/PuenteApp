@@ -33,7 +33,9 @@ async function bridgeFetch(path: string, init: RequestInit = {}): Promise<unknow
     // caller branches on either class (routes map it to 502/503, jobs rethrow
     // into pg-boss retry) — so the only behavior change is failing in
     // BRIDGE_TIMEOUT_SECONDS instead of undici's ~300s defaults. Placed after
-    // the spread so the bound is unconditional.
+    // the spread so the bound is unconditional — a caller-supplied init.signal
+    // would be CLOBBERED, deliberately (none exists; every call site lives in
+    // this file). If one ever appears, compose with AbortSignal.any instead.
     signal: AbortSignal.timeout(env.BRIDGE_TIMEOUT_SECONDS * 1000),
     headers: {
       'Api-Key': env.BRIDGE_API_KEY,

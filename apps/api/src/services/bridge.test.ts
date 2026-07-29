@@ -447,13 +447,19 @@ describe('bridgeFetch timeout + failure propagation', () => {
 
   // The spy calls through, so the instance assertions above stay honest; the
   // test env leaves BRIDGE_TIMEOUT_SECONDS unset, so this pins the zod default.
-  it('derives the deadline from BRIDGE_TIMEOUT_SECONDS (default 15s)', async () => {
+  it('derives the deadline from BRIDGE_TIMEOUT_SECONDS (default 15s) — and attaches THAT signal', async () => {
     const spy = vi.spyOn(AbortSignal, 'timeout')
     fetchMock.mockResolvedValue(jsonResponse(200, { id: 't1', state: 'payment_submitted', source: { amount: '1' } }))
 
     await getBridgeTransfer('t1')
 
     expect(spy).toHaveBeenCalledWith(15_000)
+    // Identity, not just instance (review fix): a refactor could attach a
+    // DIFFERENT signal while an AbortSignal.timeout call still exists
+    // somewhere — instance checks stay green and every call silently reverts
+    // to undici's ~300s, invalidating CLAIM_STALE_AFTER_MS's derivation.
+    const [, init] = fetchMock.mock.calls[0]!
+    expect(init.signal).toBe(spy.mock.results[0]!.value)
     spy.mockRestore()
   })
 

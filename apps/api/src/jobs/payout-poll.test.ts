@@ -197,6 +197,13 @@ describe('pollPayouts', () => {
     expect(getBridgeTransfer).not.toHaveBeenCalled()
   })
 
+  it('AUTO_REFUND on: throws on a refund-pending select ERROR, touching nothing', async () => {
+    envMock.AUTO_REFUND = true
+    selectHeal([], { data: null, error: { message: 'db down' } })
+    await expect(pollPayouts()).rejects.toThrow(/payout-poll refund-pending select failed: db down/)
+    expect(getBridgeTransfer).not.toHaveBeenCalled()
+  })
+
   it('one transfer failing to poll does not sink the sweep; it throws after all', async () => {
     selectResult({
       data: [

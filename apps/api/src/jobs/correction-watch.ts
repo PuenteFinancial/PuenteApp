@@ -41,9 +41,20 @@ export async function watchLossCorrections(): Promise<number> {
     .select('amount_minor, direction')
     .eq('account_id', (account as { id: string }).id)
     .gte('created_at', cutoff)
+    // One past PostgREST's max_rows (1000, supabase/config.toml) so truncation
+    // is DETECTABLE: without this, row 1001+ silently vanishes from the sum
+    // and the guard goes quiet exactly when exposure is highest — the one
+    // fail-open read in an otherwise fail-closed job (review fix). At >1000
+    // corrections/window this job needs a SQL-side windowed sum instead.
+    .limit(1001)
   if (error || data == null) {
     throw new Error(
       `correction-watch entries query failed: ${error?.message ?? 'no rows returned'}`,
+    )
+  }
+  if (data.length > 1000) {
+    throw new Error(
+      'correction-watch: entries window exceeds the 1000-row read bound — sum would silently truncate; move the windowed sum into SQL',
     )
   }
 
@@ -58,6 +69,12 @@ export async function watchLossCorrections(): Promise<number> {
   }
 
   if (totalMinor >= env.LOSS_CORRECTION_ALERT_MINOR) {
+    // Local evidence too (review fix): the capture is fire-and-forget, so a
+    // Sentry outage would otherwise leave zero trace of the trip anywhere.
+    // Worker stdout is Railway's log stream and this line carries no PII.
+    console.warn(
+      `worker: loss-correction-threshold tripped — ${totalMinor} minor over ${env.LOSS_CORRECTION_WINDOW_DAYS}d (threshold ${env.LOSS_CORRECTION_ALERT_MINOR})`,
+    )
     Sentry.withScope((scope) => {
       // GLOBAL fingerprint (float-ceiling model): the condition is systemic,
       // and the hourly re-fire while over threshold collapses into ONE Sentry
@@ -68,7 +85,9 @@ export async function watchLossCorrections(): Promise<number> {
         windowDays: env.LOSS_CORRECTION_WINDOW_DAYS,
         totalMinor,
         thresholdMinor: env.LOSS_CORRECTION_ALERT_MINOR,
-        correctionCount: entries.length,
+        // entry count, not "corrections": a correction and its reversal credit
+        // are two entries — ops gets the real list from cancellation_requests.
+        entryCount: entries.length,
         runbook: 'docs/runbooks/pending-cancellation.md',
       })
       Sentry.captureMessage('Reg E correction losses at/above aggregate threshold', 'warning')

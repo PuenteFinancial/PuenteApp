@@ -129,8 +129,9 @@ const envSchema = z.object({
   // page when the rolling-window signed sum of loss_cancellation_correction
   // reaches this. HARD defaults (RISK_* style, not FLOAT_CEILING's
   // required-at-use) so the tripwire stays armed even when unset. $200 ≈ one
-  // max-size correction at launch limits — fires around the second one.
-  LOSS_CORRECTION_ALERT_MINOR: z.coerce.number().int().min(0).default(20_000), // $200 / window
+  // max-size correction at launch limits — fires around the second one. Floor
+  // of 1: at 0 the >= comparison pages every hour on an EMPTY window (0 >= 0).
+  LOSS_CORRECTION_ALERT_MINOR: z.coerce.number().int().min(1).default(20_000), // $200 / window
   // Rolling window for that sum. The cap keeps a fat-fingered value from
   // turning the hourly select into an unbounded scan as entries accumulate.
   LOSS_CORRECTION_WINDOW_DAYS: z.coerce.number().int().min(1).max(90).default(7),
