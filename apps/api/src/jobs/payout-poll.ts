@@ -26,9 +26,15 @@ export async function pollPayouts(): Promise<number> {
     .from('transfers')
     .select('id, provider_transfer_ref, submit_attempted_at')
     .in('state', ['SUBMITTED', 'IN_FLIGHT'])
-  if (error) throw new Error(`payout-poll select failed: ${error.message}`)
+  // Fail CLOSED on null-without-error too (slice-7 debt pass): coalescing it
+  // to [] read as "nothing in flight" and quietly skipped the whole tick —
+  // the next cron would heal it, but a broken read must never impersonate an
+  // empty backlog on the path that reconciles money in flight.
+  if (error || data == null) {
+    throw new Error(`payout-poll select failed: ${error?.message ?? 'no rows returned'}`)
+  }
 
-  const rows = (data ?? []) as InFlightRow[]
+  const rows = data as InFlightRow[]
 
   // slice-6 PR2 self-heal: when AUTO_REFUND is on, also re-poll PAYOUT_FAILED
   // transfers whose refund hasn't landed (provider_transfer_ref set but
@@ -53,8 +59,12 @@ export async function pollPayouts(): Promise<number> {
       .eq('state', 'PAYOUT_FAILED')
       .not('provider_transfer_ref', 'is', null)
       .is('refund_payment_ref', null)
-    if (refundError) throw new Error(`payout-poll refund-pending select failed: ${refundError.message}`)
-    rows.push(...((refundPending ?? []) as InFlightRow[]))
+    if (refundError || refundPending == null) {
+      throw new Error(
+        `payout-poll refund-pending select failed: ${refundError?.message ?? 'no rows returned'}`,
+      )
+    }
+    rows.push(...(refundPending as InFlightRow[]))
   }
   let synthesized = 0
   const failures: string[] = []

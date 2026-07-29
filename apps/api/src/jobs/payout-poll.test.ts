@@ -42,9 +42,12 @@ function selectResult(result: { data: unknown; error: unknown }) {
 }
 
 // AUTO_REFUND-on: first from() is the in-flight .in() query, second is the
-// refund-pending .eq().not().is() self-heal query.
-function selectHeal(inFlight: unknown[], refundPending: unknown[]) {
-  const isFn = vi.fn().mockResolvedValue({ data: refundPending, error: null })
+// refund-pending .eq().not().is() self-heal query. The second accepts a raw
+// result so the fail-closed branches (error / null-without-error) are testable.
+function selectHeal(inFlight: unknown[], refundPending: unknown[] | { data: unknown; error: unknown }) {
+  const isFn = vi.fn().mockResolvedValue(
+    Array.isArray(refundPending) ? { data: refundPending, error: null } : refundPending,
+  )
   from
     .mockReturnValueOnce({
       select: vi.fn().mockReturnValue({
@@ -168,6 +171,30 @@ describe('pollPayouts', () => {
     recordEvent.mockResolvedValue({ id: 'ev-9', inserted: false })
     expect(await pollPayouts()).toBe(0)
     expect(enqueueEvent).not.toHaveBeenCalled()
+  })
+
+  // Fail CLOSED (slice-7 debt pass): a broken read must never impersonate an
+  // empty in-flight backlog — before this, null-without-error coalesced to []
+  // and the whole tick silently no-opped.
+  it('throws on an in-flight select error, touching nothing', async () => {
+    selectResult({ data: null, error: { message: 'db down' } })
+    await expect(pollPayouts()).rejects.toThrow(/payout-poll select failed: db down/)
+    expect(getBridgeTransfer).not.toHaveBeenCalled()
+  })
+
+  it('throws on an in-flight null-without-error result, touching nothing', async () => {
+    selectResult({ data: null, error: null })
+    await expect(pollPayouts()).rejects.toThrow(/payout-poll select failed: no rows returned/)
+    expect(getBridgeTransfer).not.toHaveBeenCalled()
+  })
+
+  it('AUTO_REFUND on: throws on a refund-pending null-without-error result, touching nothing', async () => {
+    envMock.AUTO_REFUND = true
+    selectHeal([], { data: null, error: null })
+    await expect(pollPayouts()).rejects.toThrow(
+      /payout-poll refund-pending select failed: no rows returned/,
+    )
+    expect(getBridgeTransfer).not.toHaveBeenCalled()
   })
 
   it('one transfer failing to poll does not sink the sweep; it throws after all', async () => {
