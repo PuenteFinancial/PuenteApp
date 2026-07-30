@@ -14,17 +14,23 @@ test('renders the Reg E receipt for a delivered transfer', async ({ context, pag
   await signIn(context)
   await page.goto('/dashboard/send/transfer-e2e-completed/receipt')
 
-  // Neutral chrome — the title and the completed-on line …
+  // Neutral chrome — the page title … (the chrome completed-on line is gone in
+  // v2: the server-authored date-available line owns the date)
   await expect(
     page.getByRole('heading', { name: /transfer receipt|recibo de transferencia/i }),
   ).toBeVisible()
-  await expect(page.getByText(/completed on|completado el/i)).toBeVisible()
 
   // … over the server-authored content, rendered verbatim (amount line, the MXN
   // received, and the Reg E contact address).
   await expect(page.getByText(/total to pay|total a pagar/i)).toBeVisible()
   await expect(page.getByText(/1,689\.52 MXN/)).toBeVisible()
   await expect(page.getByText('support@puentefinancial.com')).toBeVisible()
+
+  // Content v2 (PR7): the receipt announces itself and carries the
+  // §1005.31(b)(2)(ii)/(iii) lines, rendered from the server verbatim.
+  await expect(page.getByRole('heading', { name: /^(receipt|recibo)$/i })).toBeVisible()
+  await expect(page.getByText(/recipient: |destinatario: /i)).toBeVisible()
+  await expect(page.getByText(/date available: |fecha de disponibilidad: /i)).toBeVisible()
 
   await expect(
     page.getByRole('link', { name: /view all transfers|ver todas las transferencias/i }),

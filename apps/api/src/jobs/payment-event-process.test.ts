@@ -114,6 +114,8 @@ const transfer = (state: string, over: Record<string, unknown> = {}) => ({
     // PR3 receipt fields
     receive_amount_minor: 396014,
     fx_rate: 19.9997,
+    // PR7 receipt fields (§1005.31(b)(2)(iii) recipient join)
+    payout_destination_id: 'pd-1',
     ...over,
   },
   error: null,
@@ -123,11 +125,22 @@ const stateRow = (state: string) => ({ data: { state }, error: null })
 // row re-read and the ref persist, so any drive that DISBURSES queues it.
 const claimWon = { data: [{ id: 'tr-1' }], error: null }
 
-// Queue writeReceipt's tail for a COMPLETED drive: its currentState re-read
-// (transfers), the user locale load (users), and the receipt upsert (disclosures).
+// Queue writeReceipt's tail for a COMPLETED drive: its guard read (transfers —
+// state + the write-once completed_at, the PR7 date source), the user locale
+// load (users), the recipient join (payout_destinations), and the receipt
+// upsert (disclosures).
+const DELIVERED_AT = '2026-07-29T18:00:00.000Z'
+const completedRow = (state = 'COMPLETED') => ({
+  data: { state, completed_at: state === 'COMPLETED' ? DELIVERED_AT : null },
+  error: null,
+})
 function queueReceipt(finalState = 'COMPLETED', preferredLanguage = 'es') {
-  q('transfers', stateRow(finalState))
+  q('transfers', completedRow(finalState))
   q('users', { data: { preferred_language: preferredLanguage }, error: null })
+  q('payout_destinations', {
+    data: { recipients: { first_name: 'María', last_name: 'Hernández García' } },
+    error: null,
+  })
   q('disclosures', { data: null, error: null })
 }
 
@@ -881,11 +894,68 @@ describe('processPaymentEvent — receipt (PR3)', () => {
     const [payload, opts] = upsertCalls[0] as [Record<string, unknown>, Record<string, unknown>]
     expect(payload).toMatchObject({ transfer_id: 'tr-1', type: 'receipt', locale: 'en' })
     // content built from the immutable snapshot terms (real buildReceiptDisclosure)
-    const content = payload['content'] as { amounts: Record<string, unknown> }
+    const content = payload['content'] as {
+      amounts: Record<string, unknown>
+      en: Record<string, unknown>
+      es: Record<string, unknown>
+    }
     expect(content.amounts).toMatchObject({ totalMinor: 20000, receiveMinor: 396014, fxRate: '19.9997' })
+    // PR7: the receipt identifies itself (§1005.31(b)(2)) and carries the
+    // recipient + the delivery date sourced from the COMPLETED transition —
+    // both languages (parity).
+    expect(content.en).toMatchObject({
+      title: 'Receipt',
+      recipientLine: 'Recipient: María Hernández García',
+      dateAvailableLine: 'Date available: July 29, 2026',
+    })
+    expect(content.es).toMatchObject({
+      title: 'Recibo',
+      recipientLine: 'Destinatario: María Hernández García',
+      dateAvailableLine: 'Fecha de disponibilidad: 29 de julio de 2026',
+    })
     // idempotent — one receipt per transfer
     expect(opts).toMatchObject({ onConflict: 'transfer_id,type', ignoreDuplicates: true })
     expect(markProcessed).toHaveBeenCalledWith('ev-1')
+
+    // Query contracts (the harness idiom, comment at `filters`): the date on
+    // the receipt comes from the transfer row's write-once completed_at — a
+    // regression to the transitions table (whose round-trip duplicate row
+    // falsifies the date) must fail here, as must a dropped id filter.
+    expect(
+      filters.some(
+        (f) => f.table === 'transfers' && f.method === 'select' && f.args[0] === 'state, completed_at',
+      ),
+    ).toBe(true)
+    expect(filters.some((f) => f.table === 'transfer_transitions')).toBe(false)
+    const destFilters = filters.filter((f) => f.table === 'payout_destinations' && f.method === 'eq')
+    expect(destFilters).toEqual([expect.objectContaining({ args: ['id', 'pd-1'] })])
+  })
+
+  it('COMPLETED without completed_at rethrows — no receipt with a fabricated date', async () => {
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    // The guard read reports COMPLETED but the write-once column is missing —
+    // a read anomaly; the throw happens before the locale/recipient loads.
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'), {
+      data: { state: 'COMPLETED', completed_at: null },
+      error: null,
+    })
+    transition.mockResolvedValue({})
+
+    await expect(processPaymentEvent('ev-1')).rejects.toThrow('COMPLETED without completed_at')
+    expect(upsertCalls).toHaveLength(0)
+    expect(markProcessed).not.toHaveBeenCalled() // event stays received; retry self-heals
+  })
+
+  it('a missing recipient rethrows — the receipt must name the recipient (b)(2)(iii)', async () => {
+    q('payment_events', event({ event_type: 'payment_processed' }))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'), completedRow())
+    q('users', { data: { preferred_language: 'es' }, error: null })
+    q('payout_destinations', { data: { recipients: null }, error: null })
+    transition.mockResolvedValue({})
+
+    await expect(processPaymentEvent('ev-1')).rejects.toThrow('no recipient found')
+    expect(upsertCalls).toHaveLength(0)
+    expect(markProcessed).not.toHaveBeenCalled()
   })
 
   it('never writes a receipt when a concurrent fail moved the row off the forward path', async () => {
@@ -910,8 +980,12 @@ describe('processPaymentEvent — receipt (PR3)', () => {
 
   it('a receipt upsert failure rethrows and leaves the event received (self-heals on retry)', async () => {
     q('payment_events', event({ event_type: 'payment_processed' }))
-    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('COMPLETED'))
+    q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'), completedRow())
     q('users', { data: { preferred_language: 'es' }, error: null })
+    q('payout_destinations', {
+      data: { recipients: { first_name: 'María', last_name: 'Hernández García' } },
+      error: null,
+    })
     q('disclosures', { data: null, error: { message: 'disclosures db down' } })
     transition.mockResolvedValue({})
 

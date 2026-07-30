@@ -77,9 +77,11 @@ test('cancel requires two taps, then refunds', async ({ context, page }) => {
   await expect(page.getByRole('button', { name: /tap again|toca de nuevo/i })).toBeVisible()
   await expect(page.getByText(/refunded|reembolsada/i)).toHaveCount(0)
 
-  // Second tap commits.
+  // Second tap commits. (PR7 copy: the refund is "issued", not "back".) The
+  // phrase is REFUNDED-specific — the canceled body reads differently — so the
+  // spec still discriminates which terminal state the cancel lands in.
   await page.getByRole('button', { name: /tap again|toca de nuevo/i }).click()
-  await expect(page.getByText(/refunded in full|reembolsó el monto total/i)).toBeVisible()
+  await expect(page.getByText(/full refund for this transfer|reembolso completo por esta transferencia/i)).toBeVisible()
 
   // Terminal: the cancel affordance is gone.
   await expect(page.getByRole('button', { name: /cancel transfer|cancelar transferencia/i })).toHaveCount(0)
