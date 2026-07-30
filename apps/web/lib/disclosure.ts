@@ -11,6 +11,10 @@ export interface RenderedDisclosure {
   errorResolutionRights: string
   wrongAccountWarning: string
   contact: string
+  // Receipt-only additions (disclosure content v2, slice-7 PR7). Optional so
+  // v1 rows and prepayment disclosures keep validating.
+  recipientLine?: string
+  dateAvailableLine?: string
 }
 
 export type DisclosureContent = { en: RenderedDisclosure; es: RenderedDisclosure }
@@ -32,7 +36,9 @@ export function isRenderedDisclosure(v: unknown): v is RenderedDisclosure {
     typeof d.cancellationRights === 'string' &&
     typeof d.errorResolutionRights === 'string' &&
     typeof d.wrongAccountWarning === 'string' &&
-    typeof d.contact === 'string'
+    typeof d.contact === 'string' &&
+    (d.recipientLine === undefined || typeof d.recipientLine === 'string') &&
+    (d.dateAvailableLine === undefined || typeof d.dateAvailableLine === 'string')
   )
 }
 

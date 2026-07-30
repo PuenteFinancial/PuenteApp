@@ -32,6 +32,17 @@ export default function DisclosureBody({ d }: { d: RenderedDisclosure }) {
         <li style={{ fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--ink)', marginTop: 4 }}>
           {d.fxRateLine}
         </li>
+        {/* Receipt-only facts (content v2): §1005.31(b)(2)(iii) recipient, (b)(2)(ii) date available. */}
+        {d.recipientLine && (
+          <li style={{ fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--ink)', marginTop: 4 }}>
+            {d.recipientLine}
+          </li>
+        )}
+        {d.dateAvailableLine && (
+          <li style={{ fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--ink)' }}>
+            {d.dateAvailableLine}
+          </li>
+        )}
       </ul>
 
       {[d.cancellationRights, d.errorResolutionRights, d.wrongAccountWarning].map((para, i) => (

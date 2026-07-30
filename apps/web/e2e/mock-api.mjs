@@ -94,32 +94,50 @@ function transferBody(id, state = stateOf(id)) {
   }
 }
 
-// The Reg E disclosure/receipt content block — identical in shape to the API's
-// buildPrepaymentDisclosure output, which buildReceiptDisclosure delegates to.
-// Shared by the prepayment-disclosure AND receipt routes so the mock mirrors the
-// API's "receipt content == disclosure content" reality (isReceiptContent on the
-// web requires both en + es, so both must be present).
+// The Reg E disclosure content block — identical in shape to the API's
+// buildPrepaymentDisclosure output (content v2, slice-7 PR7). The receipt
+// route serves RECEIPT_CONTENT below, mirroring the API's v2 reality where the
+// receipt adds its own title + the (b)(2)(ii)/(iii) lines on top of this
+// (isReceiptContent on the web requires both en + es, so both are present).
 const DISCLOSURE_CONTENT = {
-  version: 1,
+  version: 2,
   amounts: { sendMinor: 9800, feeMinor: 200, totalMinor: 10000, sendCurrency: 'USD', receiveMinor: 168952, receiveCurrency: 'MXN', fxRate: '17.2400' },
   cancelWindowMinutes: 30,
   en: {
     title: 'Prepayment disclosure',
     amountLines: ['Transfer amount: $98.00', 'Transfer fee: $2.00', 'Total to pay: $100.00', 'Amount to be received: 1,689.52 MXN'],
     fxRateLine: 'Exchange rate: 1 USD = 17.2400 MXN',
-    cancellationRights: 'You have the right to cancel this transfer and receive a full refund for 30 minutes after you pay, unless the funds have already been submitted for payout.',
-    errorResolutionRights: 'You have the right to dispute errors in this transfer. Contact us within 180 days of the promised delivery date.',
+    cancellationRights: "You have the right to cancel this transfer and receive a full refund for 30 minutes after you pay, unless the funds have already been picked up by your recipient or deposited into your recipient's account.",
+    errorResolutionRights: 'You have the right to dispute errors in this transfer. Contact us within 180 days of the date we promised the funds would be available to your recipient.',
     wrongAccountWarning: 'Make sure the recipient account number (CLABE) is correct. An incorrect account number may mean you lose the transfer amount.',
-    contact: 'Puente Financial — support@puentefinancial.com',
+    contact: 'Puente Financial · support@puentefinancial.com · puentefinancial.com',
   },
   es: {
     title: 'Divulgación previa al pago',
     amountLines: ['Monto de la transferencia: $98.00 USD', 'Comisión por transferencia: $2.00 USD', 'Total a pagar: $100.00 USD', 'Monto a recibir: 1,689.52 MXN'],
     fxRateLine: 'Tipo de cambio: 1 USD = 17.2400 MXN',
-    cancellationRights: 'Tiene derecho a cancelar esta transferencia y recibir un reembolso completo durante los 30 minutos posteriores al pago, salvo que los fondos ya hayan sido enviados para su entrega.',
-    errorResolutionRights: 'Tiene derecho a disputar errores en esta transferencia. Contáctenos dentro de los 180 días posteriores a la fecha de entrega prometida.',
+    cancellationRights: 'Tiene derecho a cancelar esta transferencia y recibir un reembolso completo durante los 30 minutos posteriores al pago, salvo que los fondos ya hayan sido retirados por el destinatario o depositados en la cuenta del destinatario.',
+    errorResolutionRights: 'Tiene derecho a disputar errores en esta transferencia. Contáctenos dentro de los 180 días posteriores a la fecha en que prometimos que los fondos estarían disponibles para su destinatario.',
     wrongAccountWarning: 'Verifique que el número de cuenta del destinatario (CLABE) sea correcto. Un número incorrecto puede significar la pérdida del monto transferido.',
-    contact: 'Puente Financial — support@puentefinancial.com',
+    contact: 'Puente Financial · support@puentefinancial.com · puentefinancial.com',
+  },
+}
+
+// Receipt content v2 = the prepayment block plus the §1005.31(b)(2) receipt
+// items the API's buildReceiptDisclosure now adds.
+const RECEIPT_CONTENT = {
+  ...DISCLOSURE_CONTENT,
+  en: {
+    ...DISCLOSURE_CONTENT.en,
+    title: 'Receipt',
+    recipientLine: 'Recipient: María Hernández García',
+    dateAvailableLine: 'Date available: July 24, 2026',
+  },
+  es: {
+    ...DISCLOSURE_CONTENT.es,
+    title: 'Recibo',
+    recipientLine: 'Destinatario: María Hernández García',
+    dateAvailableLine: 'Fecha de disponibilidad: 24 de julio de 2026',
   },
 }
 
@@ -302,8 +320,8 @@ const server = createServer(async (req, res) => {
   }
 
   // Reg E receipt — 404 until the transfer is COMPLETED (the receipt row is
-  // written on delivery), exactly like the real API. Same content shape as the
-  // disclosure (buildReceiptDisclosure delegates to buildPrepaymentDisclosure).
+  // written on delivery), exactly like the real API. Content v2: the receipt's
+  // own rendering (Receipt title + recipient + date-available lines).
   if (method === 'GET' && /^\/v1\/transfers\/[^/]+\/receipt$/.test(pathname)) {
     const id = pathname.split('/')[3]
     // Simulates the COMPLETED-but-receipt-not-yet-written race for the error spec.
@@ -319,7 +337,7 @@ const server = createServer(async (req, res) => {
       type: 'receipt',
       locale: 'es',
       presentedAt: new Date().toISOString(),
-      content: DISCLOSURE_CONTENT,
+      content: RECEIPT_CONTENT,
     })
   }
 

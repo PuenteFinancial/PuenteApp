@@ -44,6 +44,9 @@ interface TransferRow {
   fee_amount_minor: number
   receive_amount_minor: number
   fx_rate: number
+  // slice-7 PR7 receipt: §1005.31(b)(2)(iii) wants the recipient's name on the
+  // receipt; the destination row is the join path to it.
+  payout_destination_id: string
 }
 
 // States a fail event can legally advance from. COMPLETED is absent on
@@ -298,7 +301,7 @@ async function resolveTransfer(event: EventRow): Promise<TransferRow | null> {
       .from('transfers')
       .select(
         'id, user_id, state, send_amount_minor, fee_amount_minor, ' +
-          'receive_amount_minor, fx_rate',
+          'receive_amount_minor, fx_rate, payout_destination_id',
       )
       .eq(column, value)
       .maybeSingle()
@@ -514,8 +517,28 @@ async function routeCancellationOnDelivery(transfer: TransferRow): Promise<void>
 // live state — a concurrent fail could move the row off COMPLETED between drive's
 // catch-up steps, and a receipt must exist only for a delivered transfer.
 async function writeReceipt(transfer: TransferRow): Promise<void> {
-  const current = await currentState(transfer.id)
-  if (current !== 'COMPLETED') return
+  // One read serves the COMPLETED guard AND the §1005.31(b)(2)(ii) date:
+  // transfers.completed_at is write-once at the FIRST completion (migration
+  // 20260728205647), so it survives the PR6b review round trip (COMPLETED →
+  // UNDER_REVIEW → lawful denial → COMPLETED), which appends a SECOND
+  // COMPLETED transition at the denial moment. Reading the latest transition
+  // here would stamp the denial date on a retried receipt — the exact
+  // falsification the write-once guard closed on the write side. Never now():
+  // a crash-retry hours later must stamp the same delivery date.
+  const { data: live, error: liveError } = await supabaseAdmin
+    .from('transfers')
+    .select('state, completed_at')
+    .eq('id', transfer.id)
+    .maybeSingle()
+  if (liveError)
+    throw new Error(`payment-event receipt state read failed: ${liveError.message}`)
+  const row = live as { state: string; completed_at: string | null } | null
+  if (row?.state !== 'COMPLETED') return
+  // Write-once also means COMPLETED ⇒ completed_at is set; a miss is a read
+  // anomaly — rethrow and let the event retry rather than fabricate a date.
+  if (!row.completed_at)
+    throw new Error(`payment-event receipt: COMPLETED without completed_at for ${transfer.id}`)
+  const deliveredAt = row.completed_at
 
   // Presented language = the user's preference (the same source the prepayment
   // disclosure used at creation); both renderings are stored in content.
@@ -528,6 +551,20 @@ async function writeReceipt(transfer: TransferRow): Promise<void> {
   const locale =
     (userData as { preferred_language?: string } | null)?.preferred_language === 'en' ? 'en' : 'es'
 
+  // §1005.31(b)(2)(iii) recipient name, via the destination the transfer paid.
+  const { data: destination, error: destinationError } = await supabaseAdmin
+    .from('payout_destinations')
+    .select('recipients ( first_name, last_name )')
+    .eq('id', transfer.payout_destination_id)
+    .maybeSingle()
+  if (destinationError)
+    throw new Error(`payment-event receipt recipient load failed: ${destinationError.message}`)
+  const recipient = (
+    destination as { recipients: { first_name: string; last_name: string } | null } | null
+  )?.recipients
+  if (!recipient)
+    throw new Error(`payment-event receipt: no recipient found for ${transfer.id}`)
+
   // Built from the transfer's IMMUTABLE snapshot terms = the delivered amounts
   // (Bridge fixes destination.amount in MXN, so the recipient got exactly this).
   const receipt = buildReceiptDisclosure(
@@ -539,6 +576,11 @@ async function writeReceipt(transfer: TransferRow): Promise<void> {
     },
     locale,
     env.CANCEL_WINDOW_MINUTES,
+    {
+      dateAvailableIso: deliveredAt,
+      recipientFirstName: recipient.first_name,
+      recipientLastName: recipient.last_name,
+    },
   )
 
   // One receipt per transfer: ON CONFLICT (transfer_id, type) DO NOTHING. A
