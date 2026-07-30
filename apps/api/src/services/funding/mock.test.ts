@@ -76,7 +76,9 @@ describe('mock voidFunding', () => {
       paymentRef: 'mockpay_abc',
       idempotencyKey: 'bridge-key-1:void',
     })
-    expect(a).toMatchObject({ provider: 'mock', status: 'succeeded' })
+    // mode 'voided': the mock never settles, so the nominal mode stands — and
+    // the ledger branch in the callers reads the same off the ref prefix
+    expect(a).toMatchObject({ provider: 'mock', status: 'succeeded', mode: 'voided' })
     expect(a.ref).toMatch(/^mockvoid_/)
     // key ignored → distinct refs; exactly-once lives in the caller's null-gate
     expect(a.ref).not.toBe(b.ref)
@@ -92,7 +94,8 @@ describe('mock refund', () => {
       currency: 'USD',
       idempotencyKey: 'bridge-key-1:refund',
     })
-    expect(r).toMatchObject({ provider: 'mock', status: 'succeeded' })
+    // mode 'refunded' keeps the mock-era ledger exactly as it was pre-modes
+    expect(r).toMatchObject({ provider: 'mock', status: 'succeeded', mode: 'refunded' })
     expect(r.ref).toMatch(/^mockrefund_/)
   })
 })
@@ -121,6 +124,8 @@ describe('mock parseEvent', () => {
       'funding_failed',
       'funding_cleared',
       'funding_reversed',
+      'refund_failed',
+      'refund_settled',
     ] as const) {
       const parsed = processor.parseEvent(eventBody({ type }))
       expect(parsed).toEqual({
@@ -141,6 +146,22 @@ describe('mock parseEvent', () => {
       eventBody({ type: 'funding_failed', data: { transfer_id: 'x', payment_ref: 'y', reason: 'R01' } }),
     )
     expect(parsed.outcome === 'event' && parsed.event.reason).toBe('R01')
+  })
+
+  it('carries the undo ref through on the refund tails (Stripe Refund-id parity)', () => {
+    const parsed = processor.parseEvent(
+      eventBody({
+        type: 'refund_failed',
+        data: {
+          transfer_id: 'x',
+          payment_ref: 'mockpay_abc',
+          undo_ref: 'mockrefund_9',
+          reason: 'account_closed',
+        },
+      }),
+    )
+    expect(parsed.outcome === 'event' && parsed.event.undoRef).toBe('mockrefund_9')
+    expect(parsed.outcome === 'event' && parsed.event.reason).toBe('account_closed')
   })
 
   it('classifies unknown types as unhandled (ack + warn, same contract as Stripe)', () => {

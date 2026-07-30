@@ -279,6 +279,56 @@ export function correctionRefundLedgerEntries(transfer: {
   ]
 }
 
+// ── PR-S2: the VOIDED variants ───────────────────────────────────────────────
+// Under real ACH timing the refund tails usually fire while the funding PI is
+// still `processing` (settlement ~T+4, payout failures within minutes), and the
+// Stripe adapter then makes the sender whole by CANCELING the pull — no cash
+// ever moves. The refunded-mode batches would book cash that never existed:
+// refundedLedgerEntries credits cash_clearing S+F for a disbursement that never
+// left, and leaves funding_receivable open for an ACH that will never clear.
+// Callers pick the batch by FundingUndo.mode / undoModeForRef (funding/index.ts).
+
+// REFUNDED entered from PAYOUT_FAILED, undo mode `voided`: the sender is made
+// whole by never being debited, so the FUNDED batch simply reverses — the same
+// entries as a FUNDED-window cancel, reached through a different door. The
+// bridge_return batch (posted separately) is unchanged: Bridge really did send
+// the payout principal back to our cash regardless of how the sender was made
+// whole. Nets to zero.
+export function voidRefundLedgerEntries(transfer: {
+  send_amount_minor: number
+  fee_amount_minor: number
+}): LedgerEntryJson[] {
+  return canceledLedgerEntries(transfer)
+}
+
+// UNDER_REVIEW → REFUNDED (the post-delivery correction), undo mode `voided`:
+// the sender was never debited, so there is no cash credit — the compliance
+// loss is recognized against the funding_receivable that will now never
+// collect (the pull was canceled). Same P&L as correctionRefundLedgerEntries
+// (loss S+F, fee stands as booked); only the credited ASSET differs: a real
+// refund pays cash out and lets the receivable settle on its own clearing leg,
+// a void writes the receivable off directly. Nets to zero.
+export function correctionVoidLedgerEntries(transfer: {
+  send_amount_minor: number
+  fee_amount_minor: number
+}): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  return [
+    {
+      account_code: 'loss_cancellation_correction',
+      direction: 'debit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+    {
+      account_code: 'funding_receivable',
+      direction: 'credit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+  ]
+}
+
 export async function createTransferFromQuote(input: {
   quoteId: string
   userId: string

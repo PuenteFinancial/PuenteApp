@@ -6,6 +6,33 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-30 · Settlement decides the undo mechanism, and the ledger branches on it (PR-S2).**
+The Stripe adapter's undo ops resolve the LIVE PaymentIntent instead of trusting their nominal
+mode: an uncleared ACH pull can only be VOIDED (`paymentIntents.cancel` — ACH is the one method
+cancelable during `processing`; Stripe refuses to refund an unsettled charge, and a refund beside
+a late dispute double-credits), while a settled one can only be REFUNDED (`refunds.create`, async:
+`FundingUndo.status 'pending'`, resolved later by `refund.updated`/`refund.failed`). So
+`voidFunding` falls back to a full refund when the PI settled first (sandbox settles instantly —
+the fallback IS the sandbox path; closes the slice-7 "ACH-cancelable + void→refund fallback"
+item), and `refund` voids while the PI is still processing — which under real ACH timing
+(settlement ~T+4, payout failures in minutes) makes **void the MAIN path of the refund tails**,
+not the edge. Three consequences. (1) `FundingUndo.mode 'voided'|'refunded'` +
+`undoModeForRef()` — the ref prefix is the durable mode encoding, because crash-recovery replays
+reach the settle holding only `refund_payment_ref` — and the REFUNDED/correction batches branch
+on it: a void posts the FUNDED reversal (`voidRefundLedgerEntries`) or writes the receivable off
+against the correction loss (`correctionVoidLedgerEntries`); posting the cash batch for a void
+would credit `cash_clearing` for money that never moved and leave `funding_receivable` open
+forever (ledger-rules.md has the variant postings). (2) Refund tails are recorded to
+`payment_events` (source `'funding'` — the slice-5 CHECK admitted it from day one), handled
+inline by the funding webhook route, and re-driven by the sweep→job path on a crash;
+`refund_failed` pages `funding-refund-failed` (per-transfer fingerprint, manual-refund runbook) —
+after a bounce the sender is STILL OWED and nothing auto-adjusts. (3) Stripe idempotency
+sub-keys per POST arm (`…:cancel` / `…:create` under the callers' unchanged `:void`/`:refund`
+roots), because Stripe caches failed POSTs under their key — a cancel that lost the settlement
+race must not poison the fallback refund's key. The two sandbox experiments
+(cancel-after-batch-cutoff semantics, dispute-after-refund) are deferred to the keys-in-hand
+close-out session. **Status: active** (PR-S2)
+
 **2026-07-30 · FUNDED fires on `payment_intent.processing`, not `succeeded` — instant-front is a
 webhook mapping, not a policy switch.** The Stripe adapter (PR-S1) maps `payment_intent.processing`
 → `funding_succeeded` (drives PENDING_PAYMENT → FUNDED, posts the funding ledger batch, enqueues

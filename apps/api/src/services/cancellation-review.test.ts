@@ -17,9 +17,11 @@ vi.mock('./transfers.js', async (importOriginal) => {
 })
 
 const refund = vi.hoisted(() => vi.fn())
-vi.mock('./funding/index.js', () => ({
-  getFundingProcessor: () => ({ refund: (...a: unknown[]) => refund(...a) }),
-}))
+vi.mock('./funding/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./funding/index.js')>()
+  // real undoModeForRef — the settle picks its correction batch off the ref prefix
+  return { ...actual, getFundingProcessor: () => ({ refund: (...a: unknown[]) => refund(...a) }) }
+})
 
 const claimRefund = vi.hoisted(() => vi.fn())
 vi.mock('./refunds.js', async (importOriginal) => {
@@ -143,6 +145,57 @@ describe('refundCancellation', () => {
     expect(resolveCancellationRequest).toHaveBeenCalledWith(
       expect.objectContaining({ transferId: T, status: 'resolved_refunded', resolvedBy: 'ops:jphelps' }),
     )
+  })
+
+  // PR-S2: the undo's MODE picks the correction batch. A correction fires
+  // minutes after delivery — days before ACH settlement — so the Stripe
+  // adapter usually VOIDS, and the loss then books against the receivable
+  // that will never collect, not against cash that never moved.
+  it('a VOIDED undo books the loss against funding_receivable, not cash', async () => {
+    q('transfers', reviewing(), { data: null, error: null })
+    refund.mockResolvedValue({
+      provider: 'stripe',
+      ref: 'pi_stripe1',
+      status: 'succeeded',
+      mode: 'voided',
+    })
+
+    await expect(refundCancellation({ transferId: T, operator: 'jphelps' })).resolves.toEqual({
+      done: true,
+      outcome: 'refunded',
+    })
+
+    const settle = transition.mock.calls[0]![0] as Record<string, unknown>
+    expect(settle.ledgerEntries).toEqual([
+      {
+        account_code: 'loss_cancellation_correction',
+        direction: 'debit',
+        amount_minor: S + FEE,
+        currency: 'USD',
+      },
+      {
+        account_code: 'funding_receivable',
+        direction: 'credit',
+        amount_minor: S + FEE,
+        currency: 'USD',
+      },
+    ])
+    expect(settle.ledgerDescription).toContain('voided')
+  })
+
+  it('crash-recovery reads the mode off the persisted ref (pi_ → receivable write-off)', async () => {
+    q('transfers', reviewing({ refund_payment_ref: 'pi_stripe1' }))
+
+    await expect(refundCancellation({ transferId: T, operator: 'jphelps' })).resolves.toEqual({
+      done: true,
+      outcome: 'already_disbursed',
+    })
+
+    expect(refund).not.toHaveBeenCalled()
+    const settle = transition.mock.calls[0]![0] as Record<string, unknown>
+    expect(
+      (settle.ledgerEntries as Array<{ account_code: string }>).map((e) => e.account_code),
+    ).toEqual(['loss_cancellation_correction', 'funding_receivable'])
   })
 
   // THE guard. Paying a plain COMPLETED transfer would be an unreviewed double

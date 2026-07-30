@@ -184,7 +184,12 @@ beforeEach(() => {
     paymentRef: 'mockpay_new',
     clientFields: {},
   })
-  voidFunding.mockResolvedValue({ provider: 'mock', ref: 'mockvoid_test', status: 'succeeded' })
+  voidFunding.mockResolvedValue({
+    provider: 'mock',
+    ref: 'mockvoid_test',
+    status: 'succeeded',
+    mode: 'voided',
+  })
   assessTransferRisk.mockReset()
   assessTransferRisk.mockResolvedValue({ ok: true })
   recordCancellationRequest.mockReset()
@@ -492,6 +497,40 @@ describe('POST /v1/transfers/:id/cancel', () => {
     // CANCELED → REFUNDED carries NO ledger
     const transitionArg = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
     expect(transitionArg).toMatchObject({ fromState: 'CANCELED', toState: 'REFUNDED' })
+    expect(transitionArg['ledgerEntries']).toBeUndefined()
+    await app.close()
+  })
+
+  it('void→refund fallback (PI settled first): the cancel flow completes unchanged — persist, settle, 200', async () => {
+    routeTables({ transfers: () => chain({ data: fundedRow }) })
+    cancelTransfer.mockResolvedValue({ ...fundedRow, state: 'CANCELED' })
+    // PR-S2: the pull settled before the cancel reached Stripe, so the adapter
+    // fell back to a real (async) Refund. The route's flow must not change —
+    // same persist, same ledger-free CANCELED → REFUNDED settle — the mode is
+    // an audit-trail fact, not a branch in the money path here.
+    voidFunding.mockResolvedValueOnce({
+      provider: 'stripe',
+      ref: 're_fallback1',
+      status: 'pending',
+      mode: 'refunded',
+    })
+    transitionTransfer.mockResolvedValue({
+      ...fundedRow,
+      state: 'REFUNDED',
+      refund_payment_ref: 're_fallback1',
+      refunded_at: '2026-07-17T20:10:00.000Z',
+    })
+    const app = await buildApp()
+
+    const res = await cancel(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ id: TRANSFER_ID, state: 'REFUNDED' })
+    expect(voidFunding).toHaveBeenCalledTimes(1)
+    const transitionArg = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+    expect(transitionArg).toMatchObject({ fromState: 'CANCELED', toState: 'REFUNDED' })
+    // still ledger-free: the CANCELED reversal already closed the books, and
+    // the fallback's settlement+refund cash flows offset (recon timing window)
     expect(transitionArg['ledgerEntries']).toBeUndefined()
     await app.close()
   })

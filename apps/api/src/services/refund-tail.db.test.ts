@@ -66,6 +66,9 @@ const T_REFUND = '00000000-0000-4000-8000-000000000081'
 const T_OPS = '00000000-0000-4000-8000-000000000082'
 // slice-7 PR6b-0: the refund claim, proven against real Postgres row locking.
 const T_CLAIM = '00000000-0000-4000-8000-000000000085'
+// PR-S2: the VOIDED undo arm — the REFUNDED batch reverses FUNDED instead of
+// crediting cash, proven against the real RPC + net-zero constraint.
+const T_VOID = '00000000-0000-4000-8000-000000000086'
 
 const S = 19801 // quoted send principal
 const FEE = 199
@@ -130,6 +133,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
     )
     await seedFundedTransfer(T_REFUND, destination.rows[0].id)
     await seedFundedTransfer(T_OPS, destination.rows[0].id)
+    await seedFundedTransfer(T_VOID, destination.rows[0].id)
   })
 
   afterAll(async () => {
@@ -353,6 +357,41 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
   // UPDATE serializes them, and MockFundingProcessor.refund() ignores the
   // idempotency key on purpose, so nothing downstream would dedupe the second
   // payment. Two genuinely concurrent calls, one sender, one disbursement.
+  it('a VOIDED disbursement (pi_ ref) settles with the FUNDED reversal: receivable closes, cash keeps only the returned principal', async () => {
+    await walkToPayoutFailed(T_VOID)
+    // Crash-recovery shape: a prior run voided the pull at the processor
+    // (Stripe PI cancel) and persisted the pi_ ref, then died before settling.
+    await db.query(
+      `update public.transfers set refund_payment_ref = 'pi_dbvoid1',
+         refund_claimed_at = now(), refund_claimed_by = 'worker:payment-event',
+         refunded_at = now() where id = $1`,
+      [T_VOID],
+    )
+
+    const outcome = await refundPayoutFailure({
+      transferId: T_VOID,
+      actor: 'worker:payment-event',
+      reason: 'refund completed — sender made whole',
+    })
+    expect(outcome).toEqual({ done: true, outcome: 'already_disbursed' })
+    // the ref gate held — no processor call for this transfer
+    expect(refundCalls.filter((c) => (c as { transferId: string }).transferId === T_VOID)).toEqual([])
+
+    const totals = await accountTotals(T_VOID)
+    // Every position the transfer opened closes, and cash holds EXACTLY the
+    // returned payout principal — no S+F refund credit, because no refund cash
+    // ever moved: the sender was simply never debited.
+    expect(totals).toMatchObject({
+      funding_receivable: 0,
+      transfer_payable: 0,
+      fee_revenue: 0,
+      due_from_bridge: 0,
+      cash_clearing: S,
+    })
+    const state = await db.query('select state from public.transfers where id = $1', [T_VOID])
+    expect(state.rows[0].state).toBe('REFUNDED')
+  })
+
   it('two concurrent runs disburse exactly ONCE and post exactly one set of batches', async () => {
     const destination = await db.query(
       `select pd.id from public.payout_destinations pd

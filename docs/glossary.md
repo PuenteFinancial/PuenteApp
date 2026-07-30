@@ -74,9 +74,14 @@ refer back as needed.
 - **Committed send** — a transfer whose sender has accepted the terms (`disclosure_accepted_at` set)
   and which hasn't been unwound (not `CANCELED`/`REFUNDED`/`PAYMENT_FAILED`/`FUNDING_REVERSED`); the
   unit the per-user transaction limits count. See [decisions.md](decisions.md) (slice 7 PR5).
-- **Funded send** — a transfer that reached `FUNDED` (dollars pulled; `payment_at` set). Distinct from
-  a *committed* send: every funded send was committed, but a just-committed send may not fund for days
-  (ACH). See [transfer-state-machine.md](transfer-state-machine.md).
+- **Funded send** — a transfer that reached `FUNDED` (`payment_at` set). Funded means the ACH debit
+  was *submitted to the network and we fronted the payout* — NOT that money arrived: with Stripe,
+  `FUNDED` fires on `payment_intent.processing`, and settlement (**cleared** — PI `succeeded`,
+  `funding_cleared` flag) lands ~T+4 later. The gap is the ACH exposure window: a funded-not-cleared
+  pull can still fail, be reversed — or be **voided** (canceled, sender never debited), which is how
+  the PR-S2 refund tails usually make a sender whole. Distinct from a *committed* send: every funded
+  send was committed, but a just-committed send may not fund for days.
+  See [transfer-state-machine.md](transfer-state-machine.md).
 - **Transaction limits (AML launch)** — the per-user caps on the send principal from the AML
   "Transaction Limits at Launch" policy: per transaction (`RISK_PER_TXN_MAX_MINOR`) and rolling
   day / month / 6-month totals (`RISK_DAILY_MAX_MINOR` / `RISK_MONTHLY_MAX_MINOR` /
@@ -92,7 +97,14 @@ refer back as needed.
   fiat → USDC → fiat internally (USD→MXN, and even USD→USD as our PoC proved).
 - **`funding_cleared` gate** — the per-transfer flag + policy controlling whether we wait for ACH
   settlement before paying out; MVP policy is "don't wait" for ~5 trusted users, and the flag exists
-  so flipping it later requires no rework. See the state machine doc.
+  so flipping it later requires no rework. The flag is a webhook MIRROR of settlement, not the
+  authority: the Stripe adapter's settlement-aware undo (PR-S2) reads the live PaymentIntent
+  instead. See the state machine doc.
+- **Instant verification** — Financial Connections instant bank verification, the ONLY verification
+  method at pilot (`verification_method: 'instant'` on the PaymentIntent). Microdeposits are
+  deferred: their multi-day dwell collides with the 30-min `PENDING_PAYMENT` auto-fail and the
+  15-min FX lock. An unsupported bank gets a clean error, not a fallback.
+  See [decisions.md](decisions.md) (PR-S1).
 - **Submit claim** — the guarded UPDATE (`state = 'FUNDED' AND payout_hold_reason IS NULL AND
   submit_attempted_at IS NULL`) the payout job wins before calling Bridge; it serializes submission
   against the slice-6 cancel so both can never happen. A *stale* submit claim (>10 min, no

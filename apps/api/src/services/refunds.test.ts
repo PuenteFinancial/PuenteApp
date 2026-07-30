@@ -19,9 +19,11 @@ const postLedger = vi.hoisted(() => vi.fn())
 vi.mock('./ledger.js', () => ({ postLedgerTransaction: (...a: unknown[]) => postLedger(...a) }))
 
 const refund = vi.hoisted(() => vi.fn())
-vi.mock('./funding/index.js', () => ({
-  getFundingProcessor: () => ({ refund: (...a: unknown[]) => refund(...a) }),
-}))
+vi.mock('./funding/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./funding/index.js')>()
+  // real undoModeForRef — step 3 picks its REFUNDED batch off the ref prefix
+  return { ...actual, getFundingProcessor: () => ({ refund: (...a: unknown[]) => refund(...a) }) }
+})
 
 const resolveCancellationRequest = vi.hoisted(() => vi.fn())
 vi.mock('./cancellations.js', () => ({
@@ -211,6 +213,53 @@ describe('refundPayoutFailure', () => {
     expect(refund).not.toHaveBeenCalled() // gate closed — no second disbursement
     expect(postLedger).toHaveBeenCalledTimes(1) // bridge_return is idempotent on its key
     expect(transition).toHaveBeenCalledTimes(1)
+  })
+
+  // PR-S2: the undo's MODE picks the REFUNDED batch. Under real ACH timing the
+  // Stripe adapter usually VOIDS (the PI is still processing when a payout
+  // fails), and posting the cash batch for a void would credit cash_clearing
+  // for money that never moved.
+  it('a VOIDED undo settles with the FUNDED reversal — no cash line', async () => {
+    q('transfers', parked(), claimWon, persistOk)
+    refund.mockResolvedValue({
+      provider: 'stripe',
+      ref: 'pi_stripe1',
+      status: 'succeeded',
+      mode: 'voided',
+    })
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' }),
+    ).resolves.toEqual({ done: true, outcome: 'refunded' })
+
+    const settle = transition.mock.calls[0]![0] as Record<string, unknown>
+    expect(settle.ledgerEntries).toEqual([
+      { account_code: 'transfer_payable', direction: 'debit', amount_minor: S, currency: 'USD' },
+      { account_code: 'fee_revenue', direction: 'debit', amount_minor: FEE, currency: 'USD' },
+      {
+        account_code: 'funding_receivable',
+        direction: 'credit',
+        amount_minor: S + FEE,
+        currency: 'USD',
+      },
+    ])
+    expect(settle.ledgerDescription).toContain('voided')
+    // bridge_return is unchanged — Bridge really did return the payout principal
+    expect(postLedger.mock.calls[0]![0]).toMatchObject({ transition: 'bridge_return' })
+  })
+
+  it('crash-recovery reads the mode off the persisted ref: a pi_ ref settles with the reversal batch', async () => {
+    q('transfers', parked({ refund_payment_ref: 'pi_stripe1' }))
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'worker:payment-event', reason: 'r' }),
+    ).resolves.toEqual({ done: true, outcome: 'already_disbursed' })
+
+    expect(refund).not.toHaveBeenCalled()
+    const settle = transition.mock.calls[0]![0] as Record<string, unknown>
+    expect(
+      (settle.ledgerEntries as Array<{ account_code: string }>).map((e) => e.account_code),
+    ).toEqual(['transfer_payable', 'fee_revenue', 'funding_receivable'])
   })
 
   it('scopes the refund-ref persist to THIS transfer and to a null gate', async () => {

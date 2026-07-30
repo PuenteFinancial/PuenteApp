@@ -742,6 +742,18 @@ export async function transfersRoute(server: FastifyInstance) {
           paymentRef: transfer.funding_payment_ref,
           idempotencyKey: `${transfer.idempotency_key}:void`,
         })
+        if (undo.mode === 'refunded') {
+          // The pull had already settled (void→refund fallback, PR-S2): the
+          // sender gets a real credit in days instead of never being debited.
+          // Books stay correct — the CANCELED reversal closed the receivable,
+          // and the settlement + refund cash flows offset — but the pair is a
+          // recon timing window worth a trail. User copy already covers it
+          // ("refund issued, may take a few business days").
+          server.log.info(
+            { audit: true, userId, transferId: transfer.id, refundRef: undo.ref },
+            'cancel void fell back to a refund — funding had already settled',
+          )
+        }
         const { error: persistError } = await supabaseAdmin
           .from('transfers')
           .update({ refund_payment_ref: undo.ref, refunded_at: new Date().toISOString() })

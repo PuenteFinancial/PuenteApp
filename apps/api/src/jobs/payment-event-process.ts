@@ -7,7 +7,7 @@ import {
   fxRateToWire,
   TransferRpcError,
 } from '../services/transfers.js'
-import { refundPayoutFailure } from '../services/refunds.js'
+import { refundPayoutFailure, actOnRefundTailEvent } from '../services/refunds.js'
 import { pendingCancellationFor } from '../services/cancellations.js'
 import { buildReceiptDisclosure } from '../services/disclosures.js'
 import {
@@ -116,6 +116,29 @@ export async function processPaymentEvent(paymentEventId: string): Promise<void>
 }
 
 async function route(event: EventRow): Promise<void> {
+  // PR-S2: source 'funding' rows are the refund tails the webhook route
+  // records and normally handles inline. They land here only through the
+  // crash-recovery path — payout-sweep re-enqueues stale 'received' rows
+  // source-blind — so this branch re-drives the same act and retires the row.
+  // Without it, mapBridgeState would read the type as an unknown BRIDGE state
+  // and mark the row ignored, eating a sender-still-owed page.
+  if (event.source === 'funding') {
+    if (event.event_type === 'refund_failed' || event.event_type === 'refund_settled') {
+      actOnRefundTailEvent({
+        eventType: event.event_type,
+        transferId: event.transfer_id,
+        // provider_ref carries the refund (undo) id on funding rows; the
+        // failure reason lives in the raw payload, not re-read here — the
+        // fingerprint dedupes against the route's fuller page either way.
+        refundRef: event.provider_ref,
+      })
+      await markProcessed(event.id)
+      return
+    }
+    await markIgnored(event.id, `unmapped funding event: ${event.event_type}`)
+    return
+  }
+
   const action = mapBridgeState(event.event_type)
 
   if (action.kind === 'ignore') {

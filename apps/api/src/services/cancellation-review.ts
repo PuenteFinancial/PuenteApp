@@ -1,6 +1,10 @@
 import { supabaseAdmin } from './supabase.js'
-import { transitionTransfer, correctionRefundLedgerEntries } from './transfers.js'
-import { getFundingProcessor } from './funding/index.js'
+import {
+  transitionTransfer,
+  correctionRefundLedgerEntries,
+  correctionVoidLedgerEntries,
+} from './transfers.js'
+import { getFundingProcessor, undoModeForRef } from './funding/index.js'
 import { claimRefund, isClaimAbandoned } from './refunds.js'
 import { pendingCancellationFor, resolveCancellationRequest } from './cancellations.js'
 import { earliestDepositEvidenceAt } from './payment-events.js'
@@ -122,6 +126,9 @@ export async function refundCancellation(input: {
   if (!request) return { done: false, reason: 'no_pending_request' }
 
   const alreadyDisbursed = transfer.refund_payment_ref !== null
+  // Carried to the settle, where the undo's MODE picks the correction batch —
+  // prefix-encoded in the ref so the crash-recovery path can still tell.
+  let disbursedRef = transfer.refund_payment_ref
   if (!alreadyDisbursed) {
     if (transfer.funding_payment_ref === null) {
       throw new Error(`correction refund aborted: transfer ${transfer.id} has no funding_payment_ref`)
@@ -143,6 +150,7 @@ export async function refundCancellation(input: {
         .eq('id', transfer.id)
         .is('refund_payment_ref', null)
       if (error) throw new Error(`correction refund ref persist failed: ${error.message}`)
+      disbursedRef = undo.ref
     } else {
       const fresh = await loadReviewable(transfer.id)
       if (!fresh) return { done: false, reason: 'transfer_not_found' }
@@ -160,6 +168,16 @@ export async function refundCancellation(input: {
     }
   }
 
+  // The batch depends on HOW the sender was made whole (PR-S2): a `refunded`
+  // undo paid real cash (CR cash_clearing); a `voided` undo — the LIKELY case,
+  // since delivery precedes settlement by days — canceled the uncleared pull,
+  // so the compliance loss books against the receivable that will never
+  // collect instead of against cash that never moved.
+  if (disbursedRef === null) {
+    // Unreachable — see the identical guard in refundPayoutFailure.
+    throw new Error(`correction settle reached with no disbursement ref for ${transfer.id}`)
+  }
+  const undoMode = undoModeForRef(disbursedRef)
   await transitionTransfer({
     transferId: transfer.id,
     fromState: 'UNDER_REVIEW',
@@ -167,8 +185,14 @@ export async function refundCancellation(input: {
     actor,
     reason: 'timely cancellation on a delivered transfer — correction payment',
     metadata: { cancellationRequestId: request.id, requestedAt: request.requested_at },
-    ledgerDescription: 'transfer REFUNDED — Reg E correction payment on a delivered transfer',
-    ledgerEntries: correctionRefundLedgerEntries(transfer),
+    ledgerDescription:
+      undoMode === 'voided'
+        ? 'transfer REFUNDED — Reg E correction; uncleared funding voided (receivable written off)'
+        : 'transfer REFUNDED — Reg E correction payment on a delivered transfer',
+    ledgerEntries:
+      undoMode === 'voided'
+        ? correctionVoidLedgerEntries(transfer)
+        : correctionRefundLedgerEntries(transfer),
   })
 
   await closeRequest(

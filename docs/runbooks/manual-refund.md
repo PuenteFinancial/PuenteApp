@@ -131,7 +131,10 @@ credit for you:
 UPDATE exactly one run can win — so two operators, or an operator racing the automated path, cannot
 both pay the sender. The loser writes nothing and says so (`claim_taken`). The processor's idempotency
 key (`{idempotency_key}:refund`) is the last line of defence behind the claim, not the only one, which
-matters because the mock processor ignores it outright.
+matters because the mock processor ignores it outright. (Stripe, PR-S2: the adapter derives one
+sub-key per POST arm under that root — `…:refund:cancel` for a pre-settlement VOID,
+`…:refund:create` for a real Refund — so search the dashboard for either, or by the transfer id in
+the PaymentIntent/Refund metadata.)
 
 The claim is **kept** after a successful refund — it records when the money left — and is never cleared
 automatically. There is deliberately no release when the processor errors: a timeout and a rejection
@@ -147,7 +150,10 @@ the ref is the only thing we write after the processor call, and it is missing p
 run did not get that far.
 
 1. **Check the funding processor** for a refund against this transfer (`{idempotency_key}:refund`, or
-   the transfer id in the processor dashboard). This step is not optional.
+   the transfer id in the processor dashboard). This step is not optional. Under Stripe (PR-S2)
+   the undo may be EITHER shape — a **canceled PaymentIntent** (the pull was voided
+   pre-settlement; the sender was never debited) counts as the disbursement exactly like a
+   Refund does. Check the PI's status, not just the refunds list.
 2. **A refund DID go out** → do **not** reclaim. A second one would pay twice. Escalate: the state
    needs settling without a new disbursement, which no CLI path does today (the ref was never recorded,
    so the `already_disbursed` path cannot see it).

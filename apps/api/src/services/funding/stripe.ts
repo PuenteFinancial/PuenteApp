@@ -22,6 +22,15 @@ const PI_EVENT_MAP = new Map<string, FundingEventType>([
   ['payment_intent.payment_failed', 'funding_failed'],
 ])
 
+// Refund-object envelope types (PR-S2) — the async tail of a refunds.create.
+// A Set, not a second map: the FundingEventType depends on the payload status,
+// not the envelope name alone (see parseEvent).
+const REFUND_ENVELOPE_TYPES: ReadonlySet<string> = new Set([
+  'refund.failed',
+  'refund.updated',
+  'charge.refund.updated',
+])
+
 export class StripeFundingProcessor implements FundingProcessor {
   readonly provider = 'stripe'
   readonly signatureHeader = 'stripe-signature'
@@ -177,6 +186,54 @@ export class StripeFundingProcessor implements FundingProcessor {
       }
     }
 
+    if (REFUND_ENVELOPE_TYPES.has(envelope.type)) {
+      // The undo tail (PR-S2): a Refund we issued resolving. refund.failed is
+      // the bounce (closed account etc. — money back on our balance, sender
+      // STILL OWED); refund.updated carries status churn, of which only
+      // `succeeded` (settled) and `failed` (some API versions deliver the
+      // bounce this way) are actionable — the rest ack as unhandled.
+      // charge.refund.updated is the same Refund payload under the pre-2022-11
+      // event name; endpoints can receive either depending on the API version
+      // pin, so both map here.
+      if (!object || typeof object['id'] !== 'string') return { outcome: 'malformed' }
+      const status = object['status']
+      // `canceled` counts as the bounce: a canceled Refund will never arrive,
+      // so the sender is exactly as owed as after a `failed` — acking it as
+      // unhandled would be the silent arm of a money-truth event.
+      const type =
+        envelope.type === 'refund.failed' || status === 'failed' || status === 'canceled'
+          ? ('refund_failed' as const)
+          : status === 'succeeded'
+            ? ('refund_settled' as const)
+            : null
+      if (type === null) return unhandled
+      // The PI id is the paymentRef (the funding_payment_ref join the route
+      // already knows); a refund with no payment_intent is not against a
+      // funding pull of ours — ack it.
+      const paymentIntent = object['payment_intent']
+      if (typeof paymentIntent !== 'string' || paymentIntent === '') return unhandled
+      const metadata = object['metadata'] as Record<string, unknown> | null | undefined
+      const transferRefRaw = metadata?.['transfer_id']
+      // Null (not unhandled) on a missing echo: refunds WE create carry it,
+      // but a refund issued from the Stripe dashboard against our PI would
+      // not, and it is still our money-truth — the route joins through the
+      // persisted funding_payment_ref exactly as it does for disputes.
+      const transferRef =
+        typeof transferRefRaw === 'string' && transferRefRaw !== '' ? transferRefRaw : null
+      const reason = object['failure_reason']
+      return {
+        outcome: 'event',
+        event: {
+          eventId: envelope.id,
+          type,
+          transferRef,
+          paymentRef: paymentIntent,
+          undoRef: object['id'],
+          ...(type === 'refund_failed' && typeof reason === 'string' && { reason }),
+        },
+      }
+    }
+
     // Everything else — including payment_method.automatically_updated (bank
     // account replaced/blocked after a return): with no saved payment methods
     // at pilot (fresh PI + mandate per send) there is nothing to act on, but
@@ -185,17 +242,152 @@ export class StripeFundingProcessor implements FundingProcessor {
     return unhandled
   }
 
-  async voidFunding(): Promise<FundingUndo> {
-    // PR-S2 implements undo reality: paymentIntents.cancel — ACH is the one
-    // method cancelable during `processing` (docs.stripe.com/refunds). A loud
-    // failure beats minting a fake ref into refund_payment_ref.
-    throw new Error('StripeFundingProcessor.voidFunding arrives in PR-S2 — not implemented')
+  // ── The undo ops (PR-S2) ──────────────────────────────────────────────────
+  // Settlement decides the mechanism, and the LIVE PaymentIntent is the
+  // authority (never transfers.funding_cleared — a webhook mirror that lags):
+  // ACH is the one method cancelable during `processing`
+  // (docs.stripe.com/refunds), and conversely an unsettled ACH charge cannot
+  // be refunded — Stripe rejects it, and a refund next to a late dispute
+  // double-credits. So an uncleared pull VOIDS (cancel; the sender is simply
+  // never debited) and a settled one REFUNDS (async credit, `pending` until
+  // the refund.updated/refund.failed tail resolves it).
+  //
+  // Idempotency sub-keys: each POST arm derives its own key (`:cancel` /
+  // `:create` under the caller's root) because Stripe caches a FAILED request
+  // under its key too — a cancel that lost the settlement race must not
+  // poison the fallback refund's key. Every arm is stable per (transfer, op),
+  // so crash-replays dedupe against the same sub-key.
+
+  async voidFunding(input: {
+    transferId: string
+    paymentRef: string
+    idempotencyKey: string
+  }): Promise<FundingUndo> {
+    // Optimistic cancel, no pre-read: at cancel-at-FUNDED the PI is minutes
+    // old against a ~T+4 settlement, so the void arm wins outside of sandbox
+    // (which settles instantly — the fallback below is how sandbox cancels
+    // resolve, closing the slice-7 "ACH-cancelable + void→refund fallback"
+    // gated item).
+    try {
+      const pi = await this.client.paymentIntents.cancel(
+        input.paymentRef,
+        { cancellation_reason: 'requested_by_customer' },
+        { idempotencyKey: `${input.idempotencyKey}:cancel` },
+      )
+      return { provider: this.provider, ref: pi.id, status: 'succeeded', mode: 'voided' }
+    } catch (err) {
+      if (!isNotCancelable(err)) throw err
+      return this.undoAfterCancelRefused(input, err)
+    }
   }
 
-  async refund(): Promise<FundingUndo> {
-    // PR-S2: refunds.create with status:'pending' + refund.failed/updated
-    // webhook tails, settlement-aware guard (void before `succeeded`, never
-    // refund — refund + late dispute = double credit).
-    throw new Error('StripeFundingProcessor.refund arrives in PR-S2 — not implemented')
+  async refund(input: {
+    transferId: string
+    paymentRef: string
+    amountMinor: number
+    currency: 'USD'
+    idempotencyKey: string
+  }): Promise<FundingUndo> {
+    // Read-first, unlike voidFunding: the refund tails fire on payout
+    // failures at unpredictable ages, so which arm applies is genuinely
+    // unknown here — and under real ACH timing (payout fails in minutes,
+    // settlement ~T+4) the answer is usually still `processing`, making VOID
+    // the main path of this method, not the exception.
+    const pi = await this.client.paymentIntents.retrieve(input.paymentRef)
+
+    if (pi.status === 'canceled') {
+      // Crash-replay: a prior run voided this pull but died before persisting
+      // the ref. Nothing to move — report the void.
+      return { provider: this.provider, ref: pi.id, status: 'succeeded', mode: 'voided' }
+    }
+
+    if (pi.status === 'succeeded') {
+      return this.createRefund(input)
+    }
+
+    // Uncleared → void. Cancel is all-or-nothing, so a partial amount cannot
+    // be honoured this way; both callers pass the full send+fee (= the PI
+    // amount), making a mismatch a caller bug — refuse loudly rather than
+    // return more than asked.
+    if (input.amountMinor !== pi.amount) {
+      throw new Error(
+        `stripe refund: amount ${input.amountMinor} !== PI amount ${pi.amount} — ` +
+          `an uncleared pull can only be voided in full (${pi.id})`,
+      )
+    }
+    try {
+      // No cancellation_reason: 'requested_by_customer' would be false here —
+      // this arm serves the payout-failure and correction tails.
+      const canceled = await this.client.paymentIntents.cancel(input.paymentRef, undefined, {
+        idempotencyKey: `${input.idempotencyKey}:cancel`,
+      })
+      return { provider: this.provider, ref: canceled.id, status: 'succeeded', mode: 'voided' }
+    } catch (err) {
+      if (!isNotCancelable(err)) throw err
+      // Settlement (or another actor's cancel) raced our read — re-resolve.
+      return this.undoAfterCancelRefused(input, err)
+    }
+  }
+
+  /**
+   * A cancel was refused (`payment_intent_unexpected_state`): the PI left the
+   * cancelable statuses between our decision and the POST. Re-read to learn
+   * which way — canceled (another actor / a replayed run: the void stands) or
+   * succeeded (settlement won: refund instead). Anything else rethrows the
+   * ORIGINAL refusal: the PI is in a state this seam has no move for, and the
+   * caller's posture (claim left standing, human paged) is built for exactly
+   * that throw.
+   */
+  private async undoAfterCancelRefused(
+    input: { transferId: string; paymentRef: string; idempotencyKey: string; amountMinor?: number },
+    originalErr: unknown,
+  ): Promise<FundingUndo> {
+    const pi = await this.client.paymentIntents.retrieve(input.paymentRef)
+    if (pi.status === 'canceled') {
+      return { provider: this.provider, ref: pi.id, status: 'succeeded', mode: 'voided' }
+    }
+    if (pi.status === 'succeeded') {
+      return this.createRefund(input)
+    }
+    throw originalErr
+  }
+
+  /**
+   * The refund arm. Omitted amount = full refund (the voidFunding fallback,
+   * whose seam carries no amount). `status: 'pending'` is the ACH norm — the
+   * credit lands in ~5–10 business days and resolves via refund.updated /
+   * refund.failed (parseEvent below); callers persist the ref and treat the
+   * undo as ISSUED. metadata.transfer_id mirrors the PI echo so the tail
+   * events route without a join.
+   */
+  private async createRefund(input: {
+    transferId: string
+    paymentRef: string
+    idempotencyKey: string
+    amountMinor?: number
+  }): Promise<FundingUndo> {
+    const refund = await this.client.refunds.create(
+      {
+        payment_intent: input.paymentRef,
+        ...(input.amountMinor !== undefined && { amount: input.amountMinor }),
+        metadata: { transfer_id: input.transferId },
+      },
+      { idempotencyKey: `${input.idempotencyKey}:create` },
+    )
+    return {
+      provider: this.provider,
+      ref: refund.id,
+      status: refund.status === 'succeeded' ? 'succeeded' : 'pending',
+      mode: 'refunded',
+    }
   }
 }
+
+// Stripe refuses to cancel a PI outside the cancelable statuses with an
+// invalid_request_error coded `payment_intent_unexpected_state`. Duck-typed on
+// the code rather than instanceof Stripe.errors.…: the documented contract is
+// the code string, and class identity breaks across SDK copies.
+const isNotCancelable = (err: unknown): boolean =>
+  typeof err === 'object' &&
+  err !== null &&
+  (err as { code?: unknown }).code === 'payment_intent_unexpected_state'

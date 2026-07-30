@@ -6,7 +6,8 @@ import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { getFundingProcessor } from '../../services/funding/index.js'
 import { enqueuePayoutSubmit, enqueuePaymentEventProcess } from '../../services/queue.js'
-import { recordEvent } from '../../services/payment-events.js'
+import { recordEvent, markProcessed } from '../../services/payment-events.js'
+import { actOnRefundTailEvent } from '../../services/refunds.js'
 import {
   fundedLedgerEntries,
   transitionTransfer,
@@ -414,6 +415,62 @@ export async function webhooksRoute(server: FastifyInstance) {
           { audit: true, webhook: 'funding', transferId, eventId: event.eventId },
           'funding_reversed received — handling deferred to slice 5/6',
         )
+        return { received: true }
+      }
+
+      if (event.type === 'refund_failed' || event.type === 'refund_settled') {
+        // The undo tail (PR-S2): a refund ISSUED by voidFunding/refund
+        // resolving days later. No state transition — the transfer settled at
+        // REFUNDED at issuance; this is the money-truth record plus, on a
+        // bounce, the ops page (sender still owed; never auto-adjusted).
+        // Recorded to payment_events (source 'funding') so replays dedupe, the
+        // O-lane reconciliation can read it, and — if this handler dies before
+        // the mark below — payout-sweep re-enqueues the stale 'received' row
+        // into the payment-event job, which re-drives the same act.
+        let recorded: Awaited<ReturnType<typeof recordEvent>>
+        try {
+          recorded = await recordEvent({
+            source: 'funding',
+            externalEventId: event.eventId,
+            eventType: event.type,
+            transferId,
+            providerRef: event.undoRef ?? null,
+            payload: JSON.parse(rawBody.toString('utf8')) as unknown,
+          })
+        } catch {
+          // insert failed — 500 so the provider redelivers into a clean attempt
+          return sendError(reply, 500, 'internal_error', 'Failed to record event')
+        }
+        if (!recorded.inserted && recorded.status !== 'received') {
+          return { received: true } // replayed delivery — already handled
+        }
+
+        if (event.type === 'refund_failed') {
+          // Public route — audit plugin skips it; ids only, no PII.
+          server.log.error(
+            {
+              audit: true,
+              webhook: 'funding',
+              transferId,
+              eventId: event.eventId,
+              refundRef: event.undoRef,
+            },
+            'funding refund failed — sender still owed',
+          )
+        }
+        actOnRefundTailEvent({
+          eventType: event.type,
+          transferId,
+          refundRef: event.undoRef ?? null,
+          ...(event.reason !== undefined && { reason: event.reason }),
+        })
+        try {
+          await markProcessed(recorded.id)
+        } catch {
+          // The act is done and idempotent (fingerprinted page). A failed mark
+          // leaves the row 'received'; the sweep→job path retires it — ack
+          // rather than pull Stripe into a redelivery loop over our own DB.
+        }
         return { received: true }
       }
 

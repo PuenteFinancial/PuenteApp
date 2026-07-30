@@ -323,6 +323,42 @@ describe.skipIf(!runDb)('cancellation review exits (integration, local Supabase)
     expect(transitions.rows).toEqual([{ actor: 'ops:dbtest' }])
   })
 
+  it('a VOIDED correction (pi_ ref) writes the loss against the receivable — no cash line at all', async () => {
+    const transferId = await seedTransfer()
+    await walkToCompletedWithRequest(transferId)
+    await parkUnderReview(transferId)
+    // Crash-recovery shape (PR-S2): a prior run voided the uncleared pull at
+    // the processor (Stripe PI cancel), persisted the pi_ ref, then died
+    // before settling the state.
+    await db.query(
+      `update public.transfers set refund_payment_ref = 'pi_dbvoid2',
+         refund_claimed_at = now(), refund_claimed_by = 'ops:jphelps',
+         refunded_at = now() where id = $1`,
+      [transferId],
+    )
+    const callsBefore = refundCalls.length
+
+    const outcome = await refundCancellation({ transferId, operator: 'jphelps' })
+    expect(outcome).toEqual({ done: true, outcome: 'already_disbursed' })
+    expect(refundCalls.length).toBe(callsBefore) // ref gate held — no disbursement
+
+    // Same P&L as the refunded arm (loss S+F, fee stays earned), but the
+    // receivable CLOSES — written off, the canceled pull will never clear —
+    // and cash is never touched: the sender was simply never debited.
+    expect(await accountTotals(transferId)).toEqual({
+      funding_receivable: 0,
+      transfer_payable: 0,
+      fee_revenue: -FEE,
+      due_from_bridge: 0,
+      fx_slippage: A - S,
+      bridge_wallet_float: -A,
+      loss_cancellation_correction: S + FEE,
+    })
+    const state = await db.query('select state from public.transfers where id = $1', [transferId])
+    expect(state.rows[0].state).toBe('REFUNDED')
+    expect((await requestRow(transferId)).status).toBe('resolved_refunded')
+  })
+
   it('a replay writes nothing: no second disbursement, no new entries, the first resolution stands', async () => {
     const transferId = await seedTransfer()
     await walkToCompletedWithRequest(transferId)

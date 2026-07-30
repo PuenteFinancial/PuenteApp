@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import Stripe from 'stripe'
 import { env } from '../../config/env.js'
-import type { FundingProcessor } from './index.js'
+import { undoModeForRef, type FundingProcessor } from './index.js'
 import { StripeFundingProcessor } from './stripe.js'
 
 // setup.ts provides STRIPE_WEBHOOK_SECRET (and deliberately NOT
@@ -249,21 +249,290 @@ describe('stripe parseEvent — locked event mapping', () => {
   })
 })
 
-describe('stripe undo ops are PR-S2', () => {
-  it('voidFunding and refund fail loudly instead of minting fake refs', async () => {
-    // Interface-typed on purpose: callers only ever hold the seam type.
-    const seam: FundingProcessor = processor
-    await expect(
-      seam.voidFunding({ transferId: TRANSFER_ID, paymentRef: 'pi_123', idempotencyKey: 'k' }),
-    ).rejects.toThrow(/PR-S2/)
-    await expect(
-      seam.refund({
-        transferId: TRANSFER_ID,
-        paymentRef: 'pi_123',
-        amountMinor: 20000,
-        currency: 'USD',
-        idempotencyKey: 'k',
+// ── PR-S2: the undo ops ──────────────────────────────────────────────────────
+
+const NOT_CANCELABLE = Object.assign(new Error('You cannot cancel this PaymentIntent'), {
+  code: 'payment_intent_unexpected_state',
+})
+
+// A stripe-shaped client exposing only what the undo ops touch. Missing fns
+// default to a mock that throws on call, so an arm reaching for an endpoint a
+// test didn't expect fails loudly instead of resolving undefined.
+const undoClient = (fns: {
+  cancel?: ReturnType<typeof vi.fn>
+  retrieve?: ReturnType<typeof vi.fn>
+  create?: ReturnType<typeof vi.fn>
+}) => {
+  const unexpected = (name: string) =>
+    vi.fn(async () => {
+      throw new Error(`unexpected ${name} call`)
+    })
+  return {
+    processor: new StripeFundingProcessor({
+      paymentIntents: {
+        cancel: fns.cancel ?? unexpected('paymentIntents.cancel'),
+        retrieve: fns.retrieve ?? unexpected('paymentIntents.retrieve'),
+      },
+      refunds: { create: fns.create ?? unexpected('refunds.create') },
+    } as unknown as Stripe) as FundingProcessor,
+  }
+}
+
+const VOID_INPUT = { transferId: TRANSFER_ID, paymentRef: 'pi_123', idempotencyKey: 'idem:void' }
+const REFUND_INPUT = {
+  transferId: TRANSFER_ID,
+  paymentRef: 'pi_123',
+  amountMinor: 20000,
+  currency: 'USD' as const,
+  idempotencyKey: 'idem:refund',
+}
+
+describe('stripe voidFunding', () => {
+  it('cancels the PaymentIntent — voided, succeeded, sub-keyed :cancel', async () => {
+    const cancel = vi.fn(async () => ({ id: 'pi_123', status: 'canceled' }))
+    const { processor: p } = undoClient({ cancel })
+
+    const undo = await p.voidFunding(VOID_INPUT)
+
+    expect(undo).toEqual({ provider: 'stripe', ref: 'pi_123', status: 'succeeded', mode: 'voided' })
+    expect(cancel).toHaveBeenCalledWith(
+      'pi_123',
+      { cancellation_reason: 'requested_by_customer' },
+      { idempotencyKey: 'idem:void:cancel' },
+    )
+  })
+
+  it('void→refund fallback: PI settled first → full refund, pending, sub-keyed :create', async () => {
+    const cancel = vi.fn(async () => {
+      throw NOT_CANCELABLE
+    })
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'succeeded', amount: 20000 }))
+    const create = vi.fn(async () => ({ id: 're_1', status: 'pending' }))
+    const { processor: p } = undoClient({ cancel, retrieve, create })
+
+    const undo = await p.voidFunding(VOID_INPUT)
+
+    expect(undo).toEqual({ provider: 'stripe', ref: 're_1', status: 'pending', mode: 'refunded' })
+    const [params, options] = create.mock.calls[0]! as unknown as [
+      Record<string, unknown>,
+      Record<string, unknown>,
+    ]
+    // No amount = FULL refund, and the Refund carries the transfer echo so its
+    // tail events (refund.updated/failed) route without a join.
+    expect(params).toEqual({
+      payment_intent: 'pi_123',
+      metadata: { transfer_id: TRANSFER_ID },
+    })
+    expect(options).toEqual({ idempotencyKey: 'idem:void:create' })
+  })
+
+  it('replay: cancel refused because a prior run already canceled → voided, no refund POST', async () => {
+    const cancel = vi.fn(async () => {
+      throw NOT_CANCELABLE
+    })
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'canceled' }))
+    const { processor: p } = undoClient({ cancel, retrieve })
+
+    const undo = await p.voidFunding(VOID_INPUT)
+    expect(undo).toEqual({ provider: 'stripe', ref: 'pi_123', status: 'succeeded', mode: 'voided' })
+  })
+
+  it('rethrows non-state errors without touching other endpoints', async () => {
+    const cancel = vi.fn(async () => {
+      throw Object.assign(new Error('rate limited'), { code: 'rate_limit' })
+    })
+    const { processor: p } = undoClient({ cancel })
+    await expect(p.voidFunding(VOID_INPUT)).rejects.toThrow('rate limited')
+  })
+
+  it('rethrows the ORIGINAL refusal when the PI is in a state with no move (not canceled, not succeeded)', async () => {
+    const cancel = vi.fn(async () => {
+      throw NOT_CANCELABLE
+    })
+    // e.g. requires_action after a partial re-confirmation — nothing this seam can do
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'requires_action' }))
+    const { processor: p } = undoClient({ cancel, retrieve })
+    await expect(p.voidFunding(VOID_INPUT)).rejects.toThrow(/cannot cancel/)
+  })
+})
+
+describe('stripe refund — settlement-aware', () => {
+  it('settled PI → refunds.create with the exact amount, refunded, pending', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'succeeded', amount: 20000 }))
+    const create = vi.fn(async () => ({ id: 're_9', status: 'pending' }))
+    const { processor: p } = undoClient({ retrieve, create })
+
+    const undo = await p.refund(REFUND_INPUT)
+
+    expect(undo).toEqual({ provider: 'stripe', ref: 're_9', status: 'pending', mode: 'refunded' })
+    expect(create).toHaveBeenCalledWith(
+      { payment_intent: 'pi_123', amount: 20000, metadata: { transfer_id: TRANSFER_ID } },
+      { idempotencyKey: 'idem:refund:create' },
+    )
+  })
+
+  it('a refund the sandbox settles instantly reports succeeded, not pending', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'succeeded', amount: 20000 }))
+    const create = vi.fn(async () => ({ id: 're_9', status: 'succeeded' }))
+    const { processor: p } = undoClient({ retrieve, create })
+    expect((await p.refund(REFUND_INPUT)).status).toBe('succeeded')
+  })
+
+  it('uncleared PI → VOID (the main ACH-timing path): cancel without a customer reason, sub-keyed :cancel', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'processing', amount: 20000 }))
+    const cancel = vi.fn(async () => ({ id: 'pi_123', status: 'canceled' }))
+    const { processor: p } = undoClient({ retrieve, cancel })
+
+    const undo = await p.refund(REFUND_INPUT)
+
+    expect(undo).toEqual({ provider: 'stripe', ref: 'pi_123', status: 'succeeded', mode: 'voided' })
+    expect(cancel).toHaveBeenCalledWith('pi_123', undefined, {
+      idempotencyKey: 'idem:refund:cancel',
+    })
+  })
+
+  it('crash-replay: PI already canceled → reports the void without any POST', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'canceled' }))
+    const { processor: p } = undoClient({ retrieve })
+    expect(await p.refund(REFUND_INPUT)).toEqual({
+      provider: 'stripe',
+      ref: 'pi_123',
+      status: 'succeeded',
+      mode: 'voided',
+    })
+  })
+
+  it('refuses a partial amount against an uncleared PI — cancel is all-or-nothing', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'processing', amount: 30000 }))
+    const { processor: p } = undoClient({ retrieve })
+    await expect(p.refund(REFUND_INPUT)).rejects.toThrow(/voided in full/)
+  })
+
+  it('settlement races the read: cancel refused → re-resolve → refund arm', async () => {
+    const retrieve = vi
+      .fn()
+      .mockResolvedValueOnce({ id: 'pi_123', status: 'processing', amount: 20000 })
+      .mockResolvedValueOnce({ id: 'pi_123', status: 'succeeded', amount: 20000 })
+    const cancel = vi.fn(async () => {
+      throw NOT_CANCELABLE
+    })
+    const create = vi.fn(async () => ({ id: 're_2', status: 'pending' }))
+    const { processor: p } = undoClient({ retrieve, cancel, create })
+
+    const undo = await p.refund(REFUND_INPUT)
+    expect(undo).toEqual({ provider: 'stripe', ref: 're_2', status: 'pending', mode: 'refunded' })
+    expect(retrieve).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('undoModeForRef — the persisted-ref mode encoding', () => {
+  it.each([
+    ['pi_abc123', 'voided'],
+    ['mockvoid_9d1', 'voided'],
+    ['re_abc123', 'refunded'],
+    ['mockrefund_9d1', 'refunded'],
+    // unknown namespace → the pre-S2 posting, whose error recon can see
+    ['legacy_ref', 'refunded'],
+  ] as const)('%s → %s', (ref, mode) => {
+    expect(undoModeForRef(ref)).toBe(mode)
+  })
+
+  it('agrees with the mode the adapter reports on fresh undos (prefix IS the encoding)', async () => {
+    const cancel = vi.fn(async () => ({ id: 'pi_123', status: 'canceled' }))
+    const { processor: voidP } = undoClient({ cancel })
+    const voided = await voidP.voidFunding(VOID_INPUT)
+    expect(undoModeForRef(voided.ref)).toBe(voided.mode)
+
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'succeeded', amount: 20000 }))
+    const create = vi.fn(async () => ({ id: 're_9', status: 'pending' }))
+    const { processor: refundP } = undoClient({ retrieve, create })
+    const refunded = await refundP.refund(REFUND_INPUT)
+    expect(undoModeForRef(refunded.ref)).toBe(refunded.mode)
+  })
+})
+
+describe('stripe parseEvent — refund tails (PR-S2)', () => {
+  const refundEventBody = (
+    type = 'refund.failed',
+    objectOverrides: Record<string, unknown> = {},
+  ) =>
+    Buffer.from(
+      JSON.stringify({
+        id: 'evt_r1',
+        type,
+        data: {
+          object: {
+            id: 're_1',
+            object: 'refund',
+            payment_intent: 'pi_123',
+            status: 'failed',
+            failure_reason: 'declined',
+            metadata: { transfer_id: TRANSFER_ID },
+            ...objectOverrides,
+          },
+        },
       }),
-    ).rejects.toThrow(/PR-S2/)
+    )
+
+  it('refund.failed → refund_failed with the echo, the PI join key, the refund id, and the cause', () => {
+    expect(processor.parseEvent(refundEventBody())).toEqual({
+      outcome: 'event',
+      event: {
+        eventId: 'evt_r1',
+        type: 'refund_failed',
+        transferRef: TRANSFER_ID,
+        paymentRef: 'pi_123',
+        undoRef: 're_1',
+        reason: 'declined',
+      },
+    })
+  })
+
+  it.each(['failed', 'canceled'])(
+    'refund.updated carrying status=%s is also the bounce — a refund that will never arrive',
+    (status) => {
+      const parsed = processor.parseEvent(refundEventBody('refund.updated', { status }))
+      expect(parsed.outcome === 'event' && parsed.event.type).toBe('refund_failed')
+    },
+  )
+
+  it.each(['refund.updated', 'charge.refund.updated'])(
+    '%s with status=succeeded → refund_settled, and never carries a reason',
+    (type) => {
+      const parsed = processor.parseEvent(refundEventBody(type, { status: 'succeeded' }))
+      expect(parsed).toEqual({
+        outcome: 'event',
+        event: {
+          eventId: 'evt_r1',
+          type: 'refund_settled',
+          transferRef: TRANSFER_ID,
+          paymentRef: 'pi_123',
+          undoRef: 're_1',
+        },
+      })
+    },
+  )
+
+  it('acks pending-status churn and refunds with no PI join as unhandled', () => {
+    expect(processor.parseEvent(refundEventBody('refund.updated', { status: 'pending' }))).toEqual({
+      outcome: 'unhandled',
+      eventId: 'evt_r1',
+      eventType: 'refund.updated',
+    })
+    expect(processor.parseEvent(refundEventBody('refund.failed', { payment_intent: null }))).toEqual(
+      { outcome: 'unhandled', eventId: 'evt_r1', eventType: 'refund.failed' },
+    )
+  })
+
+  it('a dashboard-issued refund (no metadata echo) still maps, with a null transferRef for the route join', () => {
+    const parsed = processor.parseEvent(refundEventBody('refund.failed', { metadata: {} }))
+    expect(parsed.outcome === 'event' && parsed.event.transferRef).toBeNull()
+    expect(parsed.outcome === 'event' && parsed.event.paymentRef).toBe('pi_123')
+  })
+
+  it('a refund envelope with no object payload is malformed', () => {
+    expect(
+      processor.parseEvent(Buffer.from(JSON.stringify({ id: 'evt_r1', type: 'refund.failed' }))),
+    ).toEqual({ outcome: 'malformed' })
   })
 })

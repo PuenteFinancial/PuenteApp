@@ -7,22 +7,35 @@ export type FundingEventType =
   | 'funding_failed'
   | 'funding_cleared'
   | 'funding_reversed'
+  // The undo tails (PR-S2): a refund ISSUED earlier (FundingUndo status
+  // 'pending') later settled or bounced. Neither drives a state transition —
+  // the transfer settled at REFUNDED when the undo was issued; these are the
+  // money-truth record (payment_events, source 'funding') and, for
+  // refund_failed, an ops page — the sender is STILL OWED after a bounce.
+  | 'refund_failed'
+  | 'refund_settled'
 
 export interface FundingEvent {
   /** Processor-unique event id (Stripe: evt_…; mock: caller-supplied). */
   eventId: string
   type: FundingEventType
   /**
-   * Our transfers.id, echoed back by the processor (Stripe: PaymentIntent
-   * metadata; mock: payload field). Null when the processor payload cannot
-   * carry the echo — Stripe's charge.dispute.created references only the
-   * payment_intent — in which case the webhook route resolves the transfer
-   * through the persisted transfers.funding_payment_ref instead.
+   * Our transfers.id, echoed back by the processor (Stripe: PaymentIntent —
+   * and Refund — metadata; mock: payload field). Null when the processor
+   * payload cannot carry the echo — Stripe's charge.dispute.created references
+   * only the payment_intent — in which case the webhook route resolves the
+   * transfer through the persisted transfers.funding_payment_ref instead.
    */
   transferRef: string | null
   /** Processor-side payment id (Stripe: payment_intent id; mock: mockpay_…). */
   paymentRef: string
-  /** Failure / ACH return code on funding_failed | funding_reversed. */
+  /**
+   * The undo object the event is about, on refund_failed | refund_settled
+   * (Stripe: Refund id re_…; mock: payload undo_ref). Distinct from paymentRef
+   * so the page/audit trail names the exact disbursement that bounced.
+   */
+  undoRef?: string
+  /** Failure / ACH return code on funding_failed | funding_reversed | refund_failed. */
   reason?: string
 }
 
@@ -49,11 +62,41 @@ export interface FundingInitiation {
 // transfers.refund_payment_ref (one undo path per transfer). `pending` is for a
 // real async return (Stripe ACH refund); the mock void/refund is always
 // `succeeded` (instant), which is what lets PR1's cancel run synchronously.
+//
+// `mode` (PR-S2) is HOW the sender was made whole, and it decides the ledger:
+//   voided   — the uncleared pull was CANCELED; the sender is never debited,
+//              no cash moves, and the FUNDED receivable must be REVERSED.
+//   refunded — collected funds go back via a real disbursement (Stripe Refund);
+//              cash leaves cash_clearing and the receivable settles on its own
+//              ACH-clearing leg.
+// Posting the wrong batch for the mode books cash that never moved — see
+// voidRefundLedgerEntries / correctionVoidLedgerEntries in services/transfers.ts.
 export interface FundingUndo {
   provider: string
   /** Processor-side undo id (Stripe: canceled PaymentIntent / Refund id; mock: mockvoid_… / mockrefund_…). */
   ref: string
   status: 'succeeded' | 'pending'
+  mode: 'voided' | 'refunded'
+}
+
+/**
+ * Recover a persisted undo's mode from its ref alone — the crash-recovery
+ * counterpart to FundingUndo.mode. The `already_disbursed` replay paths
+ * (services/refunds.ts, services/cancellation-review.ts) reach the REFUNDED
+ * transition holding nothing but transfers.refund_payment_ref, and the ledger
+ * batch they post depends on the mode, so the ref namespace IS the durable
+ * encoding (documented on FundingUndo.ref since slice 6).
+ *
+ * Module-level rather than a processor method on purpose: refs OUTLIVE the
+ * processor selection (a staging row voided under mock must still classify
+ * after FUNDING_PROCESSOR flips to stripe), so this knows every namespace.
+ * Unknown prefixes classify as 'refunded' — the pre-S2 posting, and the arm
+ * whose books recon can catch (an uncollected receivable ages visibly; a
+ * silently reversed one vanishes).
+ */
+export function undoModeForRef(ref: string): 'voided' | 'refunded' {
+  if (ref.startsWith('pi_') || ref.startsWith('mockvoid_')) return 'voided'
+  return 'refunded'
 }
 
 // The funding seam: initiation on confirm, plus the webhook-side verify +
@@ -97,8 +140,16 @@ export interface FundingProcessor {
   // UNCLEARED pull (Stripe: cancel the PaymentIntent) so nothing ever settled —
   // the cancel-at-FUNDED path; refund returns COLLECTED funds (Stripe: create a
   // Refund) — the PAYOUT_FAILED→REFUNDED path. Both accept an idempotencyKey so
-  // the slice-7 Stripe adapter drops in exactly-once without a signature change
-  // (PR1 calls voidFunding; PR2 calls refund).
+  // the Stripe adapter dedupes exactly-once without a signature change.
+  //
+  // NEITHER op promises its nominal mode (PR-S2): settlement decides. The
+  // Stripe adapter resolves the LIVE PaymentIntent — an uncleared pull can only
+  // be voided (Stripe forbids refunding an unsettled ACH charge, and a refund
+  // beside a late dispute double-credits), a settled one can only be refunded —
+  // so voidFunding falls back to a refund when the PI settled first, and refund
+  // falls back to a void while the PI is still processing. Callers learn which
+  // arm ran from FundingUndo.mode (or undoModeForRef on the persisted ref) and
+  // MUST post the matching ledger batch.
   voidFunding(input: {
     transferId: string
     paymentRef: string

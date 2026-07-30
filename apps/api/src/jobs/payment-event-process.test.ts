@@ -49,9 +49,11 @@ vi.mock('../services/cancellations.js', () => ({
 }))
 
 const refund = vi.hoisted(() => vi.fn())
-vi.mock('../services/funding/index.js', () => ({
-  getFundingProcessor: () => ({ refund: (...a: unknown[]) => refund(...a) }),
-}))
+vi.mock('../services/funding/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/funding/index.js')>()
+  // real undoModeForRef — the tail picks its REFUNDED batch off the ref prefix
+  return { ...actual, getFundingProcessor: () => ({ refund: (...a: unknown[]) => refund(...a) }) }
+})
 
 const { processPaymentEvent } = await import('./payment-event-process.js')
 const { TransferRpcError } = await import('../services/transfers.js')
@@ -992,6 +994,58 @@ describe('processPaymentEvent — receipt (PR3)', () => {
     await expect(processPaymentEvent('ev-1')).rejects.toThrow('receipt upsert failed')
     // COMPLETED ledger already posted; the event stays 'received' so a retry
     // re-runs drive() (replay no-op) and re-attempts the idempotent receipt.
+    expect(markProcessed).not.toHaveBeenCalled()
+  })
+})
+
+// ── funding-source events (PR-S2 refund tails) ───────────────────────────────
+// These rows are recorded and normally handled inline by the funding webhook
+// route; they reach the job only through the crash-recovery path (payout-sweep
+// re-enqueues stale 'received' rows source-blind). The branch must re-drive the
+// same act and retire the row — mapBridgeState would otherwise read the type as
+// an unknown BRIDGE state and mark it ignored, eating a sender-still-owed page.
+
+describe('funding-source events (PR-S2 refund tails)', () => {
+  it('refund_failed re-drives the sender-still-owed page and retires the row', async () => {
+    q(
+      'payment_events',
+      event({
+        source: 'funding',
+        event_type: 'refund_failed',
+        transfer_id: 'tr-1',
+        provider_ref: 'mockrefund_9',
+      }),
+    )
+
+    await processPaymentEvent('ev-1')
+
+    expect(setFingerprint).toHaveBeenCalledWith(['funding-refund-failed', 'tr-1'])
+    expect(captureMessage).toHaveBeenCalledWith(
+      expect.stringContaining('refund FAILED'),
+      'error',
+    )
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+    // money truth only — never a state move, never a ledger post
+    expect(transition).not.toHaveBeenCalled()
+    expect(postLedger).not.toHaveBeenCalled()
+  })
+
+  it('refund_settled retires silently — the payment_events row is the record', async () => {
+    q('payment_events', event({ source: 'funding', event_type: 'refund_settled' }))
+
+    await processPaymentEvent('ev-1')
+
+    expect(captureMessage).not.toHaveBeenCalled()
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+    expect(transition).not.toHaveBeenCalled()
+  })
+
+  it('an unknown funding event type marks ignored with the funding label, not the bridge one', async () => {
+    q('payment_events', event({ source: 'funding', event_type: 'mystery_event' }))
+
+    await processPaymentEvent('ev-1')
+
+    expect(markIgnored).toHaveBeenCalledWith('ev-1', 'unmapped funding event: mystery_event')
     expect(markProcessed).not.toHaveBeenCalled()
   })
 })
