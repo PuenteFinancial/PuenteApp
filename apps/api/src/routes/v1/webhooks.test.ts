@@ -39,6 +39,21 @@ vi.mock('../../services/payment-events.js', () => ({
   recordEvent: (...args: unknown[]) => recordEvent(...args),
 }))
 
+// Overridable funding processor: null → the real mock processor; tests set
+// `current` to a stripe-shaped fake to exercise processor-declared headers,
+// configured-checks, and the null-transferRef resolution path.
+const processorOverride = vi.hoisted(() => ({ current: null as unknown }))
+vi.mock('../../services/funding/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/funding/index.js')>()
+  return {
+    ...actual,
+    getFundingProcessor: () =>
+      (processorOverride.current ?? actual.getFundingProcessor()) as ReturnType<
+        typeof actual.getFundingProcessor
+      >,
+  }
+})
+
 const { webhooksRoute } = await import('./webhooks.js')
 const { TransferRpcError } = await import('../../services/transfers.js')
 const { env } = await import('../../config/env.js')
@@ -63,6 +78,7 @@ async function buildApp() {
 
 beforeEach(() => {
   from.mockReset()
+  processorOverride.current = null
 })
 
 describe('POST /v1/webhooks/bridge', () => {
@@ -481,9 +497,19 @@ describe('POST /v1/webhooks/funding', () => {
     const garbage = 'not json'
     expect((await postFunding(app, garbage, fundingSign(garbage))).status).toBe(400)
 
-    const unknownType = fundingBody('payment.exploded')
-    expect((await postFunding(app, unknownType, fundingSign(unknownType))).status).toBe(400)
+    expect(from).not.toHaveBeenCalled()
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
 
+  it('acks signed-but-unmapped event types instead of 400ing them into a redelivery loop', async () => {
+    const app = await buildApp()
+
+    const unknownType = fundingBody('payment.exploded')
+    const res = await postFunding(app, unknownType, fundingSign(unknownType))
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ received: true })
     expect(from).not.toHaveBeenCalled()
     expect(transitionTransfer).not.toHaveBeenCalled()
     await app.close()
@@ -514,6 +540,120 @@ describe('POST /v1/webhooks/funding', () => {
     } finally {
       env.MOCK_FUNDING_WEBHOOK_SECRET = saved
     }
+  })
+})
+
+// ── funding webhook, stripe-shaped processor (PR-S1) ────────────────────────
+// The route must take the header name, configured-check, parse result, and
+// (for disputes) the funding_payment_ref join from the processor — these
+// tests drive it with a stripe-shaped fake through the same public seam.
+
+const disputeEvent = {
+  eventId: 'evt_d1',
+  type: 'funding_reversed' as const,
+  transferRef: null,
+  paymentRef: 'pi_123',
+  reason: 'insufficient_funds',
+}
+
+function fakeStripeProcessor(overrides: Record<string, unknown> = {}) {
+  return {
+    provider: 'stripe',
+    signatureHeader: 'stripe-signature',
+    isConfigured: () => true,
+    verifySignature: vi.fn(() => true),
+    parseEvent: vi.fn(() => ({ outcome: 'event', event: disputeEvent })),
+    initiateFunding: vi.fn(),
+    voidFunding: vi.fn(),
+    refund: vi.fn(),
+    ...overrides,
+  }
+}
+
+describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
+  beforeEach(() => {
+    transitionTransfer.mockReset()
+  })
+
+  it('reads the signature from the header the processor declares', async () => {
+    const processor = fakeStripeProcessor({
+      parseEvent: vi.fn(() => ({ outcome: 'unhandled', eventId: 'evt_x', eventType: 'charge.updated' })),
+    })
+    processorOverride.current = processor
+    const app = await buildApp()
+
+    // funding-signature (the mock's header) no longer satisfies the route…
+    const missing = await supertest(app.server)
+      .post('/v1/webhooks/funding')
+      .set('Content-Type', 'application/json')
+      .set('Funding-Signature', 'sig_v1')
+      .send('{}')
+    expect(missing.status).toBe(400)
+    expect(processor.verifySignature).not.toHaveBeenCalled()
+
+    // …stripe-signature does, and the raw value reaches the processor
+    const ok = await supertest(app.server)
+      .post('/v1/webhooks/funding')
+      .set('Content-Type', 'application/json')
+      .set('Stripe-Signature', 'sig_v1')
+      .send('{}')
+    expect(ok.status).toBe(200)
+    expect(processor.verifySignature).toHaveBeenCalledWith(expect.any(Buffer), 'sig_v1')
+    await app.close()
+  })
+
+  it("503s not_configured on the processor's own configured-check", async () => {
+    processorOverride.current = fakeStripeProcessor({ isConfigured: () => false })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/funding')
+      .set('Content-Type', 'application/json')
+      .set('Stripe-Signature', 'sig_v1')
+      .send('{}')
+
+    expect(res.status).toBe(503)
+    expect(res.body.error.code).toBe('not_configured')
+    await app.close()
+  })
+
+  it('resolves a null-transferRef dispute through transfers.funding_payment_ref and acks', async () => {
+    const lookup = selectChain({ data: { id: TRANSFER_ID } })
+    from.mockReturnValueOnce(lookup)
+    processorOverride.current = fakeStripeProcessor()
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/funding')
+      .set('Content-Type', 'application/json')
+      .set('Stripe-Signature', 'sig_v1')
+      .send('{}')
+
+    expect(res.status).toBe(200)
+    expect(from).toHaveBeenCalledWith('transfers')
+    expect(lookup['select']).toHaveBeenCalledWith('id')
+    expect(lookup['eq']).toHaveBeenCalledWith('funding_payment_ref', 'pi_123')
+    expect(lookup['maybeSingle']).toHaveBeenCalled()
+    // funding_reversed handling stays deferred — resolution is for the log/join
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('acks a dispute that matches no transfer (retry cannot fix it) without touching state', async () => {
+    from.mockReturnValueOnce(selectChain({ data: null }))
+    processorOverride.current = fakeStripeProcessor()
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/funding')
+      .set('Content-Type', 'application/json')
+      .set('Stripe-Signature', 'sig_v1')
+      .send('{}')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ received: true })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    await app.close()
   })
 })
 

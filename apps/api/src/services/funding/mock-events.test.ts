@@ -46,10 +46,13 @@ describe('buildMockFundingEvent', () => {
     })
 
     expect(processor.parseEvent(Buffer.from(body, 'utf8'))).toEqual({
-      eventId: 'evt_fixed',
-      type: 'funding_succeeded',
-      transferRef: TRANSFER_ID,
-      paymentRef: 'mockpay_from_confirm',
+      outcome: 'event',
+      event: {
+        eventId: 'evt_fixed',
+        type: 'funding_succeeded',
+        transferRef: TRANSFER_ID,
+        paymentRef: 'mockpay_from_confirm',
+      },
     })
   })
 
@@ -61,7 +64,8 @@ describe('buildMockFundingEvent', () => {
       reason: 'R01',
     })
 
-    expect(processor.parseEvent(Buffer.from(body, 'utf8'))?.reason).toBe('R01')
+    const parsed = processor.parseEvent(Buffer.from(body, 'utf8'))
+    expect(parsed.outcome === 'event' && parsed.event.reason).toBe('R01')
   })
 
   it('mints a payment ref when none is supplied', () => {
@@ -71,7 +75,8 @@ describe('buildMockFundingEvent', () => {
       secret: SECRET,
     })
 
-    expect(processor.parseEvent(Buffer.from(body, 'utf8'))?.paymentRef).toMatch(/^mockpay_/)
+    const parsed = processor.parseEvent(Buffer.from(body, 'utf8'))
+    expect(parsed.outcome === 'event' && parsed.event.paymentRef).toMatch(/^mockpay_/)
   })
 
   it('signs the body VERBATIM — re-serializing the JSON breaks verification', () => {

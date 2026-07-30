@@ -1,9 +1,9 @@
 import crypto from 'node:crypto'
 import { env } from '../../config/env.js'
 import type {
-  FundingEvent,
   FundingEventType,
   FundingInitiation,
+  FundingParseResult,
   FundingProcessor,
   FundingUndo,
 } from './index.js'
@@ -22,6 +22,14 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
 
 export class MockFundingProcessor implements FundingProcessor {
   readonly provider = 'mock'
+  readonly signatureHeader = 'funding-signature'
+
+  isConfigured(): boolean {
+    // THE production lock: the mock secret is never set in prod, so mock
+    // funding (webhook + confirm) cannot exist there. Read at call time —
+    // tests toggle it on the parsed env object.
+    return Boolean(env.MOCK_FUNDING_WEBHOOK_SECRET)
+  }
 
   async initiateFunding(): Promise<FundingInitiation> {
     // No real money exists behind the mock: initiation just mints the payment
@@ -76,24 +84,32 @@ export class MockFundingProcessor implements FundingProcessor {
     return { provider: this.provider, ref: `mockrefund_${crypto.randomUUID()}`, status: 'succeeded' }
   }
 
-  parseEvent(rawBody: Buffer): FundingEvent | null {
+  parseEvent(rawBody: Buffer): FundingParseResult {
     try {
       const payload = JSON.parse(rawBody.toString('utf8')) as {
         id?: string
         type?: string
         data?: { transfer_id?: string; payment_ref?: string; reason?: string }
       }
-      if (!payload.id || !payload.type || !EVENT_TYPES.has(payload.type)) return null
-      if (!payload.data?.transfer_id || !payload.data.payment_ref) return null
+      if (!payload.id || !payload.type) return { outcome: 'malformed' }
+      if (!EVENT_TYPES.has(payload.type)) {
+        // Signed but outside the mapping — same ack contract as Stripe's
+        // unmapped event types; the route's warn log surfaces a script typo.
+        return { outcome: 'unhandled', eventId: payload.id, eventType: payload.type }
+      }
+      if (!payload.data?.transfer_id || !payload.data.payment_ref) return { outcome: 'malformed' }
       return {
-        eventId: payload.id,
-        type: payload.type as FundingEventType,
-        transferRef: payload.data.transfer_id,
-        paymentRef: payload.data.payment_ref,
-        ...(payload.data.reason !== undefined && { reason: payload.data.reason }),
+        outcome: 'event',
+        event: {
+          eventId: payload.id,
+          type: payload.type as FundingEventType,
+          transferRef: payload.data.transfer_id,
+          paymentRef: payload.data.payment_ref,
+          ...(payload.data.reason !== undefined && { reason: payload.data.reason }),
+        },
       }
     } catch {
-      return null
+      return { outcome: 'malformed' }
     }
   }
 }

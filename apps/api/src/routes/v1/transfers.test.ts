@@ -42,9 +42,16 @@ vi.mock('../../services/transfers.js', async (importOriginal) => {
 // the confirm tests expect.
 const initiateFunding = vi.fn()
 const voidFunding = vi.fn()
+const isConfigured = vi.fn(() => true)
 
 vi.mock('../../services/funding/index.js', () => ({
-  getFundingProcessor: () => ({ provider: 'mock', initiateFunding, voidFunding }),
+  getFundingProcessor: () => ({
+    provider: 'mock',
+    signatureHeader: 'funding-signature',
+    isConfigured: () => isConfigured(),
+    initiateFunding,
+    voidFunding,
+  }),
 }))
 
 // Per-user velocity gate (slice-7 PR5) is mocked ok by default so existing
@@ -332,6 +339,19 @@ describe('POST /v1/transfers/:id/confirm', () => {
     const app = await buildApp()
     const res = await confirm(app, { disclosureId: DISCLOSURE_ID, accepted: false })
     expect(res.status).toBe(400)
+    await app.close()
+  })
+
+  it("503s not_configured on the processor's configured-check — before any funding call", async () => {
+    routeTables()
+    isConfigured.mockReturnValueOnce(false)
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(503)
+    expect(res.body.error.code).toBe('not_configured')
+    expect(initiateFunding).not.toHaveBeenCalled()
     await app.close()
   })
 

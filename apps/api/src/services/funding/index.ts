@@ -1,5 +1,6 @@
 import { env } from '../../config/env.js'
 import { MockFundingProcessor } from './mock.js'
+import { StripeFundingProcessor } from './stripe.js'
 
 export type FundingEventType =
   | 'funding_succeeded'
@@ -11,13 +12,29 @@ export interface FundingEvent {
   /** Processor-unique event id (Stripe: evt_…; mock: caller-supplied). */
   eventId: string
   type: FundingEventType
-  /** Our transfers.id, echoed back by the processor (Stripe: from metadata). */
-  transferRef: string
+  /**
+   * Our transfers.id, echoed back by the processor (Stripe: PaymentIntent
+   * metadata; mock: payload field). Null when the processor payload cannot
+   * carry the echo — Stripe's charge.dispute.created references only the
+   * payment_intent — in which case the webhook route resolves the transfer
+   * through the persisted transfers.funding_payment_ref instead.
+   */
+  transferRef: string | null
   /** Processor-side payment id (Stripe: payment_intent id; mock: mockpay_…). */
   paymentRef: string
   /** Failure / ACH return code on funding_failed | funding_reversed. */
   reason?: string
 }
+
+// A signed webhook body parses to exactly one of three things: an actionable
+// funding event, a well-formed event outside our mapping (Stripe delivers
+// whatever the endpoint subscribes to — e.g. payment_method.automatically_updated —
+// and a 400 would put a legitimate delivery into a redelivery loop and count
+// against endpoint health, so the route must ack these), or junk.
+export type FundingParseResult =
+  | { outcome: 'event'; event: FundingEvent }
+  | { outcome: 'unhandled'; eventId: string; eventType: string }
+  | { outcome: 'malformed' }
 
 export interface FundingInitiation {
   provider: string
@@ -39,9 +56,9 @@ export interface FundingUndo {
   status: 'succeeded' | 'pending'
 }
 
-// The seam Stripe drops into (slice 4b): initiation on confirm, plus the
-// webhook-side verify + normalize. Implementations never throw from
-// verifySignature; parseEvent returns null for anything unusable.
+// The funding seam: initiation on confirm, plus the webhook-side verify +
+// normalize. Implementations never throw from verifySignature or parseEvent;
+// parseEvent classifies unusable payloads as malformed rather than throwing.
 //
 // TIMEOUT CONTRACT (debt pass 2026-07-29): every network-bound implementation
 // MUST enforce its own bounded per-request timeout (Stripe adapter: the SDK's
@@ -53,6 +70,20 @@ export interface FundingUndo {
 // satisfies this.
 export interface FundingProcessor {
   readonly provider: string
+  /**
+   * The (lowercase) request header carrying the webhook signature — the route
+   * asks the processor instead of hardcoding it (mock: funding-signature;
+   * Stripe: stripe-signature).
+   */
+  readonly signatureHeader: string
+  /**
+   * Whether this processor can actually run here: its secrets are present.
+   * The route 503s the funding webhook and confirm gates on this — for the
+   * mock that check IS the production lock (the mock secret is never set in
+   * prod); for Stripe env.superRefine already refuses to boot a stripe
+   * selection without keys, so this is belt-and-suspenders.
+   */
+  isConfigured(): boolean
   initiateFunding(input: {
     transferId: string
     userId: string
@@ -60,7 +91,7 @@ export interface FundingProcessor {
     currency: 'USD'
   }): Promise<FundingInitiation>
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean
-  parseEvent(rawBody: Buffer): FundingEvent | null
+  parseEvent(rawBody: Buffer): FundingParseResult
   // The two funding-undo ops (slice 6), mirroring the initiateFunding seam.
   // Distinct money movements → distinct ledger batches: voidFunding cancels an
   // UNCLEARED pull (Stripe: cancel the PaymentIntent) so nothing ever settled —
@@ -86,6 +117,7 @@ export interface FundingProcessor {
 // style) — a module-level factory on env is the established seam shape.
 const processors: Record<typeof env.FUNDING_PROCESSOR, () => FundingProcessor> = {
   mock: () => new MockFundingProcessor(),
+  stripe: () => new StripeFundingProcessor(),
 }
 
 let instance: FundingProcessor | undefined

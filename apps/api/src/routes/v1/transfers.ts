@@ -136,11 +136,12 @@ function encodeCursor(row: { created_at: string; id: string }): string {
   return Buffer.from(JSON.stringify({ c: row.created_at, i: row.id })).toString('base64url')
 }
 
-// The mock processor must be unusable wherever its webhook secret isn't
-// provisioned (production, by policy) — funding can't be initiated if the
-// events that complete it can never arrive.
+// Funding can't be initiated if the events that complete it can never arrive —
+// each processor declares its own configured-check (mock: the webhook secret
+// that is never provisioned in prod, i.e. THE production lock; Stripe: both
+// STRIPE_* secrets, doubly guaranteed by env.superRefine at boot).
 function fundingConfigured(): boolean {
-  return getFundingProcessor().provider !== 'mock' || Boolean(env.MOCK_FUNDING_WEBHOOK_SECRET)
+  return getFundingProcessor().isConfigured()
 }
 
 // A cancel that arrives once a payout is being submitted (claimed-but-still-
