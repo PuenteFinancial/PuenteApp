@@ -74,7 +74,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
 
   return (
     <OnboardingShell>
-      <ReceiptView content={body.content} completedAt={transfer.completedAt} transferId={id} />
+      <ReceiptView content={body.content} transferId={id} />
     </OnboardingShell>
   )
 }

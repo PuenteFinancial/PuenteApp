@@ -18,6 +18,18 @@ describe('isRenderedDisclosure', () => {
     expect(isRenderedDisclosure(rendered)).toBe(true)
   })
 
+  it('accepts the v2 receipt fields and v1 rows without them (optional)', () => {
+    // v2 receipts (slice-7 PR7) add these; stored v1 rows never have them —
+    // both shapes must keep validating.
+    expect(
+      isRenderedDisclosure({
+        ...rendered,
+        recipientLine: 'Recipient: María Hernández García',
+        dateAvailableLine: 'Date available: July 29, 2026',
+      }),
+    ).toBe(true)
+  })
+
   it('rejects anything not shaped like a rendering (guards the verbatim render)', () => {
     expect(isRenderedDisclosure(null)).toBe(false)
     expect(isRenderedDisclosure({})).toBe(false)
@@ -26,6 +38,8 @@ describe('isRenderedDisclosure', () => {
     expect(isRenderedDisclosure({ ...rendered, amountLines: 'nope' })).toBe(false)
     expect(isRenderedDisclosure({ ...rendered, amountLines: ['ok', 5] })).toBe(false)
     expect(isRenderedDisclosure({ ...rendered, contact: undefined })).toBe(false)
+    expect(isRenderedDisclosure({ ...rendered, recipientLine: 42 })).toBe(false)
+    expect(isRenderedDisclosure({ ...rendered, dateAvailableLine: { nope: true } })).toBe(false)
   })
 })
 
