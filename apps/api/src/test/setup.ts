@@ -9,3 +9,6 @@ process.env.BRIDGE_API_KEY ??= 'bridge_test_key'
 process.env.BRIDGE_API_BASE ??= 'https://api.bridge.test'
 process.env.DETAILS_ENCRYPTION_KEY ??= Buffer.alloc(32, 7).toString('base64')
 process.env.MOCK_FUNDING_WEBHOOK_SECRET ??= 'mock_funding_secret_test'
+// Webhook signing secret only — no STRIPE_SECRET_KEY, so tests prove the
+// stripe adapter's signature path without ever looking API-key-configured.
+process.env.STRIPE_WEBHOOK_SECRET ??= 'whsec_stripe_secret_test'

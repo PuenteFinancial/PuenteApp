@@ -6,6 +6,23 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-30 · FUNDED fires on `payment_intent.processing`, not `succeeded` — instant-front is a
+webhook mapping, not a policy switch.** The Stripe adapter (PR-S1) maps `payment_intent.processing`
+→ `funding_succeeded` (drives PENDING_PAYMENT → FUNDED, posts the funding ledger batch, enqueues
+the payout) and `payment_intent.succeeded` → `funding_cleared` (the flag `WAIT_FOR_CLEARING`
+consults). ACH is delayed-notification: `processing` means the debit was submitted to the network;
+settlement lands ~T+4. Fronting the payout at submission IS the product (family gets pesos today);
+the exposure containment is elsewhere — per-user caps (PR5), the float ceiling, and slice-8's
+uncleared-exposure controls. The failure tails map likewise: a pre-settlement return arrives as
+`payment_intent.payment_failed` → `funding_failed`; a post-settlement return arrives as
+`charge.dispute.created` → `funding_reversed` (final, no appeal — Stripe ACH disputes cannot be
+contested). Two consequences recorded now: (1) dispute payloads carry no metadata echo, so
+`FundingEvent.transferRef` went nullable and the webhook route joins through the persisted
+`transfers.funding_payment_ref`; (2) a `funding_failed` that arrives AFTER the instant-front (state
+already FUNDED) currently surfaces as a logged `transition_conflict` and nothing else — the
+money-truth tail for that case is PR-S2's settlement-aware undo work plus the O-lane
+reconciliation, deliberately not smuggled into the adapter PR. **Status: active** (PR-S1)
+
 **2026-07-29 · The aggregate Reg E double-pay guard is an hourly cron over the ledger, not an
 alert at write time.** `ledger.correction-watch` sums `loss_cancellation_correction` over a rolling
 window (`LOSS_CORRECTION_WINDOW_DAYS`, default 7) and pages `loss-correction-threshold` (warning)

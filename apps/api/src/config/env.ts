@@ -54,12 +54,28 @@ const envSchema = z.object({
   QUOTE_FEE_BPS: z.coerce.number().int().min(0).max(9999).default(100),
   QUOTE_FX_BUFFER_BPS: z.coerce.number().int().min(0).max(9999).default(50),
   QUOTE_EXPIRY_SECONDS: z.coerce.number().int().min(60).max(86400).default(900),
-  // Funding (slice 4). 'stripe' joins the enum in slice 4b when keys exist.
-  FUNDING_PROCESSOR: z.enum(['mock']).default('mock'),
+  // Funding (slice 4; 'stripe' joined in PR-S1). Selecting 'stripe' requires
+  // both STRIPE_* secrets — enforced by the superRefine below, so a
+  // half-configured stripe selection refuses to boot instead of 503ing at the
+  // first confirm. Prod stays 'mock' (and therefore inert — see the mock
+  // secret note) until Joshua flips Doppler.
+  FUNDING_PROCESSOR: z.enum(['mock', 'stripe']).default('mock'),
   // Webhook HMAC secret for the mock processor. ABSENT IN PRODUCTION on
   // purpose — its absence 503s the funding webhook and confirm, which is the
   // production lock against mock funding. Doppler sets it dev/staging only.
   MOCK_FUNDING_WEBHOOK_SECRET: z.string().min(16).optional(),
+  // Stripe (PR-S1): secret key (sk_test_… until activation; sk_live_… after)
+  // and the webhook endpoint signing secret (whsec_…). Optional here — only a
+  // FUNDING_PROCESSOR=stripe selection requires them (superRefine below).
+  STRIPE_SECRET_KEY: z.string().min(1).optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
+  // Hard deadline on every Stripe SDK call, same contract and bounds as
+  // BRIDGE_TIMEOUT_SECONDS: the funding seam's timeout contract feeds the
+  // 10-min CLAIM_STALE_AFTER_MS derivation in services/refunds.ts, so an
+  // unbounded adapter call could make a live refund read as abandoned. The
+  // SDK multiplies this by (maxNetworkRetries+1) in the worst case — still
+  // minutes inside the staleness window at the 120 cap.
+  STRIPE_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(120).default(15),
   // Explicit opt-in for the dev-only routes (slice 7 PR3: simulate-funding,
   // which drives PENDING_PAYMENT→FUNDED — a real ledger batch — with no real
   // payment). Same fail-closed enum shape as WAIT_FOR_CLEARING / AUTO_REFUND,
@@ -145,7 +161,22 @@ const envSchema = z.object({
   SENTRY_DSN: z.string().url().optional(),
 })
 
-const parsed = envSchema.safeParse(process.env)
+// Exported for tests; runtime uses the singleton `env` below.
+export const envSchemaWithRules = envSchema.superRefine((value, ctx) => {
+  if (value.FUNDING_PROCESSOR === 'stripe') {
+    for (const key of ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'] as const) {
+      if (!value[key]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is required when FUNDING_PROCESSOR=stripe`,
+        })
+      }
+    }
+  }
+})
+
+const parsed = envSchemaWithRules.safeParse(process.env)
 
 if (!parsed.success) {
   console.error('Invalid environment variables:')
