@@ -1,10 +1,7 @@
 import * as Sentry from '@sentry/node'
 import { env } from '../config/env.js'
 import { supabaseAdmin } from '../services/supabase.js'
-import {
-  transitionTransfer,
-  TransferRpcError,
-} from '../services/transfers.js'
+import { transitionTransfer, TransferRpcError } from '../services/transfers.js'
 import {
   checkPayability,
   computeDriftBps,
@@ -14,11 +11,7 @@ import {
   submittedLedgerEntries,
   PayoutValidationError,
 } from '../services/payouts.js'
-import {
-  createBridgePayout,
-  getExchangeRate,
-  BridgeApiError,
-} from '../services/bridge.js'
+import { createBridgePayout, getExchangeRate, BridgeApiError } from '../services/bridge.js'
 import { enqueuePaymentEventProcess } from '../services/queue.js'
 import { assessTransferRisk, assessUnclearedCap, hasClearedHistory } from '../services/risk.js'
 
@@ -364,7 +357,7 @@ export async function submitPayout(transferId: string): Promise<number> {
         )
         .select('id')
         .maybeSingle()
-      if (eventRow) await enqueuePaymentEventProcess((eventRow as { id: string }).id)
+      if (eventRow) await enqueuePaymentEventProcess((eventRow as { id: string }).id, 'worker')
     } catch {
       // Best-effort: the payout.poll cron (PR 3) synthesizes the same event.
     }

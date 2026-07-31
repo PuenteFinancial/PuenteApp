@@ -502,7 +502,7 @@ describe('submitPayout — submission and transition', () => {
     expect(await submitPayout('tr-1')).toBe(1)
     const eventChain = queues.payment_events
     expect(eventChain).toHaveLength(0) // consumed
-    expect(enqueueEvent).toHaveBeenCalledWith('ev-1')
+    expect(enqueueEvent).toHaveBeenCalledWith('ev-1', 'worker')
   })
 
   it('awaiting_funds state → no synthesized event', async () => {

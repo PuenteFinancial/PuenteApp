@@ -85,10 +85,14 @@ export async function pollPayouts(): Promise<number> {
         eventType: bridge.state,
         transferId: row.id,
         providerRef: bridge.bridgeTransferId,
-        payload: { state: bridge.state, source_amount: bridge.sourceAmount, synthesized_from: 'payout.poll' },
+        payload: {
+          state: bridge.state,
+          source_amount: bridge.sourceAmount,
+          synthesized_from: 'payout.poll',
+        },
       })
       if (inserted) {
-        await enqueuePaymentEventProcess(id)
+        await enqueuePaymentEventProcess(id, 'worker')
         synthesized++
       }
     } catch (err) {
@@ -98,7 +102,9 @@ export async function pollPayouts(): Promise<number> {
   }
 
   if (failures.length > 0) {
-    throw new Error(`payout-poll: ${failures.length}/${rows.length} polls failed (first: ${failures[0]})`)
+    throw new Error(
+      `payout-poll: ${failures.length}/${rows.length} polls failed (first: ${failures[0]})`,
+    )
   }
   return synthesized
 }
