@@ -120,6 +120,33 @@ describe('stripe initiateFunding', () => {
   })
 })
 
+describe('stripe getClientSession (PR-S3 pay-step bootstrap)', () => {
+  it('retrieves the live PI and returns wire-shaped camelCase fields with the publishable key', async () => {
+    const saved = env.STRIPE_PUBLISHABLE_KEY
+    env.STRIPE_PUBLISHABLE_KEY = 'pk_test_dummy'
+    try {
+      const retrieve = vi.fn(async () => ({ id: 'pi_123', client_secret: 'pi_123_secret_x' }))
+      const p = new StripeFundingProcessor({ paymentIntents: { retrieve } } as unknown as Stripe)
+
+      const session = await p.getClientSession({ paymentRef: 'pi_123' })
+
+      expect(retrieve).toHaveBeenCalledWith('pi_123')
+      expect(session).toEqual({
+        provider: 'stripe',
+        fields: { clientSecret: 'pi_123_secret_x', publishableKey: 'pk_test_dummy' },
+      })
+    } finally {
+      env.STRIPE_PUBLISHABLE_KEY = saved
+    }
+  })
+
+  it('throws on a PI without a client_secret instead of returning a half-usable session', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', client_secret: null }))
+    const p = new StripeFundingProcessor({ paymentIntents: { retrieve } } as unknown as Stripe)
+    await expect(p.getClientSession({ paymentRef: 'pi_123' })).rejects.toThrow(/client_secret/)
+  })
+})
+
 describe('stripe verifySignature — real SDK vectors', () => {
   it('accepts a genuine signature', () => {
     const body = piEventBody()

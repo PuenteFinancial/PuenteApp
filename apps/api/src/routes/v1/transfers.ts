@@ -927,6 +927,88 @@ export async function transfersRoute(server: FastifyInstance) {
     },
   )
 
+  // GET /transfers/:id/funding-session — pay-step bootstrap (PR-S3). Returns
+  // what the browser needs to mount the Payment Element for an
+  // already-initiated funding attempt: { provider, clientSecret?,
+  // publishableKey? }. The client_secret lives only at Stripe — this route
+  // retrieves it on demand (once per pay-step mount, never on the tracker
+  // poll) and it is never persisted or logged on our side (the audit plugin
+  // logs url/status only).
+  //
+  // Deliberately NO requireApprovedUser and NO O3 uncleared-cap check: this is
+  // a read-only bootstrap for a send that already passed the approved-user +
+  // risk gates at confirm. A mid-window KYC flip (Bridge rewrites kyc_status on
+  // every customer.updated) must not strand a committed sender inside the
+  // 30-min PENDING_PAYMENT lifetime — the same rationale as the cancel route's
+  // shortened guard ladder. No new commitment happens here, so the O3 403 does
+  // not apply either.
+  server.get<{ Params: { id: string } }>(
+    '/transfers/:id/funding-session',
+    {
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string', format: 'uuid' } },
+        },
+        response: {
+          // Output allowlist: anything the processor adds beyond these keys is
+          // stripped by Fastify's serializer, so a future processor cannot
+          // accidentally widen the wire contract.
+          200: {
+            type: 'object',
+            properties: {
+              provider: { type: 'string' },
+              clientSecret: { type: 'string' },
+              publishableKey: { type: 'string' },
+            },
+          },
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          503: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const userId = request.user!.id
+
+      // Same posture as confirm: an unconfigured processor (prod mock lock)
+      // has no session to serve.
+      if (!fundingConfigured()) {
+        return sendError(reply, 503, 'not_configured', 'Funding is not available yet')
+      }
+
+      const { data } = await supabaseAdmin
+        .from('transfers')
+        .select(TRANSFER_COLUMNS)
+        .eq('id', request.params.id)
+        .eq('user_id', userId)
+        .single()
+
+      if (!data) {
+        return sendError(reply, 404, 'not_found', 'Transfer not found')
+      }
+      const transfer = data as unknown as TransferRow
+
+      if (transfer.state !== 'PENDING_PAYMENT') {
+        return sendError(reply, 409, 'conflict', 'Transfer is no longer awaiting payment')
+      }
+
+      // The confirm-crashed window (accepted but no ref): confirm's own retry
+      // path is the recovery — it re-initiates and Stripe's funding_init_<id>
+      // idempotency key returns the same PI — not this read-only route.
+      if (!transfer.funding_payment_ref) {
+        return sendError(reply, 409, 'conflict', 'Payment has not been set up for this transfer')
+      }
+
+      const session = await getFundingProcessor().getClientSession({
+        paymentRef: transfer.funding_payment_ref,
+      })
+
+      return { provider: session.provider, ...session.fields }
+    },
+  )
+
   // GET /transfers/:id/receipt — the Reg E receipt for a delivered transfer.
   // Owner-scoped; the receipt row exists only once the transfer reached COMPLETED
   // (written by the payment-event.process job), so its absence — pre-COMPLETED or

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { env } from '../../config/env.js'
 import type {
+  FundingClientSession,
   FundingEventType,
   FundingInitiation,
   FundingParseResult,
@@ -42,6 +43,13 @@ export class MockFundingProcessor implements FundingProcessor {
       paymentRef: `mockpay_${crypto.randomUUID()}`,
       clientFields: {},
     }
+  }
+
+  async getClientSession(): Promise<FundingClientSession> {
+    // No Element to mount behind the mock — a clean 200 with no fields, so the
+    // web decides its affordance (simulate button vs nothing) on provider
+    // alone, with no special error branch for mock envs.
+    return { provider: this.provider, fields: {} }
   }
 
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean {
