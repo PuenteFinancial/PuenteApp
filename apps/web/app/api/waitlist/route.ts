@@ -1,6 +1,8 @@
 import { createHash } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
-import { getPostHogClient } from '@/lib/posthog-server'
+import { getPostHogClient, flushPostHog } from '@/lib/posthog-server'
+import { internalApiUrl } from '@/lib/apiBaseUrl'
+import { parseApiError } from '@/lib/apiError'
 
 // Hash phone so PostHog never holds raw PII — same phone always hashes to same ID
 function hashPhone(phone: string): string {
@@ -50,8 +52,7 @@ export async function POST(req: NextRequest) {
         })()
       : null
 
-    const apiUrl = process.env.INTERNAL_API_URL
-    if (!apiUrl) throw new Error('INTERNAL_API_URL is not configured')
+    const apiUrl = internalApiUrl()
 
     const apiRes = await fetch(`${apiUrl}/v1/waitlist`, {
       method: 'POST',
@@ -80,8 +81,13 @@ export async function POST(req: NextRequest) {
     const phId = distinctId ?? phoneHash
 
     if (!apiRes.ok) {
-      const errBody = await apiRes.json().catch(() => ({})) as { error?: string }
-      console.error('Waitlist API error:', errBody)
+      // The API returns the uniform envelope { error: { code, message, ... } },
+      // so `error` is an OBJECT here, not a string. Reading it as a string put
+      // "[object Object]" into the analytics property and threw away the `code`
+      // that makes a failure diagnosable.
+      const errBody = await apiRes.json().catch(() => ({}))
+      const apiError = parseApiError(errBody)
+      console.error('Waitlist API error:', { status: apiRes.status, ...(apiError ?? { errBody }) })
       const ph = getPostHogClient()
       ph.capture({
         distinctId: phId,
@@ -90,11 +96,18 @@ export async function POST(req: NextRequest) {
           destination_country,
           referral_source,
           language: lang || 'en',
-          error: errBody?.error ?? 'Unknown',
+          status: apiRes.status,
+          error_code: apiError?.code ?? 'unknown',
+          request_id: apiError?.requestId,
           $session_id: sessionId ?? undefined,
         },
       })
-      return NextResponse.json({ error: 'Failed to join waitlist' }, { status: 500 })
+      await flushPostHog()
+      // Pass the upstream status through instead of flattening everything to
+      // 500: a 400 is the submitter's to fix and the client renders a different
+      // message for it, while 5xx is ours.
+      const status = apiRes.status === 400 ? 400 : 500
+      return NextResponse.json({ error: 'Failed to join waitlist' }, { status })
     }
 
     const ph = getPostHogClient()
@@ -120,11 +133,13 @@ export async function POST(req: NextRequest) {
       },
     })
 
+    await flushPostHog()
     return NextResponse.json({ success: true }, { status: 200 })
   } catch (err) {
     console.error('Waitlist API error:', err instanceof Error ? err.message : 'Unknown error')
     const ph = getPostHogClient()
     ph.captureException(err, distinctId ?? 'anonymous')
+    await flushPostHog()
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
