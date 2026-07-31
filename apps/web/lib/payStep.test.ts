@@ -25,6 +25,7 @@ describe('isFundingSessionShape', () => {
     expect(isFundingSessionShape({ provider: 42 })).toBe(false)
     expect(isFundingSessionShape({ provider: 'stripe', clientSecret: 7 })).toBe(false)
     expect(isFundingSessionShape({ provider: 'stripe', publishableKey: {} })).toBe(false)
+    expect(isFundingSessionShape({ provider: 'stripe', status: 9 })).toBe(false)
   })
 })
 
@@ -38,6 +39,22 @@ describe('payAffordanceFor', () => {
   it('renders the Element for a complete stripe session regardless of canSimulate', () => {
     expect(payAffordanceFor(stripeSession, true)).toBe('stripe')
     expect(payAffordanceFor(stripeSession, false)).toBe('stripe')
+  })
+
+  it('renders the Element for every still-payable PI status', () => {
+    for (const status of ['requires_payment_method', 'requires_confirmation', 'requires_action']) {
+      expect(payAffordanceFor({ ...stripeSession, status }, false)).toBe('stripe')
+    }
+  })
+
+  it('a PI past confirmation renders submitted, not the pay form — the reload-after-pay case', () => {
+    expect(payAffordanceFor({ ...stripeSession, status: 'processing' }, false)).toBe('submitted')
+    expect(payAffordanceFor({ ...stripeSession, status: 'succeeded' }, false)).toBe('submitted')
+  })
+
+  it('a canceled or unknown PI status is an error — never a payable form for a dead PI', () => {
+    expect(payAffordanceFor({ ...stripeSession, status: 'canceled' }, false)).toBe('error')
+    expect(payAffordanceFor({ ...stripeSession, status: 'garbage' }, false)).toBe('error')
   })
 
   it('renders simulate for mock only where the dev button is allowed', () => {

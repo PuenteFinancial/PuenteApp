@@ -56,7 +56,12 @@ export class StripeFundingProcessor implements FundingProcessor {
   }
 
   isConfigured(): boolean {
-    return Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET)
+    // All three: the publishable key joined the trio in PR-S3 (superRefine
+    // refuses to boot without it, but this runtime gate should agree with the
+    // boot gate rather than 200ing a session the web can't mount).
+    return Boolean(
+      env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET && env.STRIPE_PUBLISHABLE_KEY,
+    )
   }
 
   async initiateFunding(input: {
@@ -118,6 +123,11 @@ export class StripeFundingProcessor implements FundingProcessor {
         // non-null assertion guards direct construction the same way the
         // constructor's secret-key check does.
         publishableKey: env.STRIPE_PUBLISHABLE_KEY!,
+        // The live PI status, so a reload AFTER confirmPayment (transfer still
+        // PENDING_PAYMENT until the processing webhook lands) renders the
+        // submitted banner instead of re-offering the pay form for a PI that
+        // can no longer be confirmed.
+        status: intent.status,
       },
     }
   }

@@ -425,7 +425,7 @@ export default function TransferTracker({
           transferId={transferId}
           totalAmountMinor={transfer.totalAmount.amountMinor}
           canSimulate={canSimulate}
-          onAdvanced={() => void refresh()}
+          onAdvanced={refresh}
         />
       )}
 

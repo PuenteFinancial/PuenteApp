@@ -961,6 +961,9 @@ export async function transfersRoute(server: FastifyInstance) {
               provider: { type: 'string' },
               clientSecret: { type: 'string' },
               publishableKey: { type: 'string' },
+              // Live PI status (stripe only) — lets a reload after
+              // confirmPayment render "submitted" instead of the pay form.
+              status: { type: 'string' },
             },
           },
           404: errorResponseSchema,

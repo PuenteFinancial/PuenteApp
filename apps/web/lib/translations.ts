@@ -900,7 +900,7 @@ const es: Translations = {
         submittedBody: 'Estamos confirmando tu pago con tu banco. Esto suele tomar un momento.',
         sessionError: 'No pudimos cargar el formulario de pago. Inténtalo de nuevo.',
         bankNote:
-          'Si no ves tu banco, aún no podemos aceptar pagos desde esa cuenta — no se te ha cobrado.',
+          'Si no ves tu banco, aún no podemos aceptar pagos desde ese banco — no se te ha cobrado.',
         paymentError: 'Algo salió mal con tu pago. Inténtalo de nuevo.',
       },
       loadError: 'No pudimos cargar esta transferencia. Inténtalo de nuevo.',

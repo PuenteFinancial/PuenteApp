@@ -63,6 +63,22 @@ function stateOf(id) {
   return 'PENDING_PAYMENT'
 }
 
+// Non-consuming read for handlers that GATE on state without representing a
+// tracker poll (funding-session). stateOf() advances the ADVANCING fixtures'
+// read budget as a side effect — if the funding-session bootstrap consumed a
+// read, the poll spec's "second read flips to FUNDED" contract would silently
+// count the wrong requests. Returns the state as of the reads consumed so far.
+function peekState(id) {
+  const fixed = FIXED.get(id)
+  if (fixed) return fixed
+  const mutable = mutableStates.get(id)
+  if (mutable) return mutable
+  if (ADVANCING.test(id)) {
+    return (readCounts.get(id) ?? 0) <= 1 ? 'PENDING_PAYMENT' : 'FUNDED'
+  }
+  return 'PENDING_PAYMENT'
+}
+
 // Mirrors the API's transfer response schema (transfers.ts transferResponseSchema).
 function transferBody(id, state = stateOf(id)) {
   return {
@@ -403,7 +419,8 @@ const server = createServer(async (req, res) => {
     if (id === 'transfer-e2e-session-fail') {
       return json(res, 500, { error: { code: 'internal_error', message: 'mock: forced session failure', requestId: 'mock' } })
     }
-    if (stateOf(id) !== 'PENDING_PAYMENT') {
+    // peekState, NOT stateOf: this gate must not consume an ADVANCING read.
+    if (peekState(id) !== 'PENDING_PAYMENT') {
       return json(res, 409, { error: { code: 'conflict', message: 'mock: Transfer is no longer awaiting payment', requestId: 'mock' } })
     }
     if (/^transfer-e2e-stripe/.test(id)) {

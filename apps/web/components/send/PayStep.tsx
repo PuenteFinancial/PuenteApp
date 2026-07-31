@@ -21,8 +21,9 @@ import { getStripe } from '@/lib/stripe'
 // or nothing (mock in prod — the inert lock, today's behavior).
 //
 // Poll interplay (TransferTracker's 5 s refresh): FUNDED only lands via the
-// payment_intent.processing webhook, which cannot arrive before confirmPayment
-// resolves — so the poll can't unmount the Element mid-confirmation. The
+// payment_intent.processing webhook, which in practice arrives after
+// confirmPayment resolves — and even if the poll won that race, unmounting the
+// Element for a payment that already succeeded is self-consistent. The
 // session is fetched once into state and getStripe() memoizes the loader, so
 // poll-driven re-renders never remount the Element. The one real race — the
 // 30-min reconcile-pending auto-fail flipping the transfer to PAYMENT_FAILED
@@ -40,7 +41,7 @@ export default function PayStep({
   /** Non-production only — same prop the simulate button always keyed on. */
   canSimulate: boolean
   /** The tracker's refresh — called after any action that may advance state. */
-  onAdvanced: () => void
+  onAdvanced: () => Promise<void>
 }) {
   const { t, lang } = useLanguage()
   const s = t.send.track
@@ -115,7 +116,10 @@ export default function PayStep({
         return
       }
       posthog.capture('send_funding_simulated', { transfer_id: transferId })
-      onAdvanced()
+      // Await so the button stays "Simulating…" until the tracker adopts the
+      // new state — else it re-enables on an already-FUNDED transfer and a
+      // second click paints an error under a send that succeeded.
+      await onAdvanced()
     } catch {
       setSimulateError(t.send.errors.generic)
     } finally {
@@ -138,7 +142,12 @@ export default function PayStep({
 
   if (!session) return null // first fetch in flight — the tracker renders around it
 
-  if (submitted) {
+  const affordance = payAffordanceFor(session, canSimulate)
+
+  // Local `submitted` covers the moment after confirmPayment in THIS mount;
+  // affordance 'submitted' covers a reload/second tab after paying (live PI
+  // status is processing/succeeded while the transfer waits on the webhook).
+  if (submitted || affordance === 'submitted') {
     return (
       <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
         <p style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--ink)', margin: '0 0 4px' }}>
@@ -150,8 +159,6 @@ export default function PayStep({
       </div>
     )
   }
-
-  const affordance = payAffordanceFor(session, canSimulate)
 
   if (affordance === 'none') return null
 
@@ -203,7 +210,7 @@ export default function PayStep({
           totalAmountMinor={totalAmountMinor}
           onSubmitted={() => {
             setSubmitted(true)
-            onAdvanced()
+            void onAdvanced() // banner already swapped in — no need to hold on the poll
           }}
         />
       </Elements>

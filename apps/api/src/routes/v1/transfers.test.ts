@@ -917,7 +917,11 @@ describe('GET /v1/transfers/:id/funding-session', () => {
     from.mockReturnValueOnce(chain({ data: pendingWithRef }))
     getClientSession.mockResolvedValue({
       provider: 'stripe',
-      fields: { clientSecret: 'pi_123_secret_x', publishableKey: 'pk_test_x' },
+      fields: {
+        clientSecret: 'pi_123_secret_x',
+        publishableKey: 'pk_test_x',
+        status: 'requires_payment_method',
+      },
     })
     const app = await buildApp()
 
@@ -928,6 +932,7 @@ describe('GET /v1/transfers/:id/funding-session', () => {
       provider: 'stripe',
       clientSecret: 'pi_123_secret_x',
       publishableKey: 'pk_test_x',
+      status: 'requires_payment_method',
     })
     expect(getClientSession).toHaveBeenCalledWith({ paymentRef: 'pi_123' })
     await app.close()
