@@ -393,6 +393,29 @@ const server = createServer(async (req, res) => {
     return json(res, 200, { data: page1, nextCursor: 'cursor-page-2' })
   }
 
+  // Pay-step bootstrap (PR-S3). Mirrors the real gates: 409 once the transfer
+  // has left PENDING_PAYMENT. Default is the mock provider (keeps every
+  // simulate spec green); transfer-e2e-stripe* serves a stripe-shaped session
+  // (the specs abort js.stripe.com, so the secret never reaches Stripe); and
+  // transfer-e2e-session-fail forces the retryable error card.
+  if (method === 'GET' && /^\/v1\/transfers\/[^/]+\/funding-session$/.test(pathname)) {
+    const id = pathname.split('/')[3]
+    if (id === 'transfer-e2e-session-fail') {
+      return json(res, 500, { error: { code: 'internal_error', message: 'mock: forced session failure', requestId: 'mock' } })
+    }
+    if (stateOf(id) !== 'PENDING_PAYMENT') {
+      return json(res, 409, { error: { code: 'conflict', message: 'mock: Transfer is no longer awaiting payment', requestId: 'mock' } })
+    }
+    if (/^transfer-e2e-stripe/.test(id)) {
+      return json(res, 200, {
+        provider: 'stripe',
+        clientSecret: 'pi_e2e_secret_x',
+        publishableKey: 'pk_test_e2e',
+      })
+    }
+    return json(res, 200, { provider: 'mock' })
+  }
+
   if (method === 'GET' && /^\/v1\/transfers\/[^/]+$/.test(pathname)) {
     return json(res, 200, transferBody(pathname.split('/')[3]))
   }

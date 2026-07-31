@@ -115,6 +115,16 @@ refer back as needed.
   deferred: their multi-day dwell collides with the 30-min `PENDING_PAYMENT` auto-fail and the
   15-min FX lock. An unsupported bank gets a clean error, not a fallback.
   See [decisions.md](decisions.md) (PR-S1).
+- **Payment Element** — Stripe's hosted payment UI, mounted by the web pay step (PR-S3) at
+  `PENDING_PAYMENT` under the stripe processor. Renders the bank picker (Financial Connections)
+  and the **Stripe-hosted single-debit ACH mandate** — Stripe owning the mandate means Stripe
+  auto-responds to proof-of-authorization inquiries. Localized via the Element's `locale` (es
+  default); Puente authors only the frame copy around it.
+- **Funding session** — the pay-step bootstrap served by `GET /v1/transfers/:id/funding-session`:
+  `{ provider, clientSecret?, publishableKey? }`. Retrieved from the processor on demand at each
+  pay-step mount (reload-safe by construction); the `clientSecret` is never persisted or logged on
+  our side. Mock envs get provider-only and the web falls back to the simulate button.
+  See [decisions.md](decisions.md) (2026-07-31, S3).
 - **Submit claim** — the guarded UPDATE (`state = 'FUNDED' AND payout_hold_reason IS NULL AND
   submit_attempted_at IS NULL`) the payout job wins before calling Bridge; it serializes submission
   against the slice-6 cancel so both can never happen. A *stale* submit claim (>10 min, no
