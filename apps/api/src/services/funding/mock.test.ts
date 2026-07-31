@@ -26,6 +26,21 @@ const sign = (body: Buffer, t: number = Date.now(), secret: string = SECRET) =>
 describe('funding factory', () => {
   it('returns the mock processor for FUNDING_PROCESSOR=mock', () => {
     expect(processor.provider).toBe('mock')
+    expect(processor.signatureHeader).toBe('funding-signature')
+  })
+})
+
+describe('mock isConfigured — the production lock', () => {
+  it('is configured exactly when the mock webhook secret is present', async () => {
+    const { env } = await import('../../config/env.js')
+    expect(processor.isConfigured()).toBe(true)
+    const saved = env.MOCK_FUNDING_WEBHOOK_SECRET
+    env.MOCK_FUNDING_WEBHOOK_SECRET = undefined
+    try {
+      expect(processor.isConfigured()).toBe(false)
+    } finally {
+      env.MOCK_FUNDING_WEBHOOK_SECRET = saved
+    }
   })
 })
 
@@ -49,6 +64,13 @@ describe('mock initiateFunding', () => {
   })
 })
 
+describe('mock getClientSession (PR-S3 pay-step bootstrap)', () => {
+  it('returns provider-only with no fields — the web falls back to the simulate affordance', async () => {
+    const session = await processor.getClientSession({ paymentRef: 'mockpay_x' })
+    expect(session).toEqual({ provider: 'mock', fields: {} })
+  })
+})
+
 describe('mock voidFunding', () => {
   it('returns a succeeded void ref, minting a fresh ref each call (ignores the key)', async () => {
     const a = await processor.voidFunding({
@@ -61,7 +83,9 @@ describe('mock voidFunding', () => {
       paymentRef: 'mockpay_abc',
       idempotencyKey: 'bridge-key-1:void',
     })
-    expect(a).toMatchObject({ provider: 'mock', status: 'succeeded' })
+    // mode 'voided': the mock never settles, so the nominal mode stands — and
+    // the ledger branch in the callers reads the same off the ref prefix
+    expect(a).toMatchObject({ provider: 'mock', status: 'succeeded', mode: 'voided' })
     expect(a.ref).toMatch(/^mockvoid_/)
     // key ignored → distinct refs; exactly-once lives in the caller's null-gate
     expect(a.ref).not.toBe(b.ref)
@@ -77,7 +101,8 @@ describe('mock refund', () => {
       currency: 'USD',
       idempotencyKey: 'bridge-key-1:refund',
     })
-    expect(r).toMatchObject({ provider: 'mock', status: 'succeeded' })
+    // mode 'refunded' keeps the mock-era ledger exactly as it was pre-modes
+    expect(r).toMatchObject({ provider: 'mock', status: 'succeeded', mode: 'refunded' })
     expect(r.ref).toMatch(/^mockrefund_/)
   })
 })
@@ -106,14 +131,19 @@ describe('mock parseEvent', () => {
       'funding_failed',
       'funding_cleared',
       'funding_reversed',
+      'refund_failed',
+      'refund_settled',
     ] as const) {
       const parsed = processor.parseEvent(eventBody({ type }))
       expect(parsed).toEqual({
-        eventId: 'evt_123',
-        type,
-        transferRef: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-        paymentRef: 'mockpay_abc',
-        reason: undefined,
+        outcome: 'event',
+        event: {
+          eventId: 'evt_123',
+          type,
+          transferRef: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          paymentRef: 'mockpay_abc',
+          reason: undefined,
+        },
       })
     }
   })
@@ -122,17 +152,42 @@ describe('mock parseEvent', () => {
     const parsed = processor.parseEvent(
       eventBody({ type: 'funding_failed', data: { transfer_id: 'x', payment_ref: 'y', reason: 'R01' } }),
     )
-    expect(parsed?.reason).toBe('R01')
+    expect(parsed.outcome === 'event' && parsed.event.reason).toBe('R01')
   })
 
-  it('returns null for garbage, unknown types, and missing fields', () => {
-    expect(processor.parseEvent(Buffer.from('not json'))).toBeNull()
-    expect(processor.parseEvent(eventBody({ type: 'payment.exploded' }))).toBeNull()
-    expect(processor.parseEvent(Buffer.from(JSON.stringify({ id: 'evt', type: 'funding_succeeded' })))).toBeNull()
+  it('carries the undo ref through on the refund tails (Stripe Refund-id parity)', () => {
+    const parsed = processor.parseEvent(
+      eventBody({
+        type: 'refund_failed',
+        data: {
+          transfer_id: 'x',
+          payment_ref: 'mockpay_abc',
+          undo_ref: 'mockrefund_9',
+          reason: 'account_closed',
+        },
+      }),
+    )
+    expect(parsed.outcome === 'event' && parsed.event.undoRef).toBe('mockrefund_9')
+    expect(parsed.outcome === 'event' && parsed.event.reason).toBe('account_closed')
+  })
+
+  it('classifies unknown types as unhandled (ack + warn, same contract as Stripe)', () => {
+    expect(processor.parseEvent(eventBody({ type: 'payment.exploded' }))).toEqual({
+      outcome: 'unhandled',
+      eventId: 'evt_123',
+      eventType: 'payment.exploded',
+    })
+  })
+
+  it('classifies garbage and missing fields as malformed', () => {
+    expect(processor.parseEvent(Buffer.from('not json'))).toEqual({ outcome: 'malformed' })
+    expect(
+      processor.parseEvent(Buffer.from(JSON.stringify({ id: 'evt', type: 'funding_succeeded' }))),
+    ).toEqual({ outcome: 'malformed' })
     expect(
       processor.parseEvent(
         Buffer.from(JSON.stringify({ type: 'funding_succeeded', data: { transfer_id: 'x', payment_ref: 'y' } })),
       ),
-    ).toBeNull()
+    ).toEqual({ outcome: 'malformed' })
   })
 })

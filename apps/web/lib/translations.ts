@@ -64,6 +64,7 @@ export type Translations = {
     steps: { h: string }[]
     next: string
     back: string
+    errors: { generic: string; validation: string }
   }
   footer: { tagline: string; privacyLink: string; termsLink: string; disclaimer: [string, string]; disclaimer2: string; rights: string; note: string }
   onboarding: {
@@ -77,7 +78,7 @@ export type Translations = {
       retryCta: string; retrying: string; retryError: string
       exhaustedBody: string; supportCta: string
     }
-    dashboard: { title: string; body: string; recipientsCta: string }
+    dashboard: { title: string; body: string; recipientsCta: string; historyCta: string }
   }
   recipients: {
     title: string
@@ -184,14 +185,38 @@ export type Translations = {
       simulate: string
       simulating: string
       simulateNote: string
+      // The real pay step (PR-S3): Stripe Payment Element at PENDING_PAYMENT.
+      // Stripe authors + localizes the mandate and its own field/bank errors
+      // (via the Element's locale); these are only the Puente-authored frame.
+      pay: {
+        payTitle: string
+        payNow: string
+        paying: string
+        // After confirmPayment resolves: the debit was SUBMITTED, not settled —
+        // FUNDED arrives via webhook + poll. Copy must not claim "paid".
+        submittedTitle: string
+        submittedBody: string
+        // funding-session fetch / Stripe loader failure — retryable, generic.
+        sessionError: string
+        // Instant-only verification: if their bank isn't connectable we cannot
+        // take the payment at all — no microdeposit fallback at pilot.
+        bankNote: string
+        paymentError: string
+      }
       loadError: string
       retry: string
       done: string
+      // Shown on the delivered outcome — links to the receipt view (PR4).
+      viewReceipt: string
       // Rendered as a mailto next to every message that tells a sender to
       // contact us — the 202 cancellation routing and the outcomes that direct
       // to support. Without it those messages instruct a sender to exercise a
       // statutory right with no route to do so.
       supportCta: string
+      // The pending-cancellation banner (slice-7 PR6b). A flag ORTHOGONAL to
+      // state: the payout keeps advancing while the request is open, so this
+      // rides above the timeline rather than replacing it.
+      cancellationRequested: { title: string; body: string }
       outcomes: {
         completed: { title: string; body: string }
         canceled: { title: string; body: string }
@@ -202,6 +227,23 @@ export type Translations = {
         underReview: { title: string; body: string }
       }
     }
+    // Receipt view (PR4). Chrome ONLY — the Reg E receipt body is server-authored
+    // and rendered verbatim (see ReceiptView/DisclosureBody). Its counsel-final
+    // wording is the PR7 gate; this chrome makes no statement about money or rights.
+    receipt: {
+      title: string
+      viewHistory: string
+    }
+    // Transfer history (PR4) — the money-moved transaction list. Row status
+    // labels reuse track.steps / track.outcomes; these are just list chrome.
+    history: {
+      title: string
+      empty: string
+      loadMore: string
+      loading: string
+      loadError: string
+      retry: string
+    }
     // code → user-facing message; the apiError layer maps the API error
     // envelope's stable `code` onto these (unmapped codes fall back to generic)
     errors: {
@@ -211,6 +253,7 @@ export type Translations = {
       not_found: string
       kyc_required: string
       limit_exceeded: string
+      transfer_in_progress: string
       quote_expired: string
       transfer_not_cancelable: string
       conflict: string
@@ -303,6 +346,10 @@ const en: Translations = {
     ],
     next: 'Next',
     back: 'Back',
+    errors: {
+      generic: 'Something went wrong on our end. Please try again.',
+      validation: 'Please check your answers and try again.',
+    },
   },
   footer: {
     tagline: 'Send money.\nBuild credit.',
@@ -383,6 +430,7 @@ const en: Translations = {
       title: 'You’re verified',
       body: 'Sending money is coming soon. We’ll let you know the moment it’s live.',
       recipientsCta: 'Manage recipients',
+      historyCta: 'Transfer history',
     },
   },
   recipients: {
@@ -465,23 +513,45 @@ const en: Translations = {
       steps: {
         PENDING_PAYMENT: 'Waiting for payment',
         FUNDED: 'Payment received',
-        SUBMITTED: 'Sent for payout',
+        // PR7: "Sent for payout" taught the wrong Reg E extinguishing event
+        // (the right survives until pickup/deposit, not submission).
+        SUBMITTED: 'Sending',
         IN_FLIGHT: 'On its way',
         COMPLETED: 'Delivered',
       },
       cancelWindow: 'You have {time} left to cancel this transfer.',
+      // PR7: the old note named "sent for payout" — a step label that no longer
+      // exists and the exact misstatement §4.1 corrects. This states the
+      // MECHANISM (self-service ends when sending starts), not the legal rule.
       cancelWindowNote:
-        'If it’s already been sent for payout, cancelling isn’t automatic — contact us and we’ll take it from there.',
+        'Once we start sending it, cancelling isn’t automatic — contact us and we’ll take it from there.',
       cancel: 'Cancel transfer',
       cancelConfirm: 'Tap again to cancel',
       canceling: 'Canceling…',
       simulate: 'Simulate payment',
       simulating: 'Simulating…',
       simulateNote: 'Test environment only — stands in for card and bank payment.',
+      pay: {
+        payTitle: 'Pay with your bank',
+        payNow: 'Pay {amount}',
+        paying: 'Sending payment…',
+        // NOT "paid": the ACH debit was submitted, settlement is days away.
+        submittedTitle: 'Payment submitted',
+        submittedBody: 'We are confirming your payment with your bank. This usually takes a moment.',
+        sessionError: 'We could not load the payment form. Please try again.',
+        bankNote:
+          "If you don't see your bank, we can't accept payments from it yet — you haven't been charged.",
+        paymentError: 'Something went wrong with your payment. Please try again.',
+      },
       loadError: 'We couldn’t load this transfer. Try again.',
       retry: 'Retry',
       done: 'Back to dashboard',
+      viewReceipt: 'View receipt',
       supportCta: 'Contact support',
+      cancellationRequested: {
+        title: 'Cancellation requested',
+        body: 'We got your request to cancel this transfer. It was already on its way, so we’re working through it — this page will update when it’s resolved.',
+      },
       outcomes: {
         completed: {
           title: 'Delivered',
@@ -489,29 +559,62 @@ const en: Translations = {
         },
         canceled: {
           title: 'Canceled',
-          body: 'This transfer was canceled. Your refund is being returned now.',
+          // "Issued", not "back": a real ACH refund posts days later; asserting
+          // arrival is a claim we can't verify (PR7 truthfulness pass).
+          body: 'This transfer was canceled. Your full refund, including the fee, has been issued — depending on your bank, it can take a few business days to appear.',
         },
         refunded: {
           title: 'Refunded',
-          body: 'This transfer was canceled and you were refunded in full.',
+          // Path-neutral on purpose: REFUNDED is reachable from cancel,
+          // payout-failure, and review-resolution paths (PR7).
+          body: 'Your full refund for this transfer, including the fee, has been issued. Depending on your bank, it can take a few business days to appear.',
         },
         paymentFailed: {
           title: 'Payment failed',
-          body: 'We couldn’t collect your payment, so nothing was sent and you were not charged. Start a new transfer to try again.',
+          // PAYMENT_FAILED is also set on webhook SILENCE (reconcile-pending
+          // 30-min timeout) — not proof of no charge, so don't claim it (PR7).
+          body: 'We couldn’t confirm your payment, so this transfer was not sent. If your bank shows a charge for it, contact us at support@puentefinancial.com and we’ll make it right. Start a new transfer to try again.',
         },
         payoutFailed: {
           title: 'Couldn’t be delivered',
-          body: 'Your recipient’s bank couldn’t accept this transfer. You will be refunded in full — contact support if you have questions.',
+          // PR7 truthfulness pass: states the ENTITLEMENT (owed in full, incl.
+          // fee) without asserting execution status — AUTO_REFUND is off by
+          // prod default, so issuance may await an operator. The page flips to
+          // the refunded outcome when it actually issues.
+          body: 'Your recipient’s bank couldn’t accept this transfer, so nothing was delivered. You’ll receive a full refund, including the fee — this page will update when it’s been issued. Contact support if you have questions.',
         },
         fundingReversed: {
           title: 'Payment reversed',
           body: 'Your bank reversed the payment for this transfer. Contact support so we can sort it out with you.',
         },
         underReview: {
-          title: 'Under review',
-          body: 'We’re looking into this transfer. We’ll contact you as soon as the review is done.',
+          title: 'Working on your cancellation',
+          // Promises ONLY what exists. The previous body said "we'll contact
+          // you as soon as the review is done" — there is no outbound
+          // notification mechanism in this codebase (no email service, no SMS
+          // path outside Supabase Auth), so that was a promise nothing could
+          // keep. The polling tracker DOES update in place, so that is what we
+          // say. See the glossary's "Truthful pending copy".
+          // Outcome-neutral on purpose (compliance review 2026-07-28): a
+          // review can lawfully end in denial — the request beat our deposit
+          // EVIDENCE but Bridge's authoritative timestamp can still show the
+          // deposit came first — so "your refund" would pre-promise the very
+          // question the review decides.
+          body: 'Your transfer was delivered, and you asked to cancel it. We’re reviewing your request — this page will update when it’s resolved.',
         },
       },
+    },
+    receipt: {
+      title: 'Transfer receipt',
+      viewHistory: 'View all transfers',
+    },
+    history: {
+      title: 'Transfer history',
+      empty: 'You haven’t sent any transfers yet.',
+      loadMore: 'Load more',
+      loading: 'Loading…',
+      loadError: 'We couldn’t load your transfers. Try again.',
+      retry: 'Retry',
     },
     errors: {
       validation_error: 'Please check the details and try again.',
@@ -520,6 +623,8 @@ const en: Translations = {
       not_found: 'We couldn’t find that. Refresh and try again.',
       kyc_required: 'You’ll need to verify your identity before sending money.',
       limit_exceeded: 'This goes over your sending limit right now. Try a smaller amount or come back later.',
+      transfer_in_progress:
+        'You already have a transfer in progress. You can send again once it clears — usually within a few business days.',
       quote_expired: 'This rate expired. Get a new quote to continue.',
       transfer_not_cancelable: 'This transfer can no longer be canceled.',
       conflict: 'This can’t be updated right now. Refresh and try again.',
@@ -612,6 +717,10 @@ const es: Translations = {
     ],
     next: 'Siguiente',
     back: 'Atrás',
+    errors: {
+      generic: 'Algo salió mal de nuestro lado. Por favor, inténtalo de nuevo.',
+      validation: 'Por favor revisa tus respuestas e inténtalo de nuevo.',
+    },
   },
   footer: {
     tagline: 'Envía dinero.\nCrea crédito.',
@@ -692,6 +801,7 @@ const es: Translations = {
       title: 'Estás verificado',
       body: 'Muy pronto podrás enviar dinero. Te avisaremos en cuanto esté disponible.',
       recipientsCta: 'Administrar destinatarios',
+      historyCta: 'Historial de transferencias',
     },
   },
   recipients: {
@@ -774,23 +884,43 @@ const es: Translations = {
       steps: {
         PENDING_PAYMENT: 'Esperando el pago',
         FUNDED: 'Pago recibido',
-        SUBMITTED: 'Enviada para su pago',
+        // PR7: ver nota en la versión en inglés. NEEDS LEGAL REVIEW (ES).
+        SUBMITTED: 'Enviando',
         IN_FLIGHT: 'En camino',
         COMPLETED: 'Entregada',
       },
       cancelWindow: 'Te quedan {time} para cancelar esta transferencia.',
+      // NEEDS LEGAL REVIEW (ES) — PR7, mirrors en.
       cancelWindowNote:
-        'Si ya fue enviada para su pago, la cancelación no es automática — comunícate con nosotros y lo resolvemos.',
+        'Una vez que comenzamos a enviarla, la cancelación no es automática — comunícate con nosotros y lo resolvemos.',
       cancel: 'Cancelar transferencia',
       cancelConfirm: 'Toca de nuevo para cancelar',
       canceling: 'Cancelando…',
       simulate: 'Simular pago',
       simulating: 'Simulando…',
       simulateNote: 'Solo en el entorno de pruebas — sustituye el pago con tarjeta o banco.',
+      // NEEDS LEGAL REVIEW (ES)
+      pay: {
+        payTitle: 'Paga con tu banco',
+        payNow: 'Pagar {amount}',
+        paying: 'Enviando el pago…',
+        // NO "pagado": el cargo ACH fue enviado, la liquidación tarda días.
+        submittedTitle: 'Pago enviado',
+        submittedBody: 'Estamos confirmando tu pago con tu banco. Esto suele tomar un momento.',
+        sessionError: 'No pudimos cargar el formulario de pago. Inténtalo de nuevo.',
+        bankNote:
+          'Si no ves tu banco, aún no podemos aceptar pagos desde ese banco — no se te ha cobrado.',
+        paymentError: 'Algo salió mal con tu pago. Inténtalo de nuevo.',
+      },
       loadError: 'No pudimos cargar esta transferencia. Inténtalo de nuevo.',
       retry: 'Reintentar',
       done: 'Volver al panel',
+      viewReceipt: 'Ver recibo',
       supportCta: 'Comunícate con soporte',
+      cancellationRequested: {
+        title: 'Cancelación solicitada',
+        body: 'Recibimos tu solicitud para cancelar esta transferencia. Ya iba en camino, así que la estamos gestionando; esta página se actualizará cuando se resuelva.',
+      },
       outcomes: {
         completed: {
           title: 'Entregada',
@@ -798,29 +928,45 @@ const es: Translations = {
         },
         canceled: {
           title: 'Cancelada',
-          body: 'Esta transferencia fue cancelada. Tu reembolso se está procesando ahora.',
+          // NEEDS LEGAL REVIEW (ES) — PR7 truthfulness pass, mirrors en.
+          body: 'Esta transferencia fue cancelada. Tu reembolso completo, incluida la comisión, ya fue emitido; según tu banco, puede tardar unos días hábiles en aparecer.',
         },
         refunded: {
           title: 'Reembolsada',
-          body: 'Esta transferencia fue cancelada y se te reembolsó el monto total.',
+          // NEEDS LEGAL REVIEW (ES) — PR7 truthfulness pass, mirrors en.
+          body: 'Tu reembolso completo por esta transferencia, incluida la comisión, ya fue emitido. Según tu banco, puede tardar unos días hábiles en aparecer.',
         },
         paymentFailed: {
           title: 'El pago falló',
-          body: 'No pudimos cobrar tu pago, así que no se envió nada y no se te cobró. Inicia una nueva transferencia para intentarlo otra vez.',
+          // NEEDS LEGAL REVIEW (ES) — PR7 truthfulness pass, mirrors en.
+          body: 'No pudimos confirmar tu pago, así que esta transferencia no se envió. Si tu banco muestra un cargo por ella, escríbenos a support@puentefinancial.com y lo resolveremos. Inicia una nueva transferencia para intentarlo otra vez.',
         },
         payoutFailed: {
           title: 'No se pudo entregar',
-          body: 'El banco de tu destinatario no pudo aceptar esta transferencia. Se te reembolsará el monto total — comunícate con soporte si tienes preguntas.',
+          // NEEDS LEGAL REVIEW (ES) — PR7 truthfulness pass, mirrors en.
+          body: 'El banco de tu destinatario no pudo aceptar esta transferencia, así que no se entregó nada. Recibirás un reembolso completo, incluida la comisión; esta página se actualizará cuando se haya emitido. Comunícate con soporte si tienes preguntas.',
         },
         fundingReversed: {
           title: 'Pago revertido',
           body: 'Tu banco revirtió el pago de esta transferencia. Comunícate con soporte para que lo resolvamos juntos.',
         },
         underReview: {
-          title: 'En revisión',
-          body: 'Estamos revisando esta transferencia. Te contactaremos en cuanto termine la revisión.',
+          title: 'Procesando tu cancelación',
+          body: 'Tu transferencia se entregó y pediste cancelarla. Estamos revisando tu solicitud; esta página se actualizará cuando se resuelva.',
         },
       },
+    },
+    receipt: {
+      title: 'Recibo de transferencia',
+      viewHistory: 'Ver todas las transferencias',
+    },
+    history: {
+      title: 'Historial de transferencias',
+      empty: 'Aún no has enviado ninguna transferencia.',
+      loadMore: 'Cargar más',
+      loading: 'Cargando…',
+      loadError: 'No pudimos cargar tus transferencias. Inténtalo de nuevo.',
+      retry: 'Reintentar',
     },
     errors: {
       validation_error: 'Revisa los datos e inténtalo de nuevo.',
@@ -829,6 +975,8 @@ const es: Translations = {
       not_found: 'No encontramos eso. Actualiza e inténtalo de nuevo.',
       kyc_required: 'Necesitas verificar tu identidad antes de enviar dinero.',
       limit_exceeded: 'Esto supera tu límite de envío por ahora. Prueba con un monto menor o vuelve más tarde.',
+      transfer_in_progress:
+        'Ya tienes una transferencia en curso. Podrás enviar otra cuando se procese tu pago — normalmente en unos días hábiles.',
       quote_expired: 'Este tipo de cambio expiró. Obtén una nueva cotización para continuar.',
       transfer_not_cancelable: 'Esta transferencia ya no se puede cancelar.',
       conflict: 'Esto no se puede actualizar ahora. Actualiza e inténtalo de nuevo.',

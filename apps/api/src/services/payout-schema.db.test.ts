@@ -186,6 +186,20 @@ describe.skipIf(!runDb)('payout schema (integration, local Supabase)', () => {
       expect(row.rows[0].submit_attempted_at).not.toBeNull()
     })
 
+    it("accepts 'velocity_review' — the per-user velocity backstop hold (slice-7 PR5)", async () => {
+      // Guards the drift the reviewer caught: placeHold writes this value, so the
+      // CHECK constraint must admit it (migration 20260727191425).
+      await db.query(
+        `update public.transfers set payout_hold_reason = 'velocity_review' where id = $1`,
+        [T_HOLD],
+      )
+      const row = await db.query(
+        `select payout_hold_reason from public.transfers where id = $1`,
+        [T_HOLD],
+      )
+      expect(row.rows[0].payout_hold_reason).toBe('velocity_review')
+    })
+
     it("rejects 'float_ceiling' — deliberately not a hold reason (self-healing backpressure)", async () => {
       await expect(
         db.query(

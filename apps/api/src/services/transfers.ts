@@ -62,6 +62,10 @@ export interface TransferRow {
   payout_hold_reason: string | null
   payout_held_at: string | null
   submit_attempted_at: string | null
+  // Set when the sender asks to cancel a transfer already on its way to payout
+  // (slice-7 PR6b). A FLAG ORTHOGONAL TO STATE, not a state: the payout keeps
+  // advancing while a request is pending, and the request resolves separately.
+  cancellation_requested_at: string | null
   completed_at: string | null
   created_at: string
 }
@@ -235,6 +239,96 @@ export function refundedLedgerEntries(transfer: {
   return entries
 }
 
+// UNDER_REVIEW → REFUNDED entered from COMPLETED: the post-delivery CORRECTION
+// PAYMENT (slice-7 PR6b, ledger-rules.md). Structurally different from
+// refundedLedgerEntries even though the sender receives the same amount.
+//
+// That one REVERSES an obligation we still owed: the payout failed, so
+// transfer_payable was still open and the debit closes it. Here the transfer
+// DELIVERED — transfer_payable was already discharged by the COMPLETED batch and
+// there is nothing to reverse. Paying the sender again is a NEW expense against
+// Puente, so it debits an expense account, and the original COMPLETED entries
+// are never touched. We do not rewrite delivered history.
+//
+// Its own account rather than loss_funding_reversed: that bucket is a
+// credit/fraud loss (an ACH return after delivery), while this is a compliance
+// cost (honouring a timely cancellation on a delivered transfer). Mixing them
+// means the ledger cannot answer "what did Reg E cost us" without a per-transfer
+// join, and the accounts get harder to separate the longer we wait.
+//
+// The fee rides with it: the sender is made whole, so send + fee both come back.
+// Nets to zero.
+export function correctionRefundLedgerEntries(transfer: {
+  send_amount_minor: number
+  fee_amount_minor: number
+}): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  return [
+    {
+      account_code: 'loss_cancellation_correction',
+      direction: 'debit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+    {
+      account_code: 'cash_clearing',
+      direction: 'credit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+  ]
+}
+
+// ── PR-S2: the VOIDED variants ───────────────────────────────────────────────
+// Under real ACH timing the refund tails usually fire while the funding PI is
+// still `processing` (settlement ~T+4, payout failures within minutes), and the
+// Stripe adapter then makes the sender whole by CANCELING the pull — no cash
+// ever moves. The refunded-mode batches would book cash that never existed:
+// refundedLedgerEntries credits cash_clearing S+F for a disbursement that never
+// left, and leaves funding_receivable open for an ACH that will never clear.
+// Callers pick the batch by FundingUndo.mode / undoModeForRef (funding/index.ts).
+
+// REFUNDED entered from PAYOUT_FAILED, undo mode `voided`: the sender is made
+// whole by never being debited, so the FUNDED batch simply reverses — the same
+// entries as a FUNDED-window cancel, reached through a different door. The
+// bridge_return batch (posted separately) is unchanged: Bridge really did send
+// the payout principal back to our cash regardless of how the sender was made
+// whole. Nets to zero.
+export function voidRefundLedgerEntries(transfer: {
+  send_amount_minor: number
+  fee_amount_minor: number
+}): LedgerEntryJson[] {
+  return canceledLedgerEntries(transfer)
+}
+
+// UNDER_REVIEW → REFUNDED (the post-delivery correction), undo mode `voided`:
+// the sender was never debited, so there is no cash credit — the compliance
+// loss is recognized against the funding_receivable that will now never
+// collect (the pull was canceled). Same P&L as correctionRefundLedgerEntries
+// (loss S+F, fee stands as booked); only the credited ASSET differs: a real
+// refund pays cash out and lets the receivable settle on its own clearing leg,
+// a void writes the receivable off directly. Nets to zero.
+export function correctionVoidLedgerEntries(transfer: {
+  send_amount_minor: number
+  fee_amount_minor: number
+}): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  return [
+    {
+      account_code: 'loss_cancellation_correction',
+      direction: 'debit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+    {
+      account_code: 'funding_receivable',
+      direction: 'credit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+  ]
+}
+
 export async function createTransferFromQuote(input: {
   quoteId: string
   userId: string
@@ -344,6 +438,7 @@ export function toApiTransfer(row: TransferRow) {
     disclosureAcceptedAt: row.disclosure_accepted_at,
     paymentAt: row.payment_at,
     cancelableUntil: row.cancelable_until,
+    cancellationRequestedAt: row.cancellation_requested_at,
     providerTransferRef: row.provider_transfer_ref,
     completedAt: row.completed_at,
     createdAt: row.created_at,

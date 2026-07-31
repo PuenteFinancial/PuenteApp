@@ -12,6 +12,8 @@ import posthog from 'posthog-js'
 const REFERRAL_SOURCE_VALUES = translations.en.wl.referralSourceOptions
 
 type Status = 'idle' | 'loading' | 'success' | 'error'
+// 'validation' = the submitter can fix it; 'generic' = we broke something.
+type ErrorKind = 'generic' | 'validation'
 
 const TOTAL = 2
 
@@ -26,6 +28,7 @@ export default function SignupFlow() {
   const [referralSource, setReferralSource] = useState('')
   const [referralSourceOther, setReferralSourceOther] = useState('')
   const [status, setStatus] = useState<Status>('idle')
+  const [errorKind, setErrorKind] = useState<ErrorKind>('generic')
   const [copied, setCopied] = useState(false)
 
   const refLink = 'puentefinancial.com'
@@ -66,7 +69,24 @@ export default function SignupFlow() {
         }),
       })
 
-      if (!res.ok) throw new Error('Failed')
+      if (!res.ok) {
+        // Do NOT collapse this into a bare throw. The response body carries the
+        // server's actual reason, and discarding it is what made a three-week
+        // production outage indistinguishable from a user typo — both rendered
+        // the same opaque sentence. Capture it client-side, where the event
+        // reliably flushes even when the server-side capture does not.
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        setErrorKind(res.status === 400 ? 'validation' : 'generic')
+        posthog.capture('waitlist_form_failed', {
+          status: res.status,
+          error: body.error ?? 'Unknown',
+          destination_country: country,
+          referral_source: referralSource,
+          language: lang,
+        })
+        setStatus('error')
+        return
+      }
 
       posthog.identify(phone, { first_name: name, language_preference: lang })
       posthog.capture('waitlist_form_submitted', {
@@ -76,8 +96,12 @@ export default function SignupFlow() {
       })
 
       setStatus('success')
-    } catch {
-      posthog.captureException(new Error('Waitlist form submission failed'))
+    } catch (err) {
+      // Transport-level failure — the request never got a response at all.
+      setErrorKind('generic')
+      posthog.captureException(
+        err instanceof Error ? err : new Error('Waitlist form submission failed'),
+      )
       setStatus('error')
     }
   }
@@ -233,7 +257,7 @@ export default function SignupFlow() {
 
         {status === 'error' && (
           <p style={{ color: 'var(--color-error)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center', margin: '4px 0 0' }}>
-            Something went wrong. Please try again.
+            {s.errors[errorKind]}
           </p>
         )}
       </form>

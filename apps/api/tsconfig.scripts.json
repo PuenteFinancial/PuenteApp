@@ -1,0 +1,16 @@
+{
+  // Typecheck-only pass that also covers scripts/. The base config is the BUILD
+  // config: it pins rootDir to src (so tsup emits a flat dist/), which rejects
+  // scripts/ even under --noEmit. Widening rootDir here — rather than in the
+  // base — keeps the build output shape untouched.
+  //
+  // scripts/ calls into src/services/*, including the refund disbursement path
+  // (scripts/trigger-refund.ts), so it must be typechecked like any other code.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "scripts/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

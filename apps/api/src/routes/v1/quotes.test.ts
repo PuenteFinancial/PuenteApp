@@ -21,6 +21,17 @@ vi.mock('../../services/bridge.js', async (importOriginal) => {
   }
 })
 
+// Uncleared cap (slice-8 O3) mocked ok by default — without this factory the
+// REAL risk.ts would run its transfers query against `from` and desync every
+// call-count in this file. The trip case flips it. The factory replaces the
+// module, so it must also export the message constant the route renders (a
+// sentinel — tests branch on `code`, never on copy).
+const assessUnclearedCap = vi.fn()
+vi.mock('../../services/risk.js', () => ({
+  assessUnclearedCap: (...args: unknown[]) => assessUnclearedCap(...args),
+  UNCLEARED_CAP_MESSAGE: 'transfer in progress',
+}))
+
 const { quotesRoute } = await import('./quotes.js')
 const { BridgeApiError } = await import('../../services/bridge.js')
 
@@ -102,6 +113,8 @@ async function buildApp(options: { rateLimit?: boolean } = {}) {
 beforeEach(() => {
   from.mockReset()
   getExchangeRate.mockReset()
+  assessUnclearedCap.mockReset()
+  assessUnclearedCap.mockResolvedValue({ ok: true })
 })
 
 const validBody = {
@@ -192,6 +205,23 @@ describe('POST /v1/quotes', () => {
       .send(validBody)
 
     expect(res.status).toBe(403)
+    expect(getExchangeRate).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('403s transfer_in_progress at the uncleared cap and never fetches a rate', async () => {
+    from.mockReturnValueOnce(chain({ data: approvedUser }))
+    assessUnclearedCap.mockResolvedValue({ ok: false, blockerTransferId: 'tr-prior' })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/quotes')
+      .set('Authorization', 'Bearer test-token')
+      .send(validBody)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('transfer_in_progress')
+    expect(assessUnclearedCap).toHaveBeenCalledWith({ userId: 'user-123' })
     expect(getExchangeRate).not.toHaveBeenCalled()
     await app.close()
   })

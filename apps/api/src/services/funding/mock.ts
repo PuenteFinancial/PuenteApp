@@ -1,9 +1,10 @@
 import crypto from 'node:crypto'
 import { env } from '../../config/env.js'
 import type {
-  FundingEvent,
+  FundingClientSession,
   FundingEventType,
   FundingInitiation,
+  FundingParseResult,
   FundingProcessor,
   FundingUndo,
 } from './index.js'
@@ -18,10 +19,20 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
   'funding_failed',
   'funding_cleared',
   'funding_reversed',
+  'refund_failed',
+  'refund_settled',
 ] satisfies FundingEventType[])
 
 export class MockFundingProcessor implements FundingProcessor {
   readonly provider = 'mock'
+  readonly signatureHeader = 'funding-signature'
+
+  isConfigured(): boolean {
+    // THE production lock: the mock secret is never set in prod, so mock
+    // funding (webhook + confirm) cannot exist there. Read at call time —
+    // tests toggle it on the parsed env object.
+    return Boolean(env.MOCK_FUNDING_WEBHOOK_SECRET)
+  }
 
   async initiateFunding(): Promise<FundingInitiation> {
     // No real money exists behind the mock: initiation just mints the payment
@@ -32,6 +43,13 @@ export class MockFundingProcessor implements FundingProcessor {
       paymentRef: `mockpay_${crypto.randomUUID()}`,
       clientFields: {},
     }
+  }
+
+  async getClientSession(): Promise<FundingClientSession> {
+    // No Element to mount behind the mock — a clean 200 with no fields, so the
+    // web decides its affordance (simulate button vs nothing) on provider
+    // alone, with no special error branch for mock envs.
+    return { provider: this.provider, fields: {} }
   }
 
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean {
@@ -67,33 +85,58 @@ export class MockFundingProcessor implements FundingProcessor {
     // call — so the exactly-once guarantee is proven to live in the caller's
     // refund_payment_ref null-gate (and, in slice 7, real Stripe's key), not in
     // the processor. Always 'succeeded' → PR1's cancel runs synchronously.
-    return { provider: this.provider, ref: `mockvoid_${crypto.randomUUID()}`, status: 'succeeded' }
+    // Always 'voided': the mock has no settlement, so the nominal mode stands
+    // (undoModeForRef reads the same answer back off the mockvoid_ prefix).
+    return {
+      provider: this.provider,
+      ref: `mockvoid_${crypto.randomUUID()}`,
+      status: 'succeeded',
+      mode: 'voided',
+    }
   }
 
   async refund(): Promise<FundingUndo> {
     // Same shape as voidFunding for the PR2 PAYOUT_FAILED→REFUNDED tail; the
-    // mock returns collected funds instantly and ignores amount + key.
-    return { provider: this.provider, ref: `mockrefund_${crypto.randomUUID()}`, status: 'succeeded' }
+    // mock returns collected funds instantly and ignores amount + key. Always
+    // 'refunded' — which keeps the mock-era ledger exactly as it was before
+    // modes existed (refundedLedgerEntries / correctionRefundLedgerEntries).
+    return {
+      provider: this.provider,
+      ref: `mockrefund_${crypto.randomUUID()}`,
+      status: 'succeeded',
+      mode: 'refunded',
+    }
   }
 
-  parseEvent(rawBody: Buffer): FundingEvent | null {
+  parseEvent(rawBody: Buffer): FundingParseResult {
     try {
       const payload = JSON.parse(rawBody.toString('utf8')) as {
         id?: string
         type?: string
-        data?: { transfer_id?: string; payment_ref?: string; reason?: string }
+        data?: { transfer_id?: string; payment_ref?: string; undo_ref?: string; reason?: string }
       }
-      if (!payload.id || !payload.type || !EVENT_TYPES.has(payload.type)) return null
-      if (!payload.data?.transfer_id || !payload.data.payment_ref) return null
+      if (!payload.id || !payload.type) return { outcome: 'malformed' }
+      if (!EVENT_TYPES.has(payload.type)) {
+        // Signed but outside the mapping — same ack contract as Stripe's
+        // unmapped event types; the route's warn log surfaces a script typo.
+        return { outcome: 'unhandled', eventId: payload.id, eventType: payload.type }
+      }
+      if (!payload.data?.transfer_id || !payload.data.payment_ref) return { outcome: 'malformed' }
       return {
-        eventId: payload.id,
-        type: payload.type as FundingEventType,
-        transferRef: payload.data.transfer_id,
-        paymentRef: payload.data.payment_ref,
-        ...(payload.data.reason !== undefined && { reason: payload.data.reason }),
+        outcome: 'event',
+        event: {
+          eventId: payload.id,
+          type: payload.type as FundingEventType,
+          transferRef: payload.data.transfer_id,
+          paymentRef: payload.data.payment_ref,
+          // The refund-tail drill leg (fire-funding-webhook refund-failed):
+          // mirrors Stripe's Refund id so the page names the disbursement.
+          ...(payload.data.undo_ref !== undefined && { undoRef: payload.data.undo_ref }),
+          ...(payload.data.reason !== undefined && { reason: payload.data.reason }),
+        },
       }
     } catch {
-      return null
+      return { outcome: 'malformed' }
     }
   }
 }

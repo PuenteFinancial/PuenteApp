@@ -2,8 +2,8 @@
 
 **Date:** 2026-07-20 · **Status:** live process (slice 5)
 
-A payout hold is a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`, or
-`submit_error`) and `payout_held_at`. The submit job sets the hold and stops; the 1-min
+A payout hold is a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`,
+`submit_error`, or `velocity_review`) and `payout_held_at`. The submit job sets the hold and stops; the 1-min
 `payout.sweep` cron skips held rows. Releasing a hold means clearing the column — the sweep
 resubmits automatically within a minute. There is no admin endpoint at MVP; release is SQL via
 the Supabase SQL editor (a sanctioned ops **data** fix — schema changes still go through
@@ -105,6 +105,27 @@ transitioning to `SUBMITTED`. A second, `error`-level Sentry event (fingerprint
    the SUBMITTED ledger expectation, fix `parseDecimalToMinor` / the Bridge model
    (`services/payouts.ts`), and complete the transition deliberately.
 
+## `velocity_review` — per-user velocity backstop tripped
+
+The `FUNDED → SUBMITTED` backstop found the sender over one of their per-user transaction limits (the
+AML launch limits: per-transaction, or a rolling day / month / 6-month send total, or the per-day
+count) — a rare same-instant commit race that slipped the confirm-time gate. The Sentry `payout_hold`
+context carries `velocityReason` (`per_transaction` / `daily` / `monthly` / `semiannual` /
+`velocity_count`) and the transfer id (no PII). This is **not** self-healing: a per-user tally doesn't
+drain on its own (a completed send keeps counting for its window), so the transfer would strand until
+the window rolls — hence the hold.
+
+1. Look at the sender's other in-window committed sends (`transfers` where `user_id = …`,
+   `disclosure_accepted_at` within the window, state not in the unwound set). Confirm whether the
+   burst is legitimate (the sender really meant to send this much) or looks like an error or abuse.
+2. Decide:
+   - **Legitimate** (trusted sender, honest burst) → release; the payout submits within a minute. If
+     they will routinely exceed the pilot caps, raise the `RISK_*` env values **with Joshua's
+     sign-off** rather than releasing repeatedly.
+   - **Error or suspicious** → do not release; cancel the transfer and refund the sender (the Reg E
+     cancel/refund path), then follow up.
+3. Release SQL is the standard procedure above with `payout_hold_reason = 'velocity_review'`.
+
 ## Cancel request during Bridge `in_review`
 
 Not a hold, but it lands here (decision 2026-07-20): Bridge compliance review can leave funds
@@ -117,8 +138,17 @@ Not a hold, but it lands here (decision 2026-07-20): Bridge compliance review ca
    cancel/return the funds. Do not double-move money on an assumption.
 3. If Bridge confirms the funds were not (and will not be) deposited → issue the full refund
    within the 3-business-day window.
-4. If Bridge completes the payout during review → the right has extinguished at deposit; the
-   state-keyed refund rule's `COMPLETED` branch (lawful denial) applies.
+4. If Bridge completes the payout during review → **the refund is still owed.** Corrected
+   2026-07-28 (slice 7 PR6b); this step previously read "the right has extinguished at deposit …
+   lawful denial applies," which is wrong for this case. The right extinguishes at deposit for a
+   request made AFTER deposit — but a request recorded here was necessarily made while the transfer
+   was pre-`COMPLETED`, i.e. while the funds were undeposited, so both §1005.34 conditions were met
+   at the moment the sender asked and the obligation attached then. Bridge completing the payout
+   afterwards is us failing to stop it, not the right expiring. The system now enforces this: the
+   transfer routes `COMPLETED → UNDER_REVIEW` and ops pays a correction payment. Lawful denial
+   applies only when `within_window = false`. See
+   [pending-cancellation.md](pending-cancellation.md) and
+   [transfer-state-machine.md](../transfer-state-machine.md).
 5. Record the outcome in the transfer's transition metadata / audit trail.
 
 ## Float-ceiling Sentry alert
@@ -133,5 +163,25 @@ alert is fingerprinted, so it fires once per episode, not per retry.
 2. If the balance is flat or growing: check treasury wallet replenishment and whether funding
    webhooks/clearing are stalled.
 3. Raise `FLOAT_CEILING_MINOR` **only with Joshua's sign-off** — it is the aggregate fronting
-   exposure cap, not a tuning knob. The authoritative float controls (per-user limits, velocity,
-   risk engine) are slice 8.
+   exposure cap, not a tuning knob. (Per-user velocity landed in slice 7 PR5 — see `velocity_review`
+   above; the per-user dollar-outstanding cap and the broader risk engine remain slice 8.)
+
+## FUNDED with no hold reason — the three deliberate self-heal waits
+
+A `FUNDED` row that isn't advancing and has `payout_hold_reason IS NULL` is (float ceiling aside)
+in one of three **intentional** waits, all resumed automatically by the 1-minute sweep — release
+nothing:
+
+| Wait | How to recognize it | Frees when |
+|---|---|---|
+| `WAIT_FOR_CLEARING=true` | Flag on; row has `funding_cleared=false` | Its own `funding_cleared` lands |
+| `FIRST_TRANSFER_HOLD=true` | Flag on; row uncleared **and** the user has no send with `funding_cleared=true` outside `FUNDING_REVERSED` | Its own `funding_cleared` lands |
+| Uncleared cap (slice-8 O3) | Sentry `uncleared cap reached` with fingerprint `['uncleared-cap-wait', <transferId>]` (one issue **per waiting transfer**, context names the `blockerTransferId`); the user has an older committed-uncleared send | The **blocker** clears or unwinds |
+
+The cap wait normally resolves within the ACH window (~T+4). If it persists past that, the blocker
+itself is stuck — a bounced pull (post-FUNDED `funding_failed` is stale-logged; `funding_reversed`
+is recorded-and-deferred) leaves the sender capped **until ops resolves the blocker row**; that is
+intended (their exposure is genuinely live), so investigate the blocker, not the waiter.
+
+Dev/staging: clearing is script-only — free a slot with
+`pnpm tsx scripts/fire-funding-webhook.ts <blockerTransferId> cleared`.

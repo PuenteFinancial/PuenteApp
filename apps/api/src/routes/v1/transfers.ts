@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
+import * as Sentry from '@sentry/node'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { buildPrepaymentDisclosure } from '../../services/disclosures.js'
@@ -13,7 +14,17 @@ import {
   TransferRpcError,
   type TransferRow,
 } from '../../services/transfers.js'
+import {
+  recordCancellationRequest,
+  type CancellationRequestState,
+} from '../../services/cancellations.js'
 import { requireApprovedUser } from './recipients.js'
+import {
+  assessTransferRisk,
+  assessUnclearedCap,
+  UNCLEARED_CAP_MESSAGE,
+  type RiskReason,
+} from '../../services/risk.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 const TRANSFER_COLUMNS =
@@ -21,7 +32,8 @@ const TRANSFER_COLUMNS =
   'receive_amount_minor, receive_currency, fee_amount_minor, fee_currency, fx_rate, ' +
   'funding_source_type, funding_cleared, disclosure_accepted_at, payment_at, ' +
   'cancelable_until, idempotency_key, funding_payment_ref, provider_transfer_ref, ' +
-  'refund_payment_ref, refunded_at, submit_attempted_at, completed_at, created_at'
+  'refund_payment_ref, refunded_at, submit_attempted_at, cancellation_requested_at, ' +
+  'completed_at, created_at'
 
 const moneySchema = (currency: string) =>
   ({
@@ -59,6 +71,7 @@ const transferResponseSchema = {
     disclosureAcceptedAt: { type: ['string', 'null'] },
     paymentAt: { type: ['string', 'null'] },
     cancelableUntil: { type: ['string', 'null'] },
+    cancellationRequestedAt: { type: ['string', 'null'] },
     providerTransferRef: { type: ['string', 'null'] },
     completedAt: { type: ['string', 'null'] },
     createdAt: { type: 'string' },
@@ -97,7 +110,16 @@ interface QuoteForTransferRow {
 interface ListQuery {
   limit: number
   cursor?: string
+  scope?: 'all' | 'history'
 }
+
+// "History" (the user-facing transaction list) shows only transfers where
+// payment was actually made — FUNDED and beyond. Never-funded attempts
+// (PENDING_PAYMENT and its 30-min-stale reconciliation to PAYMENT_FAILED) are
+// abandoned sends, not transactions; they stay in the table + audit log but are
+// hidden from history. The raw endpoint (scope=all, the default) keeps returning
+// everything for ops. See docs/decisions.md.
+const ABANDONED_STATES = '(PENDING_PAYMENT,PAYMENT_FAILED)'
 
 interface Cursor {
   c: string
@@ -119,11 +141,12 @@ function encodeCursor(row: { created_at: string; id: string }): string {
   return Buffer.from(JSON.stringify({ c: row.created_at, i: row.id })).toString('base64url')
 }
 
-// The mock processor must be unusable wherever its webhook secret isn't
-// provisioned (production, by policy) — funding can't be initiated if the
-// events that complete it can never arrive.
+// Funding can't be initiated if the events that complete it can never arrive —
+// each processor declares its own configured-check (mock: the webhook secret
+// that is never provisioned in prod, i.e. THE production lock; Stripe: both
+// STRIPE_* secrets, doubly guaranteed by env.superRefine at boot).
 function fundingConfigured(): boolean {
-  return getFundingProcessor().provider !== 'mock' || Boolean(env.MOCK_FUNDING_WEBHOOK_SECRET)
+  return getFundingProcessor().isConfigured()
 }
 
 // A cancel that arrives once a payout is being submitted (claimed-but-still-
@@ -134,22 +157,99 @@ function fundingConfigured(): boolean {
 // HTTP 202: the cancellation request is accepted for out-of-band handling, not
 // denied. NOTE (slice-7): the actual pending-cancel resolution track this points
 // into is deferred work.
-function submissionInProgressResponse(reply: FastifyReply, id: string, state: string) {
+/**
+ * The post-submission cancel answer: the payout is already with Bridge, so the
+ * request is RECORDED and resolved once the payout settles either way.
+ *
+ * Records before replying (slice-7 PR6b). The old copy was written when this
+ * response was pure, and both of its sentences went wrong the moment the
+ * mechanism shipped: "contact support to exercise your cancellation right"
+ * misdirects, because the tap they just made IS the request; and "if the payout
+ * does not complete, you will be refunded" understates what we owe, because a
+ * timely request is refunded either way — including when the payout completes.
+ *
+ * A persistence failure must NOT turn the sender's statutory ask into a 500.
+ * This is the only sanctioned swallow in this PR, and it is loud: the sender
+ * still gets their 202, and ops gets paged to record the ask by hand.
+ */
+async function submissionInProgressResponse(
+  server: FastifyInstance,
+  reply: FastifyReply,
+  transfer: { id: string; state: string; user_id: string },
+) {
+  let requestedAt: string | null = null
+  try {
+    const request = await recordCancellationRequest({
+      transferId: transfer.id,
+      userId: transfer.user_id,
+      state: transfer.state as CancellationRequestState,
+    })
+    requestedAt = request.requested_at
+  } catch (err) {
+    server.log.error(
+      { transferId: transfer.id, err },
+      'cancel: failed to record cancellation request — sender asked and we did not persist it',
+    )
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['cancellation-record-failed', transfer.id])
+      scope.setContext('cancellation_record_failed', {
+        transferId: transfer.id,
+        state: transfer.state,
+        // Mirrored into the Sentry event, not just the server log — the page
+        // must carry its own diagnosis. Service/PostgREST message, no PII.
+        error: err instanceof Error ? err.message : String(err),
+        runbook: 'docs/runbooks/pending-cancellation.md',
+      })
+      Sentry.captureMessage(
+        'cancellation request not recorded — sender asked, nothing persisted; record it by hand',
+        'error',
+      )
+    })
+  }
+
   return reply.status(202).send({
-    id,
-    state,
+    id: transfer.id,
+    state: transfer.state,
+    // Stable code the shipped web client branches on (apps/web/lib/apiError.ts).
+    // Do not rename without changing that mapping.
     code: 'cancellation_requires_support',
+    ...(requestedAt ? { requestedAt } : {}),
+    // Tracks BOTH §1005.34 conditions and promises nothing beyond them: the
+    // refund is owed when the request was inside the 30-minute window AND made
+    // before the deposit. An earlier draft promised the refund even when the
+    // payout "has already been delivered" — that overstates the rule (delivery
+    // before the ask defeats the right) and was pulled 2026-07-28. Staged for
+    // PR7 counsel review with the rest of the cancellation strings.
     messages: {
       en:
-        "This transfer is being sent for payout and can't be canceled automatically. " +
-        'Contact support to exercise your cancellation right — if the payout does not ' +
-        'complete, you will be refunded in full.',
+        "This transfer is already on its way to your recipient, so it can't be stopped " +
+        'automatically. We\'ve recorded your cancellation request. If you asked within 30 ' +
+        'minutes of paying and before the money was delivered, you\'ll get a full refund. ' +
+        'This page will update when it\'s resolved.',
       es:
-        'Esta transferencia se está enviando para su pago y no se puede cancelar ' +
-        'automáticamente. Comunícate con soporte para ejercer tu derecho de cancelación: ' +
-        'si el pago no se completa, se te reembolsará el monto total.',
+        'Esta transferencia ya va camino a tu destinatario, así que no se puede detener ' +
+        'automáticamente. Registramos tu solicitud de cancelación. Si la hiciste dentro de ' +
+        'los 30 minutos después de pagar y antes de que se entregara el dinero, recibirás un ' +
+        'reembolso completo. Esta página se actualizará cuando se resuelva.',
     },
   })
+}
+
+// The 403 limit_exceeded body's message is display/log only — clients branch on
+// the stable code (the web maps its own localized copy, PR1). Generic + PII-free.
+function riskLimitMessage(reason: RiskReason): string {
+  switch (reason) {
+    case 'per_transaction':
+      return 'This amount is over the per-transfer limit. Try a smaller amount.'
+    case 'daily':
+      return 'This would exceed your daily sending limit. Try a smaller amount or come back later.'
+    case 'monthly':
+      return 'This would exceed your monthly sending limit.'
+    case 'semiannual':
+      return 'This would exceed your 6-month sending limit.'
+    case 'velocity_count':
+      return 'You have reached the number of transfers allowed today. Please come back later.'
+  }
 }
 
 export async function transfersRoute(server: FastifyInstance) {
@@ -189,6 +289,15 @@ export async function transfersRoute(server: FastifyInstance) {
 
       if (!fundingConfigured()) {
         return sendError(reply, 503, 'not_configured', 'Funding is not available yet')
+      }
+
+      // Uncleared-exposure cap (slice-8 O3): re-checked at create because the
+      // quote→create gap can be minutes and another send may have committed
+      // since. Still UX-only — confirm and the FUNDED→SUBMITTED backstop are
+      // authoritative.
+      const uncleared = await assessUnclearedCap({ userId })
+      if (!uncleared.ok) {
+        return sendError(reply, 403, 'transfer_in_progress', UNCLEARED_CAP_MESSAGE)
       }
 
       // Owner-scoped quote load with the destination/recipient still-active
@@ -367,6 +476,39 @@ export async function transfersRoute(server: FastifyInstance) {
         return sendError(reply, 409, 'conflict', 'Transfer is already confirmed')
       }
 
+      // Per-user velocity gate (slice-7 PR5): enforced here — the FIRST commit,
+      // BEFORE funding is initiated — because this is where money starts moving,
+      // so blocking now refuses an over-limit send before any dollars are pulled.
+      // Only on the first commit (disclosure_accepted_at still null): recording
+      // acceptance is what makes this a counted "committed send", so the check
+      // must precede it (else a blocked send would consume the sender's own
+      // budget), and a retry of an already-committed send keeps its slot rather
+      // than being stranded behind sends that committed since. The FUNDED→SUBMITTED
+      // backstop (payout-submit.ts) authoritatively catches the same-instant race.
+      if (!transfer.disclosure_accepted_at) {
+        // Uncleared-exposure cap first (slice-8 O3): the same first-commit
+        // rationale as the velocity gate below — checked before acceptance is
+        // recorded so a blocked send never occupies a slot, and a retry of an
+        // already-committed send keeps its slot. excludeTransferId is defensive
+        // (this row is unaccepted, so it cannot count yet).
+        const uncleared = await assessUnclearedCap({
+          userId,
+          excludeTransferId: transfer.id,
+        })
+        if (!uncleared.ok) {
+          return sendError(reply, 403, 'transfer_in_progress', UNCLEARED_CAP_MESSAGE)
+        }
+
+        const verdict = await assessTransferRisk({
+          userId,
+          sendAmountMinor: transfer.send_amount_minor,
+          excludeTransferId: transfer.id,
+        })
+        if (!verdict.ok) {
+          return sendError(reply, 403, 'limit_exceeded', riskLimitMessage(verdict.reason))
+        }
+      }
+
       // Record acceptance once; a retry after a failed initiation (accepted
       // but no funding ref) skips straight to re-initiation.
       let acceptedAt = transfer.disclosure_accepted_at
@@ -468,13 +610,20 @@ export async function transfersRoute(server: FastifyInstance) {
         },
         response: {
           200: transferResponseSchema,
-          // being-submitted / SUBMITTED / IN_FLIGHT → compliant support routing.
+          // being-submitted / SUBMITTED / IN_FLIGHT → the request is RECORDED
+          // and resolved once the payout settles (slice-7 PR6b).
           202: {
             type: 'object',
             properties: {
               id: { type: 'string' },
               state: { type: 'string' },
               code: { type: 'string' },
+              // When the sender's ask was recorded — the statutory clock. Absent
+              // (not null) when the record failed, which is the one case the
+              // handler swallows; the serializer drops it rather than asserting
+              // a clock we did not start. Must be declared here or Fastify's
+              // response serializer strips it from the body entirely.
+              requestedAt: { type: 'string' },
               messages: {
                 type: 'object',
                 properties: { en: { type: 'string' }, es: { type: 'string' } },
@@ -528,7 +677,7 @@ export async function transfersRoute(server: FastifyInstance) {
         transfer.state === 'IN_FLIGHT' ||
         (transfer.state === 'FUNDED' && transfer.submit_attempted_at !== null)
       ) {
-        return submissionInProgressResponse(reply, transfer.id, transfer.state)
+        return submissionInProgressResponse(server, reply, transfer)
       }
 
       // FUNDED → the guarded cancel: race-safe against the payout submit claim
@@ -576,7 +725,9 @@ export async function transfersRoute(server: FastifyInstance) {
                   f.state === 'IN_FLIGHT' ||
                   (f.state === 'FUNDED' && f.submit_attempted_at !== null))
               ) {
-                return submissionInProgressResponse(reply, transfer.id, f.state)
+                // `f` is the FRESH re-read: its state is what the request must
+                // record, not the stale pre-RPC one this handler opened with.
+                return submissionInProgressResponse(server, reply, f)
               }
               return sendError(
                 reply,
@@ -618,6 +769,18 @@ export async function transfersRoute(server: FastifyInstance) {
           paymentRef: transfer.funding_payment_ref,
           idempotencyKey: `${transfer.idempotency_key}:void`,
         })
+        if (undo.mode === 'refunded') {
+          // The pull had already settled (void→refund fallback, PR-S2): the
+          // sender gets a real credit in days instead of never being debited.
+          // Books stay correct — the CANCELED reversal closed the receivable,
+          // and the settlement + refund cash flows offset — but the pair is a
+          // recon timing window worth a trail. User copy already covers it
+          // ("refund issued, may take a few business days").
+          server.log.info(
+            { audit: true, userId, transferId: transfer.id, refundRef: undo.ref },
+            'cancel void fell back to a refund — funding had already settled',
+          )
+        }
         const { error: persistError } = await supabaseAdmin
           .from('transfers')
           .update({ refund_payment_ref: undo.ref, refunded_at: new Date().toISOString() })
@@ -656,6 +819,7 @@ export async function transfersRoute(server: FastifyInstance) {
           properties: {
             limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
             cursor: { type: 'string' },
+            scope: { type: 'string', enum: ['all', 'history'], default: 'all' },
           },
           additionalProperties: false,
         },
@@ -673,7 +837,7 @@ export async function transfersRoute(server: FastifyInstance) {
     },
     async (request, reply) => {
       const userId = request.user!.id
-      const { limit } = request.query
+      const { limit, scope } = request.query
 
       let cursor: Cursor | null = null
       if (request.query.cursor) {
@@ -690,6 +854,11 @@ export async function transfersRoute(server: FastifyInstance) {
         .order('created_at', { ascending: false })
         .order('id', { ascending: false })
         .limit(limit + 1)
+
+      // scope=history hides abandoned (never-funded) sends; scope=all (default) is raw.
+      if (scope === 'history') {
+        query = query.not('state', 'in', ABANDONED_STATES)
+      }
 
       if (cursor) {
         query = query.or(
@@ -755,6 +924,91 @@ export async function transfersRoute(server: FastifyInstance) {
           presented_at: string
         }>).map((d) => ({ id: d.id, type: d.type, locale: d.locale, presentedAt: d.presented_at })),
       }
+    },
+  )
+
+  // GET /transfers/:id/funding-session — pay-step bootstrap (PR-S3). Returns
+  // what the browser needs to mount the Payment Element for an
+  // already-initiated funding attempt: { provider, clientSecret?,
+  // publishableKey? }. The client_secret lives only at Stripe — this route
+  // retrieves it on demand (once per pay-step mount, never on the tracker
+  // poll) and it is never persisted or logged on our side (the audit plugin
+  // logs url/status only).
+  //
+  // Deliberately NO requireApprovedUser and NO O3 uncleared-cap check: this is
+  // a read-only bootstrap for a send that already passed the approved-user +
+  // risk gates at confirm. A mid-window KYC flip (Bridge rewrites kyc_status on
+  // every customer.updated) must not strand a committed sender inside the
+  // 30-min PENDING_PAYMENT lifetime — the same rationale as the cancel route's
+  // shortened guard ladder. No new commitment happens here, so the O3 403 does
+  // not apply either.
+  server.get<{ Params: { id: string } }>(
+    '/transfers/:id/funding-session',
+    {
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string', format: 'uuid' } },
+        },
+        response: {
+          // Output allowlist: anything the processor adds beyond these keys is
+          // stripped by Fastify's serializer, so a future processor cannot
+          // accidentally widen the wire contract.
+          200: {
+            type: 'object',
+            properties: {
+              provider: { type: 'string' },
+              clientSecret: { type: 'string' },
+              publishableKey: { type: 'string' },
+              // Live PI status (stripe only) — lets a reload after
+              // confirmPayment render "submitted" instead of the pay form.
+              status: { type: 'string' },
+            },
+          },
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          503: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const userId = request.user!.id
+
+      // Same posture as confirm: an unconfigured processor (prod mock lock)
+      // has no session to serve.
+      if (!fundingConfigured()) {
+        return sendError(reply, 503, 'not_configured', 'Funding is not available yet')
+      }
+
+      const { data } = await supabaseAdmin
+        .from('transfers')
+        .select(TRANSFER_COLUMNS)
+        .eq('id', request.params.id)
+        .eq('user_id', userId)
+        .single()
+
+      if (!data) {
+        return sendError(reply, 404, 'not_found', 'Transfer not found')
+      }
+      const transfer = data as unknown as TransferRow
+
+      if (transfer.state !== 'PENDING_PAYMENT') {
+        return sendError(reply, 409, 'conflict', 'Transfer is no longer awaiting payment')
+      }
+
+      // The confirm-crashed window (accepted but no ref): confirm's own retry
+      // path is the recovery — it re-initiates and Stripe's funding_init_<id>
+      // idempotency key returns the same PI — not this read-only route.
+      if (!transfer.funding_payment_ref) {
+        return sendError(reply, 409, 'conflict', 'Payment has not been set up for this transfer')
+      }
+
+      const session = await getFundingProcessor().getClientSession({
+        paymentRef: transfer.funding_payment_ref,
+      })
+
+      return { provider: session.provider, ...session.fields }
     },
   )
 

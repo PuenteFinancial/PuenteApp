@@ -1,6 +1,6 @@
 # Transfer State Machine — USD → MXN Remittance
 
-**Date:** 2026-06-25 · **Updated:** 2026-07-21 (slice 5 — immediate payout, submit claim contract, payout holds, Bridge event mapping)
+**Date:** 2026-06-25 · **Updated:** 2026-07-28 (slice 7 PR6b — post-submission cancellation record + both resolution tails; PR6b-0 refund claim)
 **Status:** v2 — matches the slice-5 implementation
 
 The lifecycle of a single remittance transfer, from an accepted quote to delivery (or refund).
@@ -26,7 +26,7 @@ stateDiagram-v2
     CANCELED --> REFUNDED
     PAYOUT_FAILED --> REFUNDED
     COMPLETED --> FUNDING_REVERSED: ACH return / chargeback (post-payout)
-    COMPLETED --> UNDER_REVIEW: Reg E error / dispute
+    COMPLETED --> UNDER_REVIEW: timely cancellation (PR6b) / Reg E dispute (future)
     PAYMENT_FAILED --> [*]
     REFUNDED --> [*]
     COMPLETED --> [*]
@@ -35,6 +35,12 @@ stateDiagram-v2
 
 `UNDER_REVIEW` (Reg E error resolution) can also be opened from `FUNDED`, `SUBMITTED`, and
 `IN_FLIGHT`, not just `COMPLETED`; shown once above for diagram clarity.
+
+**As implemented, there is exactly ONE writer of `UNDER_REVIEW`: the cancellation COMPLETED tail
+(slice 7 PR6b, below).** The dispute paths in this section are design, not code — no `disputes` table
+exists and `POST /:id/disputes` is deliberately out of scope. Do not read the two as the same
+mechanism: §1005.34 cancellation is not §1005.33 error resolution, and conflating them puts the sender
+on the wrong clock.
 
 ### UNDER_REVIEW exit paths
 
@@ -102,7 +108,8 @@ policy setting:
   1-min sweep retries as the balance drains, and a fingerprinted Sentry alert fires (no spam,
   nothing for ops to release; see [runbooks/payout-holds.md](runbooks/payout-holds.md)). This
   bounds a bug or bad actor from running exposure unbounded — the one risk control on from day
-  one. The authoritative float controls (per-user limits, velocity, risk engine) are slice 8.
+  one. Per-user **velocity** control landed early in slice 7 PR5 (confirm gate + `FUNDED → SUBMITTED`
+  backstop); the per-user dollar-outstanding cap and the broader risk engine remain slice 8.
 
 This is a config flag, not an architecture. Same philosophy as the funding-source abstraction.
 
@@ -133,6 +140,35 @@ straight to the idempotent Bridge re-POST (same idempotency key, byte-identical 
 returns the existing transfer) and the RPC transition. The sweep treats claims older than 10 min
 with no `provider_transfer_ref` as stale and re-enqueues.
 
+### The refund claim (slice 7 PR6b-0)
+
+The `PAYOUT_FAILED → REFUNDED` tail has the same problem one step later — two runs (a poller re-drive
+and an operator's `trigger-refund.ts`, or two webhook deliveries) both reading `refund_payment_ref IS
+NULL` and both paying the sender. So it takes its own claim before calling the funding processor:
+
+```sql
+UPDATE transfers SET refund_claimed_at = now(), refund_claimed_by = $2
+WHERE id = $1
+  AND refund_payment_ref IS NULL
+  AND refund_claimed_at IS NULL
+```
+
+0 rows means someone else owns the disbursement. One re-read then says which of three: the ref is now
+set and the state settled (**nothing to do**), the ref is set but unsettled (**finish the state**), or
+neither (**refuse** — `claim_taken` if the claim is live, `claim_abandoned` if it is over 10 minutes
+old). A claim survives success: `refund_payment_ref` gates from there, and the stamp records when the
+money left.
+
+**A stale refund claim is the exact opposite of a stale submit claim, on purpose.** Submit recovers by
+re-POSTing to Bridge, which dedupes on the idempotency key, so a stale claim is safely retaken by a
+machine. Nothing gives the funding seam that guarantee — the mock processor ignores the key outright —
+so an *abandoned* refund claim may mean the sender was already paid, and only a human checking the
+processor can tell. It is never retaken automatically: ops confirms, then clears it via
+`--reclaim` ([runbooks/manual-refund.md](runbooks/manual-refund.md)). Note there is also **no
+release-on-throw**: a processor timeout and a processor rejection throw identically, so the claim is
+left standing rather than handing the next run a green light. Full rationale in
+[decisions.md](decisions.md) (2026-07-28).
+
 ### Contract for slice 6 (cancel) — binding
 
 User cancel must be a guarded UPDATE with `state = 'FUNDED' AND submit_attempted_at IS NULL`
@@ -142,8 +178,8 @@ first and the other matches 0 rows — so a Bridge-payout-exists-but-`CANCELED` 
 
 ### Payout holds
 
-A hold is not a state: it is `FUNDED` plus a `payout_hold_reason` (`fx_drift`, `payability`, or
-`submit_error`) and `payout_held_at`. The submit job sets a hold and stops; the sweep skips held
+A hold is not a state: it is `FUNDED` plus a `payout_hold_reason` (`fx_drift`, `payability`,
+`submit_error`, or `velocity_review`) and `payout_held_at`. The submit job sets a hold and stops; the sweep skips held
 rows; ops investigates and releases via [runbooks/payout-holds.md](runbooks/payout-holds.md)
 (clear the column; the sweep resubmits within a minute).
 
@@ -153,6 +189,10 @@ rows; ops investigates and releases via [runbooks/payout-holds.md](runbooks/payo
 - **`payability`** — destination or recipient not `active`, or no `provider_account_ref`.
 - **`submit_error`** — Bridge rejected the payout with a non-retryable 4xx (422 idempotency
   mismatch or similar).
+- **`velocity_review`** — the per-user velocity backstop tripped at `FUNDED → SUBMITTED`: a rare
+  same-instant commit race slipped the confirm-time cap. Deliberately a hold, **not** a self-heal —
+  a per-user velocity count doesn't drain on its own (a completed send keeps counting for the whole
+  window), so ops must release (if legitimate) or cancel + refund rather than let it strand.
 
 A float-ceiling trip is deliberately **not** a hold (self-healing — see the gate section above).
 
@@ -225,6 +265,56 @@ hard gate before slice-7 real money.
 - Webhooks (Stripe, Bridge) are the source of truth for `FUNDED`, `IN_FLIGHT`, `COMPLETED`,
   `PAYOUT_FAILED`; handlers are idempotent (providers redeliver).
 
+## Post-submission cancellation (slice 7 PR6b)
+
+A cancel tapped at `SUBMITTED`/`IN_FLIGHT` — or at `FUNDED` after the submit job claimed the row —
+cannot be honoured on the spot: the payout is already with Bridge. The API answers `202` and
+**records** a `cancellation_requests` row. That row is EVIDENCE, not a movement; nothing posts to the
+ledger while it is open.
+
+**Timeliness is recorded, not enforced at the door.** The 202 fires on state alone and never consults
+`cancelable_until`, so a cancel on a transfer stalled at `IN_FLIGHT` for days gets one too. The row
+carries `within_window`, computed once inside the recording RPC and then frozen. Only a timely request
+creates an automatic obligation.
+
+The request resolves when the payout does, and what we owe differs by which way:
+
+| Payout resolves as | What we owe | Mechanism |
+|---|---|---|
+| `PAYOUT_FAILED` | nothing extra — the refund tail already makes the sender whole | request closes `resolved_refunded` when the transfer reaches `REFUNDED` |
+| `COMPLETED`, request in-window **and before the deposit** | a **full refund anyway** — the accepted, bounded double-pay, confined to the seconds-wide race | `COMPLETED → UNDER_REVIEW`, then a human runs the **correction payment** → `REFUNDED` |
+| `COMPLETED`, request in-window but **after the deposit** | nothing — §1005.34's second condition failed at request time | **stays `COMPLETED`**; ops confirms the deposit time in the Bridge dashboard and denies with it as evidence |
+| `COMPLETED`, request out of window | nothing | **stays `COMPLETED`**; ops is alerted and a human denies it on the record |
+
+The deposit comparison uses our **earliest evidence** of it (the first `payment_processed` event's
+`received_at`) so ambiguity breaks toward the sender: the true deposit happened at or before our
+evidence, so the automatic path can over-route into review (a human then denies with Bridge's exact
+timestamp) but can never deny a request the reg entitles.
+
+`UNDER_REVIEW` appears on the middle row only, and **not because a cancellation is a dispute** —
+§1005.34 cancellation is not §1005.33 error resolution (see Cancellation above, which supersedes the
+older "post-submission cancel routes through UNDER_REVIEW" design). It is used because
+`COMPLETED → UNDER_REVIEW → REFUNDED` is the only modeled post-delivery correction path and already
+carries the right ledger treatment. Read it as "a human owes this transfer a decision," not as a claim
+that anything is being adjudicated. PR6b is the repo's **first writer** of this state.
+
+An untimely request deliberately does NOT transition: flipping a delivered transfer's state for a
+request we will not honour would be a lie in the state log.
+
+Interactions with the event processor (revised 2026-07-28, PR6b review):
+`FAILABLE_STATES` does **not** include `UNDER_REVIEW`. Its only writer is the cancellation routing on
+a *delivered* transfer — the COMPLETED ledger batch is posted and the receipt written — so a later
+Bridge fail event there is a contradictory sequence like any other post-delivery fail: it **pages**
+(`payout-fail-after-terminal`) and moves nothing, and a human resolves through the review exits
+(which post the correct correction ledger if a refund really is owed). The earlier design let the
+event silently drive `UNDER_REVIEW → PAYOUT_FAILED` and run the payout-failure refund tail against
+delivered books. Success events at `UNDER_REVIEW` likewise page (`payout-success-after-terminal`).
+`risk.ts` deliberately keeps `UNDER_REVIEW` counting toward velocity, because the sender was charged
+and the money has not come back yet.
+
+Both exits are human-only, via [runbooks/pending-cancellation.md](runbooks/pending-cancellation.md).
+A timely request can never be denied — the tool refuses it in both the CLI and the service.
+
 ## Ledger hooks (see ledger-rules.md for the authoritative posting rules)
 
 Every money-moving transition posts a balanced `ledger_transaction`. The precise debit/credit lines,
@@ -245,7 +335,15 @@ accepted now because users are trusted.
   - **Verify at funding** — bank ownership + name match + balance check (e.g. Plaid) before `FUNDED`.
   - **Gate delivery by risk** — flip `WAIT_FOR_CLEARING = true` (or hold part of the return window)
     for new / large / high-risk transfers; keep instant for seasoned, trusted users.
-  - **Limits & holds** — first-transfer holds, per-user / velocity caps, amount tiers.
+  - **Limits & holds** — per-user **transaction limits shipped in slice 7 PR5** (the AML launch
+    limits: a per-transaction send cap + rolling day/month/6-month send totals + a per-day count;
+    enforced at confirm, backstopped at `FUNDED → SUBMITTED` where a trip places a `velocity_review`
+    hold). **Slice-8 O3 added the uncleared-exposure *count* cap** (`RISK_UNCLEARED_MAX_COUNT`,
+    default 1: one committed-but-uncleared send in flight per user; `403 transfer_in_progress` at
+    quote/create/confirm, self-healing older-wins wait at `FUNDED → SUBMITTED`) **and built the
+    first-transfer hold** (`FIRST_TRANSFER_HOLD`, ships OFF: an unproven sender's payout waits for
+    their own `funding_cleared`). Still deferred: the per-user *dollar-outstanding* cap (waits for
+    ACH clearing — `funding_receivable` doesn't drain today).
   - **Automated recovery** — re-present eligible returns (e.g. R01 NSF), dunning, account freeze,
     block further sends, collections.
   - **Reserves** — provision for expected loss.

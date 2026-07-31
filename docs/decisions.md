@@ -6,6 +6,344 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-31 · Reconciliation = detection-only checks registry; Stripe legs never self-heal (O2).**
+The daily `ledger.reconcile` cron runs a registry of independent checks (each returns
+pass/findings/skipped/error) rather than one monolithic sweep: one check failing must not blind
+the others, and the per-check rows in `reconciliation_runs` are what the 8.5 ops page will render.
+The only auto-action in the registry is the Bridge state sweep, which literally re-runs
+`payout.poll` — the existing idempotent replay path. The Stripe legs (PI status vs state,
+orphans) **detect and page only**: funding webhooks are handled inline in the route, so there is
+no funding-side replay job to hand a synthesized event to — the runbook action is resending the
+event from the Stripe dashboard, which the route dedupes. Deliberately deferred: `cash_clearing`
+↔ Stripe-balance/bank comparison (meaningless until settlement cash legs exist — nothing relieves
+`funding_receivable` on `funding_cleared` today, which is also why the negative-balance guard
+excludes `cash_clearing`), and fee-line reconciliation. The `state_postings` self-check encodes
+the state⟺posting rules from the batch builders; `UNDER_REVIEW`/`FUNDING_REVERSED` get only the
+FUNDED-posting rule because their open positions are entry-path-dependent (human investigation,
+not a mechanical rule). Aging thresholds are constants, not env: they encode process clocks
+(30-min auto-fail, SPEI seconds, ACH T+4), not tunable policy.
+
+**2026-07-31 · Instant-only bank verification; microdeposits deferred (S3).** The Payment Element
+mounts with the server-pinned `verification_method: 'instant'` (Financial Connections) and no
+fallback. Microdeposit verification takes 1–2 business days, which collides with two clocks that
+assume payment-or-fail within minutes: the 30-min `PENDING_PAYMENT` auto-fail (reconcile-pending)
+and the 15-min FX rate lock — a microdeposit sender would systematically trip both, and doing it
+right needs verification-aware dwell plus a requote/redisclose flow. Deferred until that exists
+(likely alongside SetupIntents/saved accounts). An unconnectable bank gets clean en+es copy stating
+we cannot take the payment and nothing was charged. Revisit with pilot data on FC coverage misses.
+
+**2026-07-31 · Pay-step reload recovery = on-demand funding-session endpoint (S3).** The Stripe
+`client_secret` existed only in the confirm response, which the web deliberately discards — so a
+reload at `PENDING_PAYMENT` (or another device) couldn't mount the Element on a tracker URL that is
+reload-safe by design. Options considered: thread the confirm body + sessionStorage (secret
+persisted client-side, dies across tabs/devices, and the recovery path would rot as a rarely-run
+branch) vs. a read-only endpoint. Chose `GET /v1/transfers/:id/funding-session`: the server
+retrieves the live PI by `funding_payment_ref` on demand — the secret is never persisted in our DB,
+never threaded through client state, never logged; every mount exercises the same path so it can't
+rot. The publishable key rides on the same response (new `STRIPE_PUBLISHABLE_KEY`, required
+alongside the two secrets under `FUNDING_PROCESSOR=stripe`) instead of a `NEXT_PUBLIC_` build-time
+var: processor selection and key stay co-located in the API env, and the mock/stripe affordance
+branch stays server-driven — a mock env never loads js.stripe.com at all.
+
+**2026-07-31 · One uncleared send in flight per user; first-transfer hold built but OFF (slice-8 O3).**
+Under instant-front the MXN leaves on `payment_intent.processing` while the sender's ACH debit can
+still bounce for ~T+4, and nothing bounded *stacked unsettled debits* — the amount/velocity caps
+(PR5) bound dollars per window, not how many revocable pulls are simultaneously in flight. New
+control: `RISK_UNCLEARED_MAX_COUNT` (default **1**) committed-but-uncleared sends per user, a slot
+held from `disclosure_accepted_at` until `funding_cleared` flips (or the send unwinds), with **no
+time window** — COMPLETED-but-uncleared still counts, because a delivered payout with a revocable
+debit IS the exposure. This **supersedes the 2026-07-27 PR5 note that dropped a concurrency cap as
+redundant**: the locked 2026-07-29 decision adopts the PRD's pilot-simple *count* variant as the
+uncleared-exposure control, and it doubles as the substrate for first-transfer holds. Count, not
+dollar-sum, because the sum is still unbuildable (that entry's point (1) stands: `funding_receivable`
+never drains on the happy path) while `transfers.funding_cleared` is maintained by both processors —
+the dollar cap stays deferred. Enforcement mirrors PR5: friendly `403 transfer_in_progress` at
+quote/create/confirm (commit-time, before acceptance is recorded, so a blocked send never occupies a
+slot and a committed retry keeps its slot), plus the authoritative `FUNDED → SUBMITTED` backstop —
+but there it's a **self-heal wait, not a hold** (the blocker clears or unwinds on its own; the 1-min
+sweep resumes, Sentry `['uncleared-cap-wait', id]` warns per waiting transfer). The backstop counts
+only strictly-**older** rows by `(disclosure_accepted_at, id)` — two sends can race-commit past the
+confirm gate, and a symmetric count would deadlock both forever; older-wins picks exactly one.
+**First-transfer hold** (`FIRST_TRANSFER_HOLD`, default OFF, WAIT_FOR_CLEARING-shaped silent skip):
+an unproven sender — no send with `funding_cleared=true` outside `FUNDING_REVERSED` — waits for
+their own clearing; ships dark, flips with real R01 data before widening past the trusted five.
+Consequences owned explicitly: (a) a **bounced pull caps the sender indefinitely** — post-FUNDED
+`funding_failed` is stale-logged and `funding_reversed` handling is deferred, so the slot never
+frees until ops resolves the row; intended (their exposure is genuinely live), and blocking
+repeat sends after a real `FUNDING_REVERSED` lands is the named slice-8+ follow-up. (b)
+**Dev/staging clearing stays script-only** (2026-07-30): the simulate button fires only
+`funding_succeeded`, so a second staging send 403s until
+`pnpm tsx scripts/fire-funding-webhook.ts <id> cleared` — deliberate, staging mirrors prod timing
+and the cap demos itself. (c) **O1 interplay**: the future FUNDED-dwell watch must account for the
+three deliberate no-hold waits (WAIT_FOR_CLEARING, FIRST_TRANSFER_HOLD, the uncleared cap) or
+first-transfer holds will page as stuck transfers.
+
+**2026-07-30 · Settlement decides the undo mechanism, and the ledger branches on it (PR-S2).**
+The Stripe adapter's undo ops resolve the LIVE PaymentIntent instead of trusting their nominal
+mode: an uncleared ACH pull can only be VOIDED (`paymentIntents.cancel` — ACH is the one method
+cancelable during `processing`; Stripe refuses to refund an unsettled charge, and a refund beside
+a late dispute double-credits), while a settled one can only be REFUNDED (`refunds.create`, async:
+`FundingUndo.status 'pending'`, resolved later by `refund.updated`/`refund.failed`). So
+`voidFunding` falls back to a full refund when the PI settled first (sandbox settles instantly —
+the fallback IS the sandbox path; closes the slice-7 "ACH-cancelable + void→refund fallback"
+item), and `refund` voids while the PI is still processing — which under real ACH timing
+(settlement ~T+4, payout failures in minutes) makes **void the MAIN path of the refund tails**,
+not the edge. Three consequences. (1) `FundingUndo.mode 'voided'|'refunded'` +
+`undoModeForRef()` — the ref prefix is the durable mode encoding, because crash-recovery replays
+reach the settle holding only `refund_payment_ref` — and the REFUNDED/correction batches branch
+on it: a void posts the FUNDED reversal (`voidRefundLedgerEntries`) or writes the receivable off
+against the correction loss (`correctionVoidLedgerEntries`); posting the cash batch for a void
+would credit `cash_clearing` for money that never moved and leave `funding_receivable` open
+forever (ledger-rules.md has the variant postings). (2) Refund tails are recorded to
+`payment_events` (source `'funding'` — the slice-5 CHECK admitted it from day one), handled
+inline by the funding webhook route, and re-driven by the sweep→job path on a crash;
+`refund_failed` pages `funding-refund-failed` (per-transfer fingerprint, manual-refund runbook) —
+after a bounce the sender is STILL OWED and nothing auto-adjusts. (3) Stripe idempotency
+sub-keys per POST arm (`…:cancel` / `…:create` under the callers' unchanged `:void`/`:refund`
+roots), because Stripe caches failed POSTs under their key — a cancel that lost the settlement
+race must not poison the fallback refund's key. The two sandbox experiments
+(cancel-after-batch-cutoff semantics, dispute-after-refund) are deferred to the keys-in-hand
+close-out session. **Status: active** (PR-S2)
+
+**2026-07-30 · FUNDED fires on `payment_intent.processing`, not `succeeded` — instant-front is a
+webhook mapping, not a policy switch.** The Stripe adapter (PR-S1) maps `payment_intent.processing`
+→ `funding_succeeded` (drives PENDING_PAYMENT → FUNDED, posts the funding ledger batch, enqueues
+the payout) and `payment_intent.succeeded` → `funding_cleared` (the flag `WAIT_FOR_CLEARING`
+consults). ACH is delayed-notification: `processing` means the debit was submitted to the network;
+settlement lands ~T+4. Fronting the payout at submission IS the product (family gets pesos today);
+the exposure containment is elsewhere — per-user caps (PR5), the float ceiling, and slice-8's
+uncleared-exposure controls. The failure tails map likewise: a pre-settlement return arrives as
+`payment_intent.payment_failed` → `funding_failed`; a post-settlement return arrives as
+`charge.dispute.created` → `funding_reversed` (final, no appeal — Stripe ACH disputes cannot be
+contested). Two consequences recorded now: (1) dispute payloads carry no metadata echo, so
+`FundingEvent.transferRef` went nullable and the webhook route joins through the persisted
+`transfers.funding_payment_ref`; (2) a `funding_failed` that arrives AFTER the instant-front (state
+already FUNDED) currently surfaces as a logged `transition_conflict` and nothing else — the
+money-truth tail for that case is PR-S2's settlement-aware undo work plus the O-lane
+reconciliation, deliberately not smuggled into the adapter PR. **Status: active** (PR-S1)
+
+**2026-07-29 · The aggregate Reg E double-pay guard is an hourly cron over the ledger, not an
+alert at write time.** `ledger.correction-watch` sums `loss_cancellation_correction` over a rolling
+window (`LOSS_CORRECTION_WINDOW_DAYS`, default 7) and pages `loss-correction-threshold` (warning)
+at `LOSS_CORRECTION_ALERT_MINOR` (default 20000 = $200 — about the second correction at launch
+limits). Why a cron and not the write path: the write is a human-driven CLI that already pages
+per-transfer at owed-time and executes deliberately — a TREND question belongs on the aggregate,
+where it also catches anything a future writer posts to the account. The sum is SIGNED
+(debits − credits, the account's normal balance): the append-only ledger reverses an erroneous
+correction with a new credit, and a debit-only sum would keep alarming on money already clawed
+back. Reads fail closed (a broken read throws to pg-boss retry, never "no corrections"); two
+queries instead of an embedded join so a typo'd account code throws via `.single()` instead of
+reading as a quiet week. Knobs are hard-defaulted (RISK_* style) so the tripwire stays armed when
+unset; episode dedupe is the global Sentry fingerprint (float-ceiling mechanism), no persisted
+state. **Status: active** (slice-7 debt pass)
+
+**2026-07-29 · Every Bridge call gets a hard deadline, and the refund-claim staleness window drops
+30 → 10 minutes.** `bridgeFetch` now sets `AbortSignal.timeout(BRIDGE_TIMEOUT_SECONDS × 1000)`
+(default 15s, env-tunable 1–120) — the one helper all nine Bridge functions route through, so the
+bound is universal. A fired timeout rejects on the SAME non-`BridgeApiError` path as undici's
+network `TypeError`, and no caller branches on either class (routes map to 502/503, jobs rethrow
+into pg-boss retry), so the only behavior change is failing in seconds instead of undici's ~300s
+defaults. The `FundingProcessor` seam gains a matching contract: network-bound adapters (Stripe,
+slice 4b) MUST bound their own calls. That removes the entire basis of the 2026-07-28 entry's
+"**30 minutes, not 10**" derivation for `CLAIM_STALE_AFTER_MS` — the window existed to keep an
+abandoned-claim page from firing on a merely-slow call, and bounded calls cannot be 10-minutes
+slow. It now matches the submit claim's 10 minutes; the asymmetry that REMAINS is what stale
+*means* (submit self-heals by idempotent re-POST; an abandoned refund claim pages a human, is
+never machine-retaken, and the sender may already have been paid — so page sooner). Caller error
+mapping deliberately NOT redesigned here. **Status: active** (slice-7 debt pass)
+
+**2026-07-28 · A post-submission cancel routes through `UNDER_REVIEW` on the COMPLETED tail ONLY —
+and that is not a return to "cancellation = error resolution."** Slice-7 PR6b records every
+post-submission cancel as a `cancellation_requests` row and resolves it when the payout settles. The
+shape needs defending because an earlier design said post-submission cancels route through
+`UNDER_REVIEW` generally, and [transfer-state-machine.md](transfer-state-machine.md) superseded that
+as **wrong on the law**: §1005.34 cancellation is not §1005.33 error resolution. They have different
+clocks, different remedies, and different lawful denials. Treating a cancellation as a dispute would
+put the sender on the wrong clock and invite us to "investigate" a request that needs no
+investigation — they have an unconditional right, exercised in time or not. So the binding rule is
+**state-keyed**: a timely cancel at `SUBMITTED`/`IN_FLIGHT` owes a full refund once the payout
+resolves, whichever way it resolves. Two tails follow. **Payout fails** → the existing refund tail
+already makes the sender whole; nothing further is owed and the request just closes. **Payout
+completes** → §1005.34's second condition decides it: the refund is owed only if the request was
+made **before the funds were deposited** (both conditions are evaluated as of the request — see the
+research memo). On an instant rail that matters enormously: SPEI deposits in seconds while the
+window runs 30 minutes, so most in-window cancels arrive *after* the deposit and are owed nothing —
+a human denies them on the record with Bridge's deposit timestamp as evidence. Only a request that
+genuinely **beat the deposit** is owed the full refund — the recipient keeps the money and the
+sender gets theirs back. That accepted, bounded double-pay is the price of the statutory right,
+now confined to a seconds-wide race. (Initially implemented on the clock condition alone, which
+over-committed to paying twice on every in-window cancel; corrected 2026-07-28 same-day, before
+merge.)
+`UNDER_REVIEW` appears on that second tail alone, and **not because the cancel is a dispute** —
+because `COMPLETED → UNDER_REVIEW → REFUNDED` is the only modeled post-delivery correction path and
+already carries the right ledger treatment. It is a holding state meaning "a human owes this transfer
+a decision," not a claim that anything is being adjudicated. Three consequences. **(1) The correction
+gets its own expense account.** `loss_cancellation_correction`, not the existing
+`loss_funding_reversed`: an ACH return is a credit/fraud loss, this is a compliance cost, and sharing
+a bucket means the ledger cannot answer "what did Reg E cost us" without a per-transfer join. Cheap
+to separate while PR6b is the only writer; a data migration over append-only entries later. **(2)
+Denial is never automatic, and a request that beat the deposit can never be denied at all.** Denial
+has exactly two lawful grounds, mirroring the statute's two conditions: out-of-window (provable from
+our own `cancelable_until`) and deposit-preceded-request (provable only from Bridge's deposit
+timestamp — which is why `--deposited-at` is load-bearing in the deny guard, compared against
+`requested_at`, not merely recorded). Either way the transfer stays/returns to `COMPLETED` — flipping
+a delivered transfer's state for a request we will not honour would be a lie in the state log. The
+resolution tool refuses `--deny` when both conditions held; if such a request genuinely must not be
+paid, that is an escalation, not a flag. **(3) The correction payment takes the same refund claim as the PAYOUT_FAILED tail.** Both
+disburse against `refund_payment_ref` on one transfer, so they contend on one lock rather than two
+implementations of the same predicate. **Status: active** (slice 7 PR6b)
+([runbooks/pending-cancellation.md](runbooks/pending-cancellation.md); supporting research incl. the
+reg text, the commentary's silence, and Remitly's request-time completion definition:
+[research/reg-e-cancellation-after-delivery.md](research/reg-e-cancellation-after-delivery.md) —
+counsel-gated via PR7).
+
+**2026-07-28 · Cancellation timeliness is RECORDED, not enforced at the door.** The 202 that answers
+a post-submission cancel fires on **state alone** — it never consults `cancelable_until` — so a cancel
+tapped on a transfer stalled at `IN_FLIGHT` for days gets the same 202 as one tapped a minute after
+submission. Two ways to handle that, and we picked the second. **Rejected: gate the 202 on the
+window**, answering a flat 409 once it has passed. That refuses to even acknowledge a request the
+sender is entitled to make, and destroys the evidence that they made it — which is exactly what a
+regulator would ask us to produce. **Chosen: record every request, and stamp it `within_window`.**
+The wire shape does not change; the row carries the fact. Only a timely request creates an automatic
+obligation; an untimely one is still recorded, still visible, and still resolved by a human on the
+record. `within_window` is computed inside `record_cancellation_request` from the row being recorded,
+so timeliness is evaluated atomically with the record rather than read separately by a caller whose
+view may already be stale — and once written it is frozen, because the answer to "was this in time"
+must not change with the clock. The corollary is that recording must never fail the request: a
+persistence error logs, pages, and still returns the 202, because our bookkeeping problem must not
+present to the sender as a rejection of their statutory ask. **Status: active** (slice 7 PR6b).
+
+**2026-07-28 · Two atomic claims that behave OPPOSITELY when stale — and that asymmetry is the
+decision.** Slice-7 PR6b-0 adds the **refund claim** (`transfers.refund_claimed_at` /
+`refund_claimed_by`): a guarded UPDATE one run wins before calling the funding processor. It closes a
+real hole in PR6a — `refund_payment_ref IS NULL` was a *read separated from its write*, so a poller
+re-drive and an operator's `trigger-refund.ts` could both read null and both pay the sender. That was
+survivable only in theory: the exactly-once guarantee rested on the processor's idempotency key, and
+[`MockFundingProcessor.refund()`](/apps/api/src/services/funding/mock.ts) **ignores that key by
+design**, so today the claim is the *only* defence, not a second one. The shape mirrors the shipped
+**submit claim** ([`claimForSubmission`](/apps/api/src/jobs/payout-submit.ts)) — and then deliberately
+diverges on the one question that matters: **what a stale claim means.** A stale submit claim means
+*re-POST to Bridge idempotently and skip the guards*, because Bridge dedupes on the key, so recovery
+cannot double-pay; the sweep can safely treat 10 minutes as stale and re-enqueue. A stale refund claim
+means **stop and page a human**, because nothing gives the funding seam that guarantee: a claim that
+was taken but never recorded a `refund_payment_ref` may mean the sender was already paid, and only a
+person checking the processor can tell. So it is never retaken by a machine. Four consequences worth
+recording. **(1) The window is NOT in the claim predicate.** The guard is bare
+`refund_claimed_at IS NULL`; the staleness window *(30 minutes at the time — 10 since 2026-07-29,
+see above)* lives in the backlog classification, the alert, and
+`releaseStaleRefundClaim`. Putting it in the predicate would silently restore auto-retake — the exact
+behaviour this rejects — so a test asserts the predicate has no staleness term. **(2) There is no
+release-on-throw.** An earlier draft cleared the claim when the processor threw, to keep transient
+errors from becoming pages. Dropped: `FundingProcessor` has no error taxonomy, so a timeout (money may
+have left) and a definitive rejection (it did not) throw identically, and releasing would green-light
+a retry that may pay twice. A processor throw leaves the claim standing and it goes abandoned. **(3) A claim refusal must not retire the payment
+event.** Both claim refusals mean the refund has *not* happened, so the job leaves the event
+`received` for `payout.sweep` to re-drive. Marking it processed strands the sender deterministically:
+the processor throws (claim stands, by design), pg-boss retries ~15s later, and that retry loses the
+claim to *its own* dead claim — well inside the window, so it reads as `claim_taken`. Retiring it there
+drops the row out of the sweep's `status='received'` selection, and nothing else re-drives it
+(`payout.poll` enqueues only when `recordEvent` reports `inserted`, i.e. at most once per
+`(source,state)`), so the claim never ages into `claim_abandoned` and no alert ever fires. **(4)
+The operator exit is a separate named operation, not a `force` flag** — `releaseStaleRefundClaim`,
+guarded to only-if-abandoned and only-if-undisbursed, reached by `--reclaim`. It bypasses no policy
+(the principal interlock, the `PAYOUT_FAILED` guard, `--operator` and `--confirm` all still run), which
+is what keeps it clear of the bypass-parameter shape the entry below rejects. **30 minutes, not 10**,
+because no Bridge or processor call sets an `AbortSignal` — they inherit undici's ~300s defaults, so a
+hung-but-alive refund can hold a claim ~10 minutes, and an alert that needs a human must not fire on a
+call that is merely slow. *(Amended 2026-07-29 — see above: 10 minutes once every Bridge call is
+bounded; the derivation's premise no longer holds.)* **Status: active** (slice 7 PR6b-0)
+([runbooks/manual-refund.md](runbooks/manual-refund.md)).
+
+**2026-07-27 · One refund implementation, with the policy gate at the caller — and an operator CLI,
+not an ops endpoint.** Slice-7 PR6a lifts the `PAYOUT_FAILED → REFUNDED` tail out of the
+payment-event job into [`services/refunds.ts`](/apps/api/src/services/refunds.ts), so the automated
+path and the human path execute the *same* code. The alternative — a second, by-hand procedure —
+is how the two drift: the SQL an operator would otherwise write skips both ledger batches and never
+actually returns the money, leaving the books claiming a refund the sender never received.
+`AUTO_REFUND` shipped default-off with "a human refunds by runbook" (2026-07-21, below) and
+**neither the runbook nor the trigger existed**, so every parked row was unclearable in practice —
+and the poller cannot heal them later, because flipping the flag on re-synthesizes an event
+`recordEvent` dedupes. Three shape choices worth recording. **(1) The `AUTO_REFUND` check stays at
+the call site, never inside the service.** A `force: true` parameter on a money-moving service is an
+invitation for the next caller to bypass policy; keeping the gate in the job makes the policy visible
+per caller (the job checks the flag; the script does not, because the operator *is* the gate).
+**(2) The operator surface is a CLI, not an authenticated HTTP route.** A money-moving prod endpoint
+is the admin console the PRD rules out, and the script is strictly safer than the Supabase SQL editor
+the runbooks already use because it posts through the ledger RPC. A future support dashboard is
+additive — it calls the same service, and the script stays as break-glass. **(3) A
+principal-returned interlock, refusing on disagreement.** `bridge_return` books
+`DR cash_clearing / CR due_from_bridge` — it *asserts* Bridge sent our cash back — so the script
+requires both a recorded terminal `returned`/`refunded` event **and** a live Bridge `GET` confirming
+it, and refuses if they disagree. `refund_failed` (principal stuck at Bridge) is refused outright:
+fronting from float would book an unreconciled receivable under a ledger rule that does not exist.
+The service takes a transfer **id**, not a caller-supplied row, so the amounts and the
+never-refund-a-delivered-transfer guard always come from the database. **Status: active** (slice 7
+PR6a) ([runbooks/manual-refund.md](runbooks/manual-refund.md)).
+
+**2026-07-27 · Per-user transaction limits (the AML launch limits) ship commit-gated; the dollar
+"outstanding-uncleared" cap waits for ACH clearing.** Slice-7 PR5 adds `services/risk.ts` enforcing
+the **AML "Transaction Limits at Launch"** policy per user: a per-transaction send cap **($1,500)**
+plus rolling-window **send-amount** caps — **day $1,500 / month $3,000 / 6 months $18,000** — with a
+belt-and-suspenders **5 sends/day** count (the count is ours, not in the AML doc). Amounts are the
+**send principal** in USD minor units — fees excluded, because the policy caps the amount
+*transmitted*, not the total charged (so a max $1,500 send sits exactly at the $1,500/day cap). Values
+live in env (`RISK_PER_TXN_MAX_MINOR` / `RISK_DAILY_MAX_MINOR` / `RISK_MONTHLY_MAX_MINOR` /
+`RISK_SEMIANNUAL_MAX_MINOR` / `RISK_VELOCITY_MAX_COUNT`), **on-by-default** at the policy values so an
+unset env still enforces. The source of truth is the AML policy doc (kept out of the repo by
+decision), so **code defaults and policy must be reconciled by hand** — the first cut shipped
+placeholder numbers precisely because the values weren't in the codebase. Windows are rolling 30/180
+days, not calendar. Three shape choices a future engineer will question: **(1) no dollar
+outstanding-uncleared cap** — even though the PRD (§10) frames it as the purpose-built control —
+because `funding_receivable` is never drained on the happy path (the `ACH CLEARS` batch is
+documented-only) and `funding_cleared` posts no ledger entry, so a per-user outstanding sum is
+*monotonic* today; it can only be correct once ACH clearing is wired (slice 8 / post-Stripe).
+SPEI-seconds-vs-ACH-days makes these send-amount caps — not a concurrency cap — what actually bounds
+the R01 double-pay exposure, so a concurrency cap was dropped as redundant. **(2) Counts from COMMIT
+(`disclosure_accepted_at`), enforced at confirm before funding is initiated** — counting only *funded*
+sends lets the multi-day ACH lag hide a rapid burst (each new send sees "nothing funded yet"); commit
+is the first irreversible intent, so it's both the honest counting point and the right pre-money gate.
+**(3) Canceled / refunded / payment-failed sends don't count** (but `PAYOUT_FAILED` / `UNDER_REVIEW`
+do — the sender was charged and not yet refunded) — since we reject at commit, counting an unwound
+mistake would lock an honest re-send out. Enforcement: a UX gate at confirm (`403 limit_exceeded`) +
+an authoritative backstop at `FUNDED → SUBMITTED` (the last gate before the irreversible MXN payout)
+that places a `velocity_review` ops hold on a trip (a new `payout_hold_reason` — migration
+`20260727191425` extends the CHECK) — **not** a self-heal, because a per-user tally
+(unlike the aggregate float ceiling) doesn't drain on its own, so self-heal would strand the funded
+transfer for up to a full window. Config names track the ERD `user_limits` columns (`per_transfer` /
+`daily` / `monthly`) for the slice-8 per-user/tier table + `risk_tier` lift; the **6-month tier has no
+ERD column yet** (a slice-8 gap). **Status: active** (slice 7 PR5) ([erd.md](erd.md) `user_limits`,
+[prds/remittance-mvp.md](prds/remittance-mvp.md) §10, [transfer-state-machine.md](transfer-state-machine.md),
+[glossary.md](glossary.md)).
+
+**2026-07-24 · Transfer history shows only *money-moved* transfers; abandoned sends are hidden, not
+deleted.** The sender-facing transaction history (`/dashboard/transfers`, slice-7 PR4) lists only
+transfers where payment was actually made — `FUNDED` and beyond — via a new
+`GET /v1/transfers?scope=history` filter (`state NOT IN (PENDING_PAYMENT, PAYMENT_FAILED)`);
+`scope=all` (the default) still returns everything for ops. A `transfer` row is created at the
+"Continue" step (`POST /transfers` → `PENDING_PAYMENT`) *before* the sender pays, and an abandoned one
+reconciles to `PAYMENT_FAILED` after 30 min — so listing every row would fill a sender's history with
+attempts they never completed (and, while prod is mock-funding-locked, with `PAYMENT_FAILED` for
+*every* transfer). Real payment apps don't surface abandoned attempts, so we filter. Crucially this is
+a **view filter, not a delete**: the rows + audit log are retained (append-only; abandoned rows carry
+zero ledger postings), so nothing about compliance retention changes — only what the sender is shown.
+Why a future engineer will ask "why on earth does the list take a `scope` param and hide failed
+transfers?" — because history is a product *view*, not the `transfers` table. **Status: active**
+(slice 7 PR4) ([api-contract.md](api-contract.md), [glossary.md](glossary.md)).
+
+**2026-07-24 · The receipt view ships ahead of counsel-final receipt wording, rendering server content
+verbatim.** Slice-7 PR4 adds a receipt view (`/dashboard/send/:id/receipt`) backed by
+`GET /v1/transfers/:id/receipt`. That endpoint's content is currently the *prepayment* copy reused
+(`buildReceiptDisclosure` delegates to `buildPrepaymentDisclosure`) — it does not yet carry the
+receipt-specific §1005.31(b)(2)(vi) elements (funds-availability date, receipt identification), a
+deferred counsel item (PR7, the hard pre-real-money gate). We ship the view now because it is
+**content-agnostic**: it renders `content[lang]` verbatim, so counsel's real wording swaps in
+server-side with no web change. Safe because the feature is behind the `web-send-money` dark-launch
+flag (off in prod) and the pilot is Joshua-only; the web chrome stays neutral ("Transfer receipt" +
+date) and invents no legal elements client-side. Why a future engineer will ask "why does the receipt
+show prepayment copy?" — because the display surface landed before the counsel wording, and the swap
+is server-only. **Status: active** (slice 7 PR4); receipt wording stays on the PR7 gate
+([transfer-state-machine.md](transfer-state-machine.md)).
+
 **2026-07-21 · Cancel-at-`FUNDED` is a *void*, not a refund (slice-6 two-verb model).** When a sender
 cancels a `FUNDED`-pre-claim transfer, no payout has gone out and no float was fronted, so the inbound
 ACH is *voided* (canceled before it settles) and the ledger is a **clean reversal** of the `FUNDED`

@@ -38,6 +38,9 @@ const CHART = {
   provider_fees: 'debit',
   fx_slippage: 'debit',
   loss_funding_reversed: 'debit',
+  // slice-7 PR6b: the Reg E correction-payment expense, deliberately separate
+  // from loss_funding_reversed (credit/fraud loss vs compliance cost).
+  loss_cancellation_correction: 'debit',
 } as const
 
 describe.skipIf(!runDb)('ledger core (integration, local Supabase)', () => {
@@ -100,11 +103,11 @@ describe.skipIf(!runDb)('ledger core (integration, local Supabase)', () => {
   }
 
   describe('seeded chart of accounts', () => {
-    it('has exactly the 10 accounts from ledger-rules.md with correct normal balances', async () => {
+    it('has exactly the 11 accounts from ledger-rules.md with correct normal balances', async () => {
       const res = await db.query(
         'select code, normal_balance, type, currency from public.ledger_accounts order by code',
       )
-      expect(res.rows).toHaveLength(10)
+      expect(res.rows).toHaveLength(11)
       const byCode = Object.fromEntries(res.rows.map((r) => [r.code, r.normal_balance]))
       expect(byCode).toEqual(CHART)
       for (const row of res.rows) expect(row.currency.trim()).toBe('USD')

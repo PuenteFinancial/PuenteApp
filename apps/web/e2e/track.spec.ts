@@ -77,9 +77,11 @@ test('cancel requires two taps, then refunds', async ({ context, page }) => {
   await expect(page.getByRole('button', { name: /tap again|toca de nuevo/i })).toBeVisible()
   await expect(page.getByText(/refunded|reembolsada/i)).toHaveCount(0)
 
-  // Second tap commits.
+  // Second tap commits. (PR7 copy: the refund is "issued", not "back".) The
+  // phrase is REFUNDED-specific — the canceled body reads differently — so the
+  // spec still discriminates which terminal state the cancel lands in.
   await page.getByRole('button', { name: /tap again|toca de nuevo/i }).click()
-  await expect(page.getByText(/refunded in full|reembolsó el monto total/i)).toBeVisible()
+  await expect(page.getByText(/full refund for this transfer|reembolso completo por esta transferencia/i)).toBeVisible()
 
   // Terminal: the cancel affordance is gone.
   await expect(page.getByRole('button', { name: /cancel transfer|cancelar transferencia/i })).toHaveCount(0)
@@ -92,21 +94,36 @@ test('a cancel that needs support shows the server-authored Reg E copy', async (
   await page.getByRole('button', { name: /cancel transfer|cancelar transferencia/i }).click()
   await page.getByRole('button', { name: /tap again|toca de nuevo/i }).click()
 
-  // The 202 is NOT an error: the server's own wording is shown verbatim, and it
-  // affirms the refund-if-the-payout-fails tail. Assert on the distinctive tail
-  // rather than "contact support" — that phrase also appears in our own mapped
-  // fallback string AND in the support link, so matching it proves nothing
-  // about which copy actually rendered.
+  // The 202 is NOT an error: the server's own wording is shown verbatim. Assert
+  // on the distinctive tail rather than "contact support" — that phrase also
+  // appears in our own mapped fallback string AND in the support link, so
+  // matching it proves nothing about which copy actually rendered.
+  //
+  // slice-7 PR6b changed what this copy SAYS, and the change is the point: the
+  // tap IS the request now, so it must confirm we recorded it rather than
+  // sending the sender off to an inbox to ask again.
+  await expect(
+    page.getByText(/recorded your cancellation request|registramos tu solicitud/i),
+  ).toBeVisible()
+  // The refund promise must state BOTH §1005.34 conditions — the 30-minute
+  // window AND before-delivery — and no more. An earlier draft promised a
+  // refund even after delivery, which overstates the rule.
+  await expect(
+    page.getByText(/within 30 minutes of paying|dentro de los 30 minutos/i),
+  ).toBeVisible()
+  await expect(
+    page.getByText(/before the money was delivered|antes de que se entregara/i),
+  ).toBeVisible()
+  // Guards REINTRODUCTION of a withdrawn draft ("we'll still refund you…" —
+  // pulled 2026-07-28 for overstating the right); the phrase has never shipped,
+  // so this can only fail if someone brings it back. The positive assertions
+  // above are what pin the copy that DID ship.
+  await expect(
+    page.getByText(/we'll still refund you|igual te reembolsaremos/i),
+  ).toHaveCount(0)
   await expect(
     page.getByText(/being sent for payout|se está enviando para su pago/i),
-  ).toBeVisible()
-  await expect(page.getByText(/refunded in full|reembolsará el monto total/i)).toBeVisible()
-
-  // A message telling the sender to contact support must come with a route to
-  // do so, pointing at the SAME address as the Reg E disclosure's contact line.
-  await expect(
-    page.getByRole('link', { name: /contact support|comunícate con soporte/i }),
-  ).toHaveAttribute('href', 'mailto:support@puentefinancial.com')
+  ).toHaveCount(0)
 })
 
 test('a cancel past the window shows the refusal reason', async ({ context, page }) => {
@@ -119,4 +136,58 @@ test('a cancel past the window shows the refusal reason', async ({ context, page
   await expect(
     page.getByText(/can no longer be canceled|ya no se puede cancelar/i),
   ).toBeVisible()
+})
+
+// slice-7 PR6b. The banner is a flag ORTHOGONAL to state: the payout keeps
+// advancing while the request is open, so it must ride ABOVE the timeline
+// rather than replacing it — and must stop once the outcome banner takes over.
+test('a pending cancellation shows a banner without hiding the timeline', async ({ context, page }) => {
+  await signIn(context)
+  await page.goto('/dashboard/send/transfer-e2e-cancel-pending')
+
+  await expect(
+    page.getByText(/got your request to cancel|recibimos tu solicitud para cancelar/i),
+  ).toBeVisible()
+
+  // The timeline is still rendered: where the money got to is still true, and
+  // still the honest thing to show.
+  await expect(page.getByText(/on its way|en camino/i).first()).toBeVisible()
+})
+
+test('the banner stops once the transfer settles, leaving the outcome to speak', async ({
+  context,
+  page,
+}) => {
+  await signIn(context)
+  await page.goto('/dashboard/send/transfer-e2e-cancel-settled')
+
+  // Positive first: prove the page actually rendered the outcome — without
+  // this the negative below passes vacuously on a blank page.
+  await expect(page.getByText(/refunded|reembolsada/i).first()).toBeVisible()
+
+  // The request is resolved by now — the outcome banner carries the story, and
+  // a lingering "we're working on your cancellation" would contradict it.
+  await expect(
+    page.getByText(/got your request to cancel|recibimos tu solicitud para cancelar/i),
+  ).toHaveCount(0)
+})
+
+// PR6b review fix. At UNDER_REVIEW the outcome banner IS the cancellation
+// story — before the fix BOTH banners rendered, repeating the promise and
+// contradicting each other ("already on its way" over "was delivered").
+test('UNDER_REVIEW shows exactly one banner: the outcome owns the cancellation story', async ({
+  context,
+  page,
+}) => {
+  await signIn(context)
+  await page.goto('/dashboard/send/transfer-e2e-cancel-review')
+
+  await expect(
+    page.getByText(/working on your cancellation|procesando tu cancelación/i),
+  ).toBeVisible()
+
+  // The pending banner yields — one story, told once.
+  await expect(
+    page.getByText(/got your request to cancel|recibimos tu solicitud para cancelar/i),
+  ).toHaveCount(0)
 })
