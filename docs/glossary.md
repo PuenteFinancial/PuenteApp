@@ -87,9 +87,19 @@ refer back as needed.
   day / month / 6-month totals (`RISK_DAILY_MAX_MINOR` / `RISK_MONTHLY_MAX_MINOR` /
   `RISK_SEMIANNUAL_MAX_MINOR`), plus a per-day send count (`RISK_VELOCITY_MAX_COUNT`). Enforced at
   confirm and backstopped at `FUNDED → SUBMITTED`. See [decisions.md](decisions.md).
-- **Per-user outstanding-uncleared cap** *(deferred)* — the future per-user dollar limit on un-settled
-  ACH exposure (ERD `user_limits.daily_max_minor` et al.); deferred to slice 8 with real ACH clearing,
-  since `funding_receivable` doesn't drain today. See [erd.md](erd.md).
+- **Uncleared-exposure cap (slice-8 O3)** — the per-user *count* limit on funded-not-cleared
+  exposure: at most `RISK_UNCLEARED_MAX_COUNT` (default 1) committed sends whose ACH pull hasn't
+  settled, slot held from disclosure acceptance until `funding_cleared` (or unwind), no time
+  window. `403 transfer_in_progress` at quote/create/confirm; self-healing older-wins wait at
+  `FUNDED → SUBMITTED`. See [decisions.md](decisions.md).
+- **First-transfer hold (`FIRST_TRANSFER_HOLD`, ships OFF)** — flag-gated slice-8 O3 policy: a
+  sender with no cleanly cleared send yet (none with `funding_cleared` outside `FUNDING_REVERSED`)
+  waits for their **own** settlement before the MXN payout submits. Silent skip, no hold reason;
+  the sweep resumes it on clearing.
+- **Per-user outstanding-uncleared cap** *(deferred)* — the future per-user **dollar** limit on
+  un-settled ACH exposure (ERD `user_limits.daily_max_minor` et al.); still deferred, since
+  `funding_receivable` doesn't drain today — the O3 *count* cap above is the pilot control.
+  See [erd.md](erd.md).
 
 ## Puente & Bridge mechanics
 

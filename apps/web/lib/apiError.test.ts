@@ -31,6 +31,7 @@ describe('errorMessage', () => {
   it('maps a known code to its localized message', () => {
     expect(errorMessage('quote_expired', errors)).toBe(errors.quote_expired)
     expect(errorMessage('not_configured', errors)).toBe(errors.not_configured)
+    expect(errorMessage('transfer_in_progress', errors)).toBe(errors.transfer_in_progress)
   })
 
   it('falls back to generic for unknown or missing codes', () => {

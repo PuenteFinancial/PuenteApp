@@ -338,7 +338,11 @@ accepted now because users are trusted.
   - **Limits & holds** — per-user **transaction limits shipped in slice 7 PR5** (the AML launch
     limits: a per-transaction send cap + rolling day/month/6-month send totals + a per-day count;
     enforced at confirm, backstopped at `FUNDED → SUBMITTED` where a trip places a `velocity_review`
-    hold). Still deferred: first-transfer holds and the per-user *dollar-outstanding* cap (waits for
+    hold). **Slice-8 O3 added the uncleared-exposure *count* cap** (`RISK_UNCLEARED_MAX_COUNT`,
+    default 1: one committed-but-uncleared send in flight per user; `403 transfer_in_progress` at
+    quote/create/confirm, self-healing older-wins wait at `FUNDED → SUBMITTED`) **and built the
+    first-transfer hold** (`FIRST_TRANSFER_HOLD`, ships OFF: an unproven sender's payout waits for
+    their own `funding_cleared`). Still deferred: the per-user *dollar-outstanding* cap (waits for
     ACH clearing — `funding_receivable` doesn't drain today).
   - **Automated recovery** — re-present eligible returns (e.g. R01 NSF), dunning, account freeze,
     block further sends, collections.

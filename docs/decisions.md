@@ -6,6 +6,39 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-31 · One uncleared send in flight per user; first-transfer hold built but OFF (slice-8 O3).**
+Under instant-front the MXN leaves on `payment_intent.processing` while the sender's ACH debit can
+still bounce for ~T+4, and nothing bounded *stacked unsettled debits* — the amount/velocity caps
+(PR5) bound dollars per window, not how many revocable pulls are simultaneously in flight. New
+control: `RISK_UNCLEARED_MAX_COUNT` (default **1**) committed-but-uncleared sends per user, a slot
+held from `disclosure_accepted_at` until `funding_cleared` flips (or the send unwinds), with **no
+time window** — COMPLETED-but-uncleared still counts, because a delivered payout with a revocable
+debit IS the exposure. This **supersedes the 2026-07-27 PR5 note that dropped a concurrency cap as
+redundant**: the locked 2026-07-29 decision adopts the PRD's pilot-simple *count* variant as the
+uncleared-exposure control, and it doubles as the substrate for first-transfer holds. Count, not
+dollar-sum, because the sum is still unbuildable (that entry's point (1) stands: `funding_receivable`
+never drains on the happy path) while `transfers.funding_cleared` is maintained by both processors —
+the dollar cap stays deferred. Enforcement mirrors PR5: friendly `403 transfer_in_progress` at
+quote/create/confirm (commit-time, before acceptance is recorded, so a blocked send never occupies a
+slot and a committed retry keeps its slot), plus the authoritative `FUNDED → SUBMITTED` backstop —
+but there it's a **self-heal wait, not a hold** (the blocker clears or unwinds on its own; the 1-min
+sweep resumes, Sentry `['uncleared-cap-wait', id]` warns per waiting transfer). The backstop counts
+only strictly-**older** rows by `(disclosure_accepted_at, id)` — two sends can race-commit past the
+confirm gate, and a symmetric count would deadlock both forever; older-wins picks exactly one.
+**First-transfer hold** (`FIRST_TRANSFER_HOLD`, default OFF, WAIT_FOR_CLEARING-shaped silent skip):
+an unproven sender — no send with `funding_cleared=true` outside `FUNDING_REVERSED` — waits for
+their own clearing; ships dark, flips with real R01 data before widening past the trusted five.
+Consequences owned explicitly: (a) a **bounced pull caps the sender indefinitely** — post-FUNDED
+`funding_failed` is stale-logged and `funding_reversed` handling is deferred, so the slot never
+frees until ops resolves the row; intended (their exposure is genuinely live), and blocking
+repeat sends after a real `FUNDING_REVERSED` lands is the named slice-8+ follow-up. (b)
+**Dev/staging clearing stays script-only** (2026-07-30): the simulate button fires only
+`funding_succeeded`, so a second staging send 403s until
+`pnpm tsx scripts/fire-funding-webhook.ts <id> cleared` — deliberate, staging mirrors prod timing
+and the cap demos itself. (c) **O1 interplay**: the future FUNDED-dwell watch must account for the
+three deliberate no-hold waits (WAIT_FOR_CLEARING, FIRST_TRANSFER_HOLD, the uncleared cap) or
+first-transfer holds will page as stuck transfers.
+
 **2026-07-30 · Settlement decides the undo mechanism, and the ledger branches on it (PR-S2).**
 The Stripe adapter's undo ops resolve the LIVE PaymentIntent instead of trusting their nominal
 mode: an uncleared ACH pull can only be VOIDED (`paymentIntents.cancel` — ACH is the one method

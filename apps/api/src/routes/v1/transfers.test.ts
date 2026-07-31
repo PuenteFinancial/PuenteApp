@@ -54,11 +54,16 @@ vi.mock('../../services/funding/index.js', () => ({
   }),
 }))
 
-// Per-user velocity gate (slice-7 PR5) is mocked ok by default so existing
-// confirm paths stay green; the over-limit case flips it.
+// Per-user velocity gate (slice-7 PR5) + uncleared cap (slice-8 O3) are mocked
+// ok by default so existing paths stay green; the trip cases flip them. The
+// factory replaces the module, so it must also export the message constant the
+// routes render (a sentinel — tests branch on `code`, never on copy).
 const assessTransferRisk = vi.fn()
+const assessUnclearedCap = vi.fn()
 vi.mock('../../services/risk.js', () => ({
   assessTransferRisk: (...args: unknown[]) => assessTransferRisk(...args),
+  assessUnclearedCap: (...args: unknown[]) => assessUnclearedCap(...args),
+  UNCLEARED_CAP_MESSAGE: 'transfer in progress',
 }))
 
 const { transfersRoute } = await import('./transfers.js')
@@ -192,6 +197,8 @@ beforeEach(() => {
   })
   assessTransferRisk.mockReset()
   assessTransferRisk.mockResolvedValue({ ok: true })
+  assessUnclearedCap.mockReset()
+  assessUnclearedCap.mockResolvedValue({ ok: true })
   recordCancellationRequest.mockReset()
   recordCancellationRequest.mockResolvedValue({
     id: 'cr-1',
@@ -290,6 +297,18 @@ describe('POST /v1/transfers', () => {
     await app.close()
   })
 
+  it('403s transfer_in_progress at the uncleared cap — before any quote work', async () => {
+    routeTables()
+    assessUnclearedCap.mockResolvedValue({ ok: false, blockerTransferId: 'tr-prior' })
+    const app = await buildApp()
+    const res = await create(app)
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('transfer_in_progress')
+    expect(createTransferFromQuote).not.toHaveBeenCalled()
+    expect(assessUnclearedCap).toHaveBeenCalledWith({ userId: 'user-123' })
+    await app.close()
+  })
+
   it.each([
     ['quote_consumed', 409, 'conflict'],
     ['quote_expired', 409, 'quote_expired'],
@@ -336,6 +355,8 @@ describe('POST /v1/transfers/:id/confirm', () => {
     expect(res.body.disclosureAcceptedAt).toBeTruthy()
     // a retry of an already-committed send skips the velocity check (keeps its slot)
     expect(assessTransferRisk).not.toHaveBeenCalled()
+    // …and the uncleared cap for the same reason: its slot is already occupied
+    expect(assessUnclearedCap).not.toHaveBeenCalled()
     await app.close()
   })
 
@@ -402,6 +423,33 @@ describe('POST /v1/transfers/:id/confirm', () => {
     const app = await buildApp()
     const res = await confirm(app)
     expect(res.status).toBe(409)
+    await app.close()
+  })
+
+  it('403 transfer_in_progress at the uncleared cap — before the velocity gate and any funding', async () => {
+    routeTables() // fresh transfer, disclosure_accepted_at: null → the gate runs
+    assessUnclearedCap.mockResolvedValue({ ok: false, blockerTransferId: 'tr-prior' })
+    const app = await buildApp()
+    const res = await confirm(app)
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('transfer_in_progress')
+    // refused before a dollar moves, and before the velocity gate even runs
+    expect(initiateFunding).not.toHaveBeenCalled()
+    expect(assessTransferRisk).not.toHaveBeenCalled()
+    expect(assessUnclearedCap).toHaveBeenCalledWith({
+      userId: 'user-123',
+      excludeTransferId: TRANSFER_ID,
+    })
+    await app.close()
+  })
+
+  it('fails closed — an uncleared-cap query error 500s and never initiates funding', async () => {
+    routeTables()
+    assessUnclearedCap.mockRejectedValue(new Error('db down'))
+    const app = await buildApp()
+    const res = await confirm(app)
+    expect(res.status).toBe(500)
+    expect(initiateFunding).not.toHaveBeenCalled()
     await app.close()
   })
 

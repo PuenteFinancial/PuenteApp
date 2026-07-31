@@ -234,6 +234,7 @@ export type Translations = {
       not_found: string
       kyc_required: string
       limit_exceeded: string
+      transfer_in_progress: string
       quote_expired: string
       transfer_not_cancelable: string
       conflict: string
@@ -587,6 +588,8 @@ const en: Translations = {
       not_found: 'We couldn’t find that. Refresh and try again.',
       kyc_required: 'You’ll need to verify your identity before sending money.',
       limit_exceeded: 'This goes over your sending limit right now. Try a smaller amount or come back later.',
+      transfer_in_progress:
+        'You already have a transfer in progress. You can send again once it clears — usually within a few business days.',
       quote_expired: 'This rate expired. Get a new quote to continue.',
       transfer_not_cancelable: 'This transfer can no longer be canceled.',
       conflict: 'This can’t be updated right now. Refresh and try again.',
@@ -920,6 +923,8 @@ const es: Translations = {
       not_found: 'No encontramos eso. Actualiza e inténtalo de nuevo.',
       kyc_required: 'Necesitas verificar tu identidad antes de enviar dinero.',
       limit_exceeded: 'Esto supera tu límite de envío por ahora. Prueba con un monto menor o vuelve más tarde.',
+      transfer_in_progress:
+        'Ya tienes una transferencia en curso. Podrás enviar otra cuando se procese tu pago — normalmente en unos días hábiles.',
       quote_expired: 'Este tipo de cambio expiró. Obtén una nueva cotización para continuar.',
       transfer_not_cancelable: 'Esta transferencia ya no se puede cancelar.',
       conflict: 'Esto no se puede actualizar ahora. Actualiza e inténtalo de nuevo.',

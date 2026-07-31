@@ -107,6 +107,18 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
+  // First-transfer hold (slice-8 O3) — mechanism now, policy via flag (same
+  // shape as WAIT_FOR_CLEARING; NOT z.coerce.boolean, which parses 'false' as
+  // true). OFF (pilot default): the trusted-five's first sends front instantly
+  // like any other. ON: a sender with no cleanly cleared send yet
+  // (hasClearedHistory) waits for their OWN funding_cleared before the MXN
+  // payout submits — no hold reason, the 1-min sweep resumes it on settlement.
+  // Flip on with real R01 return data in hand, before widening past the
+  // trusted five.
+  FIRST_TRANSFER_HOLD: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   // Direct Postgres connection for pg-boss (worker only — the API stays
   // PostgREST-only). Must be the Supabase SESSION-mode pooler (port 5432),
   // never transaction mode (6543) — pg-boss needs session semantics.
@@ -141,6 +153,12 @@ const envSchema = z.object({
   RISK_MONTHLY_MAX_MINOR: z.coerce.number().int().min(0).default(300_000), // $3,000 / rolling 30d
   RISK_SEMIANNUAL_MAX_MINOR: z.coerce.number().int().min(0).default(1_800_000), // $18,000 / rolling 180d
   RISK_VELOCITY_MAX_COUNT: z.coerce.number().int().min(1).default(5), // sends / rolling 24h
+  // Uncleared-exposure cap (slice-8 O3): max committed sends in flight per user
+  // before their ACH pulls settle — counted from disclosure acceptance until
+  // funding_cleared (or unwind), no time window. The per-user count axis of the
+  // aggregate FLOAT_CEILING_MINOR. Floor of 1: the comparison is `>=`, so 0
+  // would block every send.
+  RISK_UNCLEARED_MAX_COUNT: z.coerce.number().int().min(1).default(1), // uncleared sends in flight
   // Aggregate Reg E correction-loss trend guard (ledger.correction-watch cron):
   // page when the rolling-window signed sum of loss_cancellation_correction
   // reaches this. HARD defaults (RISK_* style, not FLOAT_CEILING's

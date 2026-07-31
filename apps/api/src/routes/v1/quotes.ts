@@ -9,6 +9,7 @@ import {
   QuoteAmountError,
 } from '../../services/quotes.js'
 import { requireApprovedUser } from './recipients.js'
+import { assessUnclearedCap, UNCLEARED_CAP_MESSAGE } from '../../services/risk.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 // source_rate / fx_rate_at are reconciliation-only and deliberately excluded:
@@ -144,6 +145,16 @@ export async function quotesRoute(server: FastifyInstance) {
       const userId = request.user!.id
 
       if (!(await requireApprovedUser(userId, reply))) return
+
+      // Uncleared-exposure cap (slice-8 O3): one committed send in flight per
+      // user until its ACH pull settles. Checked here purely for UX — the
+      // earliest, friendliest place to say "wait" (before the sender walks the
+      // whole flow). Create/confirm re-check, and the FUNDED→SUBMITTED backstop
+      // is authoritative.
+      const uncleared = await assessUnclearedCap({ userId })
+      if (!uncleared.ok) {
+        return sendError(reply, 403, 'transfer_in_progress', UNCLEARED_CAP_MESSAGE)
+      }
 
       // Owner-scoped destination gate: active destination under an active
       // recipient of this user, in the supported corridor. provider_account_ref
