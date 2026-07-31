@@ -1,6 +1,6 @@
 # Data Model / ERD — USD → MXN Remittance MVP
 
-**Date:** 2026-07-02 · **Updated:** 2026-07-21 (slice 5 — payout hold/claim columns, payment_events inbox)
+**Date:** 2026-07-02 · **Updated:** 2026-07-31 (slice-8 O2 — reconciliation_runs)
 **Status:** Current through slice 5 (shipped + promoted to prod)
 **Pairs with:** `transfer-state-machine.md`, `ledger-rules.md`
 
@@ -231,6 +231,16 @@ Immutable snapshot of exactly what the user was shown.
 - `status` TEXT — `received` | `processed` | `ignored` | `failed` (mutated in place; `moddatetime` `updated_at` trigger)
 - `error` TEXT — failure/ignore detail stamped when the row is marked
 - **RLS:** service-role only.
+
+### reconciliation_runs  *(daily ledger.reconcile cron output — append-only)*
+One row per run of the O2 reconciliation cron (`docs/runbooks/reconciliation.md`). No FKs — it
+summarizes the whole book, not one entity.
+- `started_at` / `finished_at` timestamptz
+- `status` TEXT — `pass` | `findings` | `error` (`error` = a check could not complete)
+- `findings_count` INT
+- `checks` JSONB — per-check array (name, status, findings_count, summary; refs/counts only, no PII)
+- `balances` JSONB — full chart-of-accounts snapshot at run time
+- **Append-only** (same trigger as the ledger) · **RLS:** service-role only.
 
 ### user_limits  *(config — defaults to unlimited for MVP)*
 - `user_id` FK (nullable for `tier`/`global` defaults)

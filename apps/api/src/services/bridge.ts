@@ -270,6 +270,76 @@ export async function getBridgeTransfer(bridgeTransferId: string): Promise<Bridg
   return parseTransferResponse(response)
 }
 
+// ── Reconciliation reads (slice-8 O2) ───────────────────────────────────────
+// Read-only inputs for the daily ledger.reconcile cron. Both endpoints were
+// verified live against the sandbox 2026-07-31: GET /v0/transfers and
+// GET /v0/wallets return { count, data: [...] }.
+
+export interface BridgeTransferListItem {
+  bridgeTransferId: string
+  clientReferenceId: string | null
+  state: string
+  createdAt: string
+}
+
+/**
+ * Newest Bridge transfers on this developer account (orphan detection input).
+ * Bounded by `limit` — the caller must treat a full page as a truncated view,
+ * never as "everything" (no-silent-caps rule in the recon job).
+ */
+export async function listBridgeTransfers(limit: number): Promise<BridgeTransferListItem[]> {
+  const response = (await bridgeFetch(`/v0/transfers?limit=${limit}`)) as {
+    data?: Array<{
+      id?: string
+      client_reference_id?: string | null
+      state?: string
+      created_at?: string
+    }>
+  }
+  if (!Array.isArray(response.data)) {
+    throw new BridgeApiError(502, { code: 'bridge_transfer_list_malformed' })
+  }
+  return response.data
+    .filter((t) => typeof t.id === 'string' && t.id !== '')
+    .map((t) => ({
+      bridgeTransferId: t.id as string,
+      clientReferenceId: t.client_reference_id ?? null,
+      state: t.state ?? '',
+      createdAt: t.created_at ?? '',
+    }))
+}
+
+export interface BridgeWalletBalance {
+  currency: string
+  /** Decimal string as Bridge reports it (e.g. "5.69") — caller parses strictly. */
+  balance: string
+}
+
+/**
+ * Balances of one wallet, found via the developer-wide GET /v0/wallets list —
+ * env carries only BRIDGE_TREASURY_WALLET_ID, not its owning customer id, and
+ * the per-customer read needs both. Throws when the wallet isn't in the first
+ * page: the treasury wallet missing from its own account is itself a finding.
+ */
+export async function getBridgeWalletBalances(walletId: string): Promise<BridgeWalletBalance[]> {
+  const response = (await bridgeFetch('/v0/wallets?limit=100')) as {
+    data?: Array<{
+      id?: string
+      balances?: Array<{ balance?: string; currency?: string }>
+    }>
+  }
+  if (!Array.isArray(response.data)) {
+    throw new BridgeApiError(502, { code: 'bridge_wallet_list_malformed' })
+  }
+  const wallet = response.data.find((w) => w.id === walletId)
+  if (!wallet) {
+    throw new BridgeApiError(502, { code: 'bridge_treasury_wallet_not_found' })
+  }
+  return (wallet.balances ?? [])
+    .filter((b) => typeof b.balance === 'string' && typeof b.currency === 'string')
+    .map((b) => ({ currency: b.currency as string, balance: b.balance as string }))
+}
+
 export async function getKycLink(
   customerId: string,
   redirectUri: string,
