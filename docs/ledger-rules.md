@@ -1,7 +1,8 @@
 # Double-Entry Ledger Rules — USD → MXN Remittance
 
 **Date:** 2026-06-26
-**Status:** Documents shipped, test-pinned behavior through slice 5 (2026-07-21)
+**Status:** Documents shipped, test-pinned behavior through slice 7 + PR-S2's mode-aware undo
+postings (2026-07-30)
 **Pairs with:** `transfer-state-machine.md` (every money-moving transition posts here)
 
 ## Principles
@@ -102,6 +103,12 @@ CANCELED  (ACH not yet in flight — reverse the FUNDED batch cleanly)
   DR transfer_payable        98
   DR fee_revenue              2    ← reverses the FUNDED credit; fee not earned on a cancel
   CR funding_receivable     100
+  (PR-S2 note: the cancel route posts THIS batch in both undo modes. When the void fell back
+   to a real refund — the PI settled first, a sandbox norm and a live race — the settlement
+   inflow and the refund outflow both go unbooked: they offset exactly, end-state books stay
+   correct, and the transient Stripe-balance mismatch is a KNOWN recon timing window (logged
+   `cancel void fell back to a refund`). If the fallback refund then BOUNCES, refund.failed
+   pages and the runbook re-disbursement carries its own posting.)
 
 CANCELED  (ACH already in flight — keep funding_receivable open; owe refund from float)
   DR transfer_payable        98
@@ -114,7 +121,8 @@ CANCELED  (ACH already in flight — keep funding_receivable open; owe refund fr
   DR cash_clearing          100
   CR funding_receivable     100
 
-PAYOUT_FAILED → REFUNDED  (after SUBMITTED; Bridge returns principal)
+PAYOUT_FAILED → REFUNDED  (after SUBMITTED; Bridge returns principal; undo mode REFUNDED —
+  the funding had settled, so a real Stripe Refund pays the sender back)
   1) Bridge returns the $98:
      DR cash_clearing        98
      CR due_from_bridge      98
@@ -126,7 +134,25 @@ PAYOUT_FAILED → REFUNDED  (after SUBMITTED; Bridge returns principal)
      DR refunds_payable     100
      CR cash_clearing       100
   (Bridge's $0.50 is typically non-refundable → stays as provider_fees expense, our cost.
-   The funding_receivable / ACH-clearing leg settles independently per the happy-path entries.)
+   The funding_receivable / ACH-clearing leg settles independently per the happy-path entries.
+   The Stripe refund is ASYNC — issued now, settles in ~5–10 business days; REFUNDED means
+   issued. A later refund.failed webhook pages ops (sender still owed) and never auto-adjusts.)
+
+PAYOUT_FAILED → REFUNDED  (undo mode VOIDED — PR-S2. Under real ACH timing this is the MAIN
+  Stripe path: settlement is ~T+4 and payouts fail in minutes, so the PI is still `processing`
+  and the adapter CANCELS the pull — the sender is made whole by never being debited)
+  1) Bridge returns the $98 (unchanged — the payout principal really did come back):
+     DR cash_clearing        98
+     CR due_from_bridge      98
+  2) Settle REFUNDED by reversing the FUNDED batch — no cash moves, and the canceled pull's
+     receivable closes instead of waiting for an ACH that will never clear:
+     DR transfer_payable     98
+     DR fee_revenue           2     ← fee not earned; the sender never paid
+     CR funding_receivable  100
+  (End state: cash holds exactly the returned principal (+98 against the −98.08 float draw →
+   net −slippage), every position closed. Posting the refunded-mode batch here instead would
+   credit cash_clearing $100 that never left and strand funding_receivable open forever —
+   the mode branch in services/refunds.ts exists for exactly this.)
 
 FUNDING_REVERSED  (ACH return after COMPLETED — money already delivered, irreversible)
   DR loss_funding_reversed  100
@@ -134,15 +160,38 @@ FUNDING_REVERSED  (ACH return after COMPLETED — money already delivered, irrev
   (Or DR a user receivable instead of straight loss, then write off to loss_funding_reversed if
    unrecoverable. This is the loss the risk engine exists to prevent.)
 
-UNDER_REVIEW → REFUNDED  (entry from COMPLETED — post-delivery Reg E correction, NOT a reversal)
-  DR loss_funding_reversed   X      ← or a dedicated correction-expense account
-  CR cash_clearing           X
+UNDER_REVIEW → REFUNDED  (entry from COMPLETED — post-delivery Reg E correction, NOT a reversal;
+  undo mode REFUNDED — the funding had settled)
+  DR loss_cancellation_correction  S+F
+  CR cash_clearing                 S+F
   (A correction payment is a NEW debit against Puente. The original COMPLETED entries remain
-   intact — we never rewrite delivered history.)
+   intact — we never rewrite delivered history. Structurally unlike the PAYOUT_FAILED refund
+   below it: that one DEBITS transfer_payable because the obligation was still open, whereas
+   here the COMPLETED batch already discharged it and there is nothing left to reverse.
+   Fee rides with it — the sender is made whole.)
 
-  Pre-delivery exits (entry from FUNDED, SUBMITTED, or IN_FLIGHT) use the CANCELED or
-  PAYOUT_FAILED posting for the corresponding stage — those paths are TBD pending
-  full design of the ops console and pre-delivery dispute handling.
+UNDER_REVIEW → REFUNDED  (undo mode VOIDED — PR-S2. The LIKELY correction case: delivery
+  precedes ACH settlement by days, so the adapter cancels the still-processing pull and the
+  sender is made whole by never being charged)
+  DR loss_cancellation_correction  S+F
+  CR funding_receivable            S+F
+  (Same P&L as the refunded arm — loss S+F, fee stays earned as booked — but the credited
+   ASSET differs: no cash leaves, and the receivable is written off directly because the
+   canceled pull will never clear. The compliance loss is real either way: we delivered pesos
+   and collected nothing.)
+
+  Its OWN account, not loss_funding_reversed (slice-7 PR6b). Both are post-delivery losses,
+  but an ACH return is a credit/fraud loss while this is a COMPLIANCE cost — we chose to
+  honour a timely cancellation on a transfer that had already been delivered. Sharing one
+  bucket means the ledger cannot answer "what did Reg E cost us" without a per-transfer join,
+  and the two get harder to separate the longer they are mixed.
+
+  Pre-delivery exits (entry from FUNDED, SUBMITTED, or IN_FLIGHT) never reach UNDER_REVIEW at
+  all — that is the point of the state-keyed rule. A cancel at FUNDED pre-claim is a CANCELED
+  void; a cancel at SUBMITTED/IN_FLIGHT is RECORDED as a pending cancellation_request and
+  waits for the payout to resolve, then takes the PAYOUT_FAILED refund posting (payout failed)
+  or the correction posting above (payout delivered). Nothing about a cancellation posts to
+  the ledger before the payout resolves — an open request is evidence, not a movement.
 ```
 
 ## Invariants (must always hold)

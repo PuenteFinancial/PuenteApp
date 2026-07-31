@@ -5,13 +5,15 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import posthog from 'posthog-js'
 import { useLanguage } from '@/components/LanguageProvider'
-import { parseApiError, errorMessage } from '@/lib/apiError'
+import PayStep from '@/components/send/PayStep'
+import { errorMessage } from '@/lib/apiError'
 import { useIdempotencyKey } from '@/lib/idempotency'
 import { formatUsd, formatMxn, mmss, secondsUntil } from '@/lib/sendFormat'
 import { SUPPORT_EMAIL } from '@/lib/support'
 import {
   canRequestCancel,
   classifyCancelResponse,
+  showCancellationBanner,
   isOnHappyPath,
   isSettled,
   isTransferShape,
@@ -42,8 +44,6 @@ export default function TransferTracker({
   const [cancelError, setCancelError] = useState('')
   const [supportMessage, setSupportMessage] = useState<{ en: string; es: string } | null>(null)
   const [supportFallback, setSupportFallback] = useState(false)
-  const [simulating, setSimulating] = useState(false)
-  const [simulateError, setSimulateError] = useState('')
   // Set when the poll can't reach the server. The screen keeps showing the last
   // known state, but says so — a silently stale tracker is the worst outcome
   // here, since the user reads it as "my money is still on its way".
@@ -204,28 +204,8 @@ export default function TransferTracker({
     }
   }
 
-  const handleSimulate = async () => {
-    setSimulating(true)
-    setSimulateError('')
-    try {
-      const res = await fetch(`/api/dev/transfers/${transferId}/simulate-funding`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        setSimulateError(errorMessage(parseApiError(body)?.code, t.send.errors))
-        return
-      }
-      posthog.capture('send_funding_simulated', { transfer_id: transferId })
-      await refresh()
-    } catch {
-      setSimulateError(t.send.errors.generic)
-    } finally {
-      setSimulating(false)
-    }
-  }
-
   const outcome = outcomeFor(transfer.state)
+  const cancellationPending = showCancellationBanner(transfer)
   const steps = timelineFor(transfer.state)
 
   // Outcomes whose copy tells the sender to contact us. Each must render a real
@@ -280,6 +260,34 @@ export default function TransferTracker({
 
       {/* Outcome banner. role="status" so a state change that lands while the
           user is watching is announced, not just repainted. */}
+      {/* A pending cancellation is a flag ORTHOGONAL to state, so it rides ABOVE
+          the timeline rather than replacing it: the payout keeps advancing while
+          the request is open, and both facts are true at once. It disappears
+          whenever an OUTCOME banner speaks — settled states, and UNDER_REVIEW,
+          whose outcome IS the cancellation story — because two competing
+          messages would contradict each other (showCancellationBanner owns the
+          rule; at UNDER_REVIEW the stacked pair literally disagreed: "already
+          on its way" over "was delivered"). */}
+      {cancellationPending && (
+        <div
+          role="status"
+          style={{
+            margin: '0 0 16px',
+            padding: '12px 14px',
+            borderRadius: 10,
+            background: 'var(--surface-2, #f5f5f4)',
+            border: '1px solid var(--line, #e7e5e4)',
+          }}
+        >
+          <h2 style={{ fontFamily: 'var(--font)', fontSize: 15, fontWeight: 700, margin: '0 0 4px', color: 'var(--ink)' }}>
+            {s.cancellationRequested.title}
+          </h2>
+          <p style={{ fontSize: 14, color: 'var(--muted)', margin: 0, lineHeight: 1.6 }}>
+            {s.cancellationRequested.body}
+          </p>
+        </div>
+      )}
+
       {outcome && (
         <div role="status" style={{ margin: '0 0 16px' }}>
           <h2 style={{ fontFamily: 'var(--font)', fontSize: 17, fontWeight: 700, margin: '0 0 4px', color: 'var(--ink)' }}>
@@ -288,6 +296,17 @@ export default function TransferTracker({
           <p style={{ fontSize: 14, color: 'var(--muted)', margin: 0, lineHeight: 1.6 }}>
             {s.outcomes[outcome].body}
           </p>
+          {outcome === 'completed' && (
+            <p style={{ margin: '10px 0 0' }}>
+              <Link
+                href={`/dashboard/send/${transferId}/receipt`}
+                className="btn btn--accent btn--sm"
+                style={{ display: 'inline-block' }}
+              >
+                {s.viewReceipt}
+              </Link>
+            </p>
+          )}
           {outcomeNeedsSupport && <p style={{ margin: '8px 0 0' }}>{supportLink}</p>}
         </div>
       )}
@@ -397,25 +416,17 @@ export default function TransferTracker({
         </p>
       )}
 
-      {/* Stands in for the Stripe pay step until keys land. Never rendered in
-          production, and the API 404s the endpoint there regardless. */}
-      {canSimulate && transfer.state === 'PENDING_PAYMENT' && (
-        <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
-          <button
-            type="button"
-            className="btn btn--accent btn--sm"
-            disabled={simulating}
-            onClick={handleSimulate}
-          >
-            {simulating ? s.simulating : s.simulate}
-          </button>
-          <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '8px 0 0' }}>{s.simulateNote}</p>
-          {simulateError && (
-            <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '8px 0 0' }}>
-              {simulateError}
-            </p>
-          )}
-        </div>
+      {/* The pay step (PR-S3): Payment Element under the stripe processor, the
+          dev simulate button under mock (non-prod), nothing under prod mock.
+          The affordance decision is server-driven via the funding-session
+          endpoint — PayStep owns the fetch and the branch. */}
+      {transfer.state === 'PENDING_PAYMENT' && (
+        <PayStep
+          transferId={transferId}
+          totalAmountMinor={transfer.totalAmount.amountMinor}
+          canSimulate={canSimulate}
+          onAdvanced={refresh}
+        />
       )}
 
       <Link href="/dashboard" className="btn btn--ghost btn--sm">

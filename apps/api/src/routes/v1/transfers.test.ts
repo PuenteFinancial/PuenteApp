@@ -11,6 +11,18 @@ vi.mock('../../services/supabase.js', () => ({
   },
 }))
 
+const captureMessage = vi.hoisted(() => vi.fn())
+const setFingerprint = vi.hoisted(() => vi.fn())
+vi.mock('@sentry/node', () => ({
+  withScope: (fn: (s: unknown) => void) => fn({ setFingerprint, setContext: vi.fn() }),
+  captureMessage: (...a: unknown[]) => captureMessage(...a),
+}))
+
+const recordCancellationRequest = vi.fn()
+vi.mock('../../services/cancellations.js', () => ({
+  recordCancellationRequest: (...a: unknown[]) => recordCancellationRequest(...a),
+}))
+
 const createTransferFromQuote = vi.fn()
 const cancelTransfer = vi.fn()
 const transitionTransfer = vi.fn()
@@ -30,9 +42,30 @@ vi.mock('../../services/transfers.js', async (importOriginal) => {
 // the confirm tests expect.
 const initiateFunding = vi.fn()
 const voidFunding = vi.fn()
+const getClientSession = vi.fn()
+const isConfigured = vi.fn(() => true)
 
 vi.mock('../../services/funding/index.js', () => ({
-  getFundingProcessor: () => ({ provider: 'mock', initiateFunding, voidFunding }),
+  getFundingProcessor: () => ({
+    provider: 'mock',
+    signatureHeader: 'funding-signature',
+    isConfigured: () => isConfigured(),
+    initiateFunding,
+    voidFunding,
+    getClientSession,
+  }),
+}))
+
+// Per-user velocity gate (slice-7 PR5) + uncleared cap (slice-8 O3) are mocked
+// ok by default so existing paths stay green; the trip cases flip them. The
+// factory replaces the module, so it must also export the message constant the
+// routes render (a sentinel — tests branch on `code`, never on copy).
+const assessTransferRisk = vi.fn()
+const assessUnclearedCap = vi.fn()
+vi.mock('../../services/risk.js', () => ({
+  assessTransferRisk: (...args: unknown[]) => assessTransferRisk(...args),
+  assessUnclearedCap: (...args: unknown[]) => assessUnclearedCap(...args),
+  UNCLEARED_CAP_MESSAGE: 'transfer in progress',
 }))
 
 const { transfersRoute } = await import('./transfers.js')
@@ -54,7 +87,7 @@ function chain(result: { data?: unknown; error?: unknown }) {
   const b: Record<string, ReturnType<typeof vi.fn>> & {
     then?: (resolve: (v: unknown) => void) => void
   } = {} as never
-  for (const m of ['select', 'insert', 'update', 'delete', 'eq', 'is', 'or', 'order', 'limit'] as const) {
+  for (const m of ['select', 'insert', 'update', 'delete', 'eq', 'is', 'not', 'or', 'order', 'limit'] as const) {
     b[m] = vi.fn(() => b)
   }
   b['single'] = vi.fn(async () => resolved)
@@ -65,6 +98,7 @@ function chain(result: { data?: unknown; error?: unknown }) {
 const QUOTE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
 const TRANSFER_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2'
 const DISCLOSURE_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3'
+const USER_ID = 'user-123'
 const FUTURE = '2036-01-01T00:00:00.000Z'
 
 const approvedUser = {
@@ -157,7 +191,30 @@ beforeEach(() => {
     paymentRef: 'mockpay_new',
     clientFields: {},
   })
-  voidFunding.mockResolvedValue({ provider: 'mock', ref: 'mockvoid_test', status: 'succeeded' })
+  voidFunding.mockResolvedValue({
+    provider: 'mock',
+    ref: 'mockvoid_test',
+    status: 'succeeded',
+    mode: 'voided',
+  })
+  getClientSession.mockReset()
+  getClientSession.mockResolvedValue({ provider: 'mock', fields: {} })
+  assessTransferRisk.mockReset()
+  assessTransferRisk.mockResolvedValue({ ok: true })
+  assessUnclearedCap.mockReset()
+  assessUnclearedCap.mockResolvedValue({ ok: true })
+  recordCancellationRequest.mockReset()
+  recordCancellationRequest.mockResolvedValue({
+    id: 'cr-1',
+    transfer_id: TRANSFER_ID,
+    user_id: USER_ID,
+    requested_at: '2026-07-28T12:00:00.000Z',
+    requested_state: 'SUBMITTED',
+    within_window: true,
+    status: 'pending',
+  })
+  captureMessage.mockReset()
+  setFingerprint.mockReset()
 })
 
 describe('POST /v1/transfers', () => {
@@ -244,6 +301,18 @@ describe('POST /v1/transfers', () => {
     await app.close()
   })
 
+  it('403s transfer_in_progress at the uncleared cap — before any quote work', async () => {
+    routeTables()
+    assessUnclearedCap.mockResolvedValue({ ok: false, blockerTransferId: 'tr-prior' })
+    const app = await buildApp()
+    const res = await create(app)
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('transfer_in_progress')
+    expect(createTransferFromQuote).not.toHaveBeenCalled()
+    expect(assessUnclearedCap).toHaveBeenCalledWith({ userId: 'user-123' })
+    await app.close()
+  })
+
   it.each([
     ['quote_consumed', 409, 'conflict'],
     ['quote_expired', 409, 'quote_expired'],
@@ -288,6 +357,10 @@ describe('POST /v1/transfers/:id/confirm', () => {
       funding: { provider: 'mock', method: 'ach', clientFields: {} },
     })
     expect(res.body.disclosureAcceptedAt).toBeTruthy()
+    // a retry of an already-committed send skips the velocity check (keeps its slot)
+    expect(assessTransferRisk).not.toHaveBeenCalled()
+    // …and the uncleared cap for the same reason: its slot is already occupied
+    expect(assessUnclearedCap).not.toHaveBeenCalled()
     await app.close()
   })
 
@@ -296,6 +369,19 @@ describe('POST /v1/transfers/:id/confirm', () => {
     const app = await buildApp()
     const res = await confirm(app, { disclosureId: DISCLOSURE_ID, accepted: false })
     expect(res.status).toBe(400)
+    await app.close()
+  })
+
+  it("503s not_configured on the processor's configured-check — before any funding call", async () => {
+    routeTables()
+    isConfigured.mockReturnValueOnce(false)
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(503)
+    expect(res.body.error.code).toBe('not_configured')
+    expect(initiateFunding).not.toHaveBeenCalled()
     await app.close()
   })
 
@@ -341,6 +427,63 @@ describe('POST /v1/transfers/:id/confirm', () => {
     const app = await buildApp()
     const res = await confirm(app)
     expect(res.status).toBe(409)
+    await app.close()
+  })
+
+  it('403 transfer_in_progress at the uncleared cap — before the velocity gate and any funding', async () => {
+    routeTables() // fresh transfer, disclosure_accepted_at: null → the gate runs
+    assessUnclearedCap.mockResolvedValue({ ok: false, blockerTransferId: 'tr-prior' })
+    const app = await buildApp()
+    const res = await confirm(app)
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('transfer_in_progress')
+    // refused before a dollar moves, and before the velocity gate even runs
+    expect(initiateFunding).not.toHaveBeenCalled()
+    expect(assessTransferRisk).not.toHaveBeenCalled()
+    expect(assessUnclearedCap).toHaveBeenCalledWith({
+      userId: 'user-123',
+      excludeTransferId: TRANSFER_ID,
+    })
+    await app.close()
+  })
+
+  it('fails closed — an uncleared-cap query error 500s and never initiates funding', async () => {
+    routeTables()
+    assessUnclearedCap.mockRejectedValue(new Error('db down'))
+    const app = await buildApp()
+    const res = await confirm(app)
+    expect(res.status).toBe(500)
+    expect(initiateFunding).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('403 limit_exceeded when over the velocity limit — before any funding', async () => {
+    routeTables() // fresh transfer, disclosure_accepted_at: null → the gate runs
+    assessTransferRisk.mockResolvedValue({ ok: false, reason: 'velocity_count' })
+    const app = await buildApp()
+    const res = await confirm(app)
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('limit_exceeded')
+    // the whole point: an over-limit send is refused before a dollar moves
+    expect(initiateFunding).not.toHaveBeenCalled()
+    // and the caller metered the send principal only (fee excluded) and excluded the transfer itself
+    expect(assessTransferRisk).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-123',
+        sendAmountMinor: 19801,
+        excludeTransferId: TRANSFER_ID,
+      }),
+    )
+    await app.close()
+  })
+
+  it('fails closed — a risk-query error 500s and never initiates funding', async () => {
+    routeTables()
+    assessTransferRisk.mockRejectedValue(new Error('db down'))
+    const app = await buildApp()
+    const res = await confirm(app)
+    expect(res.status).toBe(500)
+    expect(initiateFunding).not.toHaveBeenCalled()
     await app.close()
   })
 })
@@ -410,6 +553,40 @@ describe('POST /v1/transfers/:id/cancel', () => {
     await app.close()
   })
 
+  it('void→refund fallback (PI settled first): the cancel flow completes unchanged — persist, settle, 200', async () => {
+    routeTables({ transfers: () => chain({ data: fundedRow }) })
+    cancelTransfer.mockResolvedValue({ ...fundedRow, state: 'CANCELED' })
+    // PR-S2: the pull settled before the cancel reached Stripe, so the adapter
+    // fell back to a real (async) Refund. The route's flow must not change —
+    // same persist, same ledger-free CANCELED → REFUNDED settle — the mode is
+    // an audit-trail fact, not a branch in the money path here.
+    voidFunding.mockResolvedValueOnce({
+      provider: 'stripe',
+      ref: 're_fallback1',
+      status: 'pending',
+      mode: 'refunded',
+    })
+    transitionTransfer.mockResolvedValue({
+      ...fundedRow,
+      state: 'REFUNDED',
+      refund_payment_ref: 're_fallback1',
+      refunded_at: '2026-07-17T20:10:00.000Z',
+    })
+    const app = await buildApp()
+
+    const res = await cancel(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ id: TRANSFER_ID, state: 'REFUNDED' })
+    expect(voidFunding).toHaveBeenCalledTimes(1)
+    const transitionArg = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+    expect(transitionArg).toMatchObject({ fromState: 'CANCELED', toState: 'REFUNDED' })
+    // still ledger-free: the CANCELED reversal already closed the books, and
+    // the fallback's settlement+refund cash flows offset (recon timing window)
+    expect(transitionArg['ledgerEntries']).toBeUndefined()
+    await app.close()
+  })
+
   it('401s without auth and 400s without an Idempotency-Key', async () => {
     const app = await buildApp()
     const noAuth = await supertest(app.server)
@@ -464,20 +641,56 @@ describe('POST /v1/transfers/:id/cancel', () => {
   })
 
   it.each(['SUBMITTED', 'IN_FLIGHT'] as const)(
-    '%s → 202 compliant support routing (en+es), never a flat denial',
+    '%s → 202 that RECORDS the request (en+es), never a flat denial',
     async (state) => {
       routeTables({ transfers: () => chain({ data: { ...fundedRow, state } }) })
       const app = await buildApp()
       const res = await cancel(app)
       expect(res.status).toBe(202)
       expect(res.body).toMatchObject({ id: TRANSFER_ID, state, code: 'cancellation_requires_support' })
-      expect(res.body.messages.en).toMatch(/support/i)
-      expect(res.body.messages.es).toMatch(/soporte/i)
+
+      // Exactly one request, stamped with the state that produced it — the
+      // whole point of the 202 is now that it leaves evidence.
+      expect(recordCancellationRequest).toHaveBeenCalledTimes(1)
+      expect(recordCancellationRequest).toHaveBeenCalledWith({
+        transferId: TRANSFER_ID,
+        userId: USER_ID,
+        state,
+      })
+      expect(res.body.requestedAt).toBe('2026-07-28T12:00:00.000Z')
+
+      // The copy must NOT send them to support any more: the tap they just made
+      // IS the request, and the old wording misdirected them to an inbox that
+      // does not exist yet. It must also not condition the refund on the payout
+      // failing — a timely request is refunded either way.
+      expect(res.body.messages.en).not.toMatch(/support/i)
+      expect(res.body.messages.es).not.toMatch(/soporte/i)
+      expect(res.body.messages.en).toMatch(/recorded your cancellation request/i)
+      expect(res.body.messages.es).toMatch(/registramos tu solicitud/i)
+
       expect(cancelTransfer).not.toHaveBeenCalled()
       expect(voidFunding).not.toHaveBeenCalled()
       await app.close()
     },
   )
+
+  // The sender exercised a statutory right. If OUR bookkeeping fails, that is
+  // our problem to page ourselves about — it must never surface as a 500 that
+  // makes them think the request did not land.
+  it('still answers 202 when recording the request fails, and pages ops', async () => {
+    recordCancellationRequest.mockRejectedValueOnce(new Error('db down'))
+    routeTables({ transfers: () => chain({ data: { ...fundedRow, state: 'SUBMITTED' } }) })
+    const app = await buildApp()
+    const res = await cancel(app)
+
+    expect(res.status).toBe(202)
+    expect(res.body.code).toBe('cancellation_requires_support')
+    // …but without a requestedAt, because we do not know one.
+    expect(res.body.requestedAt).toBeUndefined()
+    expect(setFingerprint).toHaveBeenCalledWith(['cancellation-record-failed', TRANSFER_ID])
+    expect(captureMessage.mock.calls.at(-1)?.[1]).toBe('error')
+    await app.close()
+  })
 
   it('claimed-but-still-FUNDED (submit_attempted_at set) → 202, never the cancel path', async () => {
     // the submit job set submit_attempted_at while state is still FUNDED — a
@@ -489,6 +702,13 @@ describe('POST /v1/transfers/:id/cancel', () => {
     const res = await cancel(app)
     expect(res.status).toBe(202)
     expect(res.body.code).toBe('cancellation_requires_support')
+    // The record must carry the state that produced this 202: FUNDED here
+    // means FUNDED-post-claim, and requested_state is statutory evidence.
+    expect(recordCancellationRequest).toHaveBeenCalledWith({
+      transferId: TRANSFER_ID,
+      userId: USER_ID,
+      state: 'FUNDED',
+    })
     expect(cancelTransfer).not.toHaveBeenCalled()
     await app.close()
   })
@@ -515,6 +735,14 @@ describe('POST /v1/transfers/:id/cancel', () => {
     const res = await cancel(app)
     expect(res.status).toBe(202)
     expect(res.body.code).toBe('cancellation_requires_support')
+    // The record must reflect the FRESH re-read (SUBMITTED), not the stale
+    // pre-RPC row (FUNDED): requested_state is statutory evidence, and passing
+    // the stale row would record false evidence on every lost race.
+    expect(recordCancellationRequest).toHaveBeenCalledWith({
+      transferId: TRANSFER_ID,
+      userId: USER_ID,
+      state: 'SUBMITTED',
+    })
     expect(voidFunding).not.toHaveBeenCalled()
     await app.close()
   })
@@ -609,6 +837,43 @@ describe('GET /v1/transfers', () => {
     expect(res.status).toBe(400)
     await app.close()
   })
+
+  it('scope=history hides abandoned (never-funded) transfers', async () => {
+    const list = chain({ data: [transferRow] })
+    from.mockReturnValueOnce(list)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/transfers?scope=history')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(list['not']).toHaveBeenCalledWith('state', 'in', '(PENDING_PAYMENT,PAYMENT_FAILED)')
+    await app.close()
+  })
+
+  it('scope=all (default) returns everything — no state filter', async () => {
+    const list = chain({ data: [transferRow] })
+    from.mockReturnValueOnce(list)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/transfers')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(list['not']).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('400s an invalid scope', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server)
+      .get('/v1/transfers?scope=bogus')
+      .set('Authorization', 'Bearer test-token')
+    expect(res.status).toBe(400)
+    await app.close()
+  })
 })
 
 describe('GET /v1/transfers/:id', () => {
@@ -636,6 +901,110 @@ describe('GET /v1/transfers/:id', () => {
       .get(`/v1/transfers/${TRANSFER_ID}`)
       .set('Authorization', 'Bearer test-token')
     expect(res.status).toBe(404)
+    await app.close()
+  })
+})
+
+describe('GET /v1/transfers/:id/funding-session', () => {
+  const get = (app: Awaited<ReturnType<typeof buildApp>>) =>
+    supertest(app.server)
+      .get(`/v1/transfers/${TRANSFER_ID}/funding-session`)
+      .set('Authorization', 'Bearer test-token')
+
+  const pendingWithRef = { ...transferRow, funding_payment_ref: 'pi_123' }
+
+  it('returns the flattened stripe session for an owned PENDING_PAYMENT transfer', async () => {
+    from.mockReturnValueOnce(chain({ data: pendingWithRef }))
+    getClientSession.mockResolvedValue({
+      provider: 'stripe',
+      fields: {
+        clientSecret: 'pi_123_secret_x',
+        publishableKey: 'pk_test_x',
+        status: 'requires_payment_method',
+      },
+    })
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      provider: 'stripe',
+      clientSecret: 'pi_123_secret_x',
+      publishableKey: 'pk_test_x',
+      status: 'requires_payment_method',
+    })
+    expect(getClientSession).toHaveBeenCalledWith({ paymentRef: 'pi_123' })
+    await app.close()
+  })
+
+  it('returns provider-only under the mock processor — no clientSecret key at all', async () => {
+    from.mockReturnValueOnce(chain({ data: pendingWithRef }))
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ provider: 'mock' })
+    await app.close()
+  })
+
+  it('strips fields outside the response schema — a widened processor cannot widen the wire', async () => {
+    from.mockReturnValueOnce(chain({ data: pendingWithRef }))
+    getClientSession.mockResolvedValue({
+      provider: 'stripe',
+      fields: {
+        clientSecret: 'pi_123_secret_x',
+        publishableKey: 'pk_test_x',
+        secretKey: 'sk_leak',
+      },
+    })
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).not.toHaveProperty('secretKey')
+    await app.close()
+  })
+
+  it("404s another user's transfer without leaking existence", async () => {
+    from.mockReturnValueOnce(chain({ data: null }))
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('not_found')
+    expect(getClientSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('409s once the transfer has left PENDING_PAYMENT', async () => {
+    from.mockReturnValueOnce(
+      chain({ data: { ...pendingWithRef, state: 'FUNDED' } }),
+    )
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('conflict')
+    expect(getClientSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('409s the confirm-crashed window (no funding_payment_ref) — confirm retry owns that recovery', async () => {
+    from.mockReturnValueOnce(chain({ data: transferRow })) // ref is null in the fixture
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(409)
+    expect(getClientSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('503s when the active processor is unconfigured (prod mock lock posture)', async () => {
+    isConfigured.mockReturnValueOnce(false)
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(503)
+    expect(res.body.error.code).toBe('not_configured')
     await app.close()
   })
 })

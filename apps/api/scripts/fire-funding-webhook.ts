@@ -4,7 +4,13 @@
 //
 // Usage:
 //   MOCK_FUNDING_WEBHOOK_SECRET=... pnpm exec tsx scripts/fire-funding-webhook.ts \
-//     <transferId> succeeded|failed|cleared|reversed [--url http://localhost:3001] [--reason R01]
+//     <transferId> succeeded|failed|cleared|reversed|refund-failed|refund-settled \
+//     [--url http://localhost:3001] [--reason R01] [--undo-ref mockrefund_x]
+//
+// refund-failed / refund-settled (PR-S2) drill the undo tail on a transfer
+// already at REFUNDED: pass --payment-ref as the transfer's funding_payment_ref
+// (or rely on the metadata echo) and --undo-ref as the recorded
+// refund_payment_ref so the page names the real disbursement.
 //
 // Works against localhost and staging (use the staging secret from Doppler).
 //
@@ -24,12 +30,16 @@ const KINDS: Record<string, FundingEventType> = {
   failed: 'funding_failed',
   cleared: 'funding_cleared',
   reversed: 'funding_reversed',
+  'refund-failed': 'refund_failed',
+  'refund-settled': 'refund_settled',
 }
 
 const secret = process.env.MOCK_FUNDING_WEBHOOK_SECRET
 if (!transferId || !kind || !KINDS[kind] || !secret) {
   console.error(
-    'usage: MOCK_FUNDING_WEBHOOK_SECRET=... tsx scripts/fire-funding-webhook.ts <transferId> succeeded|failed|cleared|reversed [--url <base>] [--reason <code>]',
+    'usage: MOCK_FUNDING_WEBHOOK_SECRET=... tsx scripts/fire-funding-webhook.ts <transferId> ' +
+      'succeeded|failed|cleared|reversed|refund-failed|refund-settled ' +
+      '[--url <base>] [--reason <code>] [--payment-ref <ref>] [--undo-ref <ref>]',
   )
   process.exit(1)
 }
@@ -41,11 +51,15 @@ const argValue = (flag: string): string | undefined => {
 
 const baseUrl = argValue('--url') ?? 'http://localhost:3001'
 const reason = argValue('--reason')
+const paymentRef = argValue('--payment-ref')
+const undoRef = argValue('--undo-ref')
 
 const { body, signature } = buildMockFundingEvent({
   transferId,
   type: KINDS[kind],
   secret,
+  ...(paymentRef && { paymentRef }),
+  ...(undoRef && { undoRef }),
   ...(reason && { reason }),
 })
 

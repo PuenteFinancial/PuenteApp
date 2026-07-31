@@ -114,7 +114,8 @@ describe('recordEvent', () => {
 
     const result = await recordEvent(input)
 
-    expect(result).toEqual({ id: 'pe-1', inserted: true })
+    // a fresh insert is always 'received' — the DB default, echoed not written
+    expect(result).toEqual({ id: 'pe-1', inserted: true, status: 'received' })
     expect(from).toHaveBeenCalledWith('payment_events')
     // status is left to the DB 'received' default — never set on insert.
     const [row, opts] = upsert.mock.calls[0] as [Record<string, unknown>, unknown]
@@ -130,16 +131,17 @@ describe('recordEvent', () => {
     expect(opts).toEqual({ onConflict: 'source,external_event_id', ignoreDuplicates: true })
   })
 
-  it('reports inserted=false on a duplicate and returns the existing row id', async () => {
+  it('reports inserted=false on a duplicate and returns the existing row id + status', async () => {
     // ignoreDuplicates → the conflicting row returns null; a follow-up select
-    // fetches its id.
+    // fetches its id and status (the funding route splits "already handled"
+    // from "recorded but the handler crashed" on that status — PR-S2).
     const { upsert } = mockUpsert({ data: null, error: null })
-    const lookup = mockLookup({ data: { id: 'pe-existing' }, error: null })
+    const lookup = mockLookup({ data: { id: 'pe-existing', status: 'processed' }, error: null })
     from.mockReturnValueOnce({ upsert }).mockReturnValueOnce({ select: lookup.select })
 
     const result = await recordEvent(input)
 
-    expect(result).toEqual({ id: 'pe-existing', inserted: false })
+    expect(result).toEqual({ id: 'pe-existing', inserted: false, status: 'processed' })
     expect(lookup.eq1).toHaveBeenCalledWith('source', 'bridge')
     expect(lookup.eq2).toHaveBeenCalledWith('external_event_id', 'evt_123')
   })

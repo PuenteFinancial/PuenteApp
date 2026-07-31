@@ -6,7 +6,8 @@ import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { getFundingProcessor } from '../../services/funding/index.js'
 import { enqueuePayoutSubmit, enqueuePaymentEventProcess } from '../../services/queue.js'
-import { recordEvent } from '../../services/payment-events.js'
+import { recordEvent, markProcessed } from '../../services/payment-events.js'
+import { actOnRefundTailEvent } from '../../services/refunds.js'
 import {
   fundedLedgerEntries,
   transitionTransfer,
@@ -286,10 +287,10 @@ export async function webhooksRoute(server: FastifyInstance) {
 
   // Funding processor webhook — drives PENDING_PAYMENT → FUNDED (with the
   // first real ledger posting) and → PAYMENT_FAILED. The processor interface
-  // owns signature + payload shape, so the Stripe adapter (slice 4b) slots in
-  // without touching this route. Exactly-once effects come from the
-  // transition guard + the ledger's (transfer_id, transition) uniqueness —
-  // payment_events dedupe arrives in slice 5.
+  // owns signature scheme, header name, configured-check, and payload shape —
+  // the route is identical for mock and Stripe (PR-S1). Exactly-once effects
+  // come from the transition guard + the ledger's (transfer_id, transition)
+  // uniqueness — replayed deliveries ack idempotently below.
   server.post(
     '/webhooks/funding',
     {
@@ -307,15 +308,21 @@ export async function webhooksRoute(server: FastifyInstance) {
       },
     },
     async (request, reply) => {
-      // THE production lock: the mock secret is never set in prod, so this
-      // endpoint (and mock funding with it) cannot exist there.
-      if (!env.MOCK_FUNDING_WEBHOOK_SECRET) {
-        server.log.error('funding webhook received but MOCK_FUNDING_WEBHOOK_SECRET is not set')
+      // The processor declares its own configured-check. For the mock this IS
+      // the production lock (its webhook secret is never set in prod, so mock
+      // funding cannot exist there); for Stripe, env.superRefine already
+      // refuses to boot a keyless stripe selection — this 503 is the runtime
+      // belt-and-suspenders.
+      const processor = getFundingProcessor()
+      if (!processor.isConfigured()) {
+        server.log.error(
+          { webhook: 'funding', provider: processor.provider },
+          'funding webhook received but the processor is not configured',
+        )
         return sendError(reply, 503, 'not_configured', 'Webhook not configured')
       }
 
-      const processor = getFundingProcessor()
-      const signature = request.headers['funding-signature']
+      const signature = request.headers[processor.signatureHeader]
       const rawBody = request.body as Buffer
       if (
         typeof signature !== 'string' ||
@@ -326,9 +333,48 @@ export async function webhooksRoute(server: FastifyInstance) {
         return sendError(reply, 400, 'validation_error', 'Invalid signature')
       }
 
-      const event = processor.parseEvent(rawBody)
-      if (!event) {
+      const parsed = processor.parseEvent(rawBody)
+      if (parsed.outcome === 'malformed') {
         return sendError(reply, 400, 'validation_error', 'Invalid payload')
+      }
+      if (parsed.outcome === 'unhandled') {
+        // Signed and well-formed but outside the funding mapping (e.g. Stripe
+        // payment_method.automatically_updated). A 400 would put a legitimate
+        // delivery into a redelivery loop and count against webhook-endpoint
+        // health — ack it, keep the type visible to ops.
+        server.log.warn(
+          {
+            audit: true,
+            webhook: 'funding',
+            eventId: parsed.eventId,
+            eventType: parsed.eventType,
+          },
+          'unhandled funding event acknowledged',
+        )
+        return { received: true }
+      }
+      const event = parsed.event
+
+      // Resolve the transfer: PI events echo transfers.id via metadata;
+      // Stripe dispute events can't (transferRef null) and join through the
+      // funding_payment_ref persisted at confirm instead.
+      let transferId = event.transferRef
+      if (transferId === null) {
+        const { data: match } = await supabaseAdmin
+          .from('transfers')
+          .select('id')
+          .eq('funding_payment_ref', event.paymentRef)
+          .maybeSingle()
+        transferId = (match as { id: string } | null)?.id ?? null
+        if (!transferId) {
+          // Signature was valid, so this is our processor talking about a
+          // payment we never recorded — ack (a retry cannot fix it), log loud.
+          server.log.error(
+            { webhook: 'funding', eventId: event.eventId, paymentRef: event.paymentRef },
+            'funding event unmatched to any transfer',
+          )
+          return { received: true }
+        }
       }
 
       // Public route — audit plugin skips it; log explicitly. Ids only, no PII.
@@ -338,7 +384,7 @@ export async function webhooksRoute(server: FastifyInstance) {
           webhook: 'funding',
           eventId: event.eventId,
           eventType: event.type,
-          transferId: event.transferRef,
+          transferId,
         },
         'funding webhook received',
       )
@@ -349,10 +395,10 @@ export async function webhooksRoute(server: FastifyInstance) {
         const { error } = await supabaseAdmin
           .from('transfers')
           .update({ funding_cleared: true })
-          .eq('id', event.transferRef)
+          .eq('id', transferId)
         if (error) {
           server.log.error(
-            { webhook: 'funding', transferId: event.transferRef, supabaseError: error.code },
+            { webhook: 'funding', transferId, supabaseError: error.code },
             'funding_cleared update failed',
           )
           return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
@@ -362,11 +408,69 @@ export async function webhooksRoute(server: FastifyInstance) {
 
       if (event.type === 'funding_reversed') {
         // Post-COMPLETED handling (loss booking, recovery) needs the slice-5/6
-        // machinery — normalize + record the delivery now, act later.
+        // machinery — normalize + record the delivery now, act later. (For
+        // Stripe this is a post-settlement ACH return via dispute — final, no
+        // appeal; PR-S2's refund guard and the O-lane recon own the tail.)
         server.log.warn(
-          { audit: true, webhook: 'funding', transferId: event.transferRef, eventId: event.eventId },
+          { audit: true, webhook: 'funding', transferId, eventId: event.eventId },
           'funding_reversed received — handling deferred to slice 5/6',
         )
+        return { received: true }
+      }
+
+      if (event.type === 'refund_failed' || event.type === 'refund_settled') {
+        // The undo tail (PR-S2): a refund ISSUED by voidFunding/refund
+        // resolving days later. No state transition — the transfer settled at
+        // REFUNDED at issuance; this is the money-truth record plus, on a
+        // bounce, the ops page (sender still owed; never auto-adjusted).
+        // Recorded to payment_events (source 'funding') so replays dedupe, the
+        // O-lane reconciliation can read it, and — if this handler dies before
+        // the mark below — payout-sweep re-enqueues the stale 'received' row
+        // into the payment-event job, which re-drives the same act.
+        let recorded: Awaited<ReturnType<typeof recordEvent>>
+        try {
+          recorded = await recordEvent({
+            source: 'funding',
+            externalEventId: event.eventId,
+            eventType: event.type,
+            transferId,
+            providerRef: event.undoRef ?? null,
+            payload: JSON.parse(rawBody.toString('utf8')) as unknown,
+          })
+        } catch {
+          // insert failed — 500 so the provider redelivers into a clean attempt
+          return sendError(reply, 500, 'internal_error', 'Failed to record event')
+        }
+        if (!recorded.inserted && recorded.status !== 'received') {
+          return { received: true } // replayed delivery — already handled
+        }
+
+        if (event.type === 'refund_failed') {
+          // Public route — audit plugin skips it; ids only, no PII.
+          server.log.error(
+            {
+              audit: true,
+              webhook: 'funding',
+              transferId,
+              eventId: event.eventId,
+              refundRef: event.undoRef,
+            },
+            'funding refund failed — sender still owed',
+          )
+        }
+        actOnRefundTailEvent({
+          eventType: event.type,
+          transferId,
+          refundRef: event.undoRef ?? null,
+          ...(event.reason !== undefined && { reason: event.reason }),
+        })
+        try {
+          await markProcessed(recorded.id)
+        } catch {
+          // The act is done and idempotent (fingerprinted page). A failed mark
+          // leaves the row 'received'; the sweep→job path retires it — ack
+          // rather than pull Stripe into a redelivery loop over our own DB.
+        }
         return { received: true }
       }
 
@@ -374,7 +478,7 @@ export async function webhooksRoute(server: FastifyInstance) {
       const { data: transferData } = await supabaseAdmin
         .from('transfers')
         .select('id, state, send_amount_minor, fee_amount_minor')
-        .eq('id', event.transferRef)
+        .eq('id', transferId)
         .single()
       const transfer = transferData as {
         id: string
@@ -387,7 +491,7 @@ export async function webhooksRoute(server: FastifyInstance) {
         // signature was valid, so this is our own processor talking about a
         // transfer we don't have — ack (a retry cannot fix it) but log loudly
         server.log.error(
-          { webhook: 'funding', transferId: event.transferRef, eventId: event.eventId },
+          { webhook: 'funding', transferId, eventId: event.eventId },
           'funding event for unknown transfer',
         )
         return { received: true }

@@ -27,7 +27,9 @@ export function buildMockFundingEvent(input: {
   secret: string
   /** Echo the transfer's real funding_payment_ref (as Stripe would echo its PaymentIntent id); a fresh mock ref when unknown. */
   paymentRef?: string
-  /** Failure / ACH return code — only meaningful on funding_failed | funding_reversed. */
+  /** The undo (refund) ref the event is about — only meaningful on refund_failed | refund_settled. */
+  undoRef?: string
+  /** Failure / ACH return code — only meaningful on funding_failed | funding_reversed | refund_failed. */
   reason?: string
   /** Overridable for deterministic tests; defaults to a fresh event id. */
   eventId?: string
@@ -39,6 +41,7 @@ export function buildMockFundingEvent(input: {
     type,
     secret,
     paymentRef,
+    undoRef,
     reason,
     eventId = `evt_${crypto.randomUUID()}`,
     timestamp = Date.now(),
@@ -50,6 +53,7 @@ export function buildMockFundingEvent(input: {
     data: {
       transfer_id: transferId,
       payment_ref: paymentRef ?? `mockpay_${crypto.randomUUID()}`,
+      ...(undoRef && { undo_ref: undoRef }),
       ...(reason && { reason }),
     },
   })

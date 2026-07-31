@@ -13,11 +13,13 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@stripe/react-stripe-js": "6.8.0",
+    "@stripe/stripe-js": "9.12.1",
     "next": "^15.3.2",
-    "posthog-js": "^1.404.0",
-    "posthog-node": "^5.45.2",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "posthog-js": "^1.407.2",
+    "posthog-node": "^5.46.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",

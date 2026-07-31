@@ -72,4 +72,8 @@ waitlist entry, confirm the row lands in **puente-staging**.
   Sandbox is right for remittance API testing (wallets, simulate_deposit, transfers with dummy data).
 - Never point local API `.env` at the prod project. Roles: `goyfagidfkjyhyepsaup` = PROD (live
   waitlist data); `namdkmsmdkmdffgscqgd` = dev + staging.
+- **A second send 403s (`transfer_in_progress`) until the first is cleared** — the slice-8 O3
+  uncleared cap, and the "Simulate payment" button fires only `funding_succeeded`, never
+  settlement. Deliberate (dev/staging mirrors prod ACH timing; the cap demos itself). Free the
+  slot with `pnpm tsx scripts/fire-funding-webhook.ts <transferId> cleared`.
 - Tests: `pnpm test` from `apps/api/`; `pnpm run typecheck` after any change.

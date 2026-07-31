@@ -16,6 +16,9 @@ const {
   canceledLedgerEntries,
   bridgeReturnLedgerEntries,
   refundedLedgerEntries,
+  voidRefundLedgerEntries,
+  correctionRefundLedgerEntries,
+  correctionVoidLedgerEntries,
   toApiTransfer,
   TransferRpcError,
 } = await import('./transfers.js')
@@ -57,6 +60,7 @@ const transferRow = {
   payout_hold_reason: null,
   payout_held_at: null,
   submit_attempted_at: null,
+  cancellation_requested_at: null,
   completed_at: null,
   created_at: '2026-07-17T20:00:00.000Z',
 }
@@ -231,6 +235,56 @@ describe('the two-batch refund tail (bridge_return + refunded)', () => {
       transfer_payable: 19801,
       fee_revenue: 199,
     })
+  })
+})
+
+describe('voidRefundLedgerEntries (PR-S2 — the undo VOIDED the pull)', () => {
+  it('is exactly the FUNDED reversal: the sender was never debited, so no cash line exists', () => {
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    expect(voidRefundLedgerEntries(t)).toEqual(canceledLedgerEntries(t))
+    expect(netsToZero(voidRefundLedgerEntries(t))).toBe(0)
+    expect(voidRefundLedgerEntries(t).map((e) => e.account_code)).not.toContain('cash_clearing')
+  })
+
+  it('the voided two-batch tail: receivable and payable close, cash keeps the returned float, fee unearned', () => {
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    expect(signedNet([...bridgeReturnLedgerEntries(t), ...voidRefundLedgerEntries(t)])).toEqual({
+      cash_clearing: 19801, // Bridge returned the fronted principal — ours again
+      due_from_bridge: -19801,
+      transfer_payable: 19801, // reverses the FUNDED credit
+      fee_revenue: 199, // reverses — no fee on a transfer the sender never paid
+      funding_receivable: -20000, // the canceled pull closes WITHOUT ever clearing
+    })
+  })
+})
+
+describe('correctionVoidLedgerEntries (PR-S2 — correction payment on a voided pull)', () => {
+  it('books the compliance loss against the never-collectable receivable (nets to zero, no cash line)', () => {
+    const entries = correctionVoidLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199 })
+    expect(entries).toEqual([
+      {
+        account_code: 'loss_cancellation_correction',
+        direction: 'debit',
+        amount_minor: 20000,
+        currency: 'USD',
+      },
+      {
+        account_code: 'funding_receivable',
+        direction: 'credit',
+        amount_minor: 20000,
+        currency: 'USD',
+      },
+    ])
+    expect(netsToZero(entries)).toBe(0)
+  })
+
+  it('same P&L as the refunded-mode correction — only the credited ASSET differs', () => {
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const voided = signedNet(correctionVoidLedgerEntries(t))
+    const refunded = signedNet(correctionRefundLedgerEntries(t))
+    expect(voided['loss_cancellation_correction']).toBe(refunded['loss_cancellation_correction'])
+    expect(voided['funding_receivable']).toBe(-20000)
+    expect(refunded['cash_clearing']).toBe(-20000)
   })
 })
 

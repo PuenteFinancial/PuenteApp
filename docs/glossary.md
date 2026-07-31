@@ -69,16 +69,82 @@ refer back as needed.
   transaction, and idempotent jobs make a lost enqueue cost only sweep latency). See
   [decisions.md](decisions.md), 2026-07-20.
 
+## Risk & limits
+
+- **Committed send** — a transfer whose sender has accepted the terms (`disclosure_accepted_at` set)
+  and which hasn't been unwound (not `CANCELED`/`REFUNDED`/`PAYMENT_FAILED`/`FUNDING_REVERSED`); the
+  unit the per-user transaction limits count. See [decisions.md](decisions.md) (slice 7 PR5).
+- **Funded send** — a transfer that reached `FUNDED` (`payment_at` set). Funded means the ACH debit
+  was *submitted to the network and we fronted the payout* — NOT that money arrived: with Stripe,
+  `FUNDED` fires on `payment_intent.processing`, and settlement (**cleared** — PI `succeeded`,
+  `funding_cleared` flag) lands ~T+4 later. The gap is the ACH exposure window: a funded-not-cleared
+  pull can still fail, be reversed — or be **voided** (canceled, sender never debited), which is how
+  the PR-S2 refund tails usually make a sender whole. Distinct from a *committed* send: every funded
+  send was committed, but a just-committed send may not fund for days.
+  See [transfer-state-machine.md](transfer-state-machine.md).
+- **Transaction limits (AML launch)** — the per-user caps on the send principal from the AML
+  "Transaction Limits at Launch" policy: per transaction (`RISK_PER_TXN_MAX_MINOR`) and rolling
+  day / month / 6-month totals (`RISK_DAILY_MAX_MINOR` / `RISK_MONTHLY_MAX_MINOR` /
+  `RISK_SEMIANNUAL_MAX_MINOR`), plus a per-day send count (`RISK_VELOCITY_MAX_COUNT`). Enforced at
+  confirm and backstopped at `FUNDED → SUBMITTED`. See [decisions.md](decisions.md).
+- **Uncleared-exposure cap (slice-8 O3)** — the per-user *count* limit on funded-not-cleared
+  exposure: at most `RISK_UNCLEARED_MAX_COUNT` (default 1) committed sends whose ACH pull hasn't
+  settled, slot held from disclosure acceptance until `funding_cleared` (or unwind), no time
+  window. `403 transfer_in_progress` at quote/create/confirm; self-healing older-wins wait at
+  `FUNDED → SUBMITTED`. See [decisions.md](decisions.md).
+- **First-transfer hold (`FIRST_TRANSFER_HOLD`, ships OFF)** — flag-gated slice-8 O3 policy: a
+  sender with no cleanly cleared send yet (none with `funding_cleared` outside `FUNDING_REVERSED`)
+  waits for their **own** settlement before the MXN payout submits. Silent skip, no hold reason;
+  the sweep resumes it on clearing.
+- **Per-user outstanding-uncleared cap** *(deferred)* — the future per-user **dollar** limit on
+  un-settled ACH exposure (ERD `user_limits.daily_max_minor` et al.); still deferred, since
+  `funding_receivable` doesn't drain today — the O3 *count* cap above is the pilot control.
+  See [erd.md](erd.md).
+
 ## Puente & Bridge mechanics
 
 - **Stablecoin sandwich** — Bridge has no direct fiat→fiat route; every transfer runs
   fiat → USDC → fiat internally (USD→MXN, and even USD→USD as our PoC proved).
 - **`funding_cleared` gate** — the per-transfer flag + policy controlling whether we wait for ACH
   settlement before paying out; MVP policy is "don't wait" for ~5 trusted users, and the flag exists
-  so flipping it later requires no rework. See the state machine doc.
+  so flipping it later requires no rework. The flag is a webhook MIRROR of settlement, not the
+  authority: the Stripe adapter's settlement-aware undo (PR-S2) reads the live PaymentIntent
+  instead. See the state machine doc.
+- **Instant verification** — Financial Connections instant bank verification, the ONLY verification
+  method at pilot (`verification_method: 'instant'` on the PaymentIntent). Microdeposits are
+  deferred: their multi-day dwell collides with the 30-min `PENDING_PAYMENT` auto-fail and the
+  15-min FX lock. An unsupported bank gets a clean error, not a fallback.
+  See [decisions.md](decisions.md) (PR-S1).
+- **Payment Element** — Stripe's hosted payment UI, mounted by the web pay step (PR-S3) at
+  `PENDING_PAYMENT` under the stripe processor. Renders the bank picker (Financial Connections)
+  and the **Stripe-hosted single-debit ACH mandate** — Stripe owning the mandate means Stripe
+  auto-responds to proof-of-authorization inquiries. Localized via the Element's `locale` (es
+  default); Puente authors only the frame copy around it.
+- **Funding session** — the pay-step bootstrap served by `GET /v1/transfers/:id/funding-session`:
+  `{ provider, clientSecret?, publishableKey? }`. Retrieved from the processor on demand at each
+  pay-step mount (reload-safe by construction); the `clientSecret` is never persisted or logged on
+  our side. Mock envs get provider-only and the web falls back to the simulate button.
+  See [decisions.md](decisions.md) (2026-07-31, S3).
 - **Submit claim** — the guarded UPDATE (`state = 'FUNDED' AND payout_hold_reason IS NULL AND
   submit_attempted_at IS NULL`) the payout job wins before calling Bridge; it serializes submission
-  against the slice-6 cancel so both can never happen. See the state machine doc.
+  against the slice-6 cancel so both can never happen. A *stale* submit claim (>10 min, no
+  `provider_transfer_ref`) is re-enqueued and recovered by an idempotent Bridge re-POST — safe because
+  Bridge dedupes on the key. Contrast the **Refund claim**, which resolves the same situation the
+  opposite way and for a specific reason ([decisions.md](decisions.md) 2026-07-28). See the state
+  machine doc.
+- **Refund claim** — the guarded UPDATE (`refund_payment_ref IS NULL AND refund_claimed_at IS NULL`)
+  one run wins before calling the funding processor's refund, recording `refund_claimed_at` and
+  `refund_claimed_by`. It is what makes the `PAYOUT_FAILED → REFUNDED` disbursement exactly-once: the
+  `refund_payment_ref` null-check alone is a read separated from its write, and the mock processor
+  ignores the idempotency key. Kept after success (it records when the money left); cleared in exactly
+  one place, `releaseStaleRefundClaim`. See [ledger-rules.md](ledger-rules.md) and the state machine doc.
+- **Abandoned refund claim** — a **Refund claim** over 10 minutes old with no `refund_payment_ref`: the
+  run that took it died between claiming and recording the disbursement, so the sender **may or may not
+  have been paid**. Never retaken automatically — ops confirms in the processor, then re-runs
+  `trigger-refund.ts --reclaim` ([runbooks/manual-refund.md](runbooks/manual-refund.md)). Distinct from
+  a **Payout hold** (a `FUNDED` transfer ops releases) and from *stuck at Bridge* (the principal never
+  came back — escalate, never refund). A claim under 10 minutes is simply *taken*: a healthy in-flight
+  refund, nothing to do.
 - **Void** — the undo of an *uncleared* funding collection: a `FUNDED`-pre-claim transfer the sender
   cancels within the Reg E window; the inbound ACH is canceled before it settles, so no money moved
   and the ledger is a **clean reversal** of the `FUNDED` batch (no `refunds_payable`, no float).
@@ -91,6 +157,26 @@ refer back as needed.
 - **`REFUNDED`** — the terminal "sender made whole" state, reached from `CANCELED` (via a void) or
   `PAYOUT_FAILED` (via a refund); the ledger shows which. See
   [transfer-state-machine.md](transfer-state-machine.md).
+- **Pending cancellation request** — a row in `cancellation_requests` recording that the sender asked
+  to cancel a transfer already on its way to payout (the `SUBMITTED`/`IN_FLIGHT`/`FUNDED`-post-claim
+  202). It is EVIDENCE, not a movement: nothing posts to the ledger while one is open. At most one is
+  open per transfer (a partial unique index), so a second tap resolves to the first — the statutory
+  clock starts when they FIRST asked and must never restart. Explicitly **not** a dispute; see
+  [decisions.md](decisions.md) 2026-07-28.
+- **Timely cancellation request** (`within_window`) — a request made before the transfer's
+  `cancelable_until`: §1005.34's **first** condition (the 30-minute clock), computed once inside the
+  recording RPC and then frozen. The statute's **second** condition — the request preceded the
+  deposit — is evaluated at resolution against deposit evidence, because only Bridge knows the
+  deposit time. Both must hold for an automatic obligation; a request failing either is still
+  recorded and still resolved by a human on the record. Timeliness is **recorded, not enforced at
+  the door** — the 202 fires on state alone.
+- **Correction payment** — the post-delivery refund owed on a cancellation that was in-window AND
+  **beat the deposit**, whose payout COMPLETED anyway: the recipient keeps the money and the sender is made whole regardless, the
+  accepted bounded double-pay. Booked `DR loss_cancellation_correction / CR cash_clearing` — a NEW
+  expense against Puente, not a reversal, because the `COMPLETED` batch already discharged
+  `transfer_payable` and delivered history is never rewritten. Contrast **Refund** (the payout
+  failed, so an obligation was still open to reverse). Executed by a human via
+  [runbooks/pending-cancellation.md](runbooks/pending-cancellation.md), never automatically.
 - **Payout hold** — a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`,
   or `submit_error`); the sweep skips it until ops releases it via
   [runbooks/payout-holds.md](runbooks/payout-holds.md).
@@ -107,3 +193,14 @@ refer back as needed.
   funding gate and limits once the risk engine exists; MVP users are all `trusted`.
 - **Truthful pending copy** — the product rule that status screens never promise what the system
   doesn't do (e.g. no "we'll email you" until email exists); established in lifecycle slice 5 (#48).
+  Applied again in slice-7 PR6b: the shipped `underReview` body said *"we'll contact you as soon as
+  the review is done"* with no outbound notification mechanism in the codebase, and now promises only
+  what the polling tracker actually does — update in place.
+- **Transaction history** — the sender-facing list of their *money-moved* transfers (`FUNDED` and
+  beyond), served by `GET /v1/transfers?scope=history`; never-funded attempts
+  (`PENDING_PAYMENT`/`PAYMENT_FAILED`) are filtered out. A product VIEW, not the `transfers` table —
+  abandoned rows are retained for audit/ledger but not shown. See [decisions.md](decisions.md) 2026-07-24.
+- **Abandoned send** — a transfer created at the "Continue" step (`POST /transfers` →
+  `PENDING_PAYMENT`) that the sender never funds; the `transfer.reconcile-pending` cron flips it to
+  `PAYMENT_FAILED` after 30 min (a zero-ledger dead row). Excluded from **Transaction history**. See
+  [transfer-state-machine.md](transfer-state-machine.md).

@@ -46,6 +46,7 @@ erDiagram
     transfers          ||--o{  disclosures         : shows
     transfers          ||--o{  payment_events      : emits
     transfers          ||--o{  disputes            : subject_of
+    transfers          ||--o{ cancellation_requests: cancel_asked_on
     ledger_transactions||--|{  ledger_entries      : contains
     ledger_accounts    ||--o{  ledger_entries      : booked_to
 ```
@@ -147,6 +148,8 @@ slippage (see ledger `fx_slippage`).
 - `idempotency_key` TEXT UNIQUE — for the Bridge submission
 - `provider_transfer_ref` TEXT — Bridge transfer id
 - `funding_payment_ref` TEXT — funding processor payment id
+- `refund_claimed_at` / `refund_claimed_by` — the **Refund claim** (slice-7 PR6b-0); the guarded UPDATE one run wins before calling the processor's refund. Never cleared on success; cleared only by `releaseStaleRefundClaim` after 10 min. Deliberately asymmetric to `submit_attempted_at` — see [decisions.md](decisions.md) 2026-07-28. Service-role mutated (not frozen)
+- `cancellation_requested_at` timestamptz — denormalized flag: the sender asked to cancel a transfer already on its way to payout (slice-7 PR6b). A flag **orthogonal to state**, not a state — the payout keeps advancing while the request is open. Keeps the FIRST ask's timestamp. Service-role mutated (not frozen)
 - `completed_at` timestamptz
 - **RLS:** owner **reads** own; **all writes service-role only** (clients never mutate transfer state).
 
@@ -196,7 +199,21 @@ Immutable snapshot of exactly what the user was shown.
 - `presented_at` timestamptz
 - **RLS:** owner reads own.
 
-### disputes  (Reg E error resolution → `UNDER_REVIEW`)
+### cancellation_requests  (§1005.34 cancellation — **NOT** `disputes`)
+- `transfer_id` FK, `user_id` FK
+- `requested_at` timestamptz — **the statutory clock**; separate from `created_at`, which is a row-audit fact
+- `requested_state` TEXT — `FUNDED` | `SUBMITTED` | `IN_FLIGHT` (CHECK); which 202 branch produced it. `FUNDED` here means FUNDED-**post-claim**
+- `within_window` BOOLEAN — timeliness vs the transfer's `cancelable_until`, computed once inside `record_cancellation_request` and then frozen. Only a timely request creates an automatic full-refund obligation
+- `status` TEXT — `pending` | `resolved_refunded` | `resolved_denied` (CHECK)
+- `resolution` TEXT, `resolved_at` timestamptz, `resolved_by` TEXT — who CLOSED it (not necessarily who paid)
+- **Partial UNIQUE `(transfer_id) WHERE status = 'pending'`** — at most one open ask per transfer, so a second tap resolves to the first and never restarts the clock
+- **RLS:** owner reads own via the `transfers` join; **writes service-role only**
+- **Deliberately not the `disputes` table below.** §1005.34 cancellation is not §1005.33 error
+  resolution: different clocks, different remedies, different lawful denials. A cancellation needs no
+  investigation — the sender has an unconditional right, exercised in time or not. See
+  [decisions.md](decisions.md) 2026-07-28.
+
+### disputes  (Reg E error resolution → `UNDER_REVIEW`)  *(deferred — not built)*
 - `transfer_id` FK, `user_id` FK
 - `type` TEXT — `non_delivery` | `wrong_amount` | `unauthorized` | `other`
 - `description` TEXT, `status` TEXT — `open` | `investigating` | `resolved`

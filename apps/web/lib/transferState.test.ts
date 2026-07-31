@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest'
+import { translations } from './translations'
 import {
   TIMELINE_STEPS,
+  badgeTone,
+  showCancellationBanner,
   canRequestCancel,
   classifyCancelResponse,
   isOnHappyPath,
@@ -251,5 +254,95 @@ describe('isTransferShape', () => {
 
   it('rejects an unrecognized state rather than treating it as in-progress', () => {
     expect(isTransferShape({ ...transfer(), state: 'SOMETHING_NEW' })).toBe(false)
+  })
+
+  it('rejects a body missing createdAt (the history date would be Invalid Date)', () => {
+    const partial: Record<string, unknown> = { ...transfer() }
+    delete partial.createdAt
+    expect(isTransferShape(partial)).toBe(false)
+  })
+})
+
+describe('badgeTone', () => {
+  it('groups every state into a tone (delivered=success, in-flight=progress)', () => {
+    expect(badgeTone('COMPLETED')).toBe('success')
+    for (const state of ['PENDING_PAYMENT', 'FUNDED', 'SUBMITTED', 'IN_FLIGHT'] as const) {
+      expect(badgeTone(state)).toBe('progress')
+    }
+  })
+
+  it('treats money-returned and benign dead-ends as neutral, not alarming', () => {
+    for (const state of ['CANCELED', 'REFUNDED', 'PAYMENT_FAILED'] as const) {
+      expect(badgeTone(state)).toBe('neutral')
+    }
+  })
+
+  it('flags states that need attention as error', () => {
+    for (const state of ['PAYOUT_FAILED', 'FUNDING_REVERSED'] as const) {
+      expect(badgeTone(state)).toBe('error')
+    }
+  })
+
+  // `error` means "needs attention" — and under review the sender can do
+  // nothing AND their transfer was delivered successfully. It is us working
+  // through a cancellation they asked for, so it reads as motion, not fault.
+  it('shows UNDER_REVIEW as progress, not error', () => {
+    expect(badgeTone('UNDER_REVIEW')).toBe('progress')
+  })
+})
+
+describe('showCancellationBanner', () => {
+  // The flag is ORTHOGONAL to state: the payout keeps advancing while the
+  // request is open, so the banner rides the in-flight states.
+  it('shows on every in-flight state with no outcome banner once the sender has asked', () => {
+    for (const state of ['FUNDED', 'SUBMITTED', 'IN_FLIGHT'] as const) {
+      expect(
+        showCancellationBanner({ state, cancellationRequestedAt: '2026-07-28T09:00:00.000Z' }),
+      ).toBe(true)
+    }
+  })
+
+  it('is false when nothing was ever asked', () => {
+    expect(showCancellationBanner({ state: 'SUBMITTED', cancellationRequestedAt: null })).toBe(false)
+    expect(showCancellationBanner({ state: 'SUBMITTED' })).toBe(false)
+  })
+
+  // Wherever an OUTCOME banner speaks, this one yields — two stacked messages
+  // contradict each other. At UNDER_REVIEW the outcome IS the cancellation
+  // story ("working on your cancellation" / delivered); stacking the pending
+  // banner over it repeated the promise and claimed the money was still "on
+  // its way" (PR6b review fix — this state used to render BOTH). Same rule at
+  // PAYOUT_FAILED, whose outcome already promises the refund that will close
+  // the request.
+  it('yields to the outcome banner wherever one renders', () => {
+    for (const state of ['UNDER_REVIEW', 'PAYOUT_FAILED'] as const) {
+      expect(
+        showCancellationBanner({ state, cancellationRequestedAt: '2026-07-28T09:00:00.000Z' }),
+      ).toBe(false)
+    }
+  })
+
+  // Settled states: the request resolved with the transfer (or — COMPLETED
+  // with the request still open awaiting a human denial — deliberately shows
+  // plain Delivered rather than implying hope for a request ops will deny).
+  it('stops once the transfer settles, so it cannot contradict the outcome', () => {
+    for (const state of ['COMPLETED', 'REFUNDED', 'PAYMENT_FAILED', 'FUNDING_REVERSED'] as const) {
+      expect(
+        showCancellationBanner({ state, cancellationRequestedAt: '2026-07-28T09:00:00.000Z' }),
+      ).toBe(false)
+    }
+  })
+})
+
+describe('underReview copy stays outcome-neutral', () => {
+  // Compliance pin (436ca26): a transfer at UNDER_REVIEW can lawfully end in
+  // DENIAL (Bridge's authoritative deposit time can beat the request even when
+  // our evidence didn't), so the body must never name "your refund" — that
+  // pre-promises the very question the review decides. Guards reintroduction.
+  it('never promises a refund, in either language', () => {
+    for (const lang of ['en', 'es'] as const) {
+      const body = translations[lang].send.track.outcomes.underReview.body
+      expect(body).not.toMatch(/refund|reembols/i)
+    }
   })
 })

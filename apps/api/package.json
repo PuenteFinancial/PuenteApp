@@ -9,8 +9,8 @@
     "build": "tsup src/server.ts src/worker.ts --format esm",
     "start": "node dist/server.js",
     "start:worker": "node dist/worker.js",
-    "lint": "eslint src/",
-    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/ scripts/",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
     "dev:e2e": "node --env-file=.env.e2e.local --import tsx src/server.ts"
@@ -20,12 +20,13 @@
     "@fastify/helmet": "^13.1.0",
     "@fastify/rate-limit": "^11.1.0",
     "@puente/shared": "workspace:*",
-    "@sentry/node": "^10.66.0",
-    "@supabase/supabase-js": "^2.110.7",
+    "@sentry/node": "^10.68.0",
+    "@supabase/supabase-js": "^2.110.8",
     "fastify": "^5.10.0",
     "fastify-plugin": "^6.0.0",
-    "jose": "^6.2.3",
-    "pg-boss": "^12.26.1",
+    "jose": "^6.2.4",
+    "pg-boss": "^12.26.2",
+    "stripe": "^22.3.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {

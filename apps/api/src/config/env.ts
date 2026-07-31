@@ -30,6 +30,14 @@ const envSchema = z.object({
     .refine((b) => b.length === 32, 'must be 32 bytes of base64'),
   BRIDGE_API_KEY: z.string().min(1),
   BRIDGE_API_BASE: z.string().url().default('https://api.bridge.xyz'),
+  // Hard deadline on every Bridge HTTP call (AbortSignal.timeout in
+  // services/bridge.ts). Without it fetches inherit undici's ~300s defaults —
+  // the absence this bound removes is what forced CLAIM_STALE_AFTER_MS to 30
+  // minutes (services/refunds.ts, re-derived to 10 alongside this knob). Floor
+  // of 1 keeps a fat-fingered 0/blank from aborting every call instantly; cap
+  // of 120 keeps the bound far inside the 10-minute refund-claim staleness
+  // window, so a merely-slow Bridge call can never age into an abandoned claim.
+  BRIDGE_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(120).default(15),
   // PEM public key issued by Bridge when the webhook endpoint is registered
   // post-deploy — webhook route returns 503 until it is set. Escaped \n
   // sequences are normalized so the PEM can live in a single-line env var.
@@ -46,12 +54,36 @@ const envSchema = z.object({
   QUOTE_FEE_BPS: z.coerce.number().int().min(0).max(9999).default(100),
   QUOTE_FX_BUFFER_BPS: z.coerce.number().int().min(0).max(9999).default(50),
   QUOTE_EXPIRY_SECONDS: z.coerce.number().int().min(60).max(86400).default(900),
-  // Funding (slice 4). 'stripe' joins the enum in slice 4b when keys exist.
-  FUNDING_PROCESSOR: z.enum(['mock']).default('mock'),
+  // Funding (slice 4; 'stripe' joined in PR-S1). Selecting 'stripe' requires
+  // both STRIPE_* secrets — enforced by the superRefine below, so a
+  // half-configured stripe selection refuses to boot instead of 503ing at the
+  // first confirm. Prod stays 'mock' (and therefore inert — see the mock
+  // secret note) until Joshua flips Doppler.
+  FUNDING_PROCESSOR: z.enum(['mock', 'stripe']).default('mock'),
   // Webhook HMAC secret for the mock processor. ABSENT IN PRODUCTION on
   // purpose — its absence 503s the funding webhook and confirm, which is the
   // production lock against mock funding. Doppler sets it dev/staging only.
   MOCK_FUNDING_WEBHOOK_SECRET: z.string().min(16).optional(),
+  // Stripe (PR-S1): secret key (sk_test_… until activation; sk_live_… after)
+  // and the webhook endpoint signing secret (whsec_…). Optional here — only a
+  // FUNDING_PROCESSOR=stripe selection requires them (superRefine below).
+  STRIPE_SECRET_KEY: z.string().min(1).optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
+  // Publishable key (pk_test_…/pk_live_…) — served to the web by the
+  // funding-session endpoint (PR-S3) so the browser can mount the Payment
+  // Element. Public by design, but it lives here (not a NEXT_PUBLIC_ build-time
+  // var) so processor selection and key stay co-located and the mock/stripe
+  // branch stays server-driven. Required alongside the two secrets when
+  // FUNDING_PROCESSOR=stripe: a stripe selection whose web can never render the
+  // pay step is a misconfiguration, so it fails at boot like the others.
+  STRIPE_PUBLISHABLE_KEY: z.string().min(1).optional(),
+  // Hard deadline on every Stripe SDK call, same contract and bounds as
+  // BRIDGE_TIMEOUT_SECONDS: the funding seam's timeout contract feeds the
+  // 10-min CLAIM_STALE_AFTER_MS derivation in services/refunds.ts, so an
+  // unbounded adapter call could make a live refund read as abandoned. The
+  // SDK multiplies this by (maxNetworkRetries+1) in the worst case — still
+  // minutes inside the staleness window at the 120 cap.
+  STRIPE_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(120).default(15),
   // Explicit opt-in for the dev-only routes (slice 7 PR3: simulate-funding,
   // which drives PENDING_PAYMENT→FUNDED — a real ledger batch — with no real
   // payment). Same fail-closed enum shape as WAIT_FOR_CLEARING / AUTO_REFUND,
@@ -83,6 +115,18 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
+  // First-transfer hold (slice-8 O3) — mechanism now, policy via flag (same
+  // shape as WAIT_FOR_CLEARING; NOT z.coerce.boolean, which parses 'false' as
+  // true). OFF (pilot default): the trusted-five's first sends front instantly
+  // like any other. ON: a sender with no cleanly cleared send yet
+  // (hasClearedHistory) waits for their OWN funding_cleared before the MXN
+  // payout submits — no hold reason, the 1-min sweep resumes it on settlement.
+  // Flip on with real R01 return data in hand, before widening past the
+  // trusted five.
+  FIRST_TRANSFER_HOLD: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   // Direct Postgres connection for pg-boss (worker only — the API stays
   // PostgREST-only). Must be the Supabase SESSION-mode pooler (port 5432),
   // never transaction mode (6543) — pg-boss needs session semantics.
@@ -103,6 +147,36 @@ const envSchema = z.object({
   // FX submission backstop: max quote age before the submit job holds the
   // transfer (fx_drift). Fires only on transfers stuck for hours.
   FX_MAX_QUOTE_AGE_MINUTES: z.coerce.number().int().min(1).default(240),
+  // Per-user transaction limits (slice-7 PR5) — the AML "Transaction Limits at
+  // Launch" policy: a per-transaction send cap plus rolling-window send-amount
+  // caps (day / month / 6 months) and a belt-and-suspenders per-day send count.
+  // All amounts are the SEND principal in USD minor units (fees excluded — the
+  // policy caps the amount transmitted). DEFAULTED to the launch values so the
+  // control stays on even if unset (fail-closed); the per-user counterpart to the
+  // aggregate FLOAT_CEILING_MINOR. Names track the ERD `user_limits` columns
+  // (per_transfer / daily / monthly) for the slice-8 lift; the 6-month tier is
+  // beyond the ERD today. Windows are rolling 30/180 days, not calendar periods.
+  RISK_PER_TXN_MAX_MINOR: z.coerce.number().int().min(0).default(150_000), // $1,500 per transfer
+  RISK_DAILY_MAX_MINOR: z.coerce.number().int().min(0).default(150_000), // $1,500 / rolling 24h
+  RISK_MONTHLY_MAX_MINOR: z.coerce.number().int().min(0).default(300_000), // $3,000 / rolling 30d
+  RISK_SEMIANNUAL_MAX_MINOR: z.coerce.number().int().min(0).default(1_800_000), // $18,000 / rolling 180d
+  RISK_VELOCITY_MAX_COUNT: z.coerce.number().int().min(1).default(5), // sends / rolling 24h
+  // Uncleared-exposure cap (slice-8 O3): max committed sends in flight per user
+  // before their ACH pulls settle — counted from disclosure acceptance until
+  // funding_cleared (or unwind), no time window. The per-user count axis of the
+  // aggregate FLOAT_CEILING_MINOR. Floor of 1: the comparison is `>=`, so 0
+  // would block every send.
+  RISK_UNCLEARED_MAX_COUNT: z.coerce.number().int().min(1).default(1), // uncleared sends in flight
+  // Aggregate Reg E correction-loss trend guard (ledger.correction-watch cron):
+  // page when the rolling-window signed sum of loss_cancellation_correction
+  // reaches this. HARD defaults (RISK_* style, not FLOAT_CEILING's
+  // required-at-use) so the tripwire stays armed even when unset. $200 ≈ one
+  // max-size correction at launch limits — fires around the second one. Floor
+  // of 1: at 0 the >= comparison pages every hour on an EMPTY window (0 >= 0).
+  LOSS_CORRECTION_ALERT_MINOR: z.coerce.number().int().min(1).default(20_000), // $200 / window
+  // Rolling window for that sum. The cap keeps a fat-fingered value from
+  // turning the hourly select into an unbounded scan as entries accumulate.
+  LOSS_CORRECTION_WINDOW_DAYS: z.coerce.number().int().min(1).max(90).default(7),
   // Cadence of the payout.poll Bridge reconciliation cron. 300 in prod;
   // set 60 in dev via env. Floor of 10 keeps a fat-fingered value from
   // hammering the Bridge API.
@@ -113,7 +187,26 @@ const envSchema = z.object({
   SENTRY_DSN: z.string().url().optional(),
 })
 
-const parsed = envSchema.safeParse(process.env)
+// Exported for tests; runtime uses the singleton `env` below.
+export const envSchemaWithRules = envSchema.superRefine((value, ctx) => {
+  if (value.FUNDING_PROCESSOR === 'stripe') {
+    for (const key of [
+      'STRIPE_SECRET_KEY',
+      'STRIPE_WEBHOOK_SECRET',
+      'STRIPE_PUBLISHABLE_KEY',
+    ] as const) {
+      if (!value[key]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is required when FUNDING_PROCESSOR=stripe`,
+        })
+      }
+    }
+  }
+})
+
+const parsed = envSchemaWithRules.safeParse(process.env)
 
 if (!parsed.success) {
   console.error('Invalid environment variables:')
