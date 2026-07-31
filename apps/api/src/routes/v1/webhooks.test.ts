@@ -35,8 +35,15 @@ vi.mock('../../services/queue.js', () => ({
 }))
 
 const recordEvent = vi.hoisted(() => vi.fn())
+const markProcessed = vi.hoisted(() => vi.fn())
 vi.mock('../../services/payment-events.js', () => ({
   recordEvent: (...args: unknown[]) => recordEvent(...args),
+  markProcessed: (...args: unknown[]) => markProcessed(...args),
+}))
+
+const actOnRefundTailEvent = vi.hoisted(() => vi.fn())
+vi.mock('../../services/refunds.js', () => ({
+  actOnRefundTailEvent: (...args: unknown[]) => actOnRefundTailEvent(...args),
 }))
 
 // Overridable funding processor: null → the real mock processor; tests set
@@ -653,6 +660,153 @@ describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ received: true })
     expect(transitionTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
+})
+
+// ── funding refund tails (PR-S2) ─────────────────────────────────────────────
+
+describe('POST /v1/webhooks/funding — refund tails (PR-S2)', () => {
+  beforeEach(() => {
+    recordEvent.mockReset()
+    markProcessed.mockReset()
+    actOnRefundTailEvent.mockReset()
+    transitionTransfer.mockReset()
+  })
+
+  const refundFailedBody = () =>
+    fundingBody('refund_failed', { undo_ref: 'mockrefund_9', reason: 'account_closed' })
+
+  it('records to payment_events (source funding), acts, marks processed — no state transition', async () => {
+    recordEvent.mockResolvedValue({ id: 'pe-1', inserted: true, status: 'received' })
+    markProcessed.mockResolvedValue(undefined)
+    const app = await buildApp()
+
+    const body = refundFailedBody()
+    const res = await postFunding(app, body, fundingSign(body))
+
+    expect(res.status).toBe(200)
+    expect(recordEvent).toHaveBeenCalledWith({
+      source: 'funding',
+      externalEventId: 'evt_f1',
+      eventType: 'refund_failed',
+      transferId: TRANSFER_ID,
+      providerRef: 'mockrefund_9',
+      payload: expect.objectContaining({ id: 'evt_f1', type: 'refund_failed' }),
+    })
+    expect(actOnRefundTailEvent).toHaveBeenCalledWith({
+      eventType: 'refund_failed',
+      transferId: TRANSFER_ID,
+      refundRef: 'mockrefund_9',
+      reason: 'account_closed',
+    })
+    expect(markProcessed).toHaveBeenCalledWith('pe-1')
+    // Money truth only — the transfer settled at REFUNDED when the undo was issued
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('refund_settled records and marks without a reason', async () => {
+    recordEvent.mockResolvedValue({ id: 'pe-2', inserted: true, status: 'received' })
+    markProcessed.mockResolvedValue(undefined)
+    const app = await buildApp()
+
+    const body = fundingBody('refund_settled', { undo_ref: 'mockrefund_9' })
+    const res = await postFunding(app, body, fundingSign(body))
+
+    expect(res.status).toBe(200)
+    expect(actOnRefundTailEvent).toHaveBeenCalledWith({
+      eventType: 'refund_settled',
+      transferId: TRANSFER_ID,
+      refundRef: 'mockrefund_9',
+    })
+    expect(markProcessed).toHaveBeenCalledWith('pe-2')
+    await app.close()
+  })
+
+  it('a replayed delivery already handled short-circuits: no act, no re-mark', async () => {
+    recordEvent.mockResolvedValue({ id: 'pe-1', inserted: false, status: 'processed' })
+    const app = await buildApp()
+
+    const body = refundFailedBody()
+    const res = await postFunding(app, body, fundingSign(body))
+
+    expect(res.status).toBe(200)
+    expect(actOnRefundTailEvent).not.toHaveBeenCalled()
+    expect(markProcessed).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it("a redelivery whose first attempt died before the mark re-drives the act (status still 'received')", async () => {
+    recordEvent.mockResolvedValue({ id: 'pe-1', inserted: false, status: 'received' })
+    markProcessed.mockResolvedValue(undefined)
+    const app = await buildApp()
+
+    const body = refundFailedBody()
+    const res = await postFunding(app, body, fundingSign(body))
+
+    expect(res.status).toBe(200)
+    expect(actOnRefundTailEvent).toHaveBeenCalledTimes(1)
+    expect(markProcessed).toHaveBeenCalledWith('pe-1')
+    await app.close()
+  })
+
+  it('500s when the record insert fails so the provider redelivers', async () => {
+    recordEvent.mockRejectedValue(new Error('insert failed'))
+    const app = await buildApp()
+
+    const body = refundFailedBody()
+    const res = await postFunding(app, body, fundingSign(body))
+
+    expect(res.status).toBe(500)
+    expect(actOnRefundTailEvent).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('still acks 200 when the mark fails — the act is done and the sweep→job path retires the row', async () => {
+    recordEvent.mockResolvedValue({ id: 'pe-1', inserted: true, status: 'received' })
+    markProcessed.mockRejectedValue(new Error('db blip'))
+    const app = await buildApp()
+
+    const body = refundFailedBody()
+    const res = await postFunding(app, body, fundingSign(body))
+
+    expect(res.status).toBe(200)
+    expect(actOnRefundTailEvent).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  it('a dashboard-issued refund (no metadata echo) joins through funding_payment_ref', async () => {
+    const lookup = selectChain({ data: { id: TRANSFER_ID } })
+    from.mockReturnValueOnce(lookup)
+    recordEvent.mockResolvedValue({ id: 'pe-3', inserted: true, status: 'received' })
+    markProcessed.mockResolvedValue(undefined)
+    processorOverride.current = fakeStripeProcessor({
+      parseEvent: vi.fn(() => ({
+        outcome: 'event',
+        event: {
+          eventId: 'evt_r9',
+          type: 'refund_failed',
+          transferRef: null,
+          paymentRef: 'pi_123',
+          undoRef: 're_9',
+          reason: 'declined',
+        },
+      })),
+    })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/funding')
+      .set('Content-Type', 'application/json')
+      .set('Stripe-Signature', 'sig_v1')
+      .send(JSON.stringify({ id: 'evt_r9', type: 'refund.failed' }))
+
+    expect(res.status).toBe(200)
+    expect(lookup['eq']).toHaveBeenCalledWith('funding_payment_ref', 'pi_123')
+    expect(recordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ transferId: TRANSFER_ID, providerRef: 're_9' }),
+    )
     await app.close()
   })
 })

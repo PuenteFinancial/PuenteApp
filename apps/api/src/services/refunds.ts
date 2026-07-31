@@ -5,10 +5,11 @@ import {
   transitionTransfer,
   bridgeReturnLedgerEntries,
   refundedLedgerEntries,
+  voidRefundLedgerEntries,
   type LedgerEntryJson,
 } from './transfers.js'
 import { postLedgerTransaction, type LedgerEntryInput } from './ledger.js'
-import { getFundingProcessor } from './funding/index.js'
+import { getFundingProcessor, undoModeForRef } from './funding/index.js'
 import { getBridgeTransfer } from './bridge.js'
 
 // The PAYOUT_FAILED → REFUNDED refund-from-float tail (ledger-rules.md), lifted
@@ -226,6 +227,10 @@ export async function refundPayoutFailure(input: {
   //    crash-recovery path listRefundBacklog exists to surface, and it behaves
   //    exactly as it did before the claim landed.
   const alreadyDisbursed = transfer.refund_payment_ref !== null
+  // Carried to step 3, where the undo's MODE picks the ledger batch. On the
+  // crash-recovery path the persisted ref is all that survives, which is why
+  // the mode is prefix-encoded (undoModeForRef) rather than only returned.
+  let disbursedRef = transfer.refund_payment_ref
   if (!alreadyDisbursed) {
     // Refuse to disburse against a missing funding ref rather than coercing it
     // to ''. Unreachable in practice — reaching PAYOUT_FAILED means the transfer
@@ -255,6 +260,7 @@ export async function refundPayoutFailure(input: {
         .eq('id', transfer.id)
         .is('refund_payment_ref', null)
       if (error) throw new Error(`refund ref persist failed: ${error.message}`)
+      disbursedRef = undo.ref
     } else {
       // Someone holds the claim. ONE re-read tells us which of three it is —
       // our own load is already stale by the time the claim comes back.
@@ -293,16 +299,32 @@ export async function refundPayoutFailure(input: {
     }
   }
 
-  // 3) Recognize + pay the refund and settle REFUNDED — a DISTINCT posting key
-  //    from bridge_return (the UNIQUE(transfer_id, transition) index needs both).
+  // 3) Settle REFUNDED — a DISTINCT posting key from bridge_return (the
+  //    UNIQUE(transfer_id, transition) index needs both). The BATCH depends on
+  //    HOW the sender was made whole (PR-S2): a `refunded` undo paid real cash
+  //    (refundedLedgerEntries — CR cash_clearing, receivable settles on its
+  //    own clearing leg), a `voided` undo canceled the uncleared pull — the
+  //    MAIN path under real ACH timing — so no cash moved and the FUNDED batch
+  //    reverses instead (voidRefundLedgerEntries). Posting the cash batch for
+  //    a void would credit cash_clearing for money that never left.
+  if (disbursedRef === null) {
+    // Unreachable: every path here either loaded a non-null ref or persisted
+    // one. A null is a logic fault — never guess a ledger batch over it.
+    throw new Error(`refund settle reached with no disbursement ref for ${transfer.id}`)
+  }
+  const undoMode = undoModeForRef(disbursedRef)
   await transitionTransfer({
     transferId: transfer.id,
     fromState: 'PAYOUT_FAILED',
     toState: 'REFUNDED',
     actor: input.actor,
     reason: input.reason,
-    ledgerDescription: 'transfer REFUNDED — payout failed, sender refunded from float',
-    ledgerEntries: refundedLedgerEntries(transfer),
+    ledgerDescription:
+      undoMode === 'voided'
+        ? 'transfer REFUNDED — payout failed; uncleared funding voided (FUNDED batch reversed)'
+        : 'transfer REFUNDED — payout failed, sender refunded from float',
+    ledgerEntries:
+      undoMode === 'voided' ? voidRefundLedgerEntries(transfer) : refundedLedgerEntries(transfer),
   })
 
   await settleCancellationRequest(transfer.id, input.actor)
@@ -360,6 +382,46 @@ async function settleCancellationRequest(transferId: string, actor: string): Pro
     // transfer re-attempts it from the already_settled exit.
     void err
   }
+}
+
+/**
+ * The undo-tail act (PR-S2), shared by the funding webhook route and the
+ * payment-event job's crash-recovery re-drive so the two paths cannot diverge.
+ *
+ * `refund_settled` needs no action — the payment_events row IS the record, and
+ * the O-lane reconciliation reads it. `refund_failed` pages: a refund we
+ * ISSUED (the transfer settled at REFUNDED then) later BOUNCED — closed
+ * account, frozen account — so the money is back on the processor balance and
+ * the sender is STILL OWED. Money discrepancies are never auto-adjusted
+ * (ledger-rules.md §Reconciliation): no state moves, no batch posts; a human
+ * re-disburses by runbook. Fingerprinted per transfer so the webhook delivery,
+ * Stripe redeliveries, and the sweep→job re-drive collapse into one issue.
+ *
+ * Synchronous on purpose: the only effect is the page, so callers can order it
+ * before their own status marks without a failure mode of its own.
+ */
+export function actOnRefundTailEvent(input: {
+  eventType: 'refund_failed' | 'refund_settled'
+  transferId: string | null
+  refundRef: string | null
+  reason?: string | null
+}): void {
+  if (input.eventType !== 'refund_failed') return
+  Sentry.withScope((scope) => {
+    scope.setFingerprint(['funding-refund-failed', input.transferId ?? input.refundRef ?? 'unknown'])
+    scope.setContext('funding_refund_failed', {
+      transferId: input.transferId,
+      refundRef: input.refundRef,
+      // Stripe failure_reason (declined / expired account …) — ids and codes
+      // only, no PII.
+      reason: input.reason ?? null,
+      runbook: 'docs/runbooks/manual-refund.md',
+    })
+    Sentry.captureMessage(
+      'funding refund FAILED after issuance — sender still owed; re-disburse by runbook',
+      'error',
+    )
+  })
 }
 
 /**

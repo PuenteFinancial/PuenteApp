@@ -77,7 +77,10 @@ export function mapBridgeState(state: string): BridgeStateAction {
 // ── Event recorder ──────────────────────────────────────────────────────────
 
 export interface RecordEventInput {
-  source: 'bridge' | 'bridge_poll'
+  // 'funding' (PR-S2): the funding processor's refund tails — recorded by the
+  // funding webhook route, handled inline there, re-driven by the sweep→job
+  // path on a crash. The migration's CHECK admitted it from day one.
+  source: 'bridge' | 'bridge_poll' | 'funding'
   externalEventId: string
   eventType: string
   transferId?: string | null
@@ -85,16 +88,20 @@ export interface RecordEventInput {
   payload: unknown
 }
 
+export type PaymentEventStatus = 'received' | 'processed' | 'ignored' | 'failed'
+
 /**
  * Insert a provider event into payment_events, deduped on
  * (source, external_event_id). Returns the row id either way and whether THIS
  * call inserted it — inserted=false on a redelivery/re-synthesis of an event
- * already recorded. status is left to the 'received' DB default. The payload
- * is stored raw and is NEVER logged or returned.
+ * already recorded, with the existing row's status so a replaying caller can
+ * tell "already handled" from "recorded but the handler crashed" (the funding
+ * route acts on that split). A fresh insert is always 'received' (DB default).
+ * The payload is stored raw and is NEVER logged or returned.
  */
 export async function recordEvent(
   input: RecordEventInput,
-): Promise<{ id: string; inserted: boolean }> {
+): Promise<{ id: string; inserted: boolean; status: PaymentEventStatus }> {
   // ON CONFLICT DO NOTHING: the conflicting row returns no representation, so
   // a null select result means this call lost the insert race (duplicate).
   const { data: inserted, error: upsertError } = await supabaseAdmin
@@ -114,13 +121,13 @@ export async function recordEvent(
     .maybeSingle()
   if (upsertError) throw new Error(`payment_events insert failed: ${upsertError.message}`)
 
-  if (inserted) return { id: (inserted as { id: string }).id, inserted: true }
+  if (inserted) return { id: (inserted as { id: string }).id, inserted: true, status: 'received' }
 
-  // Duplicate: fetch the existing row's id for the caller (enqueue is a no-op
-  // on the already-processed row, but the id keeps one call shape).
+  // Duplicate: fetch the existing row's id + status for the caller (enqueue is
+  // a no-op on the already-processed row, but the id keeps one call shape).
   const { data: existing, error: selectError } = await supabaseAdmin
     .from('payment_events')
-    .select('id')
+    .select('id, status')
     .eq('source', input.source)
     .eq('external_event_id', input.externalEventId)
     .maybeSingle()
@@ -128,7 +135,8 @@ export async function recordEvent(
   if (!existing) {
     throw new Error('payment_events row vanished after conflict — unexpected')
   }
-  return { id: (existing as { id: string }).id, inserted: false }
+  const row = existing as { id: string; status: PaymentEventStatus }
+  return { id: row.id, inserted: false, status: row.status }
 }
 
 // ── Deposit evidence ────────────────────────────────────────────────────────
