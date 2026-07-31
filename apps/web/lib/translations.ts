@@ -184,6 +184,24 @@ export type Translations = {
       simulate: string
       simulating: string
       simulateNote: string
+      // The real pay step (PR-S3): Stripe Payment Element at PENDING_PAYMENT.
+      // Stripe authors + localizes the mandate and its own field/bank errors
+      // (via the Element's locale); these are only the Puente-authored frame.
+      pay: {
+        payTitle: string
+        payNow: string
+        paying: string
+        // After confirmPayment resolves: the debit was SUBMITTED, not settled —
+        // FUNDED arrives via webhook + poll. Copy must not claim "paid".
+        submittedTitle: string
+        submittedBody: string
+        // funding-session fetch / Stripe loader failure — retryable, generic.
+        sessionError: string
+        // Instant-only verification: if their bank isn't connectable we cannot
+        // take the payment at all — no microdeposit fallback at pilot.
+        bankNote: string
+        paymentError: string
+      }
       loadError: string
       retry: string
       done: string
@@ -508,6 +526,18 @@ const en: Translations = {
       simulate: 'Simulate payment',
       simulating: 'Simulating…',
       simulateNote: 'Test environment only — stands in for card and bank payment.',
+      pay: {
+        payTitle: 'Pay with your bank',
+        payNow: 'Pay {amount}',
+        paying: 'Sending payment…',
+        // NOT "paid": the ACH debit was submitted, settlement is days away.
+        submittedTitle: 'Payment submitted',
+        submittedBody: 'We are confirming your payment with your bank. This usually takes a moment.',
+        sessionError: 'We could not load the payment form. Please try again.',
+        bankNote:
+          "If you don't see your bank, we can't accept payments from it yet — you haven't been charged.",
+        paymentError: 'Something went wrong with your payment. Please try again.',
+      },
       loadError: 'We couldn’t load this transfer. Try again.',
       retry: 'Retry',
       done: 'Back to dashboard',
@@ -860,6 +890,19 @@ const es: Translations = {
       simulate: 'Simular pago',
       simulating: 'Simulando…',
       simulateNote: 'Solo en el entorno de pruebas — sustituye el pago con tarjeta o banco.',
+      // NEEDS LEGAL REVIEW (ES)
+      pay: {
+        payTitle: 'Paga con tu banco',
+        payNow: 'Pagar {amount}',
+        paying: 'Enviando el pago…',
+        // NO "pagado": el cargo ACH fue enviado, la liquidación tarda días.
+        submittedTitle: 'Pago enviado',
+        submittedBody: 'Estamos confirmando tu pago con tu banco. Esto suele tomar un momento.',
+        sessionError: 'No pudimos cargar el formulario de pago. Inténtalo de nuevo.',
+        bankNote:
+          'Si no ves tu banco, aún no podemos aceptar pagos desde ese banco — no se te ha cobrado.',
+        paymentError: 'Algo salió mal con tu pago. Inténtalo de nuevo.',
+      },
       loadError: 'No pudimos cargar esta transferencia. Inténtalo de nuevo.',
       retry: 'Reintentar',
       done: 'Volver al panel',

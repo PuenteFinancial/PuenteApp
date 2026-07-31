@@ -18,15 +18,16 @@ describe('FUNDING_PROCESSOR=stripe env refinement', () => {
     expect(parsed.success && parsed.data.FUNDING_PROCESSOR).toBe('mock')
   })
 
-  it('refuses a stripe selection missing both keys, naming each one', () => {
+  it('refuses a stripe selection missing all three keys, naming each one', () => {
     const parsed = envSchemaWithRules.safeParse({ ...base, FUNDING_PROCESSOR: 'stripe' })
     expect(parsed.success).toBe(false)
     const fields = parsed.success ? {} : parsed.error.flatten().fieldErrors
     expect(fields).toHaveProperty('STRIPE_SECRET_KEY')
     expect(fields).toHaveProperty('STRIPE_WEBHOOK_SECRET')
+    expect(fields).toHaveProperty('STRIPE_PUBLISHABLE_KEY')
   })
 
-  it('refuses a stripe selection missing just the webhook secret', () => {
+  it('refuses a stripe selection missing just the webhook + publishable keys', () => {
     const parsed = envSchemaWithRules.safeParse({
       ...base,
       FUNDING_PROCESSOR: 'stripe',
@@ -36,6 +37,7 @@ describe('FUNDING_PROCESSOR=stripe env refinement', () => {
     const fields = parsed.success ? {} : parsed.error.flatten().fieldErrors
     expect(fields).not.toHaveProperty('STRIPE_SECRET_KEY')
     expect(fields).toHaveProperty('STRIPE_WEBHOOK_SECRET')
+    expect(fields).toHaveProperty('STRIPE_PUBLISHABLE_KEY')
   })
 
   it('accepts a fully-keyed stripe selection and applies the timeout default + bounds', () => {
@@ -44,6 +46,7 @@ describe('FUNDING_PROCESSOR=stripe env refinement', () => {
       FUNDING_PROCESSOR: 'stripe',
       STRIPE_SECRET_KEY: 'sk_test_x',
       STRIPE_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_PUBLISHABLE_KEY: 'pk_test_x',
     })
     expect(ok.success).toBe(true)
     expect(ok.success && ok.data.STRIPE_TIMEOUT_SECONDS).toBe(15)
@@ -53,6 +56,7 @@ describe('FUNDING_PROCESSOR=stripe env refinement', () => {
       FUNDING_PROCESSOR: 'stripe',
       STRIPE_SECRET_KEY: 'sk_test_x',
       STRIPE_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_PUBLISHABLE_KEY: 'pk_test_x',
       STRIPE_TIMEOUT_SECONDS: '600',
     })
     expect(outOfBounds.success).toBe(false)

@@ -159,6 +159,7 @@ reconciliation but never cross the wire.
 | POST | `/v1/transfers/:id/confirm` | ✓ | **required** | Record disclosure acceptance → initiate funding via `FundingProcessor`. Server refuses without recorded acceptance. Returns processor-neutral funding details. |
 | GET | `/v1/transfers` | ✓ | — | List (owner-scoped). `?scope=history` hides abandoned (never-funded) sends — `PENDING_PAYMENT`/`PAYMENT_FAILED`; `?scope=all` (default) returns everything. |
 | GET | `/v1/transfers/:id` | ✓ | — | Status, snapshotted terms, disclosure. |
+| GET | `/v1/transfers/:id/funding-session` | ✓ | — | Pay-step bootstrap (S3): `{ provider, clientSecret?, publishableKey? }`. `PENDING_PAYMENT` only. |
 | POST | `/v1/transfers/:id/cancel` | ✓ | **required** | Pre-claim `FUNDED` → cancels. `SUBMITTED`/`IN_FLIGHT`/`FUNDED`-post-claim → **202**, request recorded (below). Else `transfer_not_cancelable`. |
 
 **202 `cancellation_requires_support`** — the payout is already with Bridge, so the cancel is
@@ -242,6 +243,23 @@ disclosed rate is never staler than the quote window; re-quote on timeout. A ret
 initiation (acceptance recorded, no funding ref) re-initiates. `clientFields` carries whatever
 the active processor's client SDK needs (Stripe: a client_secret; mock: empty); the **funding
 webhook** drives `FUNDED`.
+
+**`GET /v1/transfers/:id/funding-session`** — pay-step bootstrap *(S3)*
+```jsonc
+// response 200 — stripe processor
+{ "provider": "stripe", "clientSecret": "pi_…_secret_…", "publishableKey": "pk_test_…" }
+// response 200 — mock processor (web falls back to the simulate affordance)
+{ "provider": "mock" }
+```
+Owner-scoped. The tracker calls this once per pay-step mount (never on the poll) so a reload at
+`PENDING_PAYMENT` can re-mount the Payment Element: the `clientSecret` is retrieved from the
+processor **on demand and never persisted or logged** on our side — Stripe stays the only store of
+the credential. Errors: `not_found` (404 — missing or not yours; never leaks existence), `conflict`
+(409 — the transfer left `PENDING_PAYMENT`, or funding was never initiated: that confirm-crashed
+window is recovered by confirm's own idempotent retry, not this route), `not_configured` (503 —
+same posture as confirm; in prod-mock this endpoint cannot serve). Deliberately **no KYC gate and
+no uncleared-cap check** — a read-only bootstrap for an already-committed send must not strand a
+sender mid-window on a KYC flip (same rationale as cancel's shortened guard ladder).
 
 ## Webhooks  (public, signature-verified, idempotent)
 

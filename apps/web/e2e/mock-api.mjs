@@ -63,6 +63,22 @@ function stateOf(id) {
   return 'PENDING_PAYMENT'
 }
 
+// Non-consuming read for handlers that GATE on state without representing a
+// tracker poll (funding-session). stateOf() advances the ADVANCING fixtures'
+// read budget as a side effect — if the funding-session bootstrap consumed a
+// read, the poll spec's "second read flips to FUNDED" contract would silently
+// count the wrong requests. Returns the state as of the reads consumed so far.
+function peekState(id) {
+  const fixed = FIXED.get(id)
+  if (fixed) return fixed
+  const mutable = mutableStates.get(id)
+  if (mutable) return mutable
+  if (ADVANCING.test(id)) {
+    return (readCounts.get(id) ?? 0) <= 1 ? 'PENDING_PAYMENT' : 'FUNDED'
+  }
+  return 'PENDING_PAYMENT'
+}
+
 // Mirrors the API's transfer response schema (transfers.ts transferResponseSchema).
 function transferBody(id, state = stateOf(id)) {
   return {
@@ -391,6 +407,30 @@ const server = createServer(async (req, res) => {
       transferBody('transfer-e2e-hist-abandoned', 'PAYMENT_FAILED'),
     ])
     return json(res, 200, { data: page1, nextCursor: 'cursor-page-2' })
+  }
+
+  // Pay-step bootstrap (PR-S3). Mirrors the real gates: 409 once the transfer
+  // has left PENDING_PAYMENT. Default is the mock provider (keeps every
+  // simulate spec green); transfer-e2e-stripe* serves a stripe-shaped session
+  // (the specs abort js.stripe.com, so the secret never reaches Stripe); and
+  // transfer-e2e-session-fail forces the retryable error card.
+  if (method === 'GET' && /^\/v1\/transfers\/[^/]+\/funding-session$/.test(pathname)) {
+    const id = pathname.split('/')[3]
+    if (id === 'transfer-e2e-session-fail') {
+      return json(res, 500, { error: { code: 'internal_error', message: 'mock: forced session failure', requestId: 'mock' } })
+    }
+    // peekState, NOT stateOf: this gate must not consume an ADVANCING read.
+    if (peekState(id) !== 'PENDING_PAYMENT') {
+      return json(res, 409, { error: { code: 'conflict', message: 'mock: Transfer is no longer awaiting payment', requestId: 'mock' } })
+    }
+    if (/^transfer-e2e-stripe/.test(id)) {
+      return json(res, 200, {
+        provider: 'stripe',
+        clientSecret: 'pi_e2e_secret_x',
+        publishableKey: 'pk_test_e2e',
+      })
+    }
+    return json(res, 200, { provider: 'mock' })
   }
 
   if (method === 'GET' && /^\/v1\/transfers\/[^/]+$/.test(pathname)) {

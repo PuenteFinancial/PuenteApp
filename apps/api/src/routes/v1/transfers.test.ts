@@ -42,6 +42,7 @@ vi.mock('../../services/transfers.js', async (importOriginal) => {
 // the confirm tests expect.
 const initiateFunding = vi.fn()
 const voidFunding = vi.fn()
+const getClientSession = vi.fn()
 const isConfigured = vi.fn(() => true)
 
 vi.mock('../../services/funding/index.js', () => ({
@@ -51,6 +52,7 @@ vi.mock('../../services/funding/index.js', () => ({
     isConfigured: () => isConfigured(),
     initiateFunding,
     voidFunding,
+    getClientSession,
   }),
 }))
 
@@ -195,6 +197,8 @@ beforeEach(() => {
     status: 'succeeded',
     mode: 'voided',
   })
+  getClientSession.mockReset()
+  getClientSession.mockResolvedValue({ provider: 'mock', fields: {} })
   assessTransferRisk.mockReset()
   assessTransferRisk.mockResolvedValue({ ok: true })
   assessUnclearedCap.mockReset()
@@ -897,6 +901,110 @@ describe('GET /v1/transfers/:id', () => {
       .get(`/v1/transfers/${TRANSFER_ID}`)
       .set('Authorization', 'Bearer test-token')
     expect(res.status).toBe(404)
+    await app.close()
+  })
+})
+
+describe('GET /v1/transfers/:id/funding-session', () => {
+  const get = (app: Awaited<ReturnType<typeof buildApp>>) =>
+    supertest(app.server)
+      .get(`/v1/transfers/${TRANSFER_ID}/funding-session`)
+      .set('Authorization', 'Bearer test-token')
+
+  const pendingWithRef = { ...transferRow, funding_payment_ref: 'pi_123' }
+
+  it('returns the flattened stripe session for an owned PENDING_PAYMENT transfer', async () => {
+    from.mockReturnValueOnce(chain({ data: pendingWithRef }))
+    getClientSession.mockResolvedValue({
+      provider: 'stripe',
+      fields: {
+        clientSecret: 'pi_123_secret_x',
+        publishableKey: 'pk_test_x',
+        status: 'requires_payment_method',
+      },
+    })
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      provider: 'stripe',
+      clientSecret: 'pi_123_secret_x',
+      publishableKey: 'pk_test_x',
+      status: 'requires_payment_method',
+    })
+    expect(getClientSession).toHaveBeenCalledWith({ paymentRef: 'pi_123' })
+    await app.close()
+  })
+
+  it('returns provider-only under the mock processor — no clientSecret key at all', async () => {
+    from.mockReturnValueOnce(chain({ data: pendingWithRef }))
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ provider: 'mock' })
+    await app.close()
+  })
+
+  it('strips fields outside the response schema — a widened processor cannot widen the wire', async () => {
+    from.mockReturnValueOnce(chain({ data: pendingWithRef }))
+    getClientSession.mockResolvedValue({
+      provider: 'stripe',
+      fields: {
+        clientSecret: 'pi_123_secret_x',
+        publishableKey: 'pk_test_x',
+        secretKey: 'sk_leak',
+      },
+    })
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).not.toHaveProperty('secretKey')
+    await app.close()
+  })
+
+  it("404s another user's transfer without leaking existence", async () => {
+    from.mockReturnValueOnce(chain({ data: null }))
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('not_found')
+    expect(getClientSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('409s once the transfer has left PENDING_PAYMENT', async () => {
+    from.mockReturnValueOnce(
+      chain({ data: { ...pendingWithRef, state: 'FUNDED' } }),
+    )
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('conflict')
+    expect(getClientSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('409s the confirm-crashed window (no funding_payment_ref) — confirm retry owns that recovery', async () => {
+    from.mockReturnValueOnce(chain({ data: transferRow })) // ref is null in the fixture
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(409)
+    expect(getClientSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('503s when the active processor is unconfigured (prod mock lock posture)', async () => {
+    isConfigured.mockReturnValueOnce(false)
+    const app = await buildApp()
+    const res = await get(app)
+    expect(res.status).toBe(503)
+    expect(res.body.error.code).toBe('not_configured')
     await app.close()
   })
 })

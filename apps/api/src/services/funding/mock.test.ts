@@ -64,6 +64,13 @@ describe('mock initiateFunding', () => {
   })
 })
 
+describe('mock getClientSession (PR-S3 pay-step bootstrap)', () => {
+  it('returns provider-only with no fields — the web falls back to the simulate affordance', async () => {
+    const session = await processor.getClientSession({ paymentRef: 'mockpay_x' })
+    expect(session).toEqual({ provider: 'mock', fields: {} })
+  })
+})
+
 describe('mock voidFunding', () => {
   it('returns a succeeded void ref, minting a fresh ref each call (ignores the key)', async () => {
     const a = await processor.voidFunding({

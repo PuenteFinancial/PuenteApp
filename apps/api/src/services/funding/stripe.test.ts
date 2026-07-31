@@ -63,15 +63,21 @@ describe('StripeFundingProcessor construction', () => {
 })
 
 describe('stripe isConfigured', () => {
-  it('requires BOTH the secret key and the webhook secret', () => {
-    const saved = env.STRIPE_SECRET_KEY
+  it('requires the secret key, webhook secret, AND publishable key (PR-S3 trio)', () => {
+    const savedSecret = env.STRIPE_SECRET_KEY
+    const savedPublishable = env.STRIPE_PUBLISHABLE_KEY
     try {
       expect(env.STRIPE_WEBHOOK_SECRET).toBeTruthy()
       expect(processor.isConfigured()).toBe(false) // no secret key in test env
       env.STRIPE_SECRET_KEY = 'sk_test_dummy'
+      // Secret + webhook alone is still a partial trio: the web could never
+      // mount the Element, so the runtime gate must agree with boot's superRefine.
+      expect(processor.isConfigured()).toBe(false)
+      env.STRIPE_PUBLISHABLE_KEY = 'pk_test_dummy'
       expect(processor.isConfigured()).toBe(true)
     } finally {
-      env.STRIPE_SECRET_KEY = saved
+      env.STRIPE_SECRET_KEY = savedSecret
+      env.STRIPE_PUBLISHABLE_KEY = savedPublishable
     }
   })
 })
@@ -117,6 +123,41 @@ describe('stripe initiateFunding', () => {
     const create = vi.fn(async () => ({ id: 'pi_123', client_secret: null }))
     const p = new StripeFundingProcessor({ paymentIntents: { create } } as unknown as Stripe)
     await expect(p.initiateFunding(input)).rejects.toThrow(/client_secret/)
+  })
+})
+
+describe('stripe getClientSession (PR-S3 pay-step bootstrap)', () => {
+  it('retrieves the live PI and returns wire-shaped camelCase fields with the publishable key', async () => {
+    const saved = env.STRIPE_PUBLISHABLE_KEY
+    env.STRIPE_PUBLISHABLE_KEY = 'pk_test_dummy'
+    try {
+      const retrieve = vi.fn(async () => ({
+        id: 'pi_123',
+        client_secret: 'pi_123_secret_x',
+        status: 'processing',
+      }))
+      const p = new StripeFundingProcessor({ paymentIntents: { retrieve } } as unknown as Stripe)
+
+      const session = await p.getClientSession({ paymentRef: 'pi_123' })
+
+      expect(retrieve).toHaveBeenCalledWith('pi_123')
+      expect(session).toEqual({
+        provider: 'stripe',
+        fields: {
+          clientSecret: 'pi_123_secret_x',
+          publishableKey: 'pk_test_dummy',
+          status: 'processing',
+        },
+      })
+    } finally {
+      env.STRIPE_PUBLISHABLE_KEY = saved
+    }
+  })
+
+  it('throws on a PI without a client_secret instead of returning a half-usable session', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', client_secret: null }))
+    const p = new StripeFundingProcessor({ paymentIntents: { retrieve } } as unknown as Stripe)
+    await expect(p.getClientSession({ paymentRef: 'pi_123' })).rejects.toThrow(/client_secret/)
   })
 })
 

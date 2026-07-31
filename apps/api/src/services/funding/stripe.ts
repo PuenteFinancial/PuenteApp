@@ -1,6 +1,7 @@
 import Stripe from 'stripe'
 import { env } from '../../config/env.js'
 import type {
+  FundingClientSession,
   FundingEventType,
   FundingInitiation,
   FundingParseResult,
@@ -55,7 +56,12 @@ export class StripeFundingProcessor implements FundingProcessor {
   }
 
   isConfigured(): boolean {
-    return Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET)
+    // All three: the publishable key joined the trio in PR-S3 (superRefine
+    // refuses to boot without it, but this runtime gate should agree with the
+    // boot gate rather than 200ing a session the web can't mount).
+    return Boolean(
+      env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET && env.STRIPE_PUBLISHABLE_KEY,
+    )
   }
 
   async initiateFunding(input: {
@@ -95,6 +101,34 @@ export class StripeFundingProcessor implements FundingProcessor {
       method: 'ach',
       paymentRef: intent.id,
       clientFields: { client_secret: intent.client_secret },
+    }
+  }
+
+  async getClientSession(input: { paymentRef: string }): Promise<FundingClientSession> {
+    // Pay-step bootstrap (PR-S3): the client_secret is deliberately NOT
+    // persisted anywhere on our side — the funding-session route calls this on
+    // demand (once per pay-step mount) and Stripe remains the only store of the
+    // credential. Read-only: retrieve never mutates the PI.
+    const intent = await this.client.paymentIntents.retrieve(input.paymentRef)
+    if (!intent.client_secret) {
+      // Same guard as initiateFunding — a PI without a secret can't mount an
+      // Element; surface loudly rather than returning a half-usable session.
+      throw new Error('Stripe PaymentIntent retrieved without a client_secret')
+    }
+    return {
+      provider: this.provider,
+      fields: {
+        clientSecret: intent.client_secret,
+        // superRefine guarantees this under FUNDING_PROCESSOR=stripe; the
+        // non-null assertion guards direct construction the same way the
+        // constructor's secret-key check does.
+        publishableKey: env.STRIPE_PUBLISHABLE_KEY!,
+        // The live PI status, so a reload AFTER confirmPayment (transfer still
+        // PENDING_PAYMENT until the processing webhook lands) renders the
+        // submitted banner instead of re-offering the pay form for a PI that
+        // can no longer be confirmed.
+        status: intent.status,
+      },
     }
   }
 

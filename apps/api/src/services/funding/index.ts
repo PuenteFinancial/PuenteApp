@@ -58,6 +58,17 @@ export interface FundingInitiation {
   clientFields: Record<string, string>
 }
 
+// What the browser needs to bootstrap the pay step (PR-S3). Served on demand
+// by GET /v1/transfers/:id/funding-session — once per pay-step mount, never on
+// the tracker poll. `fields` is wire-shaped camelCase and goes to the client
+// verbatim (stripe: { clientSecret, publishableKey }; mock: {} — the web falls
+// back to the simulate affordance on provider alone). The client_secret is
+// retrieved from the processor live each time, never persisted or logged.
+export interface FundingClientSession {
+  provider: string
+  fields: Record<string, string>
+}
+
 // The result of a funding-undo op (slice 6). Persisted to
 // transfers.refund_payment_ref (one undo path per transfer). `pending` is for a
 // real async return (Stripe ACH refund); the mock void/refund is always
@@ -135,6 +146,13 @@ export interface FundingProcessor {
   }): Promise<FundingInitiation>
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean
   parseEvent(rawBody: Buffer): FundingParseResult
+  /**
+   * Pay-step bootstrap (PR-S3): resolve the client-side fields for an
+   * already-initiated funding attempt. Read-only — must not create or mutate
+   * processor objects. Stripe retrieves the LIVE PaymentIntent by paymentRef
+   * (bounded by the SDK timeout like every other call); mock returns no fields.
+   */
+  getClientSession(input: { paymentRef: string }): Promise<FundingClientSession>
   // The two funding-undo ops (slice 6), mirroring the initiateFunding seam.
   // Distinct money movements → distinct ledger batches: voidFunding cancels an
   // UNCLEARED pull (Stripe: cancel the PaymentIntent) so nothing ever settled —

@@ -6,6 +6,28 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-31 · Instant-only bank verification; microdeposits deferred (S3).** The Payment Element
+mounts with the server-pinned `verification_method: 'instant'` (Financial Connections) and no
+fallback. Microdeposit verification takes 1–2 business days, which collides with two clocks that
+assume payment-or-fail within minutes: the 30-min `PENDING_PAYMENT` auto-fail (reconcile-pending)
+and the 15-min FX rate lock — a microdeposit sender would systematically trip both, and doing it
+right needs verification-aware dwell plus a requote/redisclose flow. Deferred until that exists
+(likely alongside SetupIntents/saved accounts). An unconnectable bank gets clean en+es copy stating
+we cannot take the payment and nothing was charged. Revisit with pilot data on FC coverage misses.
+
+**2026-07-31 · Pay-step reload recovery = on-demand funding-session endpoint (S3).** The Stripe
+`client_secret` existed only in the confirm response, which the web deliberately discards — so a
+reload at `PENDING_PAYMENT` (or another device) couldn't mount the Element on a tracker URL that is
+reload-safe by design. Options considered: thread the confirm body + sessionStorage (secret
+persisted client-side, dies across tabs/devices, and the recovery path would rot as a rarely-run
+branch) vs. a read-only endpoint. Chose `GET /v1/transfers/:id/funding-session`: the server
+retrieves the live PI by `funding_payment_ref` on demand — the secret is never persisted in our DB,
+never threaded through client state, never logged; every mount exercises the same path so it can't
+rot. The publishable key rides on the same response (new `STRIPE_PUBLISHABLE_KEY`, required
+alongside the two secrets under `FUNDING_PROCESSOR=stripe`) instead of a `NEXT_PUBLIC_` build-time
+var: processor selection and key stay co-located in the API env, and the mock/stripe affordance
+branch stays server-driven — a mock env never loads js.stripe.com at all.
+
 **2026-07-31 · One uncleared send in flight per user; first-transfer hold built but OFF (slice-8 O3).**
 Under instant-front the MXN leaves on `payment_intent.processing` while the sender's ACH debit can
 still bounce for ~T+4, and nothing bounded *stacked unsettled debits* — the amount/velocity caps

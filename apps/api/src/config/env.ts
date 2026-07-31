@@ -69,6 +69,14 @@ const envSchema = z.object({
   // FUNDING_PROCESSOR=stripe selection requires them (superRefine below).
   STRIPE_SECRET_KEY: z.string().min(1).optional(),
   STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
+  // Publishable key (pk_test_…/pk_live_…) — served to the web by the
+  // funding-session endpoint (PR-S3) so the browser can mount the Payment
+  // Element. Public by design, but it lives here (not a NEXT_PUBLIC_ build-time
+  // var) so processor selection and key stay co-located and the mock/stripe
+  // branch stays server-driven. Required alongside the two secrets when
+  // FUNDING_PROCESSOR=stripe: a stripe selection whose web can never render the
+  // pay step is a misconfiguration, so it fails at boot like the others.
+  STRIPE_PUBLISHABLE_KEY: z.string().min(1).optional(),
   // Hard deadline on every Stripe SDK call, same contract and bounds as
   // BRIDGE_TIMEOUT_SECONDS: the funding seam's timeout contract feeds the
   // 10-min CLAIM_STALE_AFTER_MS derivation in services/refunds.ts, so an
@@ -182,7 +190,11 @@ const envSchema = z.object({
 // Exported for tests; runtime uses the singleton `env` below.
 export const envSchemaWithRules = envSchema.superRefine((value, ctx) => {
   if (value.FUNDING_PROCESSOR === 'stripe') {
-    for (const key of ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'] as const) {
+    for (const key of [
+      'STRIPE_SECRET_KEY',
+      'STRIPE_WEBHOOK_SECRET',
+      'STRIPE_PUBLISHABLE_KEY',
+    ] as const) {
       if (!value[key]) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
