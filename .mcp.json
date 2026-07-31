@@ -6,6 +6,13 @@
       "env": {
         "SUPABASE_ACCESS_TOKEN": "${SUPABASE_ACCESS_TOKEN}"
       }
+    },
+    "supabase-prod": {
+      "command": "node_modules/.bin/mcp-server-supabase",
+      "args": ["--read-only", "--project-ref=goyfagidfkjyhyepsaup"],
+      "env": {
+        "SUPABASE_ACCESS_TOKEN": "${SUPABASE_ACCESS_TOKEN}"
+      }
     }
   }
 }
