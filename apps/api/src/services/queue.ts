@@ -46,11 +46,22 @@ const CRON_RETRY = { retryLimit: 0 } as const
 
 let bossPromise: Promise<PgBoss> | undefined
 
+// Both processes share this module, but must NOT share pg-boss config: the
+// worker sends + works + schedules and needs the full instance; the API only
+// ever calls send() (two webhook call sites), so it gets a deliberately
+// light instance — no maintenance supervisor, no cron timekeeper, small pool.
+// bossPromise is memoized per-process (API and worker are separate Railway
+// processes), so only the first caller's role actually takes effect.
+const ROLE_OPTIONS = {
+  worker: { max: 4 },
+  api: { max: 2, supervise: false, schedule: false },
+} as const
+
 // Memoizes the start() promise, not just the instance — concurrent callers
 // during startup must share the same in-flight start, or pg-boss would run
 // its schema migration twice. A failed start clears the memo so the next
 // caller retries instead of being wedged on a rejected promise forever.
-export async function getBoss(): Promise<PgBoss> {
+export async function getBoss(role: 'api' | 'worker'): Promise<PgBoss> {
   if (!bossPromise) {
     const connectionString = env.DATABASE_URL
     if (!connectionString) {
@@ -59,7 +70,7 @@ export async function getBoss(): Promise<PgBoss> {
           '(Supabase session-mode pooler, port 5432; transaction mode 6543 will not work)',
       )
     }
-    const boss = new PgBoss(connectionString)
+    const boss = new PgBoss({ connectionString, ...ROLE_OPTIONS[role] })
     // pg-boss emits 'error' for background maintenance failures; without a
     // listener that crashes the process (EventEmitter semantics).
     boss.on('error', (err) => Sentry.captureException(err))
@@ -76,12 +87,15 @@ let queuesPromise: Promise<void> | undefined
 // Creates every Contract A queue (idempotent). The worker calls this at
 // startup; the API send helpers call it lazily so an enqueue never races a
 // not-yet-created queue. Memoized like getBoss, cleared on failure.
-export async function ensureQueues(): Promise<void> {
+export async function ensureQueues(role: 'api' | 'worker'): Promise<void> {
   if (!queuesPromise) {
     queuesPromise = (async () => {
-      const boss = await getBoss()
+      const boss = await getBoss(role)
       await boss.createQueue(JOB_PAYOUT_SUBMIT, { ...SINGLETON_POLICY, ...PAYOUT_SUBMIT_RETRY })
-      await boss.createQueue(JOB_PAYMENT_EVENT_PROCESS, { ...SINGLETON_POLICY, ...PAYMENT_EVENT_RETRY })
+      await boss.createQueue(JOB_PAYMENT_EVENT_PROCESS, {
+        ...SINGLETON_POLICY,
+        ...PAYMENT_EVENT_RETRY,
+      })
       await boss.createQueue(JOB_PAYOUT_SWEEP, CRON_RETRY)
       await boss.createQueue(JOB_PAYOUT_POLL, CRON_RETRY)
       await boss.createQueue(JOB_RECONCILE_PENDING, CRON_RETRY)
@@ -98,9 +112,12 @@ export async function ensureQueues(): Promise<void> {
 
 // singletonKey = transferId: at most one queued/active submit per transfer,
 // so webhook enqueue + sweep re-enqueue can never double-submit.
-export async function enqueuePayoutSubmit(transferId: string): Promise<string | null> {
-  await ensureQueues()
-  const boss = await getBoss()
+export async function enqueuePayoutSubmit(
+  transferId: string,
+  role: 'api' | 'worker',
+): Promise<string | null> {
+  await ensureQueues(role)
+  const boss = await getBoss(role)
   const payload: PayoutSubmitPayload = { transferId }
   const options: SendOptions = { singletonKey: transferId, ...PAYOUT_SUBMIT_RETRY }
   return boss.send(JOB_PAYOUT_SUBMIT, payload, options)
@@ -108,9 +125,12 @@ export async function enqueuePayoutSubmit(transferId: string): Promise<string | 
 
 // singletonKey = paymentEventId: webhook enqueue + sweep re-enqueue of stale
 // 'received' events collapse to one processing job per event.
-export async function enqueuePaymentEventProcess(paymentEventId: string): Promise<string | null> {
-  await ensureQueues()
-  const boss = await getBoss()
+export async function enqueuePaymentEventProcess(
+  paymentEventId: string,
+  role: 'api' | 'worker',
+): Promise<string | null> {
+  await ensureQueues(role)
+  const boss = await getBoss(role)
   const payload: PaymentEventProcessPayload = { paymentEventId }
   const options: SendOptions = { singletonKey: paymentEventId, ...PAYMENT_EVENT_RETRY }
   return boss.send(JOB_PAYMENT_EVENT_PROCESS, payload, options)

@@ -102,7 +102,7 @@ describe('pollPayouts', () => {
         providerRef: 'bt-1',
       }),
     )
-    expect(enqueueEvent).toHaveBeenCalledWith('ev-1')
+    expect(enqueueEvent).toHaveBeenCalledWith('ev-1', 'worker')
   })
 
   it('does not re-enqueue an already-recorded state (dedupe)', async () => {
@@ -161,7 +161,7 @@ describe('pollPayouts', () => {
     expect(recordEvent).toHaveBeenCalledWith(
       expect.objectContaining({ externalEventId: 'bt-9:refunded', eventType: 'refunded', transferId: 'tr-9' }),
     )
-    expect(enqueueEvent).toHaveBeenCalledWith('ev-9')
+    expect(enqueueEvent).toHaveBeenCalledWith('ev-9', 'worker')
   })
 
   it('AUTO_REFUND on: an already-recorded refunded state does not re-enqueue (dedupe)', async () => {
@@ -217,6 +217,6 @@ describe('pollPayouts', () => {
       .mockResolvedValueOnce({ bridgeTransferId: 'bt-2', state: 'payment_submitted', sourceAmount: '198.55' })
     recordEvent.mockResolvedValue({ id: 'ev-2', inserted: true })
     await expect(pollPayouts()).rejects.toThrow(/1\/2 polls failed/)
-    expect(enqueueEvent).toHaveBeenCalledWith('ev-2') // tr-2 still processed
+    expect(enqueueEvent).toHaveBeenCalledWith('ev-2', 'worker') // tr-2 still processed
   })
 })

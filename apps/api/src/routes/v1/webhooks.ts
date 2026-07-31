@@ -87,11 +87,7 @@ function verifySignature(rawBody: Buffer, signatureHeader: string, publicKeyPem:
   // Bridge signs RSA-PKCS1v15 over sha256(sha256("{t}.{body}")). The outer
   // sha256 happens inside RSA-SHA256 verification, so hash exactly once here.
   // Use the timestamp string as received — re-serializing could alter it.
-  const digest = crypto
-    .createHash('sha256')
-    .update(`${parsed.t}.`)
-    .update(rawBody)
-    .digest()
+  const digest = crypto.createHash('sha256').update(`${parsed.t}.`).update(rawBody).digest()
 
   const verifier = crypto.createVerify('RSA-SHA256')
   verifier.update(digest)
@@ -107,10 +103,8 @@ export async function webhooksRoute(server: FastifyInstance) {
   // HMAC must be computed over the exact bytes Bridge sent, so JSON parsing
   // is deferred until after signature verification. Scoped to this plugin's
   // encapsulation context — other routes keep the default JSON parser.
-  server.addContentTypeParser(
-    'application/json',
-    { parseAs: 'buffer' },
-    (_request, body, done) => done(null, body),
+  server.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_request, body, done) =>
+    done(null, body),
   )
 
   server.post(
@@ -235,7 +229,7 @@ export async function webhooksRoute(server: FastifyInstance) {
 
         if (recorded.inserted) {
           try {
-            await enqueuePaymentEventProcess(recorded.id)
+            await enqueuePaymentEventProcess(recorded.id, 'api')
           } catch (enqueueErr) {
             // still ack — payout.sweep re-enqueues stale received events
             server.log.warn(
@@ -522,7 +516,7 @@ export async function webhooksRoute(server: FastifyInstance) {
           // enqueue failure still acks — payout.sweep re-enqueues within a
           // minute (decision 3), and the stately singleton dedupes.
           try {
-            await enqueuePayoutSubmit(transfer.id)
+            await enqueuePayoutSubmit(transfer.id, 'api')
           } catch (enqueueErr) {
             server.log.warn(
               { webhook: 'funding', transferId: transfer.id },

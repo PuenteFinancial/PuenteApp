@@ -30,7 +30,8 @@ export async function sweepPayouts(): Promise<number> {
     .or(
       `submit_attempted_at.is.null,and(submit_attempted_at.lt.${staleClaimCutoff},provider_transfer_ref.is.null)`,
     )
-  if (transfersError) throw new Error(`payout-sweep transfers select failed: ${transfersError.message}`)
+  if (transfersError)
+    throw new Error(`payout-sweep transfers select failed: ${transfersError.message}`)
 
   const { data: events, error: eventsError } = await supabaseAdmin
     .from('payment_events')
@@ -43,7 +44,7 @@ export async function sweepPayouts(): Promise<number> {
   const failures: string[] = []
   for (const row of (transfers ?? []) as { id: string }[]) {
     try {
-      await enqueuePayoutSubmit(row.id)
+      await enqueuePayoutSubmit(row.id, 'worker')
       enqueued++
     } catch (err) {
       failures.push(err instanceof Error ? err.message : String(err))
@@ -51,7 +52,7 @@ export async function sweepPayouts(): Promise<number> {
   }
   for (const row of (events ?? []) as { id: string }[]) {
     try {
-      await enqueuePaymentEventProcess(row.id)
+      await enqueuePaymentEventProcess(row.id, 'worker')
       enqueued++
     } catch (err) {
       failures.push(err instanceof Error ? err.message : String(err))

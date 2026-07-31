@@ -129,7 +129,7 @@ describe('POST /v1/dev/transfers/:id/simulate-funding', () => {
         actor: 'webhook:funding',
       }),
     )
-    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID)
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID, 'api')
   })
 
   it('echoes the confirm-time payment ref instead of minting a new one', async () => {

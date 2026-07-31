@@ -75,9 +75,9 @@ describe('sweepPayouts', () => {
     )
     expect(await sweepPayouts()).toBe(3)
     expect(enqueueSubmit).toHaveBeenCalledTimes(2)
-    expect(enqueueSubmit).toHaveBeenNthCalledWith(1, 'tr-1')
-    expect(enqueueSubmit).toHaveBeenNthCalledWith(2, 'tr-2')
-    expect(enqueueEvent).toHaveBeenCalledWith('ev-1')
+    expect(enqueueSubmit).toHaveBeenNthCalledWith(1, 'tr-1', 'worker')
+    expect(enqueueSubmit).toHaveBeenNthCalledWith(2, 'tr-2', 'worker')
+    expect(enqueueEvent).toHaveBeenCalledWith('ev-1', 'worker')
   })
 
   it('attempts every enqueue before throwing on a failure', async () => {

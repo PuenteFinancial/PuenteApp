@@ -409,7 +409,7 @@ describe('POST /v1/webhooks/funding', () => {
     const cancelableUntil = call['cancelableUntil'] as Date
     expect(cancelableUntil.getTime() - paymentAt.getTime()).toBe(30 * 60 * 1000)
     // Immediate payout (slice 5): the FUNDED transition enqueues the submit job
-    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID)
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID, 'api')
     await app.close()
   })
 
@@ -852,7 +852,7 @@ describe('POST /v1/webhooks/bridge — transfer events', () => {
         providerRef: 'bt-1',
       }),
     )
-    expect(enqueuePaymentEventProcess).toHaveBeenCalledWith('ev-1')
+    expect(enqueuePaymentEventProcess).toHaveBeenCalledWith('ev-1', 'api')
     await app.close()
   })
 
