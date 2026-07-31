@@ -69,6 +69,26 @@ export interface FundingClientSession {
   fields: Record<string, string>
 }
 
+// ── Reconciliation reads (slice-8 O2) ───────────────────────────────────────
+// Read-only inputs for the daily ledger.reconcile cron. OPTIONAL on the seam:
+// the mock has no external truth to reconcile against, so it simply doesn't
+// implement them and the recon checks report themselves `skipped` — no mock
+// theater, no pretend findings.
+
+export interface FundingPaymentStatus {
+  paymentRef: string
+  /** Raw processor status (Stripe PI: requires_*, processing, succeeded, canceled…). */
+  status: string
+}
+
+export interface FundingPaymentListItem {
+  paymentRef: string
+  /** Our transfers.id echoed in processor metadata; null = orphan candidate. */
+  transferRef: string | null
+  status: string
+  createdAt: string
+}
+
 // The result of a funding-undo op (slice 6). Persisted to
 // transfers.refund_payment_ref (one undo path per transfer). `pending` is for a
 // real async return (Stripe ACH refund); the mock void/refund is always
@@ -153,6 +173,14 @@ export interface FundingProcessor {
    * (bounded by the SDK timeout like every other call); mock returns no fields.
    */
   getClientSession(input: { paymentRef: string }): Promise<FundingClientSession>
+  /**
+   * Reconciliation reads (slice-8 O2, both OPTIONAL — see the interface note):
+   * the live status of one payment, and the newest payments on the account
+   * (orphan detection). Read-only; never create or mutate processor objects.
+   * A full page from listRecentPayments means TRUNCATED, not "everything".
+   */
+  getPaymentStatus?(input: { paymentRef: string }): Promise<FundingPaymentStatus>
+  listRecentPayments?(input: { createdAfter: Date; limit: number }): Promise<FundingPaymentListItem[]>
   // The two funding-undo ops (slice 6), mirroring the initiateFunding seam.
   // Distinct money movements → distinct ledger batches: voidFunding cancels an
   // UNCLEARED pull (Stripe: cancel the PaymentIntent) so nothing ever settled —

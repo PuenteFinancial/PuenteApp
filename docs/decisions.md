@@ -6,6 +6,23 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-07-31 · Reconciliation = detection-only checks registry; Stripe legs never self-heal (O2).**
+The daily `ledger.reconcile` cron runs a registry of independent checks (each returns
+pass/findings/skipped/error) rather than one monolithic sweep: one check failing must not blind
+the others, and the per-check rows in `reconciliation_runs` are what the 8.5 ops page will render.
+The only auto-action in the registry is the Bridge state sweep, which literally re-runs
+`payout.poll` — the existing idempotent replay path. The Stripe legs (PI status vs state,
+orphans) **detect and page only**: funding webhooks are handled inline in the route, so there is
+no funding-side replay job to hand a synthesized event to — the runbook action is resending the
+event from the Stripe dashboard, which the route dedupes. Deliberately deferred: `cash_clearing`
+↔ Stripe-balance/bank comparison (meaningless until settlement cash legs exist — nothing relieves
+`funding_receivable` on `funding_cleared` today, which is also why the negative-balance guard
+excludes `cash_clearing`), and fee-line reconciliation. The `state_postings` self-check encodes
+the state⟺posting rules from the batch builders; `UNDER_REVIEW`/`FUNDING_REVERSED` get only the
+FUNDED-posting rule because their open positions are entry-path-dependent (human investigation,
+not a mechanical rule). Aging thresholds are constants, not env: they encode process clocks
+(30-min auto-fail, SPEI seconds, ACH T+4), not tunable policy.
+
 **2026-07-31 · Instant-only bank verification; microdeposits deferred (S3).** The Payment Element
 mounts with the server-pinned `verification_method: 'instant'` (Financial Connections) and no
 fallback. Microdeposit verification takes 1–2 business days, which collides with two clocks that
