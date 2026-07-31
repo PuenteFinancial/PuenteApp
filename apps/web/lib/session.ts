@@ -1,4 +1,5 @@
 import { cookies, headers } from 'next/headers'
+import { internalApiUrl } from './apiBaseUrl'
 
 export const SESSION_COOKIE = 'puente_session'
 
@@ -37,8 +38,7 @@ export function apiFetch(
   token?: string | null,
   init: RequestInit = {},
 ): Promise<Response> {
-  const apiUrl = process.env.INTERNAL_API_URL
-  if (!apiUrl) throw new Error('INTERNAL_API_URL is not configured')
+  const apiUrl = internalApiUrl()
 
   return fetch(`${apiUrl}${path}`, {
     ...init,

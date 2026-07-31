@@ -64,6 +64,7 @@ export type Translations = {
     steps: { h: string }[]
     next: string
     back: string
+    errors: { generic: string; validation: string }
   }
   footer: { tagline: string; privacyLink: string; termsLink: string; disclaimer: [string, string]; disclaimer2: string; rights: string; note: string }
   onboarding: {
@@ -345,6 +346,10 @@ const en: Translations = {
     ],
     next: 'Next',
     back: 'Back',
+    errors: {
+      generic: 'Something went wrong on our end. Please try again.',
+      validation: 'Please check your answers and try again.',
+    },
   },
   footer: {
     tagline: 'Send money.\nBuild credit.',
@@ -712,6 +717,10 @@ const es: Translations = {
     ],
     next: 'Siguiente',
     back: 'Atrás',
+    errors: {
+      generic: 'Algo salió mal de nuestro lado. Por favor, inténtalo de nuevo.',
+      validation: 'Por favor revisa tus respuestas e inténtalo de nuevo.',
+    },
   },
   footer: {
     tagline: 'Envía dinero.\nCrea crédito.',
