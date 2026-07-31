@@ -54,6 +54,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 403 | `forbidden` | Not the owner of the resource |
 | 403 | `kyc_required` | Sender KYC not `approved` |
 | 403 | `limit_exceeded` | Per-user transaction limit hit (per-transaction / day / month / 6 months / sends per day) |
+| 403 | `transfer_in_progress` | Uncleared-exposure cap: the sender already has a committed send awaiting ACH settlement |
 | 404 | `not_found` | Unknown resource |
 | 409 | `conflict` | Illegal state transition |
 | 409 | `idempotency_conflict` | Idempotency-Key reused with different body |
@@ -216,7 +217,9 @@ do not assume "the client will just retry" heals it.
 Errors: `quote_expired` (409), `conflict` (409 — quote already used / destination archived since
 quoting), `kyc_required` (403), `not_found` (404), `idempotency_conflict` (409),
 `not_configured` (503 — funding processor unavailable), `limit_exceeded` (403 — a per-user
-transaction limit would be breached; see `services/risk.ts`). Rate-limited 10/min/user. The disclosure content (en + es, built from the
+transaction limit would be breached; see `services/risk.ts`), `transfer_in_progress` (403 — the
+uncleared-exposure cap: a committed send is still awaiting settlement; also emitted by
+`POST /v1/quotes` as the earliest friendly gate). Rate-limited 10/min/user. The disclosure content (en + es, built from the
 quote snapshot, incl. cancellation right and the §1005.33(h) wrong-account warning) is stored
 append-only on `disclosures`; the response carries the summary.
 

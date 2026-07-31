@@ -50,8 +50,12 @@ vi.mock('../services/queue.js', () => ({
 }))
 
 const risk = vi.hoisted(() => vi.fn())
+const unclearedCap = vi.hoisted(() => vi.fn())
+const clearedHistory = vi.hoisted(() => vi.fn())
 vi.mock('../services/risk.js', () => ({
   assessTransferRisk: (...args: unknown[]) => risk(...args),
+  assessUnclearedCap: (...args: unknown[]) => unclearedCap(...args),
+  hasClearedHistory: (...args: unknown[]) => clearedHistory(...args),
 }))
 
 const captureMessage = vi.hoisted(() => vi.fn())
@@ -65,6 +69,7 @@ vi.mock('@sentry/node', () => ({
 
 const envMock = vi.hoisted(() => ({
   WAIT_FOR_CLEARING: false,
+  FIRST_TRANSFER_HOLD: false,
   FX_MAX_DRIFT_BPS: 200,
   FX_MAX_QUOTE_AGE_MINUTES: 240,
   BRIDGE_TREASURY_WALLET_ID: 'wallet_1',
@@ -105,6 +110,7 @@ const baseTransfer = {
   provider_transfer_ref: null,
   payout_hold_reason: null,
   submit_attempted_at: null,
+  disclosure_accepted_at: '2026-07-30T12:00:00.000Z' as string | null,
 }
 
 const queues: Record<string, Chain[]> = {}
@@ -138,6 +144,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   for (const k of Object.keys(queues)) delete queues[k]
   envMock.WAIT_FOR_CLEARING = false
+  envMock.FIRST_TRANSFER_HOLD = false
   envMock.FX_MAX_DRIFT_BPS = 200
   envMock.FX_MAX_QUOTE_AGE_MINUTES = 240
   envMock.BRIDGE_TREASURY_WALLET_ID = 'wallet_1'
@@ -148,6 +155,9 @@ beforeEach(() => {
   })
   // Per-user velocity backstop passes by default; the trip test overrides.
   risk.mockResolvedValue({ ok: true })
+  // Uncleared-exposure gates pass by default; trip tests override.
+  unclearedCap.mockResolvedValue({ ok: true })
+  clearedHistory.mockResolvedValue(true)
 })
 
 describe('submitPayout — short-circuits (no Bridge call)', () => {
@@ -193,6 +203,86 @@ describe('submitPayout — short-circuits (no Bridge call)', () => {
     queues.transfers = [chain({ data: baseTransfer, error: null }), chain({ data: [], error: null })]
     expect(await submitPayout('tr-1')).toBe(0)
     expect(createPayout).not.toHaveBeenCalled()
+  })
+})
+
+describe('submitPayout — uncleared-exposure gates (slice-8 O3)', () => {
+  it('cap tripped → 0 with no claim, no hold, one Sentry warning', async () => {
+    const { claim } = setupHappy()
+    unclearedCap.mockResolvedValue({ ok: false, blockerTransferId: 'tr-blocker' })
+    expect(await submitPayout('tr-1')).toBe(0)
+    expect(createPayout).not.toHaveBeenCalled()
+    // Self-heal, not a hold: any second transfers-table call would consume the
+    // claim chain — neither the claim UPDATE nor a placeHold may run.
+    expect(claim.update).not.toHaveBeenCalled()
+    expect(setFingerprint).toHaveBeenCalledWith(['uncleared-cap-wait', 'tr-1'])
+    expect(captureMessage).toHaveBeenCalledWith(
+      'uncleared cap reached — payout submission waiting',
+      'warning',
+    )
+  })
+
+  it('passes the transfer’s own (acceptedAt, id) as the older-wins tuple', async () => {
+    setupHappy()
+    await submitPayout('tr-1')
+    expect(unclearedCap).toHaveBeenCalledWith({
+      userId: 'user-1',
+      excludeTransferId: 'tr-1',
+      olderThan: { acceptedAt: '2026-07-30T12:00:00.000Z', transferId: 'tr-1' },
+    })
+  })
+
+  it('null disclosure_accepted_at (dev-script row) → symmetric count, no olderThan', async () => {
+    setupHappy({ disclosure_accepted_at: null })
+    await submitPayout('tr-1')
+    expect(unclearedCap).toHaveBeenCalledWith(expect.objectContaining({ olderThan: null }))
+  })
+
+  it('runs after the float ceiling: a tripped ceiling short-circuits it', async () => {
+    setupHappy()
+    floatCeiling.mockResolvedValue({ tripped: true, balanceMinor: 100, ceilingMinor: 100 })
+    expect(await submitPayout('tr-1')).toBe(0)
+    expect(unclearedCap).not.toHaveBeenCalled()
+  })
+
+  it('runs before the velocity backstop: a tripped cap prevents the risk query', async () => {
+    setupHappy()
+    unclearedCap.mockResolvedValue({ ok: false, blockerTransferId: 'tr-blocker' })
+    expect(await submitPayout('tr-1')).toBe(0)
+    expect(risk).not.toHaveBeenCalled()
+  })
+
+  it('FIRST_TRANSFER_HOLD on + uncleared + unproven → silent 0 (no Sentry, no claim)', async () => {
+    envMock.FIRST_TRANSFER_HOLD = true
+    clearedHistory.mockResolvedValue(false)
+    const load = chain({ data: baseTransfer, error: null })
+    route('transfers', load)
+    expect(await submitPayout('tr-1')).toBe(0)
+    expect(load.update).not.toHaveBeenCalled()
+    expect(payability).not.toHaveBeenCalled()
+    expect(createPayout).not.toHaveBeenCalled()
+    expect(captureMessage).not.toHaveBeenCalled() // policy mode, not an anomaly
+  })
+
+  it('FIRST_TRANSFER_HOLD on + proven history → proceeds to submission', async () => {
+    envMock.FIRST_TRANSFER_HOLD = true
+    clearedHistory.mockResolvedValue(true)
+    setupHappy()
+    expect(await submitPayout('tr-1')).toBe(1)
+    expect(clearedHistory).toHaveBeenCalledWith('user-1')
+  })
+
+  it('FIRST_TRANSFER_HOLD on + own funding already cleared → no history query', async () => {
+    envMock.FIRST_TRANSFER_HOLD = true
+    setupHappy({ funding_cleared: true })
+    expect(await submitPayout('tr-1')).toBe(1)
+    expect(clearedHistory).not.toHaveBeenCalled()
+  })
+
+  it('flag OFF → zero history queries (the pilot default costs nothing)', async () => {
+    setupHappy()
+    expect(await submitPayout('tr-1')).toBe(1)
+    expect(clearedHistory).not.toHaveBeenCalled()
   })
 })
 
@@ -425,6 +515,11 @@ describe('submitPayout — submission and transition', () => {
 
 describe('submitPayout — crash recovery', () => {
   it('claimed row: skips every guard, re-POSTs from the raw destination ref', async () => {
+    // Arm every O3 gate hostile: if recovery consulted them at all, this run
+    // would block — the assertions below prove the skip is structural.
+    envMock.FIRST_TRANSFER_HOLD = true
+    clearedHistory.mockResolvedValue(false)
+    unclearedCap.mockResolvedValue({ ok: false, blockerTransferId: 'tr-blocker' })
     const load = chain({
       data: { ...baseTransfer, submit_attempted_at: '2026-07-20T12:00:00.000Z' },
       error: null,
@@ -446,6 +541,8 @@ describe('submitPayout — crash recovery', () => {
     expect(payability).not.toHaveBeenCalled()
     expect(floatCeiling).not.toHaveBeenCalled()
     expect(risk).not.toHaveBeenCalled() // the velocity backstop is skipped on recovery too
+    expect(unclearedCap).not.toHaveBeenCalled() // O3 cap backstop skipped on recovery
+    expect(clearedHistory).not.toHaveBeenCalled() // first-transfer hold skipped on recovery
     expect(exchangeRate).not.toHaveBeenCalled()
     expect(load.update).not.toHaveBeenCalled() // no re-claim
     expect(createPayout).toHaveBeenCalledWith(

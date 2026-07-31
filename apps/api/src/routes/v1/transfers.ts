@@ -19,7 +19,12 @@ import {
   type CancellationRequestState,
 } from '../../services/cancellations.js'
 import { requireApprovedUser } from './recipients.js'
-import { assessTransferRisk, type RiskReason } from '../../services/risk.js'
+import {
+  assessTransferRisk,
+  assessUnclearedCap,
+  UNCLEARED_CAP_MESSAGE,
+  type RiskReason,
+} from '../../services/risk.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 const TRANSFER_COLUMNS =
@@ -286,6 +291,15 @@ export async function transfersRoute(server: FastifyInstance) {
         return sendError(reply, 503, 'not_configured', 'Funding is not available yet')
       }
 
+      // Uncleared-exposure cap (slice-8 O3): re-checked at create because the
+      // quote→create gap can be minutes and another send may have committed
+      // since. Still UX-only — confirm and the FUNDED→SUBMITTED backstop are
+      // authoritative.
+      const uncleared = await assessUnclearedCap({ userId })
+      if (!uncleared.ok) {
+        return sendError(reply, 403, 'transfer_in_progress', UNCLEARED_CAP_MESSAGE)
+      }
+
       // Owner-scoped quote load with the destination/recipient still-active
       // re-check: archiving after quoting must not produce a transfer.
       const { data: quoteData } = await supabaseAdmin
@@ -472,6 +486,19 @@ export async function transfersRoute(server: FastifyInstance) {
       // than being stranded behind sends that committed since. The FUNDED→SUBMITTED
       // backstop (payout-submit.ts) authoritatively catches the same-instant race.
       if (!transfer.disclosure_accepted_at) {
+        // Uncleared-exposure cap first (slice-8 O3): the same first-commit
+        // rationale as the velocity gate below — checked before acceptance is
+        // recorded so a blocked send never occupies a slot, and a retry of an
+        // already-committed send keeps its slot. excludeTransferId is defensive
+        // (this row is unaccepted, so it cannot count yet).
+        const uncleared = await assessUnclearedCap({
+          userId,
+          excludeTransferId: transfer.id,
+        })
+        if (!uncleared.ok) {
+          return sendError(reply, 403, 'transfer_in_progress', UNCLEARED_CAP_MESSAGE)
+        }
+
         const verdict = await assessTransferRisk({
           userId,
           sendAmountMinor: transfer.send_amount_minor,

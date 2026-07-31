@@ -1,15 +1,18 @@
 // Integration tests against a real local Supabase stack (Docker).
-// Gated: RUN_DB_TESTS=1. Pins the AUTHORITATIVE per-user transaction-limit query
-// that the unit tests can only mock — proving, end-to-end through PostgREST, the
-// per-transaction cap, the rolling day/month/6-month send-amount tiers, the
-// per-day count, user-scoping, the committed (disclosure-accepted) filter, the
-// window lower bound (the `.gte` the unit test can't exercise), unwound-state
-// exclusion, and excludeTransferId. Seeds transfers by raw SQL (the
-// enforce_transfers_terms_frozen trigger is BEFORE UPDATE only, so any initial
-// state — and any send amount — is insertable).
+// Gated: RUN_DB_TESTS=1. Pins the AUTHORITATIVE per-user risk queries that the
+// unit tests can only mock — proving, end-to-end through PostgREST: for the
+// transaction limits, the per-transaction cap, the rolling day/month/6-month
+// send-amount tiers, the per-day count, user-scoping, the committed
+// (disclosure-accepted) filter, the window lower bound (the `.gte` the unit
+// test can't exercise), unwound-state exclusion, and excludeTransferId; for the
+// uncleared-exposure cap (slice-8 O3), the funding_cleared filter, the ABSENCE
+// of any window bound, and the older-wins tuple ordering against real
+// PostgREST timestamp formats (`+00:00` row values vs `Z`-form inputs). Seeds
+// transfers by raw SQL (the enforce_transfers_terms_frozen trigger is BEFORE
+// UPDATE only, so any initial state — and any send amount — is insertable).
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
 import { Client } from 'pg'
-import { assessTransferRisk } from './risk.js'
+import { assessTransferRisk, assessUnclearedCap, hasClearedHistory } from './risk.js'
 import { env } from '../config/env.js'
 
 const runDb = process.env.RUN_DB_TESTS === '1'
@@ -32,8 +35,13 @@ const RECENT = iso(1 * HOUR) // today (in every window)
 const WEEKS = iso(10 * DAY) // in the month + 6-month windows, not today
 const MONTHS = iso(60 * DAY) // in the 6-month window only
 const OUTSIDE = iso(200 * DAY) // outside every window
+// Uncleared-cap ordering fixtures: two distinct commit instants plus one
+// shared instant for the exact-tie case.
+const T_OLD = iso(3 * HOUR)
+const T_NEW = iso(2 * HOUR)
+const TIE = iso(4 * HOUR)
 
-describe.skipIf(!runDb)('assessTransferRisk (integration, local Supabase)', () => {
+describe.skipIf(!runDb)('risk service (integration, local Supabase)', () => {
   let db: Client
   let destId: string
   let otherDestId: string
@@ -66,6 +74,7 @@ describe.skipIf(!runDb)('assessTransferRisk (integration, local Supabase)', () =
     sendMinor: number
     userId?: string
     destinationId?: string
+    fundingCleared?: boolean
   }): Promise<string> => {
     const userId = opts.userId ?? USER
     const destinationId = opts.destinationId ?? destId
@@ -82,10 +91,10 @@ describe.skipIf(!runDb)('assessTransferRisk (integration, local Supabase)', () =
       `insert into public.transfers (user_id, payout_destination_id, quote_id,
          send_amount_minor, send_currency, receive_amount_minor, receive_currency,
          fee_amount_minor, fee_currency, fx_rate, fx_rate_at, idempotency_key, state,
-         disclosure_accepted_at)
-       values ($1, $2, $3, $4, 'USD', 396014, 'MXN', 0, 'USD', 19.9997, now(), $5, $6, $7)
+         disclosure_accepted_at, funding_cleared)
+       values ($1, $2, $3, $4, 'USD', 396014, 'MXN', 0, 'USD', 19.9997, now(), $5, $6, $7, $8)
        returning id`,
-      [userId, destinationId, quote.rows[0].id, opts.sendMinor, `risk-db-${seq}`, opts.state, opts.committedAt],
+      [userId, destinationId, quote.rows[0].id, opts.sendMinor, `risk-db-${seq}`, opts.state, opts.committedAt, opts.fundingCleared ?? false],
     )
     return transfer.rows[0].id as string
   }
@@ -208,6 +217,130 @@ describe.skipIf(!runDb)('assessTransferRisk (integration, local Supabase)', () =
     await expect(assessTransferRisk({ userId: USER, sendAmountMinor: 10_000 })).resolves.toEqual({
       ok: false,
       reason: 'daily',
+    })
+  })
+
+  describe('assessUnclearedCap (slice-8 O3)', () => {
+    it('blocks on an uncleared committed send regardless of age — NO window bound', async () => {
+      // OUTSIDE (200d ago) is beyond every velocity window; the cap must still
+      // see it — "until cleared" has no horizon.
+      const blocker = await seedTransfer({ state: 'COMPLETED', committedAt: OUTSIDE, sendMinor: 100 })
+      await expect(assessUnclearedCap({ userId: USER })).resolves.toEqual({
+        ok: false,
+        blockerTransferId: blocker,
+      })
+    })
+
+    it('a cleared send frees the slot', async () => {
+      await seedTransfer({
+        state: 'COMPLETED',
+        committedAt: RECENT,
+        sendMinor: 100,
+        fundingCleared: true,
+      })
+      await expect(assessUnclearedCap({ userId: USER })).resolves.toEqual({ ok: true })
+    })
+
+    it('ignores uncommitted, unwound, and other users’ sends; excludeTransferId omits self', async () => {
+      await seedTransfer({ state: 'PENDING_PAYMENT', committedAt: null, sendMinor: 100 }) // uncommitted
+      await seedTransfer({ state: 'CANCELED', committedAt: RECENT, sendMinor: 100 }) // unwound
+      await seedTransfer({ state: 'PAYMENT_FAILED', committedAt: RECENT, sendMinor: 100 }) // unwound
+      await seedTransfer({
+        state: 'FUNDED',
+        committedAt: RECENT,
+        sendMinor: 100,
+        userId: OTHER_USER,
+        destinationId: otherDestId,
+      }) // other user
+      await expect(assessUnclearedCap({ userId: USER })).resolves.toEqual({ ok: true })
+
+      const self = await seedTransfer({ state: 'FUNDED', committedAt: RECENT, sendMinor: 100 })
+      await expect(assessUnclearedCap({ userId: USER })).resolves.toMatchObject({ ok: false })
+      await expect(
+        assessUnclearedCap({ userId: USER, excludeTransferId: self }),
+      ).resolves.toEqual({ ok: true })
+    })
+
+    it('olderThan counts only strictly-older rows — through real PostgREST timestamps', async () => {
+      // The stored row comes back from PostgREST in `+00:00` form while the
+      // worker passes the Z-form it read at load; both must land on the same
+      // millisecond for the order to be consistent across racers.
+      const older = await seedTransfer({ state: 'FUNDED', committedAt: T_OLD, sendMinor: 100 })
+      const newer = await seedTransfer({ state: 'FUNDED', committedAt: T_NEW, sendMinor: 100 })
+      // the newer racer sees the older → waits
+      await expect(
+        assessUnclearedCap({
+          userId: USER,
+          excludeTransferId: newer,
+          olderThan: { acceptedAt: T_NEW, transferId: newer },
+        }),
+      ).resolves.toEqual({ ok: false, blockerTransferId: older })
+      // the older racer sees nothing older → submits
+      await expect(
+        assessUnclearedCap({
+          userId: USER,
+          excludeTransferId: older,
+          olderThan: { acceptedAt: T_OLD, transferId: older },
+        }),
+      ).resolves.toEqual({ ok: true })
+    })
+
+    it('breaks an exact same-timestamp tie by id — exactly one winner', async () => {
+      const a = await seedTransfer({ state: 'FUNDED', committedAt: TIE, sendMinor: 100 })
+      const b = await seedTransfer({ state: 'FUNDED', committedAt: TIE, sendMinor: 100 })
+      const [lo, hi] = a < b ? [a, b] : [b, a]
+      // the higher id yields to the lower…
+      await expect(
+        assessUnclearedCap({
+          userId: USER,
+          excludeTransferId: hi,
+          olderThan: { acceptedAt: TIE, transferId: hi },
+        }),
+      ).resolves.toEqual({ ok: false, blockerTransferId: lo })
+      // …and the lower id proceeds
+      await expect(
+        assessUnclearedCap({
+          userId: USER,
+          excludeTransferId: lo,
+          olderThan: { acceptedAt: TIE, transferId: lo },
+        }),
+      ).resolves.toEqual({ ok: true })
+    })
+  })
+
+  describe('hasClearedHistory (slice-8 O3)', () => {
+    it('false with no cleared sends, true once one clears', async () => {
+      await seedTransfer({ state: 'COMPLETED', committedAt: RECENT, sendMinor: 100 })
+      await expect(hasClearedHistory(USER)).resolves.toBe(false)
+      await seedTransfer({
+        state: 'COMPLETED',
+        committedAt: RECENT,
+        sendMinor: 100,
+        fundingCleared: true,
+      })
+      await expect(hasClearedHistory(USER)).resolves.toBe(true)
+    })
+
+    it('a clawed-back clearing (FUNDING_REVERSED) is not proof', async () => {
+      await seedTransfer({
+        state: 'FUNDING_REVERSED',
+        committedAt: RECENT,
+        sendMinor: 100,
+        fundingCleared: true,
+      })
+      await expect(hasClearedHistory(USER)).resolves.toBe(false)
+    })
+
+    it('is scoped to the user', async () => {
+      await seedTransfer({
+        state: 'COMPLETED',
+        committedAt: RECENT,
+        sendMinor: 100,
+        fundingCleared: true,
+        userId: OTHER_USER,
+        destinationId: otherDestId,
+      })
+      await expect(hasClearedHistory(USER)).resolves.toBe(false)
     })
   })
 })

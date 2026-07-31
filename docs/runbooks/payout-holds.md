@@ -165,3 +165,23 @@ alert is fingerprinted, so it fires once per episode, not per retry.
 3. Raise `FLOAT_CEILING_MINOR` **only with Joshua's sign-off** — it is the aggregate fronting
    exposure cap, not a tuning knob. (Per-user velocity landed in slice 7 PR5 — see `velocity_review`
    above; the per-user dollar-outstanding cap and the broader risk engine remain slice 8.)
+
+## FUNDED with no hold reason — the three deliberate self-heal waits
+
+A `FUNDED` row that isn't advancing and has `payout_hold_reason IS NULL` is (float ceiling aside)
+in one of three **intentional** waits, all resumed automatically by the 1-minute sweep — release
+nothing:
+
+| Wait | How to recognize it | Frees when |
+|---|---|---|
+| `WAIT_FOR_CLEARING=true` | Flag on; row has `funding_cleared=false` | Its own `funding_cleared` lands |
+| `FIRST_TRANSFER_HOLD=true` | Flag on; row uncleared **and** the user has no send with `funding_cleared=true` outside `FUNDING_REVERSED` | Its own `funding_cleared` lands |
+| Uncleared cap (slice-8 O3) | Sentry `uncleared cap reached` with fingerprint `['uncleared-cap-wait', <transferId>]` (one issue **per waiting transfer**, context names the `blockerTransferId`); the user has an older committed-uncleared send | The **blocker** clears or unwinds |
+
+The cap wait normally resolves within the ACH window (~T+4). If it persists past that, the blocker
+itself is stuck — a bounced pull (post-FUNDED `funding_failed` is stale-logged; `funding_reversed`
+is recorded-and-deferred) leaves the sender capped **until ops resolves the blocker row**; that is
+intended (their exposure is genuinely live), so investigate the blocker, not the waiter.
+
+Dev/staging: clearing is script-only — free a slot with
+`pnpm tsx scripts/fire-funding-webhook.ts <blockerTransferId> cleared`.

@@ -20,7 +20,7 @@ import {
   BridgeApiError,
 } from '../services/bridge.js'
 import { enqueuePaymentEventProcess } from '../services/queue.js'
-import { assessTransferRisk } from '../services/risk.js'
+import { assessTransferRisk, assessUnclearedCap, hasClearedHistory } from '../services/risk.js'
 
 // The payout submission job (`payout.submit`) — the ONLY code path that asks
 // Bridge to move money. Ordering is load → cheap gates → claim → Bridge POST →
@@ -48,6 +48,11 @@ interface SubmitTransferRow {
   provider_transfer_ref: string | null
   payout_hold_reason: string | null
   submit_attempted_at: string | null
+  // Nullable in the type even though prod writes acceptance strictly before
+  // funding initiation: the dev fire-funding-webhook script can drive an
+  // unconfirmed transfer to FUNDED, and the uncleared-cap ordering must not
+  // crash on it (null → symmetric count, no olderThan).
+  disclosure_accepted_at: string | null
 }
 
 // Bridge states the PR-3 event processor does nothing with — no point
@@ -101,7 +106,7 @@ export async function submitPayout(transferId: string): Promise<number> {
   const { data: transferData, error: transferError } = await supabaseAdmin
     .from('transfers')
     .select(
-      'id, user_id, quote_id, payout_destination_id, state, send_amount_minor, receive_amount_minor, funding_cleared, idempotency_key, provider_transfer_ref, payout_hold_reason, submit_attempted_at',
+      'id, user_id, quote_id, payout_destination_id, state, send_amount_minor, receive_amount_minor, funding_cleared, idempotency_key, provider_transfer_ref, payout_hold_reason, submit_attempted_at, disclosure_accepted_at',
     )
     .eq('id', transferId)
     .maybeSingle()
@@ -127,6 +132,20 @@ export async function submitPayout(transferId: string): Promise<number> {
     // until the risk engine flips WAIT_FOR_CLEARING).
     if (env.WAIT_FOR_CLEARING && !transfer.funding_cleared) return 0
 
+    // First-transfer hold (slice-8 O3, ships OFF): an unproven sender — no
+    // cleanly cleared send yet — waits for their OWN clearing before the MXN
+    // leaves. Same silent-skip shape as WAIT_FOR_CLEARING (deliberate policy
+    // mode, not an anomaly, so no Sentry): no hold reason, and the 1-min sweep
+    // resumes the row when its funding_cleared lands. Flag first: OFF must cost
+    // zero extra queries.
+    if (
+      env.FIRST_TRANSFER_HOLD &&
+      !transfer.funding_cleared &&
+      !(await hasClearedHistory(transfer.user_id))
+    ) {
+      return 0
+    }
+
     const payability = await checkPayability(transfer.payout_destination_id)
     if (!payability.payable) {
       await placeHold(transfer.id, 'payability', { reason: payability.reason })
@@ -144,6 +163,35 @@ export async function submitPayout(transferId: string): Promise<number> {
           ceilingMinor: float.ceilingMinor,
         })
         Sentry.captureMessage('float ceiling tripped — payout submission paused', 'warning')
+      })
+      return 0
+    }
+
+    // Uncleared-cap backstop (slice-8 O3): the authoritative catch for the
+    // same-instant commit race that slipped the confirm-time gate. Self-heal,
+    // NOT a hold — unlike the velocity count below, the blocker drains on its
+    // own (its funding clears within ~T+4 or it unwinds), so the sweep retries
+    // until the slot frees; a hold would demand ops action for a wait that
+    // resolves itself. olderThan makes the race deterministic: the older
+    // committed send submits, the newer waits for it — a symmetric count would
+    // block both forever. The Sentry warning (fingerprint per transfer, so each
+    // waiting row is one issue) surfaces the wait in case the blocker never
+    // clears — then it's the payout-holds runbook's no-hold-reason case.
+    const unclearedCap = await assessUnclearedCap({
+      userId: transfer.user_id,
+      excludeTransferId: transfer.id,
+      olderThan: transfer.disclosure_accepted_at
+        ? { acceptedAt: transfer.disclosure_accepted_at, transferId: transfer.id }
+        : null,
+    })
+    if (!unclearedCap.ok) {
+      Sentry.withScope((scope) => {
+        scope.setFingerprint(['uncleared-cap-wait', transfer.id])
+        scope.setContext('uncleared_cap', {
+          transferId: transfer.id,
+          blockerTransferId: unclearedCap.blockerTransferId,
+        })
+        Sentry.captureMessage('uncleared cap reached — payout submission waiting', 'warning')
       })
       return 0
     }

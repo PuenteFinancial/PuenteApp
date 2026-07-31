@@ -8,6 +8,7 @@ export type ApiErrorCode =
   | 'forbidden'
   | 'kyc_required'
   | 'limit_exceeded'
+  | 'transfer_in_progress'
   | 'not_found'
   | 'conflict'
   | 'idempotency_conflict'

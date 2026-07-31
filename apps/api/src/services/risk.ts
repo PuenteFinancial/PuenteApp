@@ -124,3 +124,114 @@ export async function assessTransferRisk(input: {
 
   return { ok: true }
 }
+
+// Uncleared-exposure cap (slice-8 O3) — bounds how many committed sends a user
+// may have in flight before their ACH pulls settle. Under instant-front the MXN
+// leaves on `payment_intent.processing` while the USD debit can still bounce
+// for ~T+4 (R01), so every uncleared send is live return-risk; the caps above
+// bound dollars and sends-per-day but not *stacked unsettled debits*. Count,
+// not sum, by design (PRD pilot-simple variant): the ledger cannot aggregate
+// per-user (funding_receivable never drains on the happy path — decisions.md
+// 2026-07-27) while transfers.funding_cleared is maintained by both processors.
+//
+// A send occupies its slot from disclosure acceptance (commit-time counting,
+// same rationale as UNWOUND_STATES above) until funding_cleared flips true or
+// the send unwinds. COMPLETED-but-uncleared still counts — payout delivered,
+// debit still revocable, which is exactly the exposure. Deliberately NO time
+// window (unlike the 180d bound above): "until cleared" is the policy, and a
+// row that never clears keeps blocking until ops resolves it.
+
+export type UnclearedVerdict = { ok: true } | { ok: false; blockerTransferId: string }
+
+// Display copy for the cap's 403 (`transfer_in_progress`). Exported so the
+// quote/create/confirm gates share one string; clients branch on the code and
+// the web app renders its own i18n copy.
+export const UNCLEARED_CAP_MESSAGE =
+  'You already have a transfer in progress. You can send again after it clears.'
+
+interface UnclearedRow {
+  id: string
+  disclosure_accepted_at: string
+}
+
+/**
+ * Uncleared-cap check: blocks when the user's committed, un-unwound,
+ * not-yet-cleared sends (excluding `excludeTransferId`) reach
+ * RISK_UNCLEARED_MAX_COUNT. A blocked verdict names the oldest blocker — the
+ * row whose clearing frees the slot next.
+ *
+ * `olderThan` is the submit-time deadlock guard. Two sends can race-commit at
+ * confirm (both gates pass before either records acceptance), and a symmetric
+ * count at the FUNDED→SUBMITTED backstop would then block BOTH forever — each
+ * waiting on the other's clearing, which never starts. Passing the submitting
+ * transfer's own (acceptedAt, id) counts only strictly-older rows, so the
+ * older racer submits and the newer waits for it. The tuple is compared in JS
+ * on (epoch ms, id): both racers compute the same total order, which is all
+ * correctness needs — no reliance on Postgres microsecond fidelity, and the
+ * uuid tiebreak settles same-millisecond commits deterministically.
+ *
+ * Fail-closed like assessTransferRisk: query error or null-without-error
+ * throws (route → 500, worker → pg-boss retry).
+ */
+export async function assessUnclearedCap(input: {
+  userId: string
+  excludeTransferId?: string
+  olderThan?: { acceptedAt: string; transferId: string } | null
+}): Promise<UnclearedVerdict> {
+  let query = supabaseAdmin
+    .from('transfers')
+    .select('id, disclosure_accepted_at')
+    .eq('user_id', input.userId)
+    .not('disclosure_accepted_at', 'is', null)
+    .not('state', 'in', UNWOUND_STATES)
+    .eq('funding_cleared', false)
+  if (input.excludeTransferId) {
+    query = query.neq('id', input.excludeTransferId)
+  }
+
+  const { data, error } = await query
+  if (error || data == null) {
+    throw new Error(`uncleared cap query failed: ${error?.message ?? 'no rows returned'}`)
+  }
+  let rows = data as UnclearedRow[]
+
+  if (input.olderThan) {
+    const olderMs = new Date(input.olderThan.acceptedAt).getTime()
+    const olderId = input.olderThan.transferId
+    rows = rows.filter((row) => {
+      const at = new Date(row.disclosure_accepted_at).getTime()
+      return at < olderMs || (at === olderMs && row.id < olderId)
+    })
+  }
+
+  if (rows.length < env.RISK_UNCLEARED_MAX_COUNT) return { ok: true }
+
+  const oldest = rows.reduce((a, b) => {
+    const diff =
+      new Date(a.disclosure_accepted_at).getTime() - new Date(b.disclosure_accepted_at).getTime()
+    if (diff !== 0) return diff < 0 ? a : b
+    return a.id < b.id ? a : b
+  })
+  return { ok: false, blockerTransferId: oldest.id }
+}
+
+/**
+ * First-transfer-hold predicate: has this user ever had a send clear cleanly?
+ * FUNDING_REVERSED is excluded as proof — a clearing that was later clawed
+ * back demonstrates the opposite (the state is unreachable today; the filter
+ * is future-proofing for when reversal handling lands). Fail-closed: a broken
+ * read throws rather than treating the user as proven.
+ */
+export async function hasClearedHistory(userId: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from('transfers')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('funding_cleared', true)
+    .neq('state', 'FUNDING_REVERSED')
+    .limit(1)
+  if (error || data == null) {
+    throw new Error(`cleared history query failed: ${error?.message ?? 'no rows returned'}`)
+  }
+  return (data as { id: string }[]).length > 0
+}
