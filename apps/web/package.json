@@ -13,6 +13,8 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@stripe/react-stripe-js": "6.8.0",
+    "@stripe/stripe-js": "9.12.1",
     "next": "^15.3.2",
     "posthog-js": "^1.407.2",
     "posthog-node": "^5.46.1",

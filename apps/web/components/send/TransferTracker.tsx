@@ -5,7 +5,8 @@ import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import posthog from 'posthog-js'
 import { useLanguage } from '@/components/LanguageProvider'
-import { parseApiError, errorMessage } from '@/lib/apiError'
+import PayStep from '@/components/send/PayStep'
+import { errorMessage } from '@/lib/apiError'
 import { useIdempotencyKey } from '@/lib/idempotency'
 import { formatUsd, formatMxn, mmss, secondsUntil } from '@/lib/sendFormat'
 import { SUPPORT_EMAIL } from '@/lib/support'
@@ -43,8 +44,6 @@ export default function TransferTracker({
   const [cancelError, setCancelError] = useState('')
   const [supportMessage, setSupportMessage] = useState<{ en: string; es: string } | null>(null)
   const [supportFallback, setSupportFallback] = useState(false)
-  const [simulating, setSimulating] = useState(false)
-  const [simulateError, setSimulateError] = useState('')
   // Set when the poll can't reach the server. The screen keeps showing the last
   // known state, but says so — a silently stale tracker is the worst outcome
   // here, since the user reads it as "my money is still on its way".
@@ -202,27 +201,6 @@ export default function TransferTracker({
     } finally {
       setCanceling(false)
       setArmed(false)
-    }
-  }
-
-  const handleSimulate = async () => {
-    setSimulating(true)
-    setSimulateError('')
-    try {
-      const res = await fetch(`/api/dev/transfers/${transferId}/simulate-funding`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        setSimulateError(errorMessage(parseApiError(body)?.code, t.send.errors))
-        return
-      }
-      posthog.capture('send_funding_simulated', { transfer_id: transferId })
-      await refresh()
-    } catch {
-      setSimulateError(t.send.errors.generic)
-    } finally {
-      setSimulating(false)
     }
   }
 
@@ -438,25 +416,17 @@ export default function TransferTracker({
         </p>
       )}
 
-      {/* Stands in for the Stripe pay step until keys land. Never rendered in
-          production, and the API 404s the endpoint there regardless. */}
-      {canSimulate && transfer.state === 'PENDING_PAYMENT' && (
-        <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
-          <button
-            type="button"
-            className="btn btn--accent btn--sm"
-            disabled={simulating}
-            onClick={handleSimulate}
-          >
-            {simulating ? s.simulating : s.simulate}
-          </button>
-          <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '8px 0 0' }}>{s.simulateNote}</p>
-          {simulateError && (
-            <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '8px 0 0' }}>
-              {simulateError}
-            </p>
-          )}
-        </div>
+      {/* The pay step (PR-S3): Payment Element under the stripe processor, the
+          dev simulate button under mock (non-prod), nothing under prod mock.
+          The affordance decision is server-driven via the funding-session
+          endpoint — PayStep owns the fetch and the branch. */}
+      {transfer.state === 'PENDING_PAYMENT' && (
+        <PayStep
+          transferId={transferId}
+          totalAmountMinor={transfer.totalAmount.amountMinor}
+          canSimulate={canSimulate}
+          onAdvanced={() => void refresh()}
+        />
       )}
 
       <Link href="/dashboard" className="btn btn--ghost btn--sm">
