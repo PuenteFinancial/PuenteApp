@@ -18,12 +18,14 @@ import {
   JOB_RECONCILE_PENDING,
   JOB_IDEMPOTENCY_PURGE,
   JOB_LOSS_CORRECTION_WATCH,
+  JOB_LEDGER_RECONCILE,
   type PayoutSubmitPayload,
   type PaymentEventProcessPayload,
 } from './services/queue.js'
 import { reconcilePendingTransfers } from './jobs/reconcile-pending.js'
 import { watchLossCorrections } from './jobs/correction-watch.js'
 import { purgeExpiredIdempotencyKeys } from './jobs/purge-idempotency.js'
+import { reconcileLedger } from './jobs/ledger-reconcile.js'
 import { submitPayout } from './jobs/payout-submit.js'
 import { sweepPayouts } from './jobs/payout-sweep.js'
 import { pollPayouts } from './jobs/payout-poll.js'
@@ -78,6 +80,7 @@ await ensureQueues()
 await boss.work(JOB_RECONCILE_PENDING, handle(JOB_RECONCILE_PENDING, reconcilePendingTransfers))
 await boss.work(JOB_IDEMPOTENCY_PURGE, handle(JOB_IDEMPOTENCY_PURGE, purgeExpiredIdempotencyKeys))
 await boss.work(JOB_LOSS_CORRECTION_WATCH, handle(JOB_LOSS_CORRECTION_WATCH, watchLossCorrections))
+await boss.work(JOB_LEDGER_RECONCILE, handle(JOB_LEDGER_RECONCILE, reconcileLedger))
 await boss.work(JOB_PAYOUT_SWEEP, handle(JOB_PAYOUT_SWEEP, sweepPayouts))
 await boss.work(JOB_PAYOUT_POLL, handle(JOB_PAYOUT_POLL, pollPayouts))
 // payment-event.process carries a paymentEventId payload; same batch-of-1
@@ -117,6 +120,9 @@ await boss.schedule(JOB_IDEMPOTENCY_PURGE, '0 4 * * *')
 await boss.schedule(JOB_PAYOUT_SWEEP, '* * * * *')
 await boss.schedule(JOB_PAYOUT_POLL, pollCron)
 await boss.schedule(JOB_LOSS_CORRECTION_WATCH, '0 * * * *')
+// Daily reconciliation (slice-8 O2): 6am UTC = overnight US — off-peak, after
+// the 4am idempotency purge, before the workday reads the findings.
+await boss.schedule(JOB_LEDGER_RECONCILE, '0 6 * * *')
 
 // Minimal health endpoint for Railway — no Fastify, the worker serves no API.
 const server = http.createServer((req, res) => {

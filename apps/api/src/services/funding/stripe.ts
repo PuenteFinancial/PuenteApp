@@ -5,6 +5,8 @@ import type {
   FundingEventType,
   FundingInitiation,
   FundingParseResult,
+  FundingPaymentListItem,
+  FundingPaymentStatus,
   FundingProcessor,
   FundingUndo,
 } from './index.js'
@@ -130,6 +132,33 @@ export class StripeFundingProcessor implements FundingProcessor {
         status: intent.status,
       },
     }
+  }
+
+  // ── Reconciliation reads (slice-8 O2) ────────────────────────────────────
+  // Read-only; bounded by the SDK timeout like every other call.
+
+  async getPaymentStatus(input: { paymentRef: string }): Promise<FundingPaymentStatus> {
+    const intent = await this.client.paymentIntents.retrieve(input.paymentRef)
+    return { paymentRef: intent.id, status: intent.status }
+  }
+
+  async listRecentPayments(input: {
+    createdAfter: Date
+    limit: number
+  }): Promise<FundingPaymentListItem[]> {
+    const page = await this.client.paymentIntents.list({
+      created: { gte: Math.floor(input.createdAfter.getTime() / 1000) },
+      limit: input.limit,
+    })
+    return page.data.map((pi) => {
+      const transferRef = pi.metadata?.['transfer_id']
+      return {
+        paymentRef: pi.id,
+        transferRef: typeof transferRef === 'string' && transferRef !== '' ? transferRef : null,
+        status: pi.status,
+        createdAt: new Date(pi.created * 1000).toISOString(),
+      }
+    })
   }
 
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean {
