@@ -6,6 +6,28 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-08-01 · Stuck-watch pages on state-entry time from the transitions log; deliberate
+waits are whitelisted by re-running payout-submit's own checks (O1).** The 5-min
+`transfers.stuck-watch` cron anchors dwell on the transfer's latest `transfer_transitions`
+entry into its current state — not `updated_at` (moves on any write, hiding a stuck row
+exactly when something touches it) and not the write-once stamps alone (a round trip like
+UNDER_REVIEW→COMPLETED→UNDER_REVIEW would misdate the current stay; the stamps serve only as
+a cheap over-selecting pre-filter). A dwelling FUNDED row is exempt when payout-submit itself
+would deliberately skip it, decided by literally the same checks: `payout_hold_reason`,
+`WAIT_FOR_CLEARING`, flag-first `FIRST_TRANSFER_HOLD` + `hasClearedHistory`, and
+`assessUnclearedCap` with the identical excludeTransferId/olderThan wait-die shape — a
+re-derived approximation would drift from the gate the moment either changed. The exemptions
+apply to UNCLAIMED rows only: payout-submit skips every wait gate on crash recovery
+(`isRecovery` = `submit_attempted_at` set), so a claimed row's dwell is never deliberate and
+always pages (codex-review finding). A live-state re-read guards the page against the
+bulk-read snapshot racing a payment event (a just-completed transfer must not page as stuck),
+and the episode fingerprint carries the state-entry time so a round trip back into the same
+state opens a fresh issue instead of reopening history (both codex findings). The known
+alert overlaps (payout-poll's stale-in-review, O2's daily aging) are deliberately NOT
+deduped: each fingerprint answers a different question, and collapsing them would hide
+whichever signal fired first. UNDER_REVIEW's 24h page is calendar-blind by design — the
+statutory business-day clock waits for counsel's error-resolution adoption.
+
 **2026-07-31 · Reconciliation = detection-only checks registry; Stripe legs never self-heal (O2).**
 The daily `ledger.reconcile` cron runs a registry of independent checks (each returns
 pass/findings/skipped/error) rather than one monolithic sweep: one check failing must not blind
