@@ -36,7 +36,7 @@ vi.mock('./cancellations.js', () => ({
   resolveCancellationRequest: (...a: unknown[]) => resolveCancellationRequest(...a),
 }))
 
-const { refundCancellation, denyCancellation } = await import('./cancellation-review.js')
+const { refundCancellation, denyCancellation, listPendingReviews } = await import('./cancellation-review.js')
 
 const queues: Record<string, unknown[]> = {}
 function q(table: string, ...results: unknown[]): void {
@@ -423,5 +423,48 @@ describe('denyCancellation', () => {
     })
     expect(transition).not.toHaveBeenCalled()
     expect(resolveCancellationRequest).not.toHaveBeenCalled()
+  })
+})
+
+describe('listPendingReviews (ops backlog read)', () => {
+  const joinedRow = (transferId: string) => ({
+    transfer_id: transferId,
+    requested_at: '2026-08-01T09:00:00.000Z',
+    within_window: false,
+    transfers: {
+      state: 'SUBMITTED',
+      send_amount_minor: S,
+      fee_amount_minor: FEE,
+      refund_payment_ref: null,
+    },
+  })
+
+  it('maps the joined rows to the flat PendingReview shape', async () => {
+    q('cancellation_requests', { data: [joinedRow(T)], error: null })
+    const rows = await listPendingReviews()
+    expect(rows).toEqual([
+      {
+        transfer_id: T,
+        state: 'SUBMITTED',
+        send_amount_minor: S,
+        fee_amount_minor: FEE,
+        requested_at: '2026-08-01T09:00:00.000Z',
+        within_window: false,
+        refund_payment_ref: null,
+      },
+    ])
+  })
+
+  it('fails closed on a broken read', async () => {
+    q('cancellation_requests', { data: null, error: { message: 'db down' } })
+    await expect(listPendingReviews()).rejects.toThrow(/backlog query failed: db down/)
+  })
+
+  it('throws at the PostgREST cap rather than presenting a truncated backlog as complete', async () => {
+    q('cancellation_requests', {
+      data: Array.from({ length: 1000 }, (_, i) => joinedRow(`t-${i}`)),
+      error: null,
+    })
+    await expect(listPendingReviews()).rejects.toThrow(/1000-row PostgREST cap/)
   })
 })

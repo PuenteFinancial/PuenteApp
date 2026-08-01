@@ -1,0 +1,118 @@
+import { describe, it, expect } from 'vitest'
+import {
+  formatBalance,
+  isOpsOverviewShape,
+  latestSkipped,
+  heldTransfers,
+  agingReviews,
+  latestRun,
+  latestFindings,
+  type OpsOverview,
+  type OpsOpenTransfer,
+} from './opsOverview'
+
+const openTransfer = (over: Partial<OpsOpenTransfer> = {}): OpsOpenTransfer => ({
+  transferId: 't-1',
+  state: 'FUNDED',
+  sendAmountMinor: 30_000,
+  enteredStateAt: '2026-08-01T10:00:00.000Z',
+  dwellMinutes: 20,
+  thresholdMinutes: 15,
+  overThreshold: true,
+  holdReason: null,
+  fundingCleared: false,
+  submitAttempted: false,
+  cancellationRequested: false,
+  ...over,
+})
+
+const overview = (over: Partial<OpsOverview> = {}): OpsOverview => ({
+  generatedAt: '2026-08-01T12:00:00.000Z',
+  pendingCancellations: [],
+  openTransfers: [],
+  floatCeiling: { configured: false, tripped: null, balanceMinor: 0, ceilingMinor: null },
+  transferCounts: [],
+  ledgerBalances: null,
+  reconciliationRuns: [],
+  ...over,
+})
+
+describe('isOpsOverviewShape', () => {
+  it('accepts a well-formed payload (empty world and populated)', () => {
+    expect(isOpsOverviewShape(overview())).toBe(true)
+    expect(
+      isOpsOverviewShape(
+        overview({
+          openTransfers: [openTransfer()],
+          ledgerBalances: { asOf: 'x', balances: [] },
+        }),
+      ),
+    ).toBe(true)
+  })
+
+  it('rejects contract violations rather than rendering a healthy empty board', () => {
+    expect(isOpsOverviewShape(null)).toBe(false)
+    expect(isOpsOverviewShape('<html>gateway error</html>')).toBe(false)
+    expect(isOpsOverviewShape({})).toBe(false)
+    expect(isOpsOverviewShape({ ...overview(), openTransfers: 'nope' })).toBe(false)
+    expect(isOpsOverviewShape({ ...overview(), floatCeiling: {} })).toBe(false)
+    expect(isOpsOverviewShape({ ...overview(), ledgerBalances: 'stale' })).toBe(false)
+  })
+})
+
+describe('derivations', () => {
+  it('heldTransfers filters on holdReason presence', () => {
+    const o = overview({
+      openTransfers: [
+        openTransfer(),
+        openTransfer({ transferId: 't-2', holdReason: 'velocity_review' }),
+      ],
+    })
+    expect(heldTransfers(o).map((t) => t.transferId)).toEqual(['t-2'])
+  })
+
+  it('agingReviews = UNDER_REVIEW past threshold only', () => {
+    const o = overview({
+      openTransfers: [
+        openTransfer({ transferId: 't-r1', state: 'UNDER_REVIEW', overThreshold: true }),
+        openTransfer({ transferId: 't-r2', state: 'UNDER_REVIEW', overThreshold: false }),
+        openTransfer({ transferId: 't-f', state: 'FUNDED', overThreshold: true }),
+      ],
+    })
+    expect(agingReviews(o).map((t) => t.transferId)).toEqual(['t-r1'])
+  })
+
+  it('latestRun / latestFindings read the first (newest) run and its non-pass checks', () => {
+    const o = overview({
+      reconciliationRuns: [
+        {
+          createdAt: '2026-08-01T06:00:00.000Z',
+          status: 'findings',
+          findingsCount: 2,
+          checks: [
+            { name: 'ledger_net_zero', status: 'pass', findingsCount: 0 },
+            { name: 'bridge_wallet_float', status: 'findings', findingsCount: 2 },
+            { name: 'stripe_receivables', status: 'error', findingsCount: 0, error: 'timeout' },
+            { name: 'stripe_orphans', status: 'skipped', findingsCount: 0 },
+          ],
+        },
+        { createdAt: '2026-07-31T06:00:00.000Z', status: 'pass', findingsCount: 0, checks: [] },
+      ],
+    })
+    expect(latestRun(o)?.createdAt).toBe('2026-08-01T06:00:00.000Z')
+    expect(latestFindings(o).map((c) => c.name)).toEqual(['bridge_wallet_float', 'stripe_receivables'])
+    expect(latestFindings(overview())).toEqual([])
+    // Skipped is not a finding — but it must surface separately, never vanish
+    // into "latest run was clean" (review finding).
+    expect(latestSkipped(o).map((c) => c.name)).toEqual(['stripe_orphans'])
+    expect(latestSkipped(overview())).toEqual([])
+  })
+})
+
+describe('formatBalance', () => {
+  it('formats per the wire currency — never assumes USD (codex finding)', () => {
+    expect(formatBalance(50_000, 'USD')).toBe('$500.00')
+    expect(formatBalance(50_000, 'MXN')).toBe('500.00 MXN')
+    expect(formatBalance(123_456, 'EUR')).toBe('1234.56 EUR')
+  })
+})

@@ -19,8 +19,11 @@ import { assessUnclearedCap, hasClearedHistory } from '../services/risk.js'
 // (transfer.reconcile-pending) owns that state, and O2's daily
 // `pending-payment-autofail-dead` bucket watches THAT cron's liveness.
 
-const WATCHED_STATES = ['FUNDED', 'SUBMITTED', 'IN_FLIGHT', 'UNDER_REVIEW'] as const
-type WatchedState = (typeof WATCHED_STATES)[number]
+// Exported for the ops page (8.5-v1): its open-transfers panel lists the same
+// states and marks over-threshold rows with the SAME clocks, so page and pager
+// can never drift. The page shows judgment inputs; this cron owns verdicts.
+export const WATCHED_STATES = ['FUNDED', 'SUBMITTED', 'IN_FLIGHT', 'UNDER_REVIEW'] as const
+export type WatchedState = (typeof WATCHED_STATES)[number]
 
 // PostgREST caps every response at max_rows (1000) regardless of the requested
 // limit, so a response AT the cap may be silently truncated — fail loud (the
@@ -47,7 +50,8 @@ interface TransitionRow {
   reason: string | null
 }
 
-function thresholdMs(state: WatchedState): number {
+// Exported for the ops page — see the WATCHED_STATES note above.
+export function thresholdMs(state: WatchedState): number {
   switch (state) {
     case 'FUNDED':
       return env.STUCK_FUNDED_AFTER_MINUTES * 60_000

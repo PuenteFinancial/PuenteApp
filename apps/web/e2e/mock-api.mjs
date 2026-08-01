@@ -264,6 +264,79 @@ const server = createServer(async (req, res) => {
 
   req.resume() // drain any request body
 
+  if (method === 'GET' && pathname === '/v1/ops/overview') {
+    // 8.5-v1 ops board fixture. The mock ignores auth by design — the real
+    // allowlist gate (404-never-403) is fully covered by API route tests; this
+    // serves the happy-path render only.
+    return json(res, 200, {
+      generatedAt: '2026-08-01T12:00:00.000Z',
+      pendingCancellations: [
+        {
+          transferId: 'transfer-e2e-cancel-1',
+          state: 'UNDER_REVIEW',
+          sendAmountMinor: 50_000,
+          feeAmountMinor: 550,
+          requestedAt: '2026-08-01T09:30:00.000Z',
+          withinWindow: false,
+          refundPaymentRef: null,
+        },
+      ],
+      openTransfers: [
+        {
+          transferId: 'transfer-e2e-held-1',
+          state: 'FUNDED',
+          sendAmountMinor: 30_000,
+          enteredStateAt: '2026-08-01T08:00:00.000Z',
+          dwellMinutes: 240,
+          thresholdMinutes: 15,
+          overThreshold: true,
+          holdReason: 'velocity_review',
+          fundingCleared: false,
+          submitAttempted: false,
+          cancellationRequested: false,
+        },
+        {
+          transferId: 'transfer-e2e-quiet-1',
+          state: 'SUBMITTED',
+          sendAmountMinor: 12_000,
+          enteredStateAt: '2026-08-01T11:55:00.000Z',
+          dwellMinutes: 5,
+          thresholdMinutes: 30,
+          overThreshold: false,
+          holdReason: null,
+          fundingCleared: false,
+          submitAttempted: true,
+          cancellationRequested: false,
+        },
+      ],
+      floatCeiling: { configured: true, tripped: true, balanceMinor: 500_100, ceilingMinor: 500_000 },
+      transferCounts: [
+        { state: 'COMPLETED', count: 12 },
+        { state: 'FUNDED', count: 1 },
+        { state: 'SUBMITTED', count: 1 },
+      ],
+      ledgerBalances: {
+        asOf: '2026-08-01T06:00:00.000Z',
+        balances: [
+          { code: 'bridge_wallet_float', amountMinor: 741_200, currency: 'USD' },
+          { code: 'funding_receivable', amountMinor: 500_100, currency: 'USD' },
+        ],
+      },
+      reconciliationRuns: [
+        {
+          createdAt: '2026-08-01T06:00:00.000Z',
+          status: 'findings',
+          findingsCount: 1,
+          checks: [
+            { name: 'ledger_net_zero', status: 'pass', findingsCount: 0 },
+            { name: 'bridge_wallet_float', status: 'findings', findingsCount: 1 },
+          ],
+        },
+        { createdAt: '2026-07-31T06:00:00.000Z', status: 'pass', findingsCount: 0, checks: [] },
+      ],
+    })
+  }
+
   if (method === 'GET' && pathname === '/v1/users/me') {
     return json(res, 200, {
       id: 'user-e2e-1',

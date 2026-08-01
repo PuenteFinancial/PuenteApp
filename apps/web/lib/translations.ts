@@ -268,6 +268,51 @@ export type Translations = {
       generic: string
     }
   }
+  // 8.5-v1 read-only ops page (/dashboard/ops, admin-allowlisted). Operator
+  // jargon, not consumer copy — no legal-review markers needed.
+  ops: {
+    title: string
+    generatedAt: string
+    loadFailed: string
+    retry: string
+    needsYou: string
+    stateOfWorld: string
+    pendingCancellations: string
+    pendingCancellationsEmpty: string
+    withinWindow: string
+    outOfWindow: string
+    refundMoving: string
+    openTransfers: string
+    openTransfersEmpty: string
+    openTransfersNote: string
+    dwell: string
+    threshold: string
+    holdLabel: string
+    holdReasons: { fx_drift: string; payability: string; submit_error: string; velocity_review: string }
+    waitClaimed: string
+    waitUncleared: string
+    waitCancelRequested: string
+    floatCeiling: string
+    floatNotConfigured: string
+    floatTripped: string
+    floatOk: string
+    floatBalance: string
+    floatCeilingValue: string
+    latestFindings: string
+    findingsEmpty: string
+    findingsNone: string
+    checksSkipped: string
+    checkError: string
+    transferCounts: string
+    transferCountsEmpty: string
+    ledgerBalances: string
+    ledgerBalancesAsOf: string
+    ledgerBalancesEmpty: string
+    reconRuns: string
+    reconRunsEmpty: string
+    reconStatus: { pass: string; findings: string; error: string }
+    findingsCount: string
+  }
 }
 
 const en: Translations = {
@@ -639,6 +684,54 @@ const en: Translations = {
       generic: 'Something went wrong. Please try again.',
     },
   },
+  ops: {
+    title: 'Operations overview',
+    generatedAt: 'Generated',
+    loadFailed: 'We couldn\u2019t load the ops overview.',
+    retry: 'Retry',
+    needsYou: 'Needs you',
+    stateOfWorld: 'State of the world',
+    pendingCancellations: 'Pending cancellation requests',
+    pendingCancellationsEmpty: 'No pending cancellation requests.',
+    withinWindow: 'within window',
+    outOfWindow: 'out of window',
+    refundMoving: 'refund in motion',
+    openTransfers: 'Open transfers',
+    openTransfersEmpty: 'No open transfers.',
+    openTransfersNote: 'Dwell over threshold is a marker, not a verdict \u2014 check the wait annotations; Sentry pages own stuck calls.',
+    dwell: 'Dwell',
+    threshold: 'Threshold',
+    holdLabel: 'Hold',
+    holdReasons: {
+      fx_drift: 'FX drift',
+      payability: 'Payability',
+      submit_error: 'Submit error',
+      velocity_review: 'Velocity review',
+    },
+    waitClaimed: 'claimed (crash recovery)',
+    waitUncleared: 'awaiting ACH clearing',
+    waitCancelRequested: 'cancellation requested',
+    floatCeiling: 'Float ceiling',
+    floatNotConfigured: 'Float ceiling not configured in this environment.',
+    floatTripped: 'Float ceiling tripped \u2014 payout submission paused',
+    floatOk: 'Below ceiling',
+    floatBalance: 'Fronted (funding receivable)',
+    floatCeilingValue: 'Ceiling',
+    latestFindings: 'Latest reconciliation findings',
+    findingsEmpty: 'No reconciliation runs yet.',
+    findingsNone: 'Latest run was clean.',
+    checksSkipped: 'checks skipped (not run)',
+    checkError: 'check failed',
+    transferCounts: 'Transfers by state',
+    transferCountsEmpty: 'No transfers yet.',
+    ledgerBalances: 'Ledger balances',
+    ledgerBalancesAsOf: 'as of last reconciliation run',
+    ledgerBalancesEmpty: 'No reconciliation runs yet \u2014 balances appear after the first run.',
+    reconRuns: 'Reconciliation runs',
+    reconRunsEmpty: 'No runs recorded yet.',
+    reconStatus: { pass: 'pass', findings: 'findings', error: 'error' },
+    findingsCount: 'findings',
+  },
 }
 
 const es: Translations = {
@@ -990,6 +1083,54 @@ const es: Translations = {
       cancellation_requires_support: 'Comunícate con soporte para cancelar esta transferencia.',
       generic: 'Algo salió mal. Inténtalo de nuevo.',
     },
+  },
+  ops: {
+    title: 'Panel de operaciones',
+    generatedAt: 'Generado',
+    loadFailed: 'No pudimos cargar el panel de operaciones.',
+    retry: 'Reintentar',
+    needsYou: 'Requiere tu atenci\u00f3n',
+    stateOfWorld: 'Estado general',
+    pendingCancellations: 'Solicitudes de cancelaci\u00f3n pendientes',
+    pendingCancellationsEmpty: 'No hay solicitudes de cancelaci\u00f3n pendientes.',
+    withinWindow: 'dentro del plazo',
+    outOfWindow: 'fuera del plazo',
+    refundMoving: 'reembolso en curso',
+    openTransfers: 'Transferencias abiertas',
+    openTransfersEmpty: 'No hay transferencias abiertas.',
+    openTransfersNote: 'Superar el umbral es un indicador, no un veredicto \u2014 revisa las anotaciones de espera; las alertas de Sentry deciden qu\u00e9 est\u00e1 atascado.',
+    dwell: 'Tiempo en estado',
+    threshold: 'Umbral',
+    holdLabel: 'Retenci\u00f3n',
+    holdReasons: {
+      fx_drift: 'Deriva de tipo de cambio',
+      payability: 'Cuenta no pagable',
+      submit_error: 'Error de env\u00edo',
+      velocity_review: 'Revisi\u00f3n de velocidad',
+    },
+    waitClaimed: 'reclamada (recuperaci\u00f3n tras fallo)',
+    waitUncleared: 'esperando liquidaci\u00f3n ACH',
+    waitCancelRequested: 'cancelaci\u00f3n solicitada',
+    floatCeiling: 'Techo de flotaci\u00f3n',
+    floatNotConfigured: 'El techo de flotaci\u00f3n no est\u00e1 configurado en este entorno.',
+    floatTripped: 'Techo de flotaci\u00f3n alcanzado \u2014 env\u00edo de pagos en pausa',
+    floatOk: 'Bajo el techo',
+    floatBalance: 'Adelantado (cuentas por cobrar)',
+    floatCeilingValue: 'Techo',
+    latestFindings: '\u00daltimos hallazgos de conciliaci\u00f3n',
+    findingsEmpty: 'A\u00fan no hay corridas de conciliaci\u00f3n.',
+    findingsNone: 'La \u00faltima corrida sali\u00f3 limpia.',
+    checksSkipped: 'verificaciones omitidas (no ejecutadas)',
+    checkError: 'verificaci\u00f3n fallida',
+    transferCounts: 'Transferencias por estado',
+    transferCountsEmpty: 'A\u00fan no hay transferencias.',
+    ledgerBalances: 'Saldos del libro contable',
+    ledgerBalancesAsOf: 'al cierre de la \u00faltima conciliaci\u00f3n',
+    ledgerBalancesEmpty: 'A\u00fan no hay corridas de conciliaci\u00f3n \u2014 los saldos aparecen tras la primera.',
+    reconRuns: 'Corridas de conciliaci\u00f3n',
+    reconRunsEmpty: 'A\u00fan no hay corridas registradas.',
+    reconStatus: { pass: 'limpia', findings: 'hallazgos', error: 'error' },
+    findingsCount: 'hallazgos',
   },
 }
 

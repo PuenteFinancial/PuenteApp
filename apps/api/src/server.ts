@@ -20,6 +20,7 @@ import { quotesRoute } from './routes/v1/quotes.js'
 import { transfersRoute } from './routes/v1/transfers.js'
 import { webhooksRoute } from './routes/v1/webhooks.js'
 import { devRoute, devEndpointsEnabled } from './routes/v1/dev.js'
+import { opsRoute } from './routes/v1/ops.js'
 
 // Fail boot on a bad DETAILS_ENCRYPTION_KEY — otherwise a wrong key stays
 // invisible until the first payout decrypt.
@@ -77,6 +78,12 @@ await server.register(webhooksRoute, { prefix: '/v1' })
 // from the router; the handler re-checks independently.
 if (devEndpointsEnabled()) {
   await server.register(devRoute, { prefix: '/v1' })
+}
+// Read-only ops overview (slice 8.5-v1): registered only when an allowlist
+// exists (fail closed — unset means the route 404s from the router); the
+// handler re-checks membership independently, dev-route posture.
+if (env.OPS_ADMIN_USER_IDS.size > 0) {
+  await server.register(opsRoute, { prefix: '/v1' })
 }
 
 try {

@@ -1,5 +1,7 @@
 # Runbook — Pending Cancellation Request
 
+The pending queue is visible on the read-only ops page at `/dashboard/ops` (8.5-v1); resolution stays in the CLI below.
+
 **Date:** 2026-07-28 · **Status:** live process (slice 7 PR6b)
 
 A sender asked to cancel a transfer that was **already on its way to payout**. We could not stop it,

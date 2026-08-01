@@ -1,5 +1,7 @@
 # Runbook — Payout Holds
 
+Held rows are listed with their reasons on the read-only ops page at `/dashboard/ops` (8.5-v1).
+
 **Date:** 2026-07-20 · **Status:** live process (slice 5)
 
 A payout hold is a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`,

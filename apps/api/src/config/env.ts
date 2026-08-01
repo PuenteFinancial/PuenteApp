@@ -140,6 +140,24 @@ const envSchema = z.object({
   // self-healing as the balance drains — no hold reason is set. The submit
   // job requires it in the worker; unset elsewhere is fine.
   FLOAT_CEILING_MINOR: z.coerce.number().int().min(0).optional(),
+  // Read-only ops page allowlist (slice 8.5-v1): comma-separated user UUIDs
+  // permitted to call GET /v1/ops/overview. FAIL-CLOSED — unset/empty means
+  // NOBODY (the route is not even registered), and non-members get 404, never
+  // 403 (dev-route posture: the surface must not confirm it exists). This is
+  // the v1 stopgap; 8.5-v1.1's real admin-auth design supersedes it.
+  OPS_ADMIN_USER_IDS: z
+    .string()
+    .optional()
+    .transform((v) =>
+      v == null
+        ? new Set<string>()
+        : new Set(
+            v
+              .split(',')
+              .map((id) => id.trim())
+              .filter(Boolean),
+          ),
+    ),
   // FX submission backstop: max |live buy_rate − quote source_rate| drift in
   // basis points before the submit job holds the transfer (fx_drift). 10000
   // bps = 100% — anything beyond that is a config typo, not a market move.
