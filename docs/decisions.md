@@ -6,6 +6,28 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-08-01 · Ops page v1 = read-only, env-allowlisted, 404-never-403 (8.5-v1).** The
+"where do I see what needs me" surface ships as `GET /v1/ops/overview` + `/dashboard/ops`
+behind `OPS_ADMIN_USER_IDS` — a comma-separated user-UUID allowlist, FAIL-CLOSED (unset ⇒
+the route is not even registered) with the dev-route double-check posture: the handler
+re-verifies membership first and answers a 404 byte-identical to the router's own not-found,
+so the surface never confirms it exists. This is deliberately NOT the real admin-auth design —
+that arrives with v1.1's action buttons and its own security gate; v1 has no write path at
+all, which is what makes the stopgap acceptable. Panel choices that would otherwise puzzle:
+ledger balances come from the LATEST reconciliation run's snapshot (staleness explicit via
+asOf) rather than a live RPC — the one balance that must be live, funding_receivable vs the
+float ceiling, comes from the float panel; transfers-by-state is a new
+`ops_transfer_state_counts()` SQL GROUP BY because a TS-side count over a bounded select
+would hit the 1000-row loud-throw exactly when terminal states accumulate (i.e. when the
+business works); the needs-you findings panel shows only the LATEST run's non-pass checks —
+findings have no resolved-bit, so "latest" is the only honest read; recon check `summary`
+objects are excluded from the ops wire entirely (schema is the output allowlist). The
+open-transfers panel shows dwell + judgment annotations (hold reason, cleared flag, claimed
+marker, cancel-tap) and deliberately does NOT re-run the stuck-watch whitelist — the page
+shows inputs, the Sentry pager owns verdicts; a FUNDED row deliberately waiting will show
+over-threshold WITH its explanation. No dashboard nav entry: direct URL only, so
+non-admin dashboards never probe the endpoint.
+
 **2026-08-01 · Stuck-watch pages on state-entry time from the transitions log; deliberate
 waits are whitelisted by re-running payout-submit's own checks (O1).** The 5-min
 `transfers.stuck-watch` cron anchors dwell on the transfer's latest `transfer_transitions`

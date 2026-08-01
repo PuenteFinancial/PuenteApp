@@ -76,7 +76,7 @@ from reconciliation_runs order by created_at desc limit 7;
 ```
 
 `checks` is the per-check array (status, findings_count, summary); `balances` is the full
-chart snapshot (the 8.5 ops page reads both). Findings detail lives in Sentry, not the row —
+chart snapshot — both render on the read-only ops page at `/dashboard/ops` (8.5-v1, admin-allowlisted). Findings detail lives in Sentry, not the row —
 the row carries counts and refs only, never PII.
 
 ## Known gaps (phase 2)

@@ -69,6 +69,34 @@ describe('FUNDING_PROCESSOR=stripe env refinement', () => {
   })
 })
 
+describe('OPS_ADMIN_USER_IDS allowlist (slice 8.5-v1)', () => {
+  it('defaults to the empty set — fail closed, nobody is an ops admin', () => {
+    const parsed = envSchemaWithRules.safeParse(base)
+    expect(parsed.success).toBe(true)
+    if (!parsed.success) return
+    expect(parsed.data.OPS_ADMIN_USER_IDS).toEqual(new Set())
+  })
+
+  it('parses a comma-separated list, trimming whitespace and dropping empties', () => {
+    const parsed = envSchemaWithRules.safeParse({
+      ...base,
+      OPS_ADMIN_USER_IDS: ' 11111111-2222-4333-8444-555555555555 ,, 99999999-8888-4777-8666-555555555554 ',
+    })
+    expect(parsed.success).toBe(true)
+    if (!parsed.success) return
+    expect(parsed.data.OPS_ADMIN_USER_IDS).toEqual(
+      new Set(['11111111-2222-4333-8444-555555555555', '99999999-8888-4777-8666-555555555554']),
+    )
+  })
+
+  it('an all-whitespace value still parses to the empty set (fail closed)', () => {
+    const parsed = envSchemaWithRules.safeParse({ ...base, OPS_ADMIN_USER_IDS: ' , ' })
+    expect(parsed.success).toBe(true)
+    if (!parsed.success) return
+    expect(parsed.data.OPS_ADMIN_USER_IDS.size).toBe(0)
+  })
+})
+
 describe('stuck-transfer dwell knobs (slice-8 O1)', () => {
   it('applies the hard defaults so the pager is armed even when unset', () => {
     const parsed = envSchemaWithRules.safeParse(base)

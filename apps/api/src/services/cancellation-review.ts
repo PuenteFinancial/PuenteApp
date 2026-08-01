@@ -355,14 +355,25 @@ export interface PendingReview {
   refund_payment_ref: string | null
 }
 
+// PostgREST caps every response at max_rows (1000) regardless of the requested
+// limit, so a response AT the cap may be silently truncated — fail loud rather
+// than present a capped backlog as complete (repo convention; stuck-watch.ts).
+const REVIEW_ROW_BOUND = 1000
+
 export async function listPendingReviews(): Promise<PendingReview[]> {
   const { data, error } = await supabaseAdmin
     .from('cancellation_requests')
     .select('transfer_id, requested_at, within_window, transfers!inner(state, send_amount_minor, fee_amount_minor, refund_payment_ref)')
     .eq('status', 'pending')
+    .limit(REVIEW_ROW_BOUND)
   // Fail closed: an empty backlog and a broken read must never look the same.
   if (error || data == null) {
     throw new Error(`cancellation review backlog query failed: ${error?.message ?? 'no rows returned'}`)
+  }
+  if (data.length >= REVIEW_ROW_BOUND) {
+    throw new Error(
+      `cancellation review backlog hit the ${REVIEW_ROW_BOUND}-row PostgREST cap — results may be silently truncated`,
+    )
   }
   type Joined = {
     transfer_id: string

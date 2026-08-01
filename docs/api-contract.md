@@ -275,6 +275,50 @@ guard + the ledger's `(transfer_id, transition)` uniqueness; `payment_events` de
 worker + the 30-min stale-`PENDING_PAYMENT` sweep arrive in slice 5 (a stuck `PENDING_PAYMENT`
 row has no postings and no funds moved — a dead row, not lost money).
 
+## Ops (read-only admin overview — slice 8.5-v1)
+
+| Method | Path | Auth | Idempotent | Notes |
+|---|---|---|---|---|
+| GET | `/v1/ops/overview` | bearer + `OPS_ADMIN_USER_IDS` allowlist | read-only | Non-admins get **404 `not_found`** with a body identical to a missing route — never 403. Route is not even registered when the allowlist is unset (fail closed). |
+
+One aggregate for the read-only ops page (`/dashboard/ops`, no nav entry — direct URL).
+**The response schema is the output allowlist**: every field is enumerated; recon check
+`summary` objects are deliberately excluded from this wire (name/status/findingsCount/error
+only — detail lives in `reconciliation_runs` and Sentry). PII discipline: ids, amounts,
+timestamps, states, hold reasons, booleans; never names, destinations, or user ids.
+v1 is read-only by design; v1.1 adds action endpoints behind a real admin-auth design.
+
+```jsonc
+// GET /v1/ops/overview → 200
+{
+  "generatedAt": "2026-08-01T12:00:00.000Z",
+  "pendingCancellations": [        // status='pending' cancellation_requests (bounded 1000, loud throw at cap)
+    { "transferId": "…", "state": "UNDER_REVIEW", "sendAmountMinor": 50000,
+      "feeAmountMinor": 550, "requestedAt": "…", "withinWindow": false,
+      "refundPaymentRef": null }   // non-null ⇒ a refund is already in motion
+  ],
+  "openTransfers": [               // every FUNDED|SUBMITTED|IN_FLIGHT|UNDER_REVIEW row (bounded 1000)
+    { "transferId": "…", "state": "FUNDED", "sendAmountMinor": 30000,
+      "enteredStateAt": "…",       // coarse stamp anchor — may predate the current stay on a state round trip
+      "dwellMinutes": 83, "thresholdMinutes": 15,
+      "overThreshold": true,       // page marker only; the stuck-watch Sentry pager owns verdicts
+      "holdReason": null,          // fx_drift | payability | submit_error | velocity_review | null
+      "fundingCleared": false, "submitAttempted": false, "cancellationRequested": false }
+  ],
+  "floatCeiling": {                // live funding_receivable vs FLOAT_CEILING_MINOR
+    "configured": true,            // false when the env knob is unset in the API process (not an error)
+    "tripped": false, "balanceMinor": 123400, "ceilingMinor": 500000 },
+  "transferCounts": [              // ops_transfer_state_counts() — SQL GROUP BY, all states, any scale
+    { "state": "COMPLETED", "count": 87 } ],
+  "ledgerBalances": {              // the LATEST reconciliation run's snapshot (staleness explicit); null before the first run
+    "asOf": "2026-08-01T06:00:04Z",
+    "balances": [ { "code": "funding_receivable", "amountMinor": 123400, "currency": "USD" } ] },
+  "reconciliationRuns": [          // latest 7, newest first — the reconciliation runbook's own read
+    { "createdAt": "…", "status": "findings", "findingsCount": 2,
+      "checks": [ { "name": "bridge_wallet_float", "status": "findings", "findingsCount": 2 } ] } ]
+}
+```
+
 ## Endpoint → state transition map
 
 | Trigger | Transition |

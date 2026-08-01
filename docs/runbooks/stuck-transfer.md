@@ -33,6 +33,10 @@ send by the same user; note the OLDER blocker itself **does** page if it exceeds
 dwell, which is exactly what you want to look at). O2's daily 8-day uncleared audit bounds
 all of these.
 
+The read-only ops page at `/dashboard/ops` (8.5-v1, admin-allowlisted) lists every open
+transfer with dwell, threshold, and wait annotations — the same clocks as this cron, but as a
+board, not a pager.
+
 **Overlapping alerts are separate questions, deliberately not deduped:** this cron = "is OUR
 pipeline stuck"; payout-poll's `payout-in-review-stale` = "is Bridge holding it >1h"; O2's
 daily `transfer_aging` = the coarse audit backstop. One incident can page two of these.
