@@ -20,6 +20,7 @@ import {
   JOB_IDEMPOTENCY_PURGE,
   JOB_LOSS_CORRECTION_WATCH,
   JOB_LEDGER_RECONCILE,
+  JOB_STUCK_WATCH,
   type PayoutSubmitPayload,
   type PaymentEventProcessPayload,
 } from './services/queue.js'
@@ -27,6 +28,7 @@ import { reconcilePendingTransfers } from './jobs/reconcile-pending.js'
 import { watchLossCorrections } from './jobs/correction-watch.js'
 import { purgeExpiredIdempotencyKeys } from './jobs/purge-idempotency.js'
 import { reconcileLedger } from './jobs/ledger-reconcile.js'
+import { watchStuckTransfers } from './jobs/stuck-watch.js'
 import { submitPayout } from './jobs/payout-submit.js'
 import { sweepPayouts } from './jobs/payout-sweep.js'
 import { pollPayouts } from './jobs/payout-poll.js'
@@ -113,6 +115,7 @@ const boss = await withBootRetry(
       handle(JOB_LOSS_CORRECTION_WATCH, watchLossCorrections),
     )
     await boss.work(JOB_LEDGER_RECONCILE, handle(JOB_LEDGER_RECONCILE, reconcileLedger))
+    await boss.work(JOB_STUCK_WATCH, handle(JOB_STUCK_WATCH, watchStuckTransfers))
     await boss.work(JOB_PAYOUT_SWEEP, handle(JOB_PAYOUT_SWEEP, sweepPayouts))
     await boss.work(JOB_PAYOUT_POLL, handle(JOB_PAYOUT_POLL, pollPayouts))
     // payment-event.process carries a paymentEventId payload; same batch-of-1
@@ -155,6 +158,8 @@ const boss = await withBootRetry(
     // Daily reconciliation (slice-8 O2): 6am UTC = overnight US — off-peak, after
     // the 4am idempotency purge, before the workday reads the findings.
     await boss.schedule(JOB_LEDGER_RECONCILE, '0 6 * * *')
+    // Stuck-transfer pager (slice-8 O1): 5-min sweep of non-terminal dwell.
+    await boss.schedule(JOB_STUCK_WATCH, '*/5 * * * *')
 
     return boss
   },

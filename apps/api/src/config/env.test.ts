@@ -68,3 +68,24 @@ describe('FUNDING_PROCESSOR=stripe env refinement', () => {
     expect(parsed.success && parsed.data.MOCK_FUNDING_WEBHOOK_SECRET).toBeUndefined()
   })
 })
+
+describe('stuck-transfer dwell knobs (slice-8 O1)', () => {
+  it('applies the hard defaults so the pager is armed even when unset', () => {
+    const parsed = envSchemaWithRules.safeParse(base)
+    expect(parsed.success).toBe(true)
+    if (!parsed.success) return
+    expect(parsed.data.STUCK_FUNDED_AFTER_MINUTES).toBe(15)
+    expect(parsed.data.STUCK_SUBMITTED_AFTER_MINUTES).toBe(30)
+    expect(parsed.data.STUCK_IN_FLIGHT_AFTER_MINUTES).toBe(60)
+    expect(parsed.data.STUCK_UNDER_REVIEW_AFTER_HOURS).toBe(24)
+  })
+
+  it('coerces string overrides and refuses the page-everything zero', () => {
+    const tuned = envSchemaWithRules.safeParse({ ...base, STUCK_FUNDED_AFTER_MINUTES: '5' })
+    expect(tuned.success).toBe(true)
+    expect(tuned.success && tuned.data.STUCK_FUNDED_AFTER_MINUTES).toBe(5)
+
+    const zero = envSchemaWithRules.safeParse({ ...base, STUCK_FUNDED_AFTER_MINUTES: '0' })
+    expect(zero.success).toBe(false)
+  })
+})

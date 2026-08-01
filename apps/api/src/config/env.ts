@@ -181,6 +181,19 @@ const envSchema = z.object({
   // set 60 in dev via env. Floor of 10 keeps a fat-fingered value from
   // hammering the Bridge API.
   WORKER_POLL_INTERVAL_SECONDS: z.coerce.number().int().min(10).default(300),
+  // Stuck-transfer dwell thresholds (transfers.stuck-watch cron, slice-8 O1):
+  // how long a transfer may sit in a state before it pages as stuck. HARD
+  // defaults (LOSS_CORRECTION_* style) so the pager stays armed even when
+  // unset; the defaults encode expected process timing (submission in seconds,
+  // Bridge accept in seconds-to-minutes, SPEI settlement in seconds). Floor of
+  // 1 everywhere: 0 would page every non-terminal transfer on every tick.
+  STUCK_FUNDED_AFTER_MINUTES: z.coerce.number().int().min(1).default(15),
+  STUCK_SUBMITTED_AFTER_MINUTES: z.coerce.number().int().min(1).default(30),
+  STUCK_IN_FLIGHT_AFTER_MINUTES: z.coerce.number().int().min(1).default(60),
+  // The "dumb >1-business-day" UNDER_REVIEW age alert — calendar-blind by
+  // design (weekend false positives accepted); statutory-clock tracking waits
+  // for counsel's error-resolution process adoption.
+  STUCK_UNDER_REVIEW_AFTER_HOURS: z.coerce.number().int().min(1).default(24),
   TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
   TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
   TWILIO_PHONE_NUMBER: z.string().min(1).optional(),

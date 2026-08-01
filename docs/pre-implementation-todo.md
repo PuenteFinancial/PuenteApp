@@ -50,7 +50,7 @@ endpoint maps align). Open items below.
 - [ ] Paid Supabase + PITR; separate staging & prod projects.
 - [x] Railway services: API + worker; cron for reconciliation. Worker service + housekeeping crons (`transfer.reconcile-pending`, `payout.sweep`, `payout.poll`, `idempotency.purge`) shipped in slice 5 (prod worker deferred to slice 7 — staging only today). The three-way ledger↔Stripe↔Bridge reconciliation is the separate open item below.
 - [x] Secrets via Doppler across all envs. Live — see `runbooks/secrets.md`.
-- [~] Sentry + end-to-end trace IDs; alerts on stuck/failed transfers. Sentry wired; slice-5 alerts live (float-ceiling trip, Bridge `in_review` >1h, payout holds). The **general** stuck-transfer alert (any non-terminal state past a threshold) is still slice 8.
+- [x] Sentry + end-to-end trace IDs; alerts on stuck/failed transfers. Sentry wired; slice-5 alerts live (float-ceiling trip, Bridge `in_review` >1h, payout holds); the **general** stuck-transfer alert shipped in slice-8 O1 (`transfers.stuck-watch`, 5-min cron — `runbooks/stuck-transfer.md`).
 - [x] Reconciliation job — ledger vs funding processor vs Bridge payout. Live (slice-8 O2): daily `ledger.reconcile` worker cron + `reconciliation_runs` audit table; runbook graduated to `docs/runbooks/reconciliation.md`.
 - [ ] Admin/ops console — view transfers, resolve stuck payout, process refund/cancel.
 - [~] Fraud & exposure guardrails — **float ceiling (cap aggregate fronted `funding_receivable`)** shipped in slice 5; amount caps, velocity limits, per-user exposure caps, and first-transaction holds are still slice 8.
