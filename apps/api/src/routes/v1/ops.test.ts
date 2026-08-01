@@ -262,6 +262,28 @@ describe('POST /v1/ops/cancellations/resolve', () => {
       await app.close()
     })
 
+    it('404s a non-admin BEFORE validation and the idempotency plugin — a missing header or garbage body must not leak a 400', async () => {
+      const app = await buildApp()
+      // No Idempotency-Key and an invalid body: if the gate ran after
+      // validation/preHandler, either would answer 400 and confirm the route
+      // exists. The 404 posture requires the gate to win.
+      const res = await supertest(app.server)
+        .post(RESOLVE_PATH)
+        .set('Authorization', `Bearer ${NON_ADMIN}`)
+        .send({ nonsense: true })
+      const missing = await supertest(app.server)
+        .post('/v1/ops/nonexistent')
+        .set('Authorization', `Bearer ${NON_ADMIN}`)
+        .send({ nonsense: true })
+      expect(res.status).toBe(404)
+      expect(res.body.error.code).toBe(missing.body.error.code)
+      expect(res.body.error.message).toBe(missing.body.error.message)
+      expect(Object.keys(res.body.error).sort()).toEqual(Object.keys(missing.body.error).sort())
+      // and the gate refusal never touched the idempotency store
+      expect(from).not.toHaveBeenCalled()
+      await app.close()
+    })
+
     it('404s even an admin when the write flag drops after registration (handler re-check)', async () => {
       const app = await buildApp()
       envMock.OPS_WRITE_ENABLED = false

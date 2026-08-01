@@ -211,6 +211,16 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
     '/ops/cancellations/resolve',
     {
       config: { idempotency: true },
+      // Gate as a route-level onRequest hook — BEFORE schema validation and
+      // the idempotency preHandler. Otherwise a non-admin probing without an
+      // Idempotency-Key (or with a garbage body) would get their 400 and learn
+      // the route exists; the 404 posture must win every race. Runs after the
+      // global auth hook, so request.user is set. The handler re-checks too.
+      onRequest: async (request, reply) => {
+        if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
+          return sendError(reply, 404, 'not_found', 'Route not found')
+        }
+      },
       schema: {
         body: resolveBodySchema,
         response: {
