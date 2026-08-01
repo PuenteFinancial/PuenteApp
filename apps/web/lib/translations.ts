@@ -312,6 +312,43 @@ export type Translations = {
     reconRunsEmpty: string
     reconStatus: { pass: string; findings: string; error: string }
     findingsCount: string
+    // v1.1 resolve-cancellation actions. Operator jargon, not consumer copy —
+    // no legal-review markers needed (the consumer-facing Reg E strings live
+    // in send.*; these render only on the admin-gated ops board).
+    actions: {
+      refund: string
+      settleRefund: string
+      deny: string
+      cancel: string
+      close: string
+      confirmRefund: string
+      confirmDeny: string
+      working: string
+      amountLabel: string
+      requestedAtLabel: string
+      refundConsequence: string
+      settleNote: string
+      denyEvidenceLabel: string
+      denyEvidenceHint: string
+      denyComparedNote: string
+      denyTypoWarning: string
+      denyInvalidTimestamp: string
+      outcomes: {
+        refunded: string
+        denied: string
+        already_disbursed: string
+        already_refunded: string
+      }
+      errors: {
+        claim_abandoned: string
+        refund_owed: string
+        evidence_conflict: string
+        conflict: string
+        not_found: string
+        validation: string
+        generic: string
+      }
+    }
   }
 }
 
@@ -695,6 +732,47 @@ const en: Translations = {
     pendingCancellationsEmpty: 'No pending cancellation requests.',
     withinWindow: 'within window',
     outOfWindow: 'out of window',
+    actions: {
+      refund: 'Refund',
+      settleRefund: 'Settle refund',
+      deny: 'Deny',
+      cancel: 'Cancel',
+      close: 'Close',
+      confirmRefund: 'Confirm refund',
+      confirmDeny: 'Confirm denial',
+      working: 'Working…',
+      amountLabel: 'Correction payment',
+      requestedAtLabel: 'Requested at',
+      refundConsequence:
+        'Pays the sender this amount again as a correction payment — the recipient keeps the delivery.',
+      settleNote:
+        'A prior run already disbursed this refund; confirming settles the record — no money moves.',
+      denyEvidenceLabel: 'Deposit time from the Bridge dashboard (ISO 8601 with timezone)',
+      denyEvidenceHint: 'Example: 2026-08-01T15:04:05Z — the denial stands or falls on this value.',
+      denyComparedNote:
+        'It is compared against the request time above: deny only if the request came AFTER the deposit.',
+      denyTypoWarning:
+        'Careful: an EARLIER timestamp makes a wrongful denial MORE likely. Copy the dashboard value exactly, timezone included.',
+      denyInvalidTimestamp: 'Enter a parseable ISO 8601 timestamp with an explicit timezone.',
+      outcomes: {
+        refunded: 'Refunded — correction payment sent.',
+        denied: 'Denied — request closed.',
+        already_disbursed: 'Settled — a prior run had already paid; no money moved now.',
+        already_refunded: 'Already refunded — request closed; no money moved now.',
+      },
+      errors: {
+        claim_abandoned:
+          'DANGER: a prior refund run abandoned its claim and may have disbursed without recording it. Do NOT retry — follow runbooks/manual-refund.md (abandoned claims).',
+        refund_owed:
+          'This request met both cancellation conditions — a refund is owed and it cannot be denied by any tool. Refund it instead.',
+        evidence_conflict: 'The cited deposit time conflicts with recorded evidence:',
+        conflict: 'The board is stale — the transfer changed underneath. Refresh and re-check.',
+        not_found: 'Transfer not found — refresh the board.',
+        validation: 'The request was rejected as invalid — check the inputs.',
+        generic:
+          'The action failed. Nothing was changed silently — refresh and re-check the row before retrying.',
+      },
+    },
     refundMoving: 'refund in motion',
     openTransfers: 'Open transfers',
     openTransfersEmpty: 'No open transfers.',
@@ -1095,6 +1173,47 @@ const es: Translations = {
     pendingCancellationsEmpty: 'No hay solicitudes de cancelaci\u00f3n pendientes.',
     withinWindow: 'dentro del plazo',
     outOfWindow: 'fuera del plazo',
+    actions: {
+      refund: 'Reembolsar',
+      settleRefund: 'Asentar reembolso',
+      deny: 'Denegar',
+      cancel: 'Cancelar',
+      close: 'Cerrar',
+      confirmRefund: 'Confirmar reembolso',
+      confirmDeny: 'Confirmar denegaci\u00f3n',
+      working: 'Procesando\u2026',
+      amountLabel: 'Pago de correcci\u00f3n',
+      requestedAtLabel: 'Solicitada',
+      refundConsequence:
+        'Paga al remitente este monto de nuevo como pago de correcci\u00f3n \u2014 el destinatario conserva la entrega.',
+      settleNote:
+        'Una ejecuci\u00f3n anterior ya desembols\u00f3 este reembolso; confirmar solo asienta el registro \u2014 no se mueve dinero.',
+      denyEvidenceLabel: 'Hora del dep\u00f3sito seg\u00fan el panel de Bridge (ISO 8601 con zona horaria)',
+      denyEvidenceHint: 'Ejemplo: 2026-08-01T15:04:05Z \u2014 la denegaci\u00f3n depende de este valor.',
+      denyComparedNote:
+        'Se compara contra la hora de la solicitud de arriba: deniega solo si la solicitud lleg\u00f3 DESPU\u00c9S del dep\u00f3sito.',
+      denyTypoWarning:
+        'Cuidado: un valor M\u00c1S TEMPRANO hace m\u00e1s probable una denegaci\u00f3n indebida. Copia el valor del panel exactamente, incluida la zona horaria.',
+      denyInvalidTimestamp: 'Ingresa una marca de tiempo ISO 8601 v\u00e1lida con zona horaria expl\u00edcita.',
+      outcomes: {
+        refunded: 'Reembolsado \u2014 pago de correcci\u00f3n enviado.',
+        denied: 'Denegada \u2014 solicitud cerrada.',
+        already_disbursed: 'Asentado \u2014 una ejecuci\u00f3n anterior ya hab\u00eda pagado; ahora no se movi\u00f3 dinero.',
+        already_refunded: 'Ya reembolsado \u2014 solicitud cerrada; ahora no se movi\u00f3 dinero.',
+      },
+      errors: {
+        claim_abandoned:
+          'PELIGRO: una ejecuci\u00f3n anterior abandon\u00f3 su claim de reembolso y pudo haber desembolsado sin registrarlo. NO reintentes \u2014 sigue runbooks/manual-refund.md (claims abandonados).',
+        refund_owed:
+          'La solicitud cumpli\u00f3 ambas condiciones de cancelaci\u00f3n \u2014 se debe un reembolso y ninguna herramienta puede denegarla. Reemb\u00f3lsala.',
+        evidence_conflict: 'La hora de dep\u00f3sito citada contradice la evidencia registrada:',
+        conflict: 'El tablero est\u00e1 desactualizado \u2014 la transferencia cambi\u00f3. Actualiza y verifica de nuevo.',
+        not_found: 'Transferencia no encontrada \u2014 actualiza el tablero.',
+        validation: 'La solicitud fue rechazada como inv\u00e1lida \u2014 revisa los datos.',
+        generic:
+          'La acci\u00f3n fall\u00f3. Nada cambi\u00f3 silenciosamente \u2014 actualiza y verifica la fila antes de reintentar.',
+      },
+    },
     refundMoving: 'reembolso en curso',
     openTransfers: 'Transferencias abiertas',
     openTransfersEmpty: 'No hay transferencias abiertas.',

@@ -97,6 +97,30 @@ describe('OPS_ADMIN_USER_IDS allowlist (slice 8.5-v1)', () => {
   })
 })
 
+describe('OPS_WRITE_ENABLED write capability (slice 8.5-v1.1)', () => {
+  it('defaults to false — fail closed, the write route does not exist', () => {
+    const parsed = envSchemaWithRules.safeParse(base)
+    expect(parsed.success).toBe(true)
+    if (!parsed.success) return
+    expect(parsed.data.OPS_WRITE_ENABLED).toBe(false)
+  })
+
+  it("parses only the exact strings 'true' and 'false'", () => {
+    const on = envSchemaWithRules.safeParse({ ...base, OPS_WRITE_ENABLED: 'true' })
+    expect(on.success).toBe(true)
+    expect(on.success && on.data.OPS_WRITE_ENABLED).toBe(true)
+
+    const off = envSchemaWithRules.safeParse({ ...base, OPS_WRITE_ENABLED: 'false' })
+    expect(off.success).toBe(true)
+    expect(off.success && off.data.OPS_WRITE_ENABLED).toBe(false)
+
+    // z.coerce.boolean() would parse '1' (and even 'false') as true — the
+    // enum-transform refuses anything that is not the exact literal.
+    const junk = envSchemaWithRules.safeParse({ ...base, OPS_WRITE_ENABLED: '1' })
+    expect(junk.success).toBe(false)
+  })
+})
+
 describe('stuck-transfer dwell knobs (slice-8 O1)', () => {
   it('applies the hard defaults so the pager is armed even when unset', () => {
     const parsed = envSchemaWithRules.safeParse(base)

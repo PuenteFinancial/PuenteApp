@@ -262,6 +262,68 @@ const server = createServer(async (req, res) => {
     return json(res, 200, transferBody(id, 'REFUNDED'))
   }
 
+  // 8.5-v1.1 ops resolve — same governing rule as the cancel mock above: this
+  // MIRRORS the real API's preconditions (Idempotency-Key required, transferId
+  // + decision in the body, deny requires depositedAt / refund forbids it) so
+  // a refactor that drops any of them cannot ship green. Auth/gate posture is
+  // covered by API route tests; outcomes are keyed on the fixture rows:
+  //   cancel-1 (out-of-window) deny    → 200 denied
+  //   cancel-2 (within-window) refund  → 200 refunded
+  //   cancel-2 (within-window) deny    → 409 refund_owed (the legal refusal)
+  if (method === 'POST' && pathname === '/v1/ops/cancellations/resolve') {
+    const body = await readBody(req)
+
+    if (!req.headers['idempotency-key']) {
+      return json(res, 400, {
+        error: { code: 'validation_error', message: 'mock: Idempotency-Key header is required', requestId: 'mock' },
+      })
+    }
+    if (typeof body?.transferId !== 'string' || !['refund', 'deny'].includes(body?.decision)) {
+      return json(res, 400, {
+        error: { code: 'validation_error', message: 'mock: transferId and decision are required', requestId: 'mock' },
+      })
+    }
+    if (body.decision === 'deny' && body.depositedAt === undefined) {
+      return json(res, 400, {
+        error: {
+          code: 'validation_error',
+          message: 'mock: depositedAt is required to deny',
+          requestId: 'mock',
+          details: [{ path: 'depositedAt', issue: 'required when decision is deny' }],
+        },
+      })
+    }
+    if (body.decision === 'refund' && body.depositedAt !== undefined) {
+      return json(res, 400, {
+        error: {
+          code: 'validation_error',
+          message: 'mock: depositedAt does not apply to a refund',
+          requestId: 'mock',
+          details: [{ path: 'depositedAt', issue: 'only allowed when decision is deny' }],
+        },
+      })
+    }
+
+    if (body.transferId === 'transfer-e2e-cancel-2' && body.decision === 'deny') {
+      return json(res, 409, {
+        error: {
+          code: 'refund_owed',
+          message: 'mock: this request met both cancellation conditions — a refund is owed',
+          requestId: 'mock',
+        },
+      })
+    }
+    if (body.transferId === 'transfer-e2e-cancel-1' || body.transferId === 'transfer-e2e-cancel-2') {
+      return json(res, 200, {
+        transferId: body.transferId,
+        outcome: body.decision === 'refund' ? 'refunded' : 'denied',
+      })
+    }
+    return json(res, 404, {
+      error: { code: 'not_found', message: 'mock: Transfer not found', requestId: 'mock' },
+    })
+  }
+
   req.resume() // drain any request body
 
   if (method === 'GET' && pathname === '/v1/ops/overview') {
@@ -270,6 +332,9 @@ const server = createServer(async (req, res) => {
     // serves the happy-path render only.
     return json(res, 200, {
       generatedAt: '2026-08-01T12:00:00.000Z',
+      // v1.1: the write capability is live in this fixture so the action
+      // buttons render; the POST handler above mirrors the real preconditions.
+      actionsEnabled: true,
       pendingCancellations: [
         {
           transferId: 'transfer-e2e-cancel-1',
@@ -278,6 +343,15 @@ const server = createServer(async (req, res) => {
           feeAmountMinor: 550,
           requestedAt: '2026-08-01T09:30:00.000Z',
           withinWindow: false,
+          refundPaymentRef: null,
+        },
+        {
+          transferId: 'transfer-e2e-cancel-2',
+          state: 'UNDER_REVIEW',
+          sendAmountMinor: 20_000,
+          feeAmountMinor: 300,
+          requestedAt: '2026-08-01T11:50:00.000Z',
+          withinWindow: true,
           refundPaymentRef: null,
         },
       ],
