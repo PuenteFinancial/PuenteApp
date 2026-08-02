@@ -14,13 +14,16 @@ export const authPlugin = fp(async (server: FastifyInstance) => {
   // - issuer: derived from SUPABASE_URL (hosted `https://<ref>.supabase.co/
   //   auth/v1`, local `http://127.0.0.1:54321/auth/v1`) — no new env var.
   // - audience: 'authenticated' — GoTrue's aud on every user access token.
-  // - algorithms: ES256 pinned as OBSERVED on both the staging and prod JWKS
-  //   (single EC P-256 key each, checked 2026-08-01). The JWKS itself already
-  //   precludes HS-confusion (symmetric keys can't appear in a JWKS); the pin
-  //   is defense-in-depth. If Supabase key config ever moves to RS256, update
-  //   this alongside the key rotation.
+  // - algorithms: the ASYMMETRIC set Supabase advertises, not just the one alg
+  //   in today's JWKS. Both projects hold a single ES256 key right now but
+  //   advertise RS256 too (/auth/v1/.well-known/openid-configuration, checked
+  //   2026-08-01), so an ES256-only pin would turn a routine signing-key
+  //   rotation into a total lockout — every user, every route, no deploy to
+  //   blame. Excluding HS* is the part that carries the security value: it
+  //   keeps a forged `alg:HS256` from being verified with the published public
+  //   key as an HMAC secret (auth.test.ts pins that attack).
   const issuer = new URL('/auth/v1', env.SUPABASE_URL).href
-  const verifyOptions = { issuer, audience: 'authenticated', algorithms: ['ES256'] }
+  const verifyOptions = { issuer, audience: 'authenticated', algorithms: ['ES256', 'RS256'] }
 
   server.addHook('onRequest', async (request, reply) => {
     if (request.routeOptions?.config?.public) return

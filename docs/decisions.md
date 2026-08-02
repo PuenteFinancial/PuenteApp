@@ -24,9 +24,14 @@ Two couplings worth remembering: **refusals map to non-2xx** because the idempot
 stores/replays only 2xx — a 200-refusal would freeze a transient claim state into every retry
 (and `refund_owed` / `claim_abandoned` / `deposit_evidence_conflict` get their own codes because
 each demands different operator behavior); and `plugins/auth.ts` now pins issuer, audience, and
-ES256 (observed on both projects' JWKS) — signature-only verification was tolerable while `sub`
-merely selected your own rows, not once a token carries write authority over other people's
-money. `actionsEnabled` on the overview wire tells the web whether to render buttons, so a
+the asymmetric algorithm set — signature-only verification was tolerable while `sub` merely
+selected your own rows, not once a token carries write authority over other people's money. The
+algorithm pin is `['ES256','RS256']`, NOT the single ES256 key both JWKS hold today: both
+projects advertise RS256 as well, so an exact-key pin would convert a routine Supabase signing-key
+rotation into a total lockout of every user on every route. Excluding HS* is the part that carries
+the security value (a forged `alg:HS256` verified with the published public key as an HMAC secret);
+narrowing further only buys an outage. Issuer derivation and the advertised algorithm set were
+read from each project's `/auth/v1/.well-known/openid-configuration`, not assumed. `actionsEnabled` on the overview wire tells the web whether to render buttons, so a
 read-only deployment shows no dead buttons and capability is never probed.
 
 **2026-08-01 · Ops page v1 = read-only, env-allowlisted, 404-never-403 (8.5-v1).** The
