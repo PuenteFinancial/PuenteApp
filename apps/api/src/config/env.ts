@@ -158,6 +158,18 @@ const envSchema = z.object({
               .filter(Boolean),
           ),
     ),
+  // Ops write capability (slice 8.5-v1.1): second control of the double-control
+  // gate on POST /v1/ops/cancellations/resolve. Identity (OPS_ADMIN_USER_IDS)
+  // and capability (this flag) are set independently in Doppler, so staging can
+  // carry the allowlist with writes off, and a leaked allowlisted session alone
+  // cannot move money on an environment where writes are dark. Same fail-closed
+  // enum shape as ENABLE_DEV_ENDPOINTS, and deliberately NOT keyed on NODE_ENV
+  // (unset NODE_ENV would make that predicate fail-OPEN — see the comment
+  // there). The write route is not registered unless BOTH controls are set.
+  OPS_WRITE_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   // FX submission backstop: max |live buy_rate − quote source_rate| drift in
   // basis points before the submit job holds the transfer (fx_drift). 10000
   // bps = 100% — anything beyond that is a config typo, not a market move.

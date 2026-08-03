@@ -6,6 +6,34 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-08-01 · Ops v1.1 admin gate = double-control env pair, not RBAC/step-up; refusals are
+non-2xx; JWT claims pinned (8.5-v1.1).** The promised "real admin-auth design" for the first
+ops write path (`POST /v1/ops/cancellations/resolve` — refund/deny buttons on the
+pending-cancellations panel) is deliberately small: identity (`OPS_ADMIN_USER_IDS`) ×
+capability (`OPS_WRITE_ENABLED`), two env controls set independently in Doppler, both required
+before the POST is even registered, both re-checked (plus membership) as the handler's first
+statement with the same 404-never-403 byte-identical body. At an admin population of one,
+env-var change control IS the approval workflow — a grant is a Doppler change plus a restart,
+and there is no in-product path to self-escalate. Deliberately NOT built and why: SMS step-up
+(Twilio A2P approval still pending, and the OTP machinery is login-shaped — it would need a new
+action-token design), `app_metadata` role claims (revocation lags the access-token refresh — a
+real hole on a money-writing path), RBAC tables (nothing to govern at N=1). The endpoint wraps
+the SAME `cancellation-review.ts` services the CLI calls, per the 2026-07-27 decision — the CLI
+stays break-glass; actor is `ops:<admin user id>` from the verified JWT, never from the body.
+Two couplings worth remembering: **refusals map to non-2xx** because the idempotency plugin
+stores/replays only 2xx — a 200-refusal would freeze a transient claim state into every retry
+(and `refund_owed` / `claim_abandoned` / `deposit_evidence_conflict` get their own codes because
+each demands different operator behavior); and `plugins/auth.ts` now pins issuer, audience, and
+the asymmetric algorithm set — signature-only verification was tolerable while `sub` merely
+selected your own rows, not once a token carries write authority over other people's money. The
+algorithm pin is `['ES256','RS256']`, NOT the single ES256 key both JWKS hold today: both
+projects advertise RS256 as well, so an exact-key pin would convert a routine Supabase signing-key
+rotation into a total lockout of every user on every route. Excluding HS* is the part that carries
+the security value (a forged `alg:HS256` verified with the published public key as an HMAC secret);
+narrowing further only buys an outage. Issuer derivation and the advertised algorithm set were
+read from each project's `/auth/v1/.well-known/openid-configuration`, not assumed. `actionsEnabled` on the overview wire tells the web whether to render buttons, so a
+read-only deployment shows no dead buttons and capability is never probed.
+
 **2026-08-01 · Ops page v1 = read-only, env-allowlisted, 404-never-403 (8.5-v1).** The
 "where do I see what needs me" surface ships as `GET /v1/ops/overview` + `/dashboard/ops`
 behind `OPS_ADMIN_USER_IDS` — a comma-separated user-UUID allowlist, FAIL-CLOSED (unset ⇒

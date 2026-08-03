@@ -60,6 +60,9 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 409 | `idempotency_conflict` | Idempotency-Key reused with different body |
 | 409 | `quote_expired` | Quote past `expires_at` |
 | 409 | `transfer_not_cancelable` | Not in `FUNDED`, or already claimed for payout submission |
+| 409 | `refund_owed` | Ops deny refused: the request met both §1005.34 conditions — a refund is owed; no tool may deny it |
+| 409 | `claim_abandoned` | Ops resolve refused: a prior refund run abandoned its claim — manual-refund runbook, never retry |
+| 409 | `deposit_evidence_conflict` | Ops deny refused: cited `depositedAt` provably wrong; `details[]` carries the legal bounds |
 | 422 | `provider_rejected` | Upstream provider rejected the request (e.g. bank refused the account) |
 | 429 | `rate_limited` | Throttled |
 | 500 | `internal_error` | Unexpected failure; details never leak — use `requestId` |
@@ -275,23 +278,24 @@ guard + the ledger's `(transfer_id, transition)` uniqueness; `payment_events` de
 worker + the 30-min stale-`PENDING_PAYMENT` sweep arrive in slice 5 (a stuck `PENDING_PAYMENT`
 row has no postings and no funds moved — a dead row, not lost money).
 
-## Ops (read-only admin overview — slice 8.5-v1)
+## Ops (admin overview + resolve-cancellation — slices 8.5-v1/v1.1)
 
 | Method | Path | Auth | Idempotent | Notes |
 |---|---|---|---|---|
 | GET | `/v1/ops/overview` | bearer + `OPS_ADMIN_USER_IDS` allowlist | read-only | Non-admins get **404 `not_found`** with a body identical to a missing route — never 403. Route is not even registered when the allowlist is unset (fail closed). |
+| POST | `/v1/ops/cancellations/resolve` | bearer + allowlist + `OPS_WRITE_ENABLED` (double control) | `Idempotency-Key` required | Same 404 posture, both layers: not registered unless BOTH env controls are set, handler re-checks both + membership first. Wraps the SAME services as `resolve-cancellation.ts` (the CLI stays break-glass). |
 
-One aggregate for the read-only ops page (`/dashboard/ops`, no nav entry — direct URL).
+One aggregate for the ops page (`/dashboard/ops`, no nav entry — direct URL).
 **The response schema is the output allowlist**: every field is enumerated; recon check
 `summary` objects are deliberately excluded from this wire (name/status/findingsCount/error
 only — detail lives in `reconciliation_runs` and Sentry). PII discipline: ids, amounts,
 timestamps, states, hold reasons, booleans; never names, destinations, or user ids.
-v1 is read-only by design; v1.1 adds action endpoints behind a real admin-auth design.
 
 ```jsonc
 // GET /v1/ops/overview → 200
 {
   "generatedAt": "2026-08-01T12:00:00.000Z",
+  "actionsEnabled": true,          // v1.1: the write capability is live on this deployment — web renders buttons only when true
   "pendingCancellations": [        // status='pending' cancellation_requests (bounded 1000, loud throw at cap)
     { "transferId": "…", "state": "UNDER_REVIEW", "sendAmountMinor": 50000,
       "feeAmountMinor": 550, "requestedAt": "…", "withinWindow": false,
@@ -319,6 +323,37 @@ v1 is read-only by design; v1.1 adds action endpoints behind a real admin-auth d
 }
 ```
 
+### POST /v1/ops/cancellations/resolve (slice 8.5-v1.1)
+
+`transferId` lives in the **body**, not the path: the idempotency identity is route pattern +
+body hash, so a path param would hash identically across transfers (the known collision — see
+the cancel route note). One endpoint spans both decisions; a key reused with a different body
+(other transfer, flipped decision, corrected evidence) is a 409 `idempotency_conflict` — except
+after a non-2xx, which releases the claim so a corrected retry may reuse the key.
+
+```jsonc
+// POST /v1/ops/cancellations/resolve  (Idempotency-Key required)
+{ "transferId": "…", "decision": "refund" }                                   // refund: no depositedAt allowed
+{ "transferId": "…", "decision": "deny", "depositedAt": "2026-08-01T15:04:05Z" } // deny: depositedAt REQUIRED
+// → 200
+{ "transferId": "…", "outcome": "refunded" }  // refunded | denied | already_disbursed | already_refunded
+//   already_disbursed / already_refunded = crash-recovery settles: state closed, NO money moved this run
+```
+
+**Refusals are non-2xx by design** — the idempotency plugin stores and replays only 2xx, so a
+200-refusal would freeze a transient claim state into every retry. Mapping (`ReviewOutcome` →
+HTTP): `transfer_not_found` → 404 `not_found`; `not_under_review` / `no_pending_request` /
+`claim_taken` → 409 `conflict`; and three codes with their own operator behavior:
+
+| Code | Status | Meaning / required behavior |
+|---|---|---|
+| `refund_owed` | 409 | The request met BOTH §1005.34 conditions — a refund is owed; no tool may deny it. Refund instead. |
+| `claim_abandoned` | 409 | A prior refund run abandoned its claim (may have disbursed without recording). NEVER retry — `runbooks/manual-refund.md`. |
+| `deposit_evidence_conflict` | 409 | Cited `depositedAt` is provably wrong; `details[]` carries the legal bounds so the operator corrects the input. |
+
+Actor attribution: the services record `ops:<admin user id>` on the transition and the request
+resolution — the durable decision record (the audit plugin only logs the hit).
+
 ## Endpoint → state transition map
 
 | Trigger | Transition |
@@ -333,8 +368,8 @@ v1 is read-only by design; v1.1 adds action endpoints behind a real admin-auth d
 | Bridge webhook: delivered, in-window request that **beat the deposit** | `COMPLETED → UNDER_REVIEW` (system; no ledger) |
 | Bridge webhook: delivered, request in-window but **after the deposit** | **no transition** — stays `COMPLETED`, ops alerted to deny with Bridge's timestamp |
 | Bridge webhook: delivered, request out of window | **no transition** — stays `COMPLETED`, ops alerted to deny |
-| `resolve-cancellation.ts --refund` (ops) | `UNDER_REVIEW → REFUNDED` (correction payment) |
-| `resolve-cancellation.ts --deny` (ops) | `UNDER_REVIEW → COMPLETED`, or no transition if never routed |
+| `POST /ops/cancellations/resolve` `decision:refund` (ops; CLI `resolve-cancellation.ts --refund` is break-glass) | `UNDER_REVIEW → REFUNDED` (correction payment) |
+| `POST /ops/cancellations/resolve` `decision:deny` (ops; CLI `--deny` is break-glass) | `UNDER_REVIEW → COMPLETED`, or no transition if never routed |
 | Bridge webhook: accepted | `SUBMITTED → IN_FLIGHT` |
 | Bridge webhook: delivered | `IN_FLIGHT → COMPLETED` |
 | Bridge webhook: failed | `SUBMITTED/IN_FLIGHT → PAYOUT_FAILED → REFUNDED` |
