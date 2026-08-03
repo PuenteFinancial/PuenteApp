@@ -7,6 +7,9 @@ import {
   agingReviews,
   latestRun,
   latestFindings,
+  isOpsResolveSuccessShape,
+  resolveErrorKind,
+  firstDetailIssue,
   type OpsOverview,
   type OpsOpenTransfer,
 } from './opsOverview'
@@ -114,5 +117,63 @@ describe('formatBalance', () => {
     expect(formatBalance(50_000, 'USD')).toBe('$500.00')
     expect(formatBalance(50_000, 'MXN')).toBe('500.00 MXN')
     expect(formatBalance(123_456, 'EUR')).toBe('1234.56 EUR')
+  })
+})
+
+describe('actionsEnabled tolerance (slice 8.5-v1.1)', () => {
+  it('accepts payloads with and without actionsEnabled (deploy skew)', () => {
+    expect(isOpsOverviewShape(overview())).toBe(true)
+    expect(isOpsOverviewShape({ ...overview(), actionsEnabled: true })).toBe(true)
+    expect(isOpsOverviewShape({ ...overview(), actionsEnabled: false })).toBe(true)
+  })
+
+  it('rejects a non-boolean actionsEnabled', () => {
+    expect(isOpsOverviewShape({ ...overview(), actionsEnabled: 'yes' })).toBe(false)
+  })
+})
+
+describe('isOpsResolveSuccessShape', () => {
+  it('accepts the four success outcomes', () => {
+    for (const outcome of ['refunded', 'denied', 'already_disbursed', 'already_refunded']) {
+      expect(isOpsResolveSuccessShape({ transferId: 't-1', outcome })).toBe(true)
+    }
+  })
+
+  it('rejects anything else', () => {
+    expect(isOpsResolveSuccessShape(null)).toBe(false)
+    expect(isOpsResolveSuccessShape({})).toBe(false)
+    expect(isOpsResolveSuccessShape({ transferId: 't-1', outcome: 'ok' })).toBe(false)
+    expect(isOpsResolveSuccessShape({ outcome: 'refunded' })).toBe(false)
+  })
+})
+
+describe('resolveErrorKind', () => {
+  const envelope = (code: string, issue?: string) => ({
+    error: { code, message: 'x', requestId: 'r', ...(issue && { details: [{ path: 'depositedAt', issue }] }) },
+  })
+
+  it('classifies each ops refusal onto its own UI branch', () => {
+    expect(resolveErrorKind(409, envelope('claim_abandoned'))).toBe('claim_abandoned')
+    expect(resolveErrorKind(409, envelope('refund_owed'))).toBe('refund_owed')
+    expect(resolveErrorKind(409, envelope('deposit_evidence_conflict'))).toBe('evidence_conflict')
+    expect(resolveErrorKind(409, envelope('conflict'))).toBe('conflict')
+    expect(resolveErrorKind(409, envelope('idempotency_conflict'))).toBe('conflict')
+    expect(resolveErrorKind(404, envelope('not_found'))).toBe('not_found')
+    expect(resolveErrorKind(400, envelope('validation_error'))).toBe('validation')
+  })
+
+  it('falls back to generic for unknown statuses, codes, and non-envelope bodies', () => {
+    expect(resolveErrorKind(500, envelope('internal_error'))).toBe('generic')
+    expect(resolveErrorKind(409, envelope('something_new'))).toBe('generic')
+    expect(resolveErrorKind(409, '<html>gateway</html>')).toBe('generic')
+    expect(resolveErrorKind(400, null)).toBe('validation')
+  })
+
+  it('firstDetailIssue surfaces the evidence bounds, or null', () => {
+    expect(firstDetailIssue(envelope('deposit_evidence_conflict', 'must lie between A and B'))).toBe(
+      'must lie between A and B',
+    )
+    expect(firstDetailIssue(envelope('conflict'))).toBe(null)
+    expect(firstDetailIssue(null)).toBe(null)
   })
 })

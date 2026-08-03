@@ -1,8 +1,13 @@
 # Runbook — Pending Cancellation Request
 
-The pending queue is visible on the read-only ops page at `/dashboard/ops` (8.5-v1); resolution stays in the CLI below.
+**The primary path is the ops page**: the pending queue AND its resolution live at
+`/dashboard/ops` (8.5-v1.1 — Refund/Deny buttons on each pending row, shown only when the
+API's `OPS_WRITE_ENABLED` write gate is live). The CLI below is **break-glass** — same
+services, same guards, same refusals; use it when the web path is down or dark. Everything
+in this runbook about the RULE (the two §1005.34 conditions, the evidence, the refusals,
+the typo hazard) applies identically to both surfaces.
 
-**Date:** 2026-07-28 · **Status:** live process (slice 7 PR6b)
+**Date:** 2026-07-28 · **Status:** live process (slice 7 PR6b; ops-page resolution 8.5-v1.1)
 
 A sender asked to cancel a transfer that was **already on its way to payout**. We could not stop it,
 so we recorded the ask. This runbook is how that ask gets resolved.
@@ -47,7 +52,29 @@ episode (the hourly re-checks group into one Sentry issue while the window stays
 | `cancellation-route-failed` | **error** | we could not evaluate a delivered transfer's pending request at all | check `--list` for that transfer |
 | `loss-correction-threshold` | warning | rolling `LOSS_CORRECTION_WINDOW_DAYS`-day Reg E correction losses reached `LOSS_CORRECTION_ALERT_MINOR` | [Aggregate exposure](#aggregate-exposure) |
 
+## Resolving from the ops page (primary, 8.5-v1.1)
+
+Each pending row on `/dashboard/ops` carries **Refund** and **Deny**:
+
+- **Refund** opens a confirm step showing the correction amount (send + fee) and its
+  consequence — the modal's Confirm is the CLI's `--confirm`. When the row shows *refund in
+  motion* (`refundPaymentRef` set), the button reads **Settle refund**: a prior run already
+  paid; confirming settles the record and moves no money.
+- **Deny** REQUIRES typing Bridge's deposit timestamp (ISO 8601 **with timezone** — the form
+  rejects a timezone-less value rather than silently reading it as local time). The request
+  time renders beside the input; the ⚠️ EARLIER-typo warning below applies verbatim.
+- Refusals map 1:1 to the CLI's: a stale row → refresh; `refund_owed` → the refund is owed,
+  deny is impossible by design; `deposit_evidence_conflict` → the form shows the legal bounds;
+  **`claim_abandoned` → STOP, the page offers no retry — [manual-refund.md](manual-refund.md)
+  → *Abandoned claims*.**
+- Attribution is automatic: `ops:<your user id>` from your session, on the transition and the
+  request resolution.
+
+Verify with the [§4 SQL](#4-verify) exactly as with the CLI.
+
 ## 1. Triage — what is open?
+
+The ops page IS the triage view. The break-glass equivalent:
 
 ```bash
 doppler run -- pnpm exec tsx scripts/resolve-cancellation.ts --list

@@ -1,10 +1,14 @@
 'use client'
 
-// The 8.5-v1 read-only ops board (docs/runbooks/*: "see /dashboard/ops").
-// Props-fed by the server component — no fetching here. Deliberately NO action
-// buttons anywhere: v1.1 adds trigger-refund / resolve-cancellation behind the
-// real admin-auth design + its own security gate.
+// The 8.5 ops board (docs/runbooks/*: "see /dashboard/ops"). Props-fed by the
+// server component — this view fetches nothing. v1.1 adds exactly one write
+// surface: resolve-cancellation actions on the pending-cancellations panel,
+// rendered ONLY when the API reports actionsEnabled (its double-control env
+// gate — OPS_ADMIN_USER_IDS × OPS_WRITE_ENABLED — is live), so a read-only
+// deployment shows no dead buttons and the page never probes the POST.
+// Everything else stays read-only; trigger-refund for PAYOUT_FAILED is v1.2.
 import { useLanguage } from '@/components/LanguageProvider'
+import CancellationActions from '@/components/ops/CancellationActions'
 import { badgeTone, type TransferState } from '@/lib/transferState'
 import type { BadgeTone } from '@/lib/transferState'
 import { formatUsd, formatDate } from '@/lib/sendFormat'
@@ -188,6 +192,7 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
                 {req.withinWindow ? s.withinWindow : s.outOfWindow}
                 {req.refundPaymentRef != null && ` · ${s.refundMoving}`}
               </div>
+              {overview.actionsEnabled === true && <CancellationActions req={req} />}
             </Card>
           ))
         )}

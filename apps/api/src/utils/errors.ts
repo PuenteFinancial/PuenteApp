@@ -14,6 +14,15 @@ export type ApiErrorCode =
   | 'idempotency_conflict'
   | 'quote_expired'
   | 'transfer_not_cancelable'
+  // Ops resolve-cancellation refusals (slice 8.5-v1.1) — all 409, but each
+  // demands DIFFERENT operator behavior, so each gets its own code:
+  // refund_owed = permanent legal refusal (both §1005.34 conditions held — no
+  // tool may deny this request); claim_abandoned = danger state, go to
+  // runbooks/manual-refund.md, never retry; deposit_evidence_conflict = the
+  // cited timestamp is provably wrong, details[] carries the legal bounds.
+  | 'refund_owed'
+  | 'claim_abandoned'
+  | 'deposit_evidence_conflict'
   | 'rate_limited'
   | 'rate_unavailable'
   | 'provider_rejected'

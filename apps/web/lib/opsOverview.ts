@@ -1,4 +1,5 @@
 import { formatUsd, formatMxn } from './sendFormat'
+import { parseApiError } from './apiError'
 
 // Pure types + guards + derivations for the 8.5-v1 ops page (extract-to-lib
 // convention: logic out of .tsx so it unit-tests without a DOM). Types are
@@ -58,6 +59,10 @@ export interface OpsLedgerBalances {
 
 export interface OpsOverview {
   generatedAt: string
+  // v1.1: whether the API's write capability (double-control env gate) is live.
+  // OPTIONAL with default-false semantics — a v1 API during deploy skew simply
+  // omits it and the page renders read-only. Gate rendering on `=== true`.
+  actionsEnabled?: boolean
   pendingCancellations: OpsPendingCancellation[]
   openTransfers: OpsOpenTransfer[]
   floatCeiling: OpsFloatCeiling
@@ -80,7 +85,61 @@ export function isOpsOverviewShape(v: unknown): v is OpsOverview {
   if (!Array.isArray(v.reconciliationRuns)) return false
   if (!isRecord(v.floatCeiling) || typeof v.floatCeiling.configured !== 'boolean') return false
   if (v.ledgerBalances !== null && !isRecord(v.ledgerBalances)) return false
+  if (v.actionsEnabled !== undefined && typeof v.actionsEnabled !== 'boolean') return false
   return true
+}
+
+// ── v1.1 resolve-cancellation (POST /api/ops/cancellations/resolve) ──────────
+
+export type OpsResolveDecision = 'refund' | 'deny'
+
+const RESOLVE_OUTCOMES = ['refunded', 'denied', 'already_disbursed', 'already_refunded'] as const
+export type OpsResolveOutcome = (typeof RESOLVE_OUTCOMES)[number]
+
+export interface OpsResolveSuccess {
+  transferId: string
+  outcome: OpsResolveOutcome
+}
+
+export function isOpsResolveSuccessShape(v: unknown): v is OpsResolveSuccess {
+  if (!isRecord(v)) return false
+  if (typeof v.transferId !== 'string') return false
+  return RESOLVE_OUTCOMES.includes(v.outcome as OpsResolveOutcome)
+}
+
+// The UI branches the component switches on — each refusal demands DIFFERENT
+// operator behavior (claim_abandoned → runbook, never retry; refund_owed →
+// permanent legal refusal; evidence_conflict → correct the input in place).
+export type ResolveErrorKind =
+  | 'claim_abandoned'
+  | 'refund_owed'
+  | 'evidence_conflict'
+  | 'conflict'
+  | 'not_found'
+  | 'validation'
+  | 'generic'
+
+export function resolveErrorKind(status: number, body: unknown): ResolveErrorKind {
+  const code = parseApiError(body)?.code ?? null
+  if (status === 409) {
+    if (code === 'claim_abandoned') return 'claim_abandoned'
+    if (code === 'refund_owed') return 'refund_owed'
+    if (code === 'deposit_evidence_conflict') return 'evidence_conflict'
+    if (code === 'conflict' || code === 'idempotency_conflict') return 'conflict'
+    return 'generic'
+  }
+  if (status === 404) return 'not_found'
+  if (status === 400) return 'validation'
+  return 'generic'
+}
+
+// The evidence bounds ride details[0].issue on deposit_evidence_conflict —
+// operator-facing operational data (timestamps), not consumer copy.
+export function firstDetailIssue(body: unknown): string | null {
+  if (!isRecord(body) || !isRecord(body.error)) return null
+  const details = body.error.details
+  if (!Array.isArray(details) || !isRecord(details[0])) return null
+  return typeof details[0].issue === 'string' ? details[0].issue : null
 }
 
 // ── Derivations (the API ships two lists; the page shows five panels) ────────
