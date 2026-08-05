@@ -17,6 +17,10 @@ vi.mock('../../services/supabase.js', () => ({
 }))
 
 const transitionTransfer = vi.fn()
+const postLedgerTransaction = vi.fn()
+vi.mock('../../services/ledger.js', () => ({
+  postLedgerTransaction: (...args: unknown[]) => postLedgerTransaction(...args),
+}))
 
 vi.mock('../../services/transfers.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/transfers.js')>()
@@ -85,6 +89,7 @@ async function buildApp() {
 
 beforeEach(() => {
   from.mockReset()
+  postLedgerTransaction.mockReset().mockResolvedValue(undefined)
   processorOverride.current = null
 })
 
@@ -443,9 +448,14 @@ describe('POST /v1/webhooks/funding', () => {
     await app.close()
   })
 
-  it('funding_cleared flips the flag only — no transition', async () => {
+  it('funding_cleared flips the flag and posts the ACH CLEARS cash leg — no transition', async () => {
+    // Regression guard (2026-08-03): the cash leg was specified in
+    // ledger-rules.md but never implemented, so funding_receivable tracked
+    // LIFETIME VOLUME instead of outstanding float. The float ceiling reads
+    // that balance, making it a one-way ratchet that permanently halts payouts.
+    const load = selectChain({ data: { ...transferRow, state: 'FUNDED' } })
     const update = selectChain({ data: null })
-    from.mockReturnValueOnce(update)
+    from.mockReturnValueOnce(load).mockReturnValueOnce(update)
     const app = await buildApp()
 
     const body = fundingBody('funding_cleared')
@@ -454,6 +464,71 @@ describe('POST /v1/webhooks/funding', () => {
     expect(res.status).toBe(200)
     expect(update['update']).toHaveBeenCalledWith({ funding_cleared: true })
     expect(transitionTransfer).not.toHaveBeenCalled()
+
+    expect(postLedgerTransaction).toHaveBeenCalledTimes(1)
+    const post = postLedgerTransaction.mock.calls[0]![0] as {
+      transition: string
+      entries: { accountCode: string; direction: string; money: { amountMinor: number } }[]
+    }
+    // keyed on its own transition → the unique idempotency key makes a
+    // redelivered webhook a no-op rather than a double relief
+    expect(post.transition).toBe('funding_cleared')
+    const total = transferRow.send_amount_minor + transferRow.fee_amount_minor
+    expect(post.entries).toEqual([
+      { accountCode: 'cash_clearing', direction: 'debit', money: { amountMinor: total, currency: 'USD' } },
+      { accountCode: 'funding_receivable', direction: 'credit', money: { amountMinor: total, currency: 'USD' } },
+    ])
+    await app.close()
+  })
+
+  it.each([
+    ['CANCELED', null],
+    ['PAYMENT_FAILED', null],
+    ['PENDING_PAYMENT', null],
+    ['REFUNDED', 'mockvoid_abc'],
+  ] as const)(
+    'skips the cash leg when the receivable is already closed (%s) — never drives it negative',
+    async (state, refundRef) => {
+      const load = selectChain({ data: { ...transferRow, state, refund_payment_ref: refundRef } })
+      from.mockReturnValueOnce(load).mockReturnValueOnce(selectChain({ data: null }))
+      const app = await buildApp()
+
+      const body = fundingBody('funding_cleared')
+      const res = await postFunding(app, body, fundingSign(body))
+
+      expect(res.status).toBe(200)
+      expect(postLedgerTransaction).not.toHaveBeenCalled()
+      await app.close()
+    },
+  )
+
+  it('DOES post for a settled (refunded-mode) refund — that path credits cash, not the receivable', async () => {
+    const load = selectChain({
+      data: { ...transferRow, state: 'REFUNDED', refund_payment_ref: 're_stripe_1' },
+    })
+    from.mockReturnValueOnce(load).mockReturnValueOnce(selectChain({ data: null }))
+    const app = await buildApp()
+
+    const body = fundingBody('funding_cleared')
+    const res = await postFunding(app, body, fundingSign(body))
+
+    expect(res.status).toBe(200)
+    expect(postLedgerTransaction).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  it('500s when the cash leg fails to post so the processor redelivers', async () => {
+    // The flag is already set; a swallowed failure would strand the receivable
+    // open forever with nothing to retry it.
+    const load = selectChain({ data: { ...transferRow, state: 'FUNDED' } })
+    from.mockReturnValueOnce(load).mockReturnValueOnce(selectChain({ data: null }))
+    postLedgerTransaction.mockRejectedValueOnce(new Error('ledger rpc down'))
+    const app = await buildApp()
+
+    const body = fundingBody('funding_cleared')
+    const res = await postFunding(app, body, fundingSign(body))
+
+    expect(res.status).toBe(500)
     await app.close()
   })
 

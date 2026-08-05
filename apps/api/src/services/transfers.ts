@@ -114,6 +114,37 @@ export function fundedLedgerEntries(transfer: {
   return entries
 }
 
+// The ACH CLEARS batch (ledger-rules.md): the sender's ACH actually settled, so
+// the receivable opened at FUNDED becomes cash we hold. Independent of the
+// transfer's own lifecycle — a transfer can clear before, during or long after
+// its payout — which is why it is keyed on its own `FUNDING_CLEARED` transition
+// rather than a state change.
+//
+// WHY THIS EXISTS (2026-08-03): it was specified in ledger-rules.md from the
+// start but never implemented, and its absence was not merely an accounting gap.
+// `funding_receivable` is what the float ceiling reads (isFloatCeilingTripped),
+// so with nothing ever relieving it the balance tracked CUMULATIVE LIFETIME
+// VOLUME instead of outstanding float — a one-way ratchet that would trip the
+// ceiling permanently and halt every payout once lifetime volume crossed it,
+// with no self-healing. Confirmed on a live stack: two transfers COMPLETED with
+// funding_cleared=true and the balance still held their full amount.
+//
+// Timing caveat: Stripe settles in BATCHES (one bank payout covers many charges,
+// net of fees), so posting per-transfer on the cleared event approximates the
+// moment cash truly lands. The amount is exact; only the timing is approximate.
+// Reconciling `cash_clearing` against the real Stripe balance needs the
+// balance-transaction ingest (reconciliation.md "Known gaps").
+export function fundingClearedLedgerEntries(transfer: {
+  send_amount_minor: number
+  fee_amount_minor: number
+}): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  return [
+    { account_code: 'cash_clearing', direction: 'debit', amount_minor: total, currency: 'USD' },
+    { account_code: 'funding_receivable', direction: 'credit', amount_minor: total, currency: 'USD' },
+  ]
+}
+
 // The CANCELED batch (ledger-rules.md "ACH not yet in flight"): a clean reversal
 // of the FUNDED batch. At FUNDED-pre-claim nothing has moved — no payout, no
 // float fronted — so the sender's uncleared ACH is *voided* and the FUNDED
