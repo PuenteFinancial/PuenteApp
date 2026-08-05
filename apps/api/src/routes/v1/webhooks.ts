@@ -4,15 +4,17 @@ import type { FastifyInstance } from 'fastify'
 import type { KycStatus } from '@puente/shared'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
-import { getFundingProcessor } from '../../services/funding/index.js'
+import { getFundingProcessor, undoModeForRef } from '../../services/funding/index.js'
 import { enqueuePayoutSubmit, enqueuePaymentEventProcess } from '../../services/queue.js'
 import { recordEvent, markProcessed } from '../../services/payment-events.js'
 import { actOnRefundTailEvent } from '../../services/refunds.js'
 import {
   fundedLedgerEntries,
+  fundingClearedLedgerEntries,
   transitionTransfer,
   TransferRpcError,
 } from '../../services/transfers.js'
+import { postLedgerTransaction } from '../../services/ledger.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 // Bridge statuses we don't recognize fall through unmapped and are only logged
@@ -386,6 +388,19 @@ export async function webhooksRoute(server: FastifyInstance) {
       if (event.type === 'funding_cleared') {
         // A flag, not a state: recorded for the WAIT_FOR_CLEARING policy, the
         // one sanctioned guarded UPDATE outside the transition RPC.
+        const { data: clearedRow, error: clearedLoadError } = await supabaseAdmin
+          .from('transfers')
+          .select('state, send_amount_minor, fee_amount_minor, refund_payment_ref')
+          .eq('id', transferId)
+          .maybeSingle()
+        if (clearedLoadError) {
+          server.log.error(
+            { webhook: 'funding', transferId, supabaseError: clearedLoadError.code },
+            'funding_cleared load failed',
+          )
+          return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
+        }
+
         const { error } = await supabaseAdmin
           .from('transfers')
           .update({ funding_cleared: true })
@@ -396,6 +411,62 @@ export async function webhooksRoute(server: FastifyInstance) {
             'funding_cleared update failed',
           )
           return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
+        }
+
+        // The ACH CLEARS batch (ledger-rules.md): the receivable opened at
+        // FUNDED becomes cash. Posting this is what keeps funding_receivable
+        // meaning "outstanding fronted float" rather than lifetime volume —
+        // the float ceiling reads that balance, so without it the ceiling
+        // ratchets shut permanently (see fundingClearedLedgerEntries).
+        //
+        // Skipped when the receivable is already closed or was never opened:
+        // PENDING_PAYMENT/PAYMENT_FAILED never posted FUNDED; CANCELED and a
+        // VOIDED-mode refund already credited it back. Those all describe a
+        // pull that was voided and therefore never truly settles, so a cleared
+        // event on one is contradictory data — skip it rather than drive the
+        // receivable negative.
+        const row = clearedRow as {
+          state: string
+          send_amount_minor: number
+          fee_amount_minor: number
+          refund_payment_ref: string | null
+        } | null
+        const receivableClosed =
+          row === null ||
+          row.state === 'PENDING_PAYMENT' ||
+          row.state === 'PAYMENT_FAILED' ||
+          row.state === 'CANCELED' ||
+          (row.state === 'REFUNDED' &&
+            (row.refund_payment_ref === null || undoModeForRef(row.refund_payment_ref) === 'voided'))
+
+        if (!receivableClosed) {
+          try {
+            await postLedgerTransaction({
+              transferId,
+              transition: 'funding_cleared',
+              description: 'ach cleared: funding receivable settled to cash',
+              entries: fundingClearedLedgerEntries(row).map((e) => ({
+                accountCode: e.account_code,
+                direction: e.direction,
+                money: { amountMinor: e.amount_minor, currency: e.currency },
+              })),
+            })
+          } catch (err) {
+            // Never replay-safe to fail silently: the flag is already set, so a
+            // lost posting would leave the receivable open forever with no
+            // retry. The unique (transfer, transition) key makes a redelivery a
+            // no-op, so 500 and let the processor redeliver.
+            server.log.error(
+              { webhook: 'funding', transferId },
+              `funding_cleared ledger post failed: ${err instanceof Error ? err.message : String(err)}`,
+            )
+            return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
+          }
+        } else {
+          server.log.info(
+            { webhook: 'funding', transferId, state: row?.state ?? 'unknown' },
+            'funding_cleared: receivable already closed, no cash leg posted',
+          )
         }
         return { received: true }
       }
