@@ -86,7 +86,12 @@ ACH bounces after the recipient has been paid.
 Three controls bound that exposure:
 
 - **Float ceiling** — an aggregate cap; payouts pause when outstanding uncleared money hits it,
-  and resume automatically as it drains.
+  and resume automatically as it drains. That "outstanding" reading depends on the ledger
+  relieving `funding_receivable` when the ACH settles — a posting that was specified from the
+  start but only implemented on 2026-08-03. Without it the account tracked *lifetime volume*,
+  which would have turned the ceiling into a one-way ratchet that halted every payout once
+  cumulative volume crossed it. Worth knowing as the shape of failure this control can have:
+  a risk limit is only as honest as the number it reads.
 - **Uncleared cap (per user)** — one unsettled transfer at a time. A second send is refused until
   the first clears.
 - **First-transfer hold** — a switch (currently off) that makes a brand-new sender wait for their

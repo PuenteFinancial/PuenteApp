@@ -53,7 +53,7 @@ FUNDING_PROCESSOR=mock
 ENABLE_DEV_ENDPOINTS=true      # both of these are required for the
 MOCK_FUNDING_WEBHOOK_SECRET=…  # Simulate payment button to exist
 OPS_ADMIN_USER_IDS=<your user uuid>
-OPS_WRITE_ENABLED=true         # ops action buttons (PR #137)
+OPS_WRITE_ENABLED=true         # ops action buttons
 ```
 
 Worker only, on top of that:
@@ -197,7 +197,7 @@ navigation link anywhere, so an ordinary user never discovers it.
   all and **everyone gets a 404**, including you. It is currently unset in every environment,
   which is why the board is invisible in staging today.
 - `OPS_WRITE_ENABLED` — must be `true` for the Refund/Deny buttons to render. Read-only without
-  it. (Ships in PR #137.)
+  it.
 
 Non-admins get a 404 that is byte-identical to a missing route — never a 403 — so the surface
 never confirms it exists.
@@ -243,7 +243,7 @@ the reconciliation runbook queries, Sentry.
 
 **To make prod capable of real money**, in order: Stripe keys in Doppler → flip
 `FUNDING_PROCESSOR=stripe` → treasury wallet + `DATABASE_URL` + `FLOAT_CEILING_MINOR` for the
-worker → Bridge webhook keys → merge and promote PR #137 if you want ops actions. Each is a
+worker → Bridge webhook keys → promote to production if you want the ops actions. Each is a
 deliberate gate, not an oversight.
 
 **Changing ops admins in staging/prod:** Doppler → project `puente-api` → config `stg_main` /
