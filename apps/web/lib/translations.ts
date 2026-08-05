@@ -68,7 +68,7 @@ export type Translations = {
   }
   footer: { tagline: string; privacyLink: string; termsLink: string; disclaimer: [string, string]; disclaimer2: string; rights: string; note: string }
   onboarding: {
-    signup: { title: string; sub: string; phone: string; phonePh: string; smsConsent: string; cta: string; sending: string; error: string }
+    signup: { title: string; sub: string; phone: string; phonePh: string; smsConsent: string; legal: { pre: string; privacyLink: string; and: string; termsLink: string; post: string }; cta: string; sending: string; error: string }
     verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resent: string; error: string }
     profile: { title: string; sub: string; firstName: string; lastName: string; email: string; emailNote: string; cta: string; saving: string; error: string }
     kyc: { title: string; body: string; dataNotice: string; cta: string; starting: string; error: string }
@@ -450,9 +450,31 @@ const en: Translations = {
       sub: 'Enter your mobile number and we’ll text you a verification code.',
       phone: 'Mobile number',
       phonePh: '(555) 555-5555',
-      // NEEDS LEGAL REVIEW (EN + ES): TCPA consent language
+      // NEEDS LEGAL REVIEW (EN + ES): TCPA consent language.
+      //
+      // A2P 10DLC: this campaign is registered as 2FA, so the consent scope must
+      // name ONE message type — one-time codes. An earlier version added "and
+      // account notices", which read as a second, unregistered category and was
+      // rejected by TCR (error 30896, "opt-in does not align with the use case").
+      // Do not widen this without re-registering the campaign for the wider use
+      // case first. This exact string is also quoted verbatim in the campaign's
+      // message_flow field in the Twilio console — the two must stay in sync.
+      //
+      // "Consent is not a condition of using Puente" was also dropped: it is a
+      // marketing-consent construct, and it contradicted the checkbox, which is
+      // `required` on the form.
       smsConsent:
-        'I agree to receive automated text messages from Puente Financial at this number, including verification codes and account notices. Message and data rates may apply. Consent is not a condition of using Puente.',
+        'I agree to receive automated one-time verification codes by text message from Puente Financial at this number. Codes are sent only when you request one — we send no marketing or promotional messages. Message and data rates may apply. Reply STOP to opt out or HELP for help.',
+      // CTIA web opt-in: the privacy policy and terms must be reachable from the
+      // point of consent. The site-wide Footer renders only on the homepage, so
+      // /signup carried no legal links at all until these were added.
+      legal: {
+        pre: 'See our',
+        privacyLink: 'Privacy Policy',
+        and: 'and',
+        termsLink: 'Terms of Service',
+        post: 'for how we handle your mobile information.',
+      },
       cta: 'Send code',
       sending: 'Sending…',
       error: 'We couldn’t send the code. Check the number and try again.',
@@ -910,9 +932,18 @@ const es: Translations = {
       sub: 'Ingresa tu número de celular y te enviaremos un código de verificación por SMS.',
       phone: 'Número de celular',
       phonePh: '(555) 555-5555',
-      // NEEDS LEGAL REVIEW (EN + ES): texto de consentimiento TCPA
+      // NEEDS LEGAL REVIEW (EN + ES): texto de consentimiento TCPA.
+      // Ver la nota en la versión en inglés: el alcance del consentimiento debe
+      // nombrar únicamente los códigos de un solo uso (A2P 10DLC, error 30896).
       smsConsent:
-        'Acepto recibir mensajes de texto automatizados de Puente Financial en este número, incluidos códigos de verificación y avisos de cuenta. Pueden aplicar tarifas de mensajes y datos. El consentimiento no es una condición para usar Puente.',
+        'Acepto recibir códigos de verificación de un solo uso por mensaje de texto automatizado de Puente Financial en este número. Los códigos se envían solo cuando los solicitas; no enviamos mensajes de marketing ni promocionales. Pueden aplicar tarifas de mensajes y datos. Responde STOP para cancelar o HELP para obtener ayuda.',
+      legal: {
+        pre: 'Consulta nuestra',
+        privacyLink: 'Política de Privacidad',
+        and: 'y nuestros',
+        termsLink: 'Términos de Servicio',
+        post: 'para saber cómo tratamos tu información móvil.',
+      },
       cta: 'Enviar código',
       sending: 'Enviando…',
       error: 'No pudimos enviar el código. Revisa el número e inténtalo de nuevo.',
