@@ -79,6 +79,13 @@ COMPLETED  (Bridge confirms delivery)
 ACH CLEARS  (independent later event — funding actually lands)
   DR cash_clearing          100
   CR funding_receivable     100
+  (Posted by the funding_cleared webhook under its own `funding_cleared` transition — NOT a state
+   change, so it is keyed independently and a redelivery is a no-op. Implemented 2026-08-03;
+   until then it was specified here but never posted, which left funding_receivable tracking
+   LIFETIME VOLUME. Because isFloatCeilingTripped reads that balance, the ceiling was a one-way
+   ratchet that would have halted all payouts permanently. Skipped when the receivable is already
+   closed — PENDING_PAYMENT/PAYMENT_FAILED never opened it, CANCELED and voided-mode refunds
+   already credited it back; those all describe a pull that never truly settles.)
 ```
 
 The `SUBMITTED` slippage line flips with the sign of `D = A − S`: a **debit** when unfavorable

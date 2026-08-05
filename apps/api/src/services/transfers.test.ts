@@ -14,6 +14,7 @@ const {
   cancelTransfer,
   fundedLedgerEntries,
   canceledLedgerEntries,
+  fundingClearedLedgerEntries,
   bridgeReturnLedgerEntries,
   refundedLedgerEntries,
   voidRefundLedgerEntries,
@@ -156,6 +157,37 @@ describe('fundedLedgerEntries', () => {
     const entries = fundedLedgerEntries({ send_amount_minor: 100, fee_amount_minor: 0 })
     expect(entries).toHaveLength(2)
     expect(entries.map((e) => e.account_code)).not.toContain('fee_revenue')
+  })
+})
+
+describe('fundingClearedLedgerEntries', () => {
+  it('builds the net-zero ACH CLEARS batch — the receivable becomes cash', () => {
+    const entries = fundingClearedLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199 })
+    expect(entries).toEqual([
+      { account_code: 'cash_clearing', direction: 'debit', amount_minor: 20000, currency: 'USD' },
+      { account_code: 'funding_receivable', direction: 'credit', amount_minor: 20000, currency: 'USD' },
+    ])
+    const debits = entries.filter((e) => e.direction === 'debit').reduce((s, e) => s + e.amount_minor, 0)
+    const credits = entries.filter((e) => e.direction === 'credit').reduce((s, e) => s + e.amount_minor, 0)
+    expect(debits).toBe(credits)
+  })
+
+  it('relieves EXACTLY what FUNDED opened, so the receivable returns to zero', () => {
+    // The bug this fixes: without this batch, funding_receivable accumulated
+    // lifetime volume and the float ceiling (which reads that balance) became a
+    // one-way ratchet that permanently halts payouts.
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const opened = fundedLedgerEntries(t).find((e) => e.account_code === 'funding_receivable')!
+    const relieved = fundingClearedLedgerEntries(t).find((e) => e.account_code === 'funding_receivable')!
+    expect(relieved.amount_minor).toBe(opened.amount_minor)
+    expect(opened.direction).toBe('debit')
+    expect(relieved.direction).toBe('credit')
+  })
+
+  it('includes the fee in the relief even on a zero-fee transfer', () => {
+    const entries = fundingClearedLedgerEntries({ send_amount_minor: 5000, fee_amount_minor: 0 })
+    expect(entries).toHaveLength(2)
+    expect(entries[0]!.amount_minor).toBe(5000)
   })
 })
 

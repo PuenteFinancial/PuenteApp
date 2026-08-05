@@ -81,11 +81,17 @@ the row carries counts and refs only, never PII.
 
 ## Known gaps (phase 2)
 
-- **No cash legs yet:** `funding_receivable` is never relieved into `cash_clearing` at
-  settlement (no posting on `funding_cleared`), so `cash_clearing` ↔ Stripe balance + bank
-  comparison is not yet meaningful — needs the settlement/sweep posting design first.
-  `cash_clearing` can sit legitimately negative meanwhile (fee refunds paid before cash legs
-  exist); the negative-balance guard deliberately excludes it.
+- ~~**No cash legs yet**~~ **— CLOSED 2026-08-03.** `funding_cleared` now posts the ACH CLEARS
+  batch (`DR cash_clearing / CR funding_receivable`, transition `funding_cleared`), so the
+  receivable is relieved at settlement as ledger-rules.md always specified. This was not only an
+  accounting gap: `funding_receivable` is what the float ceiling reads, so an unrelieved balance
+  tracked lifetime volume and would have tripped the ceiling permanently once cumulative volume
+  crossed it, halting every payout with no self-healing.
+  **Still open:** `cash_clearing` ↔ Stripe balance + bank comparison. Stripe settles in BATCHES
+  (one payout covers many charges, net of fees), so the per-transfer posting is exact in amount
+  but approximate in timing; a meaningful comparison needs the balance-transaction ingest.
+  `cash_clearing` can still sit legitimately negative meanwhile (fee refunds, and payouts fronted
+  before their funding settles); the negative-balance guard deliberately excludes it.
 - Fee-line reconciliation (Stripe fees + Bridge invoice bps vs `provider_fees`) — with the
   cash legs.
 - Bridge/Stripe list reads are one bounded page (100); the run summary flags `truncated: true`
