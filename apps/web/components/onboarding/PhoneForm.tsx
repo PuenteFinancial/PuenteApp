@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useLanguage } from '@/components/LanguageProvider'
 import { SIGNUP_PHONE_KEY, normalizePhone } from '@/lib/phone'
@@ -71,6 +72,22 @@ export default function PhoneForm() {
             {s.smsConsent}
           </span>
         </label>
+
+        {/* CTIA web opt-in requires the privacy policy and terms to be reachable
+            from the point of consent — and A2P/TCR vetting checks the opt-in page
+            for them. The site-wide Footer mounts only on the homepage, so these
+            links are what /signup has; do not remove them. */}
+        <p style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.5, margin: 0 }}>
+          {s.legal.pre}{' '}
+          <Link href="/privacy" style={{ color: 'var(--hero)', fontWeight: 600, textDecoration: 'underline' }}>
+            {s.legal.privacyLink}
+          </Link>{' '}
+          {s.legal.and}{' '}
+          <Link href="/terms" style={{ color: 'var(--hero)', fontWeight: 600, textDecoration: 'underline' }}>
+            {s.legal.termsLink}
+          </Link>{' '}
+          {s.legal.post}
+        </p>
 
         <button
           className="btn btn--accent"
