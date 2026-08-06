@@ -9,6 +9,12 @@ function hashPhone(phone: string): string {
   return createHash('sha256').update(phone.trim().replace(/\s+/g, '')).digest('hex')
 }
 
+// Deliberately under the 10s floor of every Vercel plan. Without our own
+// deadline the platform kills the invocation instead, and a killed invocation
+// logs nothing and flushes no analytics — the exact blind spot that makes a
+// "the row committed but the response was lost" duplicate impossible to prove.
+const UPSTREAM_TIMEOUT_MS = 8_000
+
 export async function POST(req: NextRequest) {
   const distinctId = req.headers.get('X-POSTHOG-DISTINCT-ID')
   const sessionId = req.headers.get('X-POSTHOG-SESSION-ID')
@@ -22,6 +28,11 @@ export async function POST(req: NextRequest) {
       referral_source,
       referral_source_other,
       lang,
+      // Duplicate-submission diagnostics. Passed straight through to the API,
+      // which stores them on the row and classifies any collision.
+      submission_id,
+      attempt,
+      prior_error,
     } = body
 
     if (!first_name?.trim()) {
@@ -54,31 +65,70 @@ export async function POST(req: NextRequest) {
 
     const apiUrl = internalApiUrl()
 
-    const apiRes = await fetch(`${apiUrl}/v1/waitlist`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        first_name: first_name.trim(),
-        phone: phone.trim(),
-        destination_country: destination_country.trim(),
-        referral_source,
-        ...(referral_source === 'Other' && { referral_source_other: referral_source_other.trim() }),
-        language_preference: lang || 'en',
-        ...(url.searchParams.get('utm_source') ?? utm_source_referer
-          ? { utm_source: url.searchParams.get('utm_source') ?? utm_source_referer }
-          : {}),
-        ...(url.searchParams.get('utm_medium') && {
-          utm_medium: url.searchParams.get('utm_medium'),
-        }),
-        ...(url.searchParams.get('utm_campaign') && {
-          utm_campaign: url.searchParams.get('utm_campaign'),
-        }),
-        ...(req.headers.get('user-agent') && { user_agent: req.headers.get('user-agent') }),
-      }),
-    })
-
+    // Computed before the call, not after: the failure path below needs an
+    // identity to attribute its event to.
     const phoneHash = hashPhone(phone)
     const phId = distinctId ?? phoneHash
+
+    const startedAt = Date.now()
+    let apiRes: Response
+    try {
+      apiRes = await fetch(`${apiUrl}/v1/waitlist`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+        body: JSON.stringify({
+          first_name: first_name.trim(),
+          phone: phone.trim(),
+          destination_country: destination_country.trim(),
+          referral_source,
+          ...(referral_source === 'Other' && { referral_source_other: referral_source_other.trim() }),
+          language_preference: lang || 'en',
+          ...(url.searchParams.get('utm_source') ?? utm_source_referer
+            ? { utm_source: url.searchParams.get('utm_source') ?? utm_source_referer }
+            : {}),
+          ...(url.searchParams.get('utm_medium') && {
+            utm_medium: url.searchParams.get('utm_medium'),
+          }),
+          ...(url.searchParams.get('utm_campaign') && {
+            utm_campaign: url.searchParams.get('utm_campaign'),
+          }),
+          ...(req.headers.get('user-agent') && { user_agent: req.headers.get('user-agent') }),
+          ...(submission_id && { submission_id }),
+          ...(typeof attempt === 'number' && { attempt }),
+          ...(prior_error && { prior_error }),
+          ...(distinctId && { client_distinct_id: distinctId }),
+        }),
+      })
+    } catch (err) {
+      // The row may ALREADY exist. The insert can commit and the response still
+      // be lost — a stalled upstream, a torn-down invocation, a dropped socket.
+      // We cannot tell from here, so we report the failure honestly and let the
+      // API classify the retry if one arrives. 504 (not 500) so the client can
+      // record precisely what it saw.
+      const upstreamMs = Date.now() - startedAt
+      const reason =
+        err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')
+          ? 'timeout'
+          : 'transport'
+      console.error('Waitlist upstream unreachable:', { reason, upstreamMs })
+      const ph = getPostHogClient()
+      ph.capture({
+        distinctId: phId,
+        event: 'waitlist_upstream_unreachable',
+        properties: {
+          reason,
+          upstream_ms: upstreamMs,
+          submission_id,
+          attempt,
+          destination_country,
+          language: lang || 'en',
+          $session_id: sessionId ?? undefined,
+        },
+      })
+      await flushPostHog()
+      return NextResponse.json({ error: 'Failed to join waitlist' }, { status: 504 })
+    }
 
     if (!apiRes.ok) {
       // The API returns the uniform envelope { error: { code, message, ... } },
@@ -99,6 +149,8 @@ export async function POST(req: NextRequest) {
           status: apiRes.status,
           error_code: apiError?.code ?? 'unknown',
           request_id: apiError?.requestId,
+          submission_id,
+          attempt,
           $session_id: sessionId ?? undefined,
         },
       })
@@ -129,6 +181,8 @@ export async function POST(req: NextRequest) {
         utm_source: url.searchParams.get('utm_source') ?? utm_source_referer,
         utm_medium: url.searchParams.get('utm_medium'),
         utm_campaign: url.searchParams.get('utm_campaign'),
+        submission_id,
+        attempt,
         $session_id: sessionId ?? undefined,
       },
     })
