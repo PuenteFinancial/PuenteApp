@@ -12,6 +12,7 @@ import { Client } from 'pg'
 import { moneyFromMinorUnits } from '@puente/shared'
 import { postLedgerTransaction, getAccountBalance, type LedgerEntryInput } from './ledger.js'
 import { submittedLedgerEntries } from './payouts.js'
+import { fundedLedgerEntries, fundingClearedLedgerEntries } from './transfers.js'
 import { supabaseAdmin } from './supabase.js'
 
 const runDb = process.env.RUN_DB_TESTS === '1'
@@ -405,6 +406,68 @@ describe.skipIf(!runDb)('ledger core (integration, local Supabase)', () => {
     it('returns zero for an account with no entries and errors on an unknown code', async () => {
       expect(await getAccountBalance('loss_funding_reversed')).toEqual(usd(0))
       await expect(getAccountBalance('nope')).rejects.toThrow(/unknown ledger account code/)
+    })
+  })
+
+  // The bug this pins (2026-08-03, fixed in #145): funding_cleared flipped a
+  // flag and posted NOTHING, so funding_receivable was never relieved on the
+  // happy path. isFloatCeilingTripped() compares FLOAT_CEILING_MINOR against
+  // exactly this balance, so the account tracked CUMULATIVE LIFETIME VOLUME
+  // rather than outstanding float — a one-way ratchet that would permanently
+  // halt every payout once volume crossed the ceiling, with no self-healing.
+  //
+  // Unit tests could not have caught it: each batch was individually correct.
+  // Only summing them through real Postgres shows the receivable never closing.
+  describe('funding lifecycle balances (float-ceiling ratchet regression)', () => {
+    const transfer = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const TOTAL = 20000
+
+    const post = (transition: string, entries: ReturnType<typeof fundedLedgerEntries>) =>
+      postLedgerTransaction({
+        transferId: T1,
+        transition,
+        description: `db test ${transition}`,
+        entries: entries.map((e) => ({
+          accountCode: e.account_code,
+          direction: e.direction,
+          money: usd(e.amount_minor),
+        })),
+      })
+
+    it('opens the receivable at FUNDED and closes it to ZERO once the ACH clears', async () => {
+      await post('FUNDED', fundedLedgerEntries(transfer))
+      expect(await getAccountBalance('funding_receivable')).toEqual(usd(TOTAL))
+      expect(await getAccountBalance('cash_clearing')).toEqual(usd(0))
+
+      await post('funding_cleared', fundingClearedLedgerEntries(transfer))
+
+      // THE assertion. Before the fix this read 20000 forever.
+      expect(await getAccountBalance('funding_receivable')).toEqual(usd(0))
+      // the money did not vanish — it became cash we hold
+      expect(await getAccountBalance('cash_clearing')).toEqual(usd(TOTAL))
+    })
+
+    it('does not ratchet across many cleared transfers — the whole point of the fix', async () => {
+      // Simulate volume: the same lifecycle posted repeatedly. The receivable
+      // must return to zero every time rather than accumulating, or the float
+      // ceiling trips on cumulative volume and never recovers.
+      for (let i = 0; i < 5; i++) {
+        await post(`FUNDED:${i}`, fundedLedgerEntries(transfer))
+        await post(`funding_cleared:${i}`, fundingClearedLedgerEntries(transfer))
+      }
+      expect(await getAccountBalance('funding_receivable')).toEqual(usd(0))
+      expect(await getAccountBalance('cash_clearing')).toEqual(usd(TOTAL * 5))
+    })
+
+    it('is replay-safe — a redelivered clearing webhook cannot double-relieve', async () => {
+      await post('FUNDED', fundedLedgerEntries(transfer))
+      await post('funding_cleared', fundingClearedLedgerEntries(transfer))
+      // same (transfer, transition) → same idempotency key → replay, posts nothing
+      await post('funding_cleared', fundingClearedLedgerEntries(transfer))
+
+      expect(await getAccountBalance('funding_receivable')).toEqual(usd(0))
+      // a double relief would drive cash to 2x and the receivable negative
+      expect(await getAccountBalance('cash_clearing')).toEqual(usd(TOTAL))
     })
   })
 })
