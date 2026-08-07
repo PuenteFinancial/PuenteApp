@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useLanguage } from '@/components/LanguageProvider'
 import { COUNTRIES } from '@/lib/countries'
 import { translations } from '@/lib/translations'
@@ -17,6 +17,27 @@ type ErrorKind = 'generic' | 'validation'
 
 const TOTAL = 2
 
+// Identifies one form session, stable across retries within it. Sent with every
+// attempt so a duplicate row can be traced back to whether the SAME person
+// resubmitted the SAME form (we showed them a false failure) or came back and
+// filled it in again. A page reload deliberately starts a new session.
+function newSubmissionId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID()
+    }
+  } catch {
+    // fall through to the manual shape below
+  }
+  // Safari < 15.4 has no randomUUID, and the target audience skews to older
+  // devices. This is a correlation id, never a secret — the uuid SHAPE is what
+  // matters (the column is `uuid`), not the entropy.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16)
+  })
+}
+
 export default function SignupFlow() {
   const { t, lang } = useLanguage()
   const s = t.wl
@@ -30,6 +51,12 @@ export default function SignupFlow() {
   const [status, setStatus] = useState<Status>('idle')
   const [errorKind, setErrorKind] = useState<ErrorKind>('generic')
   const [copied, setCopied] = useState(false)
+  // Lazy initializer: one id per mount, NOT one per render.
+  const [submissionId] = useState(newSubmissionId)
+  const attemptRef = useRef(0)
+  // What the previous attempt was shown. Null on the first attempt; on a retry
+  // this is the evidence that the user was told it failed.
+  const priorErrorRef = useRef<string | null>(null)
 
   const refLink = 'puentefinancial.com'
   const waHref = 'https://wa.me/?text=' + encodeURIComponent(s.success.waText + ' https://' + refLink)
@@ -50,6 +77,8 @@ export default function SignupFlow() {
     setStatus('loading')
     const distinctId = posthog.get_distinct_id()
     const sessionId = posthog.get_session_id()
+    attemptRef.current += 1
+    const attempt = attemptRef.current
 
     try {
       const res = await fetch('/api/waitlist', {
@@ -66,6 +95,9 @@ export default function SignupFlow() {
           referral_source: referralSource,
           ...(referralSource === 'Other' && { referral_source_other: referralSourceOther }),
           lang,
+          submission_id: submissionId,
+          attempt,
+          ...(priorErrorRef.current && { prior_error: priorErrorRef.current }),
         }),
       })
 
@@ -77,12 +109,17 @@ export default function SignupFlow() {
         // reliably flushes even when the server-side capture does not.
         const body = (await res.json().catch(() => ({}))) as { error?: string }
         setErrorKind(res.status === 400 ? 'validation' : 'generic')
+        // Carried on the NEXT attempt. A 504 here means the row may already
+        // have landed — that pairing is what proves the duplicate's cause.
+        priorErrorRef.current = `http_${res.status}`
         posthog.capture('waitlist_form_failed', {
           status: res.status,
           error: body.error ?? 'Unknown',
           destination_country: country,
           referral_source: referralSource,
           language: lang,
+          submission_id: submissionId,
+          attempt,
         })
         setStatus('error')
         return
@@ -93,12 +130,17 @@ export default function SignupFlow() {
         destination_country: country,
         referral_source: referralSource,
         language: lang,
+        submission_id: submissionId,
+        attempt,
       })
 
       setStatus('success')
     } catch (err) {
       // Transport-level failure — the request never got a response at all.
+      // The write may still have succeeded server-side, so a retry from here is
+      // a prime duplicate source.
       setErrorKind('generic')
+      priorErrorRef.current = 'transport'
       posthog.captureException(
         err instanceof Error ? err : new Error('Waitlist form submission failed'),
       )
