@@ -22,8 +22,8 @@ less obvious than it looks — the gotchas below each cost time once.
 
 - `expo*` majors and `react-native-screens` are in the Dependabot ignore list — the Expo SDK pins
   these; they only move when the SDK itself is upgraded.
-- **CI never builds the mobile app**, so an Expo-SDK-incompatible bump (e.g. SDK 57 packages into
-  the SDK 56 app) passes CI green. Check expo-adjacent package majors manually before merging.
+- **CI never builds the mobile app**, so an Expo-SDK-incompatible bump (e.g. SDK 58 packages into
+  the SDK 57 app) passes CI green. Check expo-adjacent package majors manually before merging.
 
 ## Deferred major migrations
 

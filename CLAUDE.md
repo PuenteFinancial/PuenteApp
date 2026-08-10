@@ -6,18 +6,24 @@ Live now: waitlist, credit score check, financial literacy content (puentefinanc
 In progress: USD → MXN remittance MVP — pure money movement. Lending is a separate future stack.
 
 ## Stack
-- Monorepo: Turborepo. `apps/mobile` (RN + Expo), `apps/api` (Fastify), `packages/shared` (TS types)
+- Monorepo: Turborepo. `apps/mobile` (RN + Expo), `apps/web` (Next.js), `apps/api` (Fastify), `packages/shared` (types + portable client logic)
 - API: Fastify v5, TypeScript 6, Zod schema validation, Supabase (Postgres)
-- Mobile: Expo SDK 56, expo-router, NativeWind (Tailwind), react-i18next
+- Mobile: Expo SDK 57, expo-router, NativeWind (Tailwind), shared `translations.ts` (not react-i18next)
 - Auth: Supabase Auth + Twilio SMS OTP + JWT
 - Credit: CRS Credit API (server-side only — never called from client)
 - Analytics: PostHog. Feature flags via PostHog.
 - Error monitoring: Sentry
 - Deployment: Railway (API), Expo EAS (mobile)
 
-## Shared types
+## Shared code
 Define types ONCE in `packages/shared/src/types/`. Import everywhere via `@puente/shared`.
 Never duplicate type definitions across apps.
+
+`packages/shared` also holds framework-free client logic used by more than one app —
+`i18n/` (UI copy), `api/` (error-envelope mapping), `theme/` (design tokens). Anything needing
+React, the DOM, or a bundler stays in the app. Subpath exports (`@puente/shared/i18n`,
+`/theme`) keep UI copy out of the API's runtime import graph — do not re-export them from the
+root barrel.
 
 ## API conventions
 - All routes versioned: `/v1/`
@@ -36,7 +42,7 @@ Never duplicate type definitions across apps.
 
 ## Mobile conventions
 - NativeWind for all styling (Tailwind class names)
-- All user-facing strings go through i18next — English + Spanish from day one
+- All user-facing strings come from `@puente/shared/i18n` — English + Spanish from day one
 - expo-router for navigation (file-based)
 - expo-secure-store for any sensitive local storage (tokens, etc.)
 

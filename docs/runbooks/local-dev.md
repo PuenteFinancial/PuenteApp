@@ -44,6 +44,11 @@ waitlist entry, confirm the row lands in **puente-staging**.
   tokens. `apiFetch` **throws** if `INTERNAL_API_URL` is unset — there is no default.
 - API must bind `HOST=::` — Node's fetch resolves `localhost` to `::1`, so an IPv4-only bind breaks
   the web→API proxy.
+- `packages/shared` is consumed as **built output** (`dist/`, gitignored), not source. Root
+  `pnpm dev` handles this: turbo's `dev` task has `dependsOn: ["^build"]`, and shared's own `dev`
+  script is `tsup --watch`, so edits there propagate live. Running a single app directly
+  (`pnpm --filter @puente/web dev`) skips both — build shared first with
+  `pnpm turbo run build --filter=@puente/shared`, or you will debug a stale `dist/`.
 
 ## Setup B — fully local (supabase start)
 

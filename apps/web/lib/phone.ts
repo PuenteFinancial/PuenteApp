@@ -1,8 +1,3 @@
-export const SIGNUP_PHONE_KEY = 'puente_signup_phone'
-
-// Digits only, US country code prepended when a bare 10-digit number is
-// entered — matches the format Supabase phone auth is configured with.
-export function normalizePhone(input: string): string {
-  const digits = input.replace(/\D/g, '')
-  return digits.length === 10 ? `1${digits}` : digits
-}
+// Moved to @puente/shared (src/phone.ts) — mobile normalizes phone numbers for
+// the same Supabase phone-auth format.
+export { SIGNUP_PHONE_KEY, normalizePhone } from '@puente/shared'

@@ -160,6 +160,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@puente/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       '@stripe/react-stripe-js':
         specifier: 6.8.0
         version: 6.8.0(@stripe/stripe-js@9.13.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
