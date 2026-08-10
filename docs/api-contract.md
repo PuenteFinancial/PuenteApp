@@ -319,7 +319,11 @@ timestamps, states, hold reasons, booleans; never names, destinations, or user i
     "balances": [ { "code": "funding_receivable", "amountMinor": 123400, "currency": "USD" } ] },
   "reconciliationRuns": [          // latest 7, newest first — the reconciliation runbook's own read
     { "createdAt": "…", "status": "findings", "findingsCount": 2,
-      "checks": [ { "name": "bridge_wallet_float", "status": "findings", "findingsCount": 2 } ] } ]
+      "checks": [ { "name": "bridge_wallet_float", "status": "findings", "findingsCount": 2 } ] } ],
+  "workerHeartbeats": [            // one row per logical worker service; [] before the first beat
+    { "worker": "worker", "beatAt": "2026-08-01T11:58:00Z",
+      "ageSeconds": 120,           // age at generatedAt
+      "stale": false } ]           // no beat in 15 min — same threshold as the Sentry cron monitor
 }
 ```
 

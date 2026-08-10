@@ -136,6 +136,18 @@ const overviewResponseSchema = {
         },
       },
     },
+    workerHeartbeats: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          worker: { type: 'string' },
+          beatAt: { type: 'string' },
+          ageSeconds: { type: 'number' },
+          stale: { type: 'boolean' },
+        },
+      },
+    },
   },
 } as const
 

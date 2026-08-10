@@ -312,6 +312,11 @@ export type Translations = {
     reconRunsEmpty: string
     reconStatus: { pass: string; findings: string; error: string }
     findingsCount: string
+    workerHeartbeat: string
+    workerHeartbeatEmpty: string
+    heartbeatLive: string
+    heartbeatStale: string
+    heartbeatDead: string
     // v1.1 resolve-cancellation actions. Operator jargon, not consumer copy —
     // no legal-review markers needed (the consumer-facing Reg E strings live
     // in send.*; these render only on the admin-gated ops board).
@@ -831,6 +836,11 @@ const en: Translations = {
     reconRunsEmpty: 'No runs recorded yet.',
     reconStatus: { pass: 'pass', findings: 'findings', error: 'error' },
     findingsCount: 'findings',
+    workerHeartbeat: 'Worker heartbeat',
+    workerHeartbeatEmpty: 'No heartbeat recorded yet.',
+    heartbeatLive: 'beating',
+    heartbeatStale: 'no beat in 15+ min',
+    heartbeatDead: 'Worker heartbeat stopped — scheduled jobs are probably not running',
   },
 }
 
@@ -1281,6 +1291,12 @@ const es: Translations = {
     reconRunsEmpty: 'A\u00fan no hay corridas registradas.',
     reconStatus: { pass: 'limpia', findings: 'hallazgos', error: 'error' },
     findingsCount: 'hallazgos',
+    workerHeartbeat: 'Latido del worker',
+    workerHeartbeatEmpty: 'A\u00fan no se registra ning\u00fan latido.',
+    heartbeatLive: 'activo',
+    heartbeatStale: 'sin latido hace 15+ min',
+    heartbeatDead:
+      'El latido del worker se detuvo \u2014 es probable que los trabajos programados no se est\u00e9n ejecutando',
   },
 }
 
