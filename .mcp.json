@@ -1,11 +1,12 @@
 {
   "mcpServers": {
     "supabase": {
-      "command": "node_modules/.bin/mcp-server-supabase",
-      "args": ["--read-only", "--project-ref=namdkmsmdkmdffgscqgd"],
-      "env": {
-        "SUPABASE_ACCESS_TOKEN": "${SUPABASE_ACCESS_TOKEN}"
-      }
+      "comment": "Token resolution must not depend on how the app was launched. A Dock-launched app never sources ~/.zshenv, so ${SUPABASE_ACCESS_TOKEN} expands to nothing and the literal text reaches the server as its token. Keychain works either way; the env fallback keeps non-macOS clones working.",
+      "command": "sh",
+      "args": [
+        "-c",
+        "SUPABASE_ACCESS_TOKEN=$(/usr/bin/security find-generic-password -s supabase-mcp -w 2>/dev/null || printf %s \"$SUPABASE_ACCESS_TOKEN\") exec node_modules/.bin/mcp-server-supabase --read-only --project-ref=namdkmsmdkmdffgscqgd"
+      ]
     },
     "supabase-prod": {
       "command": "node_modules/.bin/mcp-server-supabase",
