@@ -6,10 +6,6 @@
     "orientation": "portrait",
     "scheme": "puente",
     "userInterfaceStyle": "automatic",
-    "splash": {
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.puentefinancial.app"
@@ -22,6 +18,13 @@
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#ffffff",
+          "resizeMode": "contain"
+        }
+      ],
       [
         "@sentry/react-native/expo",
         {
