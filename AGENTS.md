@@ -8,7 +8,7 @@ In progress: USD → MXN remittance MVP — pure money movement. Lending is a se
 ## Stack
 - Monorepo: Turborepo. `apps/mobile` (RN + Expo), `apps/web` (Next.js), `apps/api` (Fastify), `packages/shared` (types + portable client logic)
 - API: Fastify v5, TypeScript 6, Zod schema validation, Supabase (Postgres)
-- Mobile: Expo SDK 57, expo-router, NativeWind (Tailwind), shared `translations.ts` (not react-i18next)
+- Mobile: Expo SDK 57, expo-router, `StyleSheet` over `@puente/shared/theme` tokens (NOT NativeWind), shared `translations.ts` (not react-i18next)
 - Auth: Supabase Auth + Twilio SMS OTP + JWT
 - Credit: CRS Credit API (server-side only — never called from client)
 - Analytics: PostHog. Feature flags via PostHog.
@@ -41,7 +41,10 @@ root barrel.
 - Run security-reviewer subagent before merging auth or financial logic
 
 ## Mobile conventions
-- NativeWind for all styling (Tailwind class names)
+- Styling is `StyleSheet.create` reading tokens from `@puente/shared/theme` via `apps/mobile/lib/theme.ts`.
+  **NativeWind was evaluated and rejected 2026-08-10** — its engine
+  (`react-native-css-interop`) has a non-optional peer on `react-native-reanimated`, which is not
+  in mobile's tree, and no EAS build has ever run against this app. Never hardcode a hex value.
 - All user-facing strings come from `@puente/shared/i18n` — English + Spanish from day one
 - expo-router for navigation (file-based)
 - expo-secure-store for any sensitive local storage (tokens, etc.)

@@ -8,12 +8,14 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "build": "echo 'Use EAS Build: eas build'",
-    "lint": "eslint app/",
+    "lint": "eslint app/ lib/",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@expo/metro-runtime": "~57.0.8",
+    "@puente/shared": "workspace:*",
     "@sentry/react-native": "~7.11.0",
     "expo": "~57.0.11",
     "expo-constants": "~57.0.9",
