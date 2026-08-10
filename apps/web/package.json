@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
@@ -15,25 +15,24 @@
   "dependencies": {
     "@stripe/react-stripe-js": "6.8.0",
     "@stripe/stripe-js": "9.12.1",
-    "next": "^15.5.21",
+    "next": "^16.3.0",
     "posthog-js": "^1.409.5",
     "posthog-node": "^5.47.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3",
     "@playwright/test": "^1.62.1",
     "@types/node": "^26",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "autoprefixer": "^10",
-    "eslint": "^9",
-    "eslint-config-next": "^15.3.2",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.3.0",
     "playwright": "^1.62.1",
     "postcss": "^8",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5",
+    "typescript": "^6.0.3",
     "vitest": "^4.1.10"
   }
 }
