@@ -218,6 +218,28 @@ const shutdown = async (signal: string) => {
     Sentry.captureException(err)
     console.error('worker: pg-boss stop failed', err)
   }
+  // Drain Sentry's client buffer BEFORE exiting. process.exit() discards
+  // anything still queued, so an event captured moments before the exit never
+  // ships — which is precisely the shape of the captureException above: the
+  // pg-boss stop failure is reported and then the process leaves immediately.
+  // Measured: flush() with a freshly captured event genuinely waits (2005ms
+  // against an unreachable ingest host, returning false at the cap), so this is
+  // load-bearing, not ceremony.
+  //
+  // Scope, so nobody over-reads this: flush drains the CLIENT BUFFER, not
+  // envelopes already handed to the HTTP transport. An event captured seconds
+  // earlier is already past this point and is unaffected. This narrows the
+  // shutdown loss window; it does not close it.
+  //
+  // 2s cap, not unbounded: shutdown already spends up to 30s in boss.stop() and
+  // must stay inside Railway's SIGTERM grace period. A flush that cannot finish
+  // in 2s is one whose events are not worth delaying the exit for. Wrapped
+  // because a flush failure must never wedge shutdown.
+  try {
+    await Sentry.flush(2000)
+  } catch (err) {
+    console.error('worker: sentry flush failed', errMessage(err))
+  }
   server.close(() => process.exit(0))
   // Lingering health-check keep-alives must not block exit forever.
   setTimeout(() => process.exit(0), 5000).unref()
