@@ -33,8 +33,25 @@ updates:
       # expo-constants, etc. — companion packages jump majors with the SDK)
       - dependency-name: "expo*"
         update-types: ["version-update:semver-major"]
-      # Pinned exactly by the Expo SDK; moves only via `npx expo install` during SDK upgrades
+      # --- Expo SDK-managed packages: Dependabot must not touch these at all ---
+      # Their versions come from the installed SDK's bundledNativeModules.json,
+      # not from semver. CI never builds the mobile app, so a bump that breaks
+      # SDK compatibility passes every check and only surfaces at EAS build or
+      # runtime — which is exactly how mobile ended up a full major ahead on
+      # @sentry/react-native and a minor ahead on react-native while still on
+      # SDK 56. Dependabot was effectively performing a piecemeal, unplanned
+      # SDK upgrade: the react-native 0.86.2 it kept proposing is SDK 57's pin.
+      #
+      # These move only via a deliberate SDK upgrade. Revisit on the next one.
+      - dependency-name: "react-native"
+      - dependency-name: "react-native-safe-area-context"
       - dependency-name: "react-native-screens"
+      - dependency-name: "@sentry/react-native"
+      # NOTE: `react` is deliberately NOT ignored. It is SDK-managed too (57
+      # pins 19.2.3 exactly, to match react-native's renderer), but ignores
+      # apply workspace-wide and would freeze apps/web, which is live in
+      # production on ^19.2.8. pnpm keeps the two apart, so react bumps still
+      # get proposed — apply them to apps/web and drop the apps/mobile hunk.
 
   # GitHub Actions
   - package-ecosystem: github-actions
