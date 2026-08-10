@@ -21,6 +21,8 @@ import {
   JOB_LOSS_CORRECTION_WATCH,
   JOB_LEDGER_RECONCILE,
   JOB_STUCK_WATCH,
+  JOB_WORKER_HEARTBEAT,
+  WORKER_HEARTBEAT_CRON,
   type PayoutSubmitPayload,
   type PaymentEventProcessPayload,
 } from './services/queue.js'
@@ -33,6 +35,12 @@ import { submitPayout } from './jobs/payout-submit.js'
 import { sweepPayouts } from './jobs/payout-sweep.js'
 import { pollPayouts } from './jobs/payout-poll.js'
 import { processPaymentEvent } from './jobs/payment-event-process.js'
+import {
+  recordWorkerHeartbeat,
+  WORKER_HEARTBEAT_MONITOR,
+  WORKER_HEARTBEAT_MONITOR_SLUG,
+  type MonitorConfig,
+} from './jobs/worker-heartbeat.js'
 
 // pg-boss schedule() takes cron (1-min floor), but the poll cadence is
 // configured in seconds — convert to an every-N-minutes expression.
@@ -97,6 +105,22 @@ const handle = (jobName: string, fn: () => Promise<number>) => async () => {
   }
 }
 
+// Sentry cron check-in, wrapped around the INNER fn so handle()'s
+// () => Promise<number> contract is untouched and the failure order is right:
+// withMonitor marks the check-in 'error' first, then handle captures and
+// rethrows, then pg-boss records the job failure.
+//
+// Applied to exactly ONE job — the beat whose whole purpose is to prove the
+// dispatcher still dispatches. Deliberately not folded into handle() for every
+// cron: a monitor needs its own slug AND a crontab matching the real cadence
+// (handle() has neither), and monitoring all eight would create a monitor for
+// payout.sweep at 1-minute cadence alone. The other crons report failures
+// through Sentry.captureException above, as they do today — a failing
+// idempotency.purge is a bug report, not a liveness signal.
+const monitored =
+  (slug: string, config: MonitorConfig, fn: () => Promise<number>) => (): Promise<number> =>
+    Sentry.withMonitor(slug, fn, config)
+
 // Safe to wait out a retry here because the health endpoint above is already
 // listening — Railway won't kill the container mid-retry the way it would if
 // liveness depended on this whole sequence succeeding.
@@ -118,6 +142,13 @@ const boss = await withBootRetry(
     await boss.work(JOB_STUCK_WATCH, handle(JOB_STUCK_WATCH, watchStuckTransfers))
     await boss.work(JOB_PAYOUT_SWEEP, handle(JOB_PAYOUT_SWEEP, sweepPayouts))
     await boss.work(JOB_PAYOUT_POLL, handle(JOB_PAYOUT_POLL, pollPayouts))
+    await boss.work(
+      JOB_WORKER_HEARTBEAT,
+      handle(
+        JOB_WORKER_HEARTBEAT,
+        monitored(WORKER_HEARTBEAT_MONITOR_SLUG, WORKER_HEARTBEAT_MONITOR, recordWorkerHeartbeat),
+      ),
+    )
     // payment-event.process carries a paymentEventId payload; same batch-of-1
     // semantics as payout.submit (a rejection fails the job and pg-boss retries).
     await boss.work<PaymentEventProcessPayload>(JOB_PAYMENT_EVENT_PROCESS, async (jobs) => {
@@ -160,6 +191,9 @@ const boss = await withBootRetry(
     await boss.schedule(JOB_LEDGER_RECONCILE, '0 6 * * *')
     // Stuck-transfer pager (slice-8 O1): 5-min sweep of non-terminal dwell.
     await boss.schedule(JOB_STUCK_WATCH, '*/5 * * * *')
+    // Liveness beat (Workstream A). Last in the block because it is not a
+    // business cron: it exists so the silence of the others is detectable.
+    await boss.schedule(JOB_WORKER_HEARTBEAT, WORKER_HEARTBEAT_CRON)
 
     return boss
   },
@@ -183,6 +217,28 @@ const shutdown = async (signal: string) => {
   } catch (err) {
     Sentry.captureException(err)
     console.error('worker: pg-boss stop failed', err)
+  }
+  // Drain Sentry's client buffer BEFORE exiting. process.exit() discards
+  // anything still queued, so an event captured moments before the exit never
+  // ships — which is precisely the shape of the captureException above: the
+  // pg-boss stop failure is reported and then the process leaves immediately.
+  // Measured: flush() with a freshly captured event genuinely waits (2005ms
+  // against an unreachable ingest host, returning false at the cap), so this is
+  // load-bearing, not ceremony.
+  //
+  // Scope, so nobody over-reads this: flush drains the CLIENT BUFFER, not
+  // envelopes already handed to the HTTP transport. An event captured seconds
+  // earlier is already past this point and is unaffected. This narrows the
+  // shutdown loss window; it does not close it.
+  //
+  // 2s cap, not unbounded: shutdown already spends up to 30s in boss.stop() and
+  // must stay inside Railway's SIGTERM grace period. A flush that cannot finish
+  // in 2s is one whose events are not worth delaying the exit for. Wrapped
+  // because a flush failure must never wedge shutdown.
+  try {
+    await Sentry.flush(2000)
+  } catch (err) {
+    console.error('worker: sentry flush failed', errMessage(err))
   }
   server.close(() => process.exit(0))
   // Lingering health-check keep-alives must not block exit forever.

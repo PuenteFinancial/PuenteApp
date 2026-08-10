@@ -47,6 +47,7 @@ const minutesAgo = (m: number) => new Date(nowMs - m * 60_000).toISOString()
 
 let transfersResult: { data: unknown; error: unknown }
 let runsResult: { data: unknown; error: unknown }
+let heartbeatResult: { data: unknown; error: unknown }
 let transfersIn: ReturnType<typeof vi.fn>
 
 function chain(resolveFn: () => { data: unknown; error: unknown }) {
@@ -98,10 +99,12 @@ beforeEach(() => {
   envMock.FLOAT_CEILING_MINOR = undefined
   transfersResult = { data: [], error: null }
   runsResult = { data: [], error: null }
+  heartbeatResult = { data: [], error: null }
   transfersIn = vi.fn()
   from.mockImplementation((table: string) => {
     if (table === 'transfers') return chain(() => transfersResult)
     if (table === 'reconciliation_runs') return chain(() => runsResult)
+    if (table === 'worker_heartbeat') return chain(() => heartbeatResult)
     throw new Error(`unexpected supabase.from('${table}')`)
   })
   vi.useFakeTimers({ toFake: ['Date'] })
@@ -283,6 +286,56 @@ describe('buildOpsOverview', () => {
     runsResult = { data: [], error: null }
     rpc.mockResolvedValue({ data: null, error: { message: 'rpc missing' } })
     await expect(buildOpsOverview()).rejects.toThrow(/transfer-counts rpc failed: rpc missing/)
+
+    rpc.mockResolvedValue({ data: [], error: null })
+    heartbeatResult = { data: null, error: { message: 'heartbeat gone' } }
+    await expect(buildOpsOverview()).rejects.toThrow(
+      /worker-heartbeat select failed: heartbeat gone/,
+    )
+  })
+
+  it('marks a recent beat live and an old one stale', async () => {
+    heartbeatResult = {
+      data: [
+        { worker: 'worker', updated_at: minutesAgo(2) },
+        { worker: 'payout-worker', updated_at: minutesAgo(40) },
+      ],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+
+    expect(overview.workerHeartbeats).toEqual([
+      { worker: 'worker', beatAt: minutesAgo(2), ageSeconds: 120, stale: false },
+      { worker: 'payout-worker', beatAt: minutesAgo(40), ageSeconds: 2400, stale: true },
+    ])
+  })
+
+  it('holds the stale threshold at 15 minutes — the same arithmetic the pager uses', async () => {
+    // The Sentry monitor opens an issue after 3 missed 5-minute beats. If this
+    // boundary drifts, the board and the pager start disagreeing about whether
+    // the worker is alive, which is worse than either signal alone.
+    heartbeatResult = {
+      data: [
+        { worker: 'at-boundary', updated_at: minutesAgo(15) },
+        { worker: 'just-past', updated_at: new Date(nowMs - (15 * 60_000 + 1000)).toISOString() },
+      ],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+
+    expect(overview.workerHeartbeats.map((b) => b.stale)).toEqual([false, true])
+  })
+
+  it('reports no beats as an empty array, never as a healthy board', async () => {
+    heartbeatResult = { data: [], error: null }
+
+    const overview = await buildOpsOverview()
+
+    // Empty is the truthful pre-first-beat state; the web side renders it as
+    // "no heartbeat recorded yet", not as a passing check.
+    expect(overview.workerHeartbeats).toEqual([])
   })
 
   it('throws at the PostgREST cap on the open-transfers sweep', async () => {
