@@ -15,7 +15,7 @@
   "dependencies": {
     "@stripe/react-stripe-js": "6.8.0",
     "@stripe/stripe-js": "9.12.1",
-    "next": "^15.3.2",
+    "next": "^15.5.21",
     "posthog-js": "^1.409.5",
     "posthog-node": "^5.47.3",
     "react": "^19.2.8",
