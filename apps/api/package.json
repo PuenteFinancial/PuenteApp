@@ -22,7 +22,7 @@
     "@puente/shared": "workspace:*",
     "@sentry/node": "^10.69.0",
     "@supabase/supabase-js": "^2.111.0",
-    "fastify": "^5.11.0",
+    "fastify": "^5.11.2",
     "fastify-plugin": "^6.0.0",
     "jose": "^6.2.5",
     "pg-boss": "^12.26.3",
