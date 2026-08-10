@@ -11,7 +11,8 @@
     "lint": "eslint app/ lib/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "eas-build-post-install": "cd ../.. && pnpm turbo run build --filter=@puente/shared"
   },
   "dependencies": {
     "@expo/metro-runtime": "~57.0.8",
