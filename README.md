@@ -17,7 +17,7 @@ Turborepo monorepo, pnpm workspaces:
 |---|---|---|
 | `apps/api` | The API — the only thing that talks to the DB and to providers | Fastify v5, TypeScript, Zod, Supabase (Postgres) |
 | `apps/web` | Marketing site + waitlist + onboarding web flows | Next.js, Vercel |
-| `apps/mobile` | The app (remittance MVP target) | React Native, Expo SDK 57, NativeWind, expo-router |
+| `apps/mobile` | The app (remittance MVP target) | React Native, Expo SDK 57, StyleSheet + shared tokens, expo-router |
 | `packages/shared` | Defined once, imported everywhere (`@puente/shared`) — types incl. `Money`, plus UI copy, error mapping, and design tokens | TypeScript |
 | `docs/` | Design docs, runbooks, PRDs — see reading order below | — |
 | `supabase/migrations/` | Schema migrations (applied only via the pipeline) | — |

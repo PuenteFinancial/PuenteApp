@@ -53,9 +53,14 @@ clock). M3–M7 are the parity port. M8–M9 are what an app needs that a web pa
 - **i18n: reuse `translations.ts` verbatim; rewrite the 42-line provider.** Not react-i18next —
   CLAUDE.md gets amended. `translations.ts` is plain data with no framework coupling, and its
   strings must stay character-identical to web for A2P/TCR reasons (see §4).
-- **NativeWind + a shared token module.** NativeWind is *not* currently installed — only an orphaned
-  `apps/mobile/nativewind-env.d.ts`. Web's real palette lives as CSS custom properties in
-  `globals.css:10-55`, not in the stale `tailwind.config.ts`.
+- **~~NativeWind~~ → `StyleSheet` over a shared token module.** The NativeWind gate was run on
+  2026-08-10 and **failed**: its engine `react-native-css-interop@0.2.6` declares a non-optional
+  peer on `react-native-reanimated >=3.6.2`. reanimated is not in mobile's tree (store-only, as an
+  unlinked transitive peer), no EAS build has ever run against this app, and css-interop targets the
+  reanimated 3 era while SDK 57 ships reanimated 4 — a mismatch that resolves and bundles cleanly
+  and only surfaces natively. Screens consume `apps/mobile/lib/theme.ts`, so revisiting this when
+  NativeWind v5 stabilizes costs nothing. Web's real palette lives in `globals.css:10-55`, not in
+  the stale `tailwind.config.ts`.
 - **iOS first.** `app.json` already declares an Android package and the port is largely
   platform-agnostic, but MVP ships iOS; Android becomes a parity check in M9.
 - **TanStack Query for the client data layer** (lands in M4, see §6). Web's server components
@@ -74,7 +79,7 @@ These are not ports. Budget for them as new work:
 | **Payment** | Stripe.js `PaymentElement` | `@stripe/stripe-react-native` + Financial Connections — different SDK |
 | **Foreground detection** | `document.visibilitychange` | `AppState` |
 | **Ephemeral state** | `sessionStorage` | React context (PII to disk is not acceptable) |
-| **Styling** | Inline `style={{}}` + CSS vars | NativeWind classes over shared tokens |
+| **Styling** | Inline `style={{}}` + CSS vars | `StyleSheet.create` over shared tokens |
 | **Push** | n/a | Doesn't exist anywhere yet (§10) |
 
 ---
@@ -126,10 +131,10 @@ Once web imports `@puente/shared` that accident becomes load-bearing and invisib
 duplicate and defers CSS regeneration. No codegen — 16 constants don't earn a build step. Follow-up:
 a web test asserting parity.
 
-**NativeWind is a gate, not a formality.** Expo SDK 57 / RN 0.86.2 / React 19.2.3 is ahead of NativeWind
-v4's tested matrix. Install, run `expo-doctor`. **If it doesn't come up clean, ship the whole PRD
-with `StyleSheet.create` over the same shared tokens and amend CLAUDE.md** rather than blocking on a
-styling library.
+**NativeWind gate: RUN AND FAILED (2026-08-10).** See the decision above. Shipped with
+`StyleSheet.create` over the same shared tokens; CLAUDE.md, AGENTS.md and README amended. The
+`exports`-subpath risk this gate also covered is closed: `@puente/shared/theme` was proven to
+resolve through Metro by exporting a real iOS Hermes bundle and confirming the token hex is in it.
 
 Also fix `apps/mobile/tsconfig.json` — `"@/*": ["./src/*"]` points at a directory that doesn't exist.
 
@@ -343,7 +348,7 @@ the entity providing the service. Verify current requirements directly — Apple
 
 | # | Slice | Size | Depends on | Blocked by (external) |
 |---|---|---|---|---|
-| M1 | Foundation | M | — | NativeWind × SDK 57 compatibility |
+| M1 | Foundation | M | — | ~~NativeWind × SDK 57~~ — gate failed, StyleSheet shipped |
 | M2 | Auth + shell | M | M1 | — (Twilio approved 8/10) |
 | M3 | Profile + KYC | M | M2 | prod Bridge for E2E; needs an API change |
 | M4 | Recipients | M | M2 | — |
