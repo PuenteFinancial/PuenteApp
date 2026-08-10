@@ -228,6 +228,10 @@ const envSchema = z.object({
   TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
   TWILIO_PHONE_NUMBER: z.string().min(1).optional(),
   SENTRY_DSN: z.string().url().optional(),
+  // Declared here for validation + documentation only — instrument.ts reads it
+  // straight off process.env, because Sentry.init must run before anything
+  // imports this module.
+  SENTRY_ENVIRONMENT: z.string().min(1).optional(),
 })
 
 // Exported for tests; runtime uses the singleton `env` below.
