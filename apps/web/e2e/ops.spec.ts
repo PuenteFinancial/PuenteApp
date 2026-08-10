@@ -54,6 +54,14 @@ test('renders the needs-you queue and state-of-world panels', async ({ context, 
   await expect(page.getByText(/as of last reconciliation|al cierre de la última conciliación/i)).toBeVisible()
   await expect(page.getByText(/reconciliation runs|corridas de conciliación/i)).toBeVisible()
 
+  // Worker heartbeat panel renders the healthy path, and the dead-worker banner
+  // stays out of the way when the beat is fresh.
+  await expect(page.getByText(/worker heartbeat|latido del worker/i)).toBeVisible()
+  await expect(page.getByText(/^(beating|activo)$/i)).toBeVisible()
+  await expect(
+    page.getByText(/heartbeat stopped|latido del worker se detuvo/i),
+  ).toHaveCount(0)
+
   // v1.1: actionsEnabled is true in the fixture, so each pending-cancellation
   // row carries exactly its Refund + Deny pair — and nothing else grew buttons.
   await expect(page.getByRole('button', { name: /^(refund|reembolsar)$/i })).toHaveCount(2)

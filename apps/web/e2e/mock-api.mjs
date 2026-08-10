@@ -408,6 +408,16 @@ const server = createServer(async (req, res) => {
         },
         { createdAt: '2026-07-31T06:00:00.000Z', status: 'pass', findingsCount: 0, checks: [] },
       ],
+      // Fresh beat: the default render is the healthy path, so the stale banner
+      // stays out of every other ops assertion in the suite.
+      workerHeartbeats: [
+        {
+          worker: 'worker',
+          beatAt: '2026-08-01T11:58:00.000Z',
+          ageSeconds: 120,
+          stale: false,
+        },
+      ],
     })
   }
 

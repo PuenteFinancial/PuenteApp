@@ -57,6 +57,13 @@ export interface OpsLedgerBalances {
   balances: Array<{ code: string; amountMinor: number; currency: string }>
 }
 
+export interface OpsWorkerHeartbeat {
+  worker: string
+  beatAt: string
+  ageSeconds: number
+  stale: boolean
+}
+
 export interface OpsOverview {
   generatedAt: string
   // v1.1: whether the API's write capability (double-control env gate) is live.
@@ -69,6 +76,12 @@ export interface OpsOverview {
   transferCounts: Array<{ state: string; count: number }>
   ledgerBalances: OpsLedgerBalances | null
   reconciliationRuns: OpsReconciliationRun[]
+  // Workstream A: liveness beats, one per logical worker service. OPTIONAL with
+  // the same deploy-skew semantics as actionsEnabled — an API predating the
+  // heartbeat omits it, and the panel simply doesn't render. Requiring it would
+  // make isOpsOverviewShape reject an older API's payload and blank the whole
+  // board over a missing panel.
+  workerHeartbeats?: OpsWorkerHeartbeat[]
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
@@ -86,7 +99,27 @@ export function isOpsOverviewShape(v: unknown): v is OpsOverview {
   if (!isRecord(v.floatCeiling) || typeof v.floatCeiling.configured !== 'boolean') return false
   if (v.ledgerBalances !== null && !isRecord(v.ledgerBalances)) return false
   if (v.actionsEnabled !== undefined && typeof v.actionsEnabled !== 'boolean') return false
+  if (v.workerHeartbeats !== undefined && !Array.isArray(v.workerHeartbeats)) return false
   return true
+}
+
+/**
+ * True when ANY worker has gone quiet. This is a needs-you condition, not a
+ * statistic: if the worker is dead, every other queue on this page is frozen
+ * and its numbers are stale rather than calm.
+ *
+ * Absent (deploy skew) reads as false — "not reported" must not render as an
+ * alarm, or every deploy would cry wolf.
+ */
+export function workerHeartbeatAlarm(overview: OpsOverview): boolean {
+  return (overview.workerHeartbeats ?? []).some((b) => b.stale)
+}
+
+/** The worst beat, for the needs-you banner. Null when absent or empty. */
+export function stalestHeartbeat(overview: OpsOverview): OpsWorkerHeartbeat | null {
+  const beats = overview.workerHeartbeats
+  if (beats == null || beats.length === 0) return null
+  return beats.reduce((worst, b) => (b.ageSeconds > worst.ageSeconds ? b : worst))
 }
 
 // ── v1.1 resolve-cancellation (POST /api/ops/cancellations/resolve) ──────────

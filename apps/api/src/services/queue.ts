@@ -21,6 +21,14 @@ export const JOB_IDEMPOTENCY_PURGE = 'idempotency.purge'
 export const JOB_LOSS_CORRECTION_WATCH = 'ledger.correction-watch'
 export const JOB_LEDGER_RECONCILE = 'ledger.reconcile'
 export const JOB_STUCK_WATCH = 'transfers.stuck-watch'
+export const JOB_WORKER_HEARTBEAT = 'worker.heartbeat'
+
+// The heartbeat cadence, exported because TWO places must agree on it:
+// boss.schedule() in worker.ts, and the Sentry cron monitor's crontab in
+// jobs/worker-heartbeat.ts. A monitor whose schedule disagrees with the real
+// cadence either alerts constantly or never alerts at all — and the second
+// failure mode looks exactly like a healthy system until the day it matters.
+export const WORKER_HEARTBEAT_CRON = '*/5 * * * *'
 
 export interface PayoutSubmitPayload {
   transferId: string
@@ -104,6 +112,7 @@ export async function ensureQueues(role: 'api' | 'worker'): Promise<void> {
       await boss.createQueue(JOB_LOSS_CORRECTION_WATCH, CRON_RETRY)
       await boss.createQueue(JOB_LEDGER_RECONCILE, CRON_RETRY)
       await boss.createQueue(JOB_STUCK_WATCH, CRON_RETRY)
+      await boss.createQueue(JOB_WORKER_HEARTBEAT, CRON_RETRY)
     })().catch((err: unknown) => {
       queuesPromise = undefined
       throw err
