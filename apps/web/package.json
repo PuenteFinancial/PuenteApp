@@ -14,10 +14,10 @@
   },
   "dependencies": {
     "@stripe/react-stripe-js": "6.8.0",
-    "@stripe/stripe-js": "9.12.1",
+    "@stripe/stripe-js": "9.13.0",
     "next": "^15.3.2",
-    "posthog-js": "^1.409.5",
-    "posthog-node": "^5.47.3",
+    "posthog-js": "^1.414.0",
+    "posthog-node": "^5.48.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
