@@ -33,8 +33,27 @@ updates:
       # expo-constants, etc. — companion packages jump majors with the SDK)
       - dependency-name: "expo*"
         update-types: ["version-update:semver-major"]
-      # Pinned exactly by the Expo SDK; moves only via `npx expo install` during SDK upgrades
+      # --- Expo SDK-managed packages: Dependabot must not touch these at all ---
+      # Their versions are dictated by the installed Expo SDK (see
+      # `expo/bundledNativeModules.json`), not by semver. CI never builds the
+      # mobile app, so a bump that breaks SDK compatibility passes every check
+      # and only surfaces at EAS build or runtime. That is exactly what happened
+      # here: weekly bumps walked react-native from the SDK-56 pin 0.85.3 up to
+      # 0.86.0 and @sentry/react-native a full major past the supported ~7.11.0,
+      # leaving `npx expo-doctor` failing 7 checks with nobody notified.
+      #
+      # These move only via `npx expo install --check --fix` during a deliberate
+      # SDK upgrade. Revisit this list when the app moves off SDK 56.
+      - dependency-name: "react-native"
+      - dependency-name: "react-native-safe-area-context"
       - dependency-name: "react-native-screens"
+      - dependency-name: "@sentry/react-native"
+      # NOTE: `react` is deliberately NOT ignored. It is also SDK-managed
+      # (56 pins 19.2.3 exactly, to match react-native's renderer), but ignores
+      # apply to the whole workspace — blocking it here would also freeze
+      # apps/web, which is the live production surface on ^19.2.8. So react
+      # bumps still get proposed: apply them to apps/web and revert the
+      # apps/mobile hunk, leaving mobile on the SDK pin.
 
   # GitHub Actions
   - package-ecosystem: github-actions
