@@ -33,7 +33,7 @@ Four artifacts carry legally-operative or rights-adjacent copy:
 |---|---|---|
 | **Prepayment disclosure** (§1005.31(b)(1)) | Review screen, before confirming payment | `apps/api/src/services/disclosures.ts` (`renderEn`/`renderEs`), stored immutably per transfer |
 | **Receipt** (§1005.31(b)(2)) | Receipt view, after delivery | same file (`buildReceiptDisclosure`), written once at COMPLETED |
-| **Transfer tracker strings** | Live status page (steps, cancel window, outcomes) | `apps/web/lib/translations.ts` (`send.track`) |
+| **Transfer tracker strings** | Live status page (steps, cancel window, outcomes) | `packages/shared/src/i18n/translations.ts` (`send.track`) |
 | **Post-submission cancel response** ("the 202") | When a cancel request arrives after the payout already left | `apps/api/src/routes/v1/transfers.ts` |
 
 Both language renderings are generated and stored together for every transfer; the sender's
@@ -228,7 +228,7 @@ reviewer to rule; no code assumption depends on the choice.
    `cancelWindowNote`, cancellation-requested banner, all outcome bodies (incl. the three
    staged rewrites in §4.6).
 4. The 202 response (§3.5).
-5. Error strings surfaced on the send flow (`send.errors.*` in `apps/web/lib/translations.ts`).
+5. Error strings surfaced on the send flow (`send.errors.*` in `packages/shared/src/i18n/translations.ts`).
 
 ## 7. Open questions for counsel
 

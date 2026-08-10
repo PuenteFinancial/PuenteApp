@@ -126,7 +126,7 @@ Once web imports `@puente/shared` that accident becomes load-bearing and invisib
 duplicate and defers CSS regeneration. No codegen — 16 constants don't earn a build step. Follow-up:
 a web test asserting parity.
 
-**NativeWind is a gate, not a formality.** Expo SDK 56 / RN 0.86 / React 19.2 is ahead of NativeWind
+**NativeWind is a gate, not a formality.** Expo SDK 57 / RN 0.86.2 / React 19.2.3 is ahead of NativeWind
 v4's tested matrix. Install, run `expo-doctor`. **If it doesn't come up clean, ship the whole PRD
 with `StyleSheet.create` over the same shared tokens and amend CLAUDE.md** rather than blocking on a
 styling library.
@@ -162,7 +162,7 @@ Phone travels between the two auth screens in **React context scoped to `(auth)/
 secure-store (persisting PII to disk for a 60-second value), not a route param (banned). Cold mount
 with empty context self-heals to `/(auth)`, same as `OtpForm.tsx:19-26`.
 
-> **A2P/TCR — load-bearing.** `apps/web/lib/translations.ts:459-472`: the campaign is registered as
+> **A2P/TCR — load-bearing.** `packages/shared/src/i18n/translations.ts:459-472`: the campaign is registered as
 > 2FA only, and the English `smsConsent` string at `:472` is quoted **verbatim** in the Twilio
 > console's `message_flow` field. A prior widening was rejected with TCR error 30896. Mobile renders
 > that string unmodified — no truncation, no ellipsis, no small-screen paraphrase.
@@ -343,7 +343,7 @@ the entity providing the service. Verify current requirements directly — Apple
 
 | # | Slice | Size | Depends on | Blocked by (external) |
 |---|---|---|---|---|
-| M1 | Foundation | M | — | NativeWind × SDK 56 compatibility |
+| M1 | Foundation | M | — | NativeWind × SDK 57 compatibility |
 | M2 | Auth + shell | M | M1 | — (Twilio approved 8/10) |
 | M3 | Profile + KYC | M | M2 | prod Bridge for E2E; needs an API change |
 | M4 | Recipients | M | M2 | — |

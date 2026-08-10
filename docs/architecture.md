@@ -66,7 +66,7 @@ and PostHog attach to every service and are omitted from the edge list for reada
 
 | Component | Runs on | Role |
 |---|---|---|
-| Mobile app | Expo EAS | The product surface. NativeWind, expo-router, i18next (EN+ES). Talks only to the API with a Supabase session JWT. |
+| Mobile app | Expo EAS | The product surface. NativeWind, expo-router, shared `@puente/shared/i18n` strings (EN+ES). Talks only to the API with a Supabase session JWT. |
 | Web app | Vercel | Waitlist, credit check, content, KYC hosted flows. No direct Supabase access — all writes via `INTERNAL_API_URL` to the API. |
 | Fastify API | Railway | The boundary. `/v1` routes with schema validation, auth middleware (default-on), audit log, rate limiting (`TRUST_PROXY_HOPS=1`). Uses the Supabase service role (RLS is defense-in-depth behind it). |
 | Worker | Railway | Executes state-machine transitions from the Postgres job queue (pg-boss): the `FUNDED → SUBMITTED` gate + float-ceiling check, Bridge submission with idempotency keys, ledger posting, provider-event ingestion (`payment-event.process`, webhook + poll), and a polling reconciliation backstop for missed webhooks. |
