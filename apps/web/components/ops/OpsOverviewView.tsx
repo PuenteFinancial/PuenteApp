@@ -19,6 +19,7 @@ import {
   latestFindings,
   latestSkipped,
   formatBalance,
+  workerHeartbeatAlarm,
   type OpsOverview,
   type OpsOpenTransfer,
 } from '@/lib/opsOverview'
@@ -148,6 +149,26 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
         )}
       </h2>
 
+      {/* A dead worker outranks every queue below it: nothing is being swept,
+          submitted, or polled, so every other number on this page is frozen
+          rather than calm. Rendered only when actually stale — absent (deploy
+          skew) must not cry wolf. */}
+      {workerHeartbeatAlarm(overview) && (
+        <div
+          style={{
+            border: '1px solid var(--color-error)',
+            borderRadius: 8,
+            padding: '10px 12px',
+            marginBottom: 12,
+            fontSize: 13,
+            fontWeight: 600,
+            color: 'var(--color-error)',
+          }}
+        >
+          {s.heartbeatDead}
+        </div>
+      )}
+
       {/* Always rendered: a healthy ceiling that showed NOTHING would be
           indistinguishable from a failed panel (review finding). */}
       <Section title={s.floatCeiling}>
@@ -244,6 +265,39 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
       <h2 style={{ fontSize: 13, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', margin: '24px 0 12px' }}>
         {s.stateOfWorld}
       </h2>
+
+      {/* First in this group: whether the worker is alive conditions how much
+          every panel below it can be trusted. */}
+      <Section title={s.workerHeartbeat}>
+        {(overview.workerHeartbeats ?? []).length === 0 ? (
+          <p style={{ fontSize: 13, color: 'var(--muted)' }}>{s.workerHeartbeatEmpty}</p>
+        ) : (
+          <Card>
+            {(overview.workerHeartbeats ?? []).map((b) => (
+              <div
+                key={b.worker}
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: 8,
+                  fontSize: 13,
+                  padding: '3px 0',
+                }}
+              >
+                <span style={{ fontFamily: 'var(--mono)' }}>{b.worker}</span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ color: 'var(--muted)' }}>{formatDate(b.beatAt, lang)}</span>
+                  <Pill
+                    label={b.stale ? s.heartbeatStale : s.heartbeatLive}
+                    tone={b.stale ? 'error' : 'success'}
+                  />
+                </span>
+              </div>
+            ))}
+          </Card>
+        )}
+      </Section>
 
       <Section title={s.transferCounts}>
         {overview.transferCounts.length === 0 ? (

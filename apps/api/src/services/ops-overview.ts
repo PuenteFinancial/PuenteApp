@@ -71,6 +71,13 @@ export interface OpsLedgerBalances {
   balances: Array<{ code: string; amountMinor: number; currency: string }>
 }
 
+export interface OpsWorkerHeartbeat {
+  worker: string
+  beatAt: string
+  ageSeconds: number
+  stale: boolean
+}
+
 export interface OpsOverview {
   generatedAt: string
   pendingCancellations: OpsPendingCancellation[]
@@ -79,6 +86,7 @@ export interface OpsOverview {
   transferCounts: Array<{ state: string; count: number }>
   ledgerBalances: OpsLedgerBalances | null
   reconciliationRuns: OpsReconciliationRun[]
+  workerHeartbeats: OpsWorkerHeartbeat[]
 }
 
 // Row shape for the open-transfers select — a superset of stuck-watch's
@@ -227,15 +235,53 @@ async function readReconciliationRuns(): Promise<{
   return { runs, ledgerBalances }
 }
 
+// The beat is every 5 min and the Sentry cron monitor opens an issue after 3
+// consecutive misses. This page uses the SAME arithmetic on purpose — a board
+// that calls the worker healthy while the pager calls it dead (or vice versa)
+// is worse than either signal alone.
+const HEARTBEAT_STALE_SECONDS = 15 * 60
+
+interface HeartbeatRow {
+  worker: string
+  updated_at: string
+}
+
+// One row per logical worker service, returned as an ARRAY rather than "the
+// newest beat": if a second worker service is ever added, a dead one must not
+// be masked by a healthy one. `instance` is deliberately not selected — it is
+// for psql during an incident, not for the wire.
+async function readWorkerHeartbeats(nowMs: number): Promise<OpsWorkerHeartbeat[]> {
+  const { data, error } = await supabaseAdmin
+    .from('worker_heartbeat')
+    .select('worker, updated_at')
+    // Stalest first, matching how readOpenTransfers surfaces worst-first.
+    .order('updated_at', { ascending: true })
+    .limit(50)
+  if (error || data == null) {
+    throw new Error(`ops worker-heartbeat select failed: ${error?.message ?? 'no rows returned'}`)
+  }
+  return (data as HeartbeatRow[]).map((row) => {
+    const ageSeconds = Math.max(0, Math.round((nowMs - new Date(row.updated_at).getTime()) / 1000))
+    return {
+      worker: row.worker,
+      beatAt: row.updated_at,
+      ageSeconds,
+      stale: ageSeconds > HEARTBEAT_STALE_SECONDS,
+    }
+  })
+}
+
 export async function buildOpsOverview(): Promise<OpsOverview> {
   const nowMs = Date.now()
-  const [pending, openTransfers, floatCeiling, transferCounts, recon] = await Promise.all([
-    listPendingReviews(),
-    readOpenTransfers(nowMs),
-    readFloatCeiling(),
-    readTransferCounts(),
-    readReconciliationRuns(),
-  ])
+  const [pending, openTransfers, floatCeiling, transferCounts, recon, workerHeartbeats] =
+    await Promise.all([
+      listPendingReviews(),
+      readOpenTransfers(nowMs),
+      readFloatCeiling(),
+      readTransferCounts(),
+      readReconciliationRuns(),
+      readWorkerHeartbeats(nowMs),
+    ])
   return {
     generatedAt: new Date(nowMs).toISOString(),
     pendingCancellations: pending.map((row) => ({
@@ -252,5 +298,6 @@ export async function buildOpsOverview(): Promise<OpsOverview> {
     transferCounts,
     ledgerBalances: recon.ledgerBalances,
     reconciliationRuns: recon.runs,
+    workerHeartbeats,
   }
 }

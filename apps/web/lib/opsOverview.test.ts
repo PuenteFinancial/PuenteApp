@@ -10,8 +10,11 @@ import {
   isOpsResolveSuccessShape,
   resolveErrorKind,
   firstDetailIssue,
+  workerHeartbeatAlarm,
+  stalestHeartbeat,
   type OpsOverview,
   type OpsOpenTransfer,
+  type OpsWorkerHeartbeat,
 } from './opsOverview'
 
 const openTransfer = (over: Partial<OpsOpenTransfer> = {}): OpsOpenTransfer => ({
@@ -26,6 +29,14 @@ const openTransfer = (over: Partial<OpsOpenTransfer> = {}): OpsOpenTransfer => (
   fundingCleared: false,
   submitAttempted: false,
   cancellationRequested: false,
+  ...over,
+})
+
+const beat = (over: Partial<OpsWorkerHeartbeat> = {}): OpsWorkerHeartbeat => ({
+  worker: 'worker',
+  beatAt: '2026-08-01T11:58:00.000Z',
+  ageSeconds: 120,
+  stale: false,
   ...over,
 })
 
@@ -60,6 +71,14 @@ describe('isOpsOverviewShape', () => {
     expect(isOpsOverviewShape({ ...overview(), openTransfers: 'nope' })).toBe(false)
     expect(isOpsOverviewShape({ ...overview(), floatCeiling: {} })).toBe(false)
     expect(isOpsOverviewShape({ ...overview(), ledgerBalances: 'stale' })).toBe(false)
+    expect(isOpsOverviewShape({ ...overview(), workerHeartbeats: 'nope' })).toBe(false)
+  })
+
+  it('tolerates workerHeartbeats being absent (API predating Workstream A)', () => {
+    // Deploy skew must degrade to a missing panel, never to a blanked board.
+    expect(isOpsOverviewShape(overview())).toBe(true)
+    expect(isOpsOverviewShape(overview({ workerHeartbeats: [] }))).toBe(true)
+    expect(isOpsOverviewShape(overview({ workerHeartbeats: [beat()] }))).toBe(true)
   })
 })
 
@@ -175,5 +194,40 @@ describe('resolveErrorKind', () => {
     )
     expect(firstDetailIssue(envelope('conflict'))).toBe(null)
     expect(firstDetailIssue(null)).toBe(null)
+  })
+})
+
+describe('worker heartbeat derivations', () => {
+  it('workerHeartbeatAlarm is false when absent, empty, or all fresh', () => {
+    // Absent is the deploy-skew case: "not reported" must not read as an
+    // alarm, or every deploy of the web ahead of the API would cry wolf.
+    expect(workerHeartbeatAlarm(overview())).toBe(false)
+    expect(workerHeartbeatAlarm(overview({ workerHeartbeats: [] }))).toBe(false)
+    expect(workerHeartbeatAlarm(overview({ workerHeartbeats: [beat(), beat()] }))).toBe(false)
+  })
+
+  it('workerHeartbeatAlarm is true when ANY worker is stale', () => {
+    // Any, not all: a second worker service going dark must not be masked by a
+    // healthy first one.
+    const o = overview({
+      workerHeartbeats: [beat(), beat({ worker: 'payout-worker', stale: true })],
+    })
+    expect(workerHeartbeatAlarm(o)).toBe(true)
+  })
+
+  it('stalestHeartbeat returns null when absent or empty', () => {
+    expect(stalestHeartbeat(overview())).toBeNull()
+    expect(stalestHeartbeat(overview({ workerHeartbeats: [] }))).toBeNull()
+  })
+
+  it('stalestHeartbeat picks the highest age', () => {
+    const o = overview({
+      workerHeartbeats: [
+        beat({ worker: 'a', ageSeconds: 60 }),
+        beat({ worker: 'b', ageSeconds: 3000, stale: true }),
+        beat({ worker: 'c', ageSeconds: 900 }),
+      ],
+    })
+    expect(stalestHeartbeat(o)?.worker).toBe('b')
   })
 })
