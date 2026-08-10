@@ -3,9 +3,13 @@ import { parseApiError } from './apiError'
 
 // Pure types + guards + derivations for the 8.5-v1 ops page (extract-to-lib
 // convention: logic out of .tsx so it unit-tests without a DOM). Types are
-// hand-mirrored from GET /v1/ops/overview (docs/api-contract.md) — the web
-// convention (no @puente/shared here); the shape guard is the runtime
-// contract check, same posture as isTransferShape.
+// hand-mirrored from GET /v1/ops/overview (docs/api-contract.md); the shape
+// guard is the runtime contract check, same posture as isTransferShape.
+//
+// These stay mirrored on purpose even though apps/web now depends on
+// @puente/shared: the ops console is web-only (docs/prds/mobile-mvp.md §2),
+// so its response types have exactly one consumer and moving them to a shared
+// package would buy nothing.
 
 export interface OpsPendingCancellation {
   transferId: string

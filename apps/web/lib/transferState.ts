@@ -6,10 +6,15 @@ import { parseApiError, parseCancellationRequiresSupport } from './apiError'
 // Extracted from TransferTracker.tsx so all of it is unit-testable in the
 // node-environment vitest run (same split as sendFormat.ts ← QuoteScreen).
 
-// The 11 states of docs/transfer-state-machine.md. Mirrored rather than
-// imported: apps/web has no @puente/shared dependency (see project.web
-// architecture — the web talks to the API over HTTP only), so this list must be
-// kept in step with packages/shared/src/types/transfer.ts by hand.
+// The 11 states of docs/transfer-state-machine.md, still mirrored by hand from
+// packages/shared/src/types/transfer.ts and still needing to be kept in step
+// with it.
+//
+// The reason for the mirror is gone as of the i18n promotion: apps/web now
+// depends on @puente/shared. This module just hasn't moved yet — it lands in
+// shared in mobile slice M7, alongside the transfer tracker that consumes it
+// (docs/prds/mobile-mvp.md §9). Import from @puente/shared then and delete
+// this union.
 export type TransferState =
   | 'PENDING_PAYMENT'
   | 'FUNDED'

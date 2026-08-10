@@ -41,8 +41,13 @@ jobs:
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
           TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
 
+      # Through turbo, not `pnpm --filter … exec next build`: apps/web now
+      # imports @puente/shared, whose dist/ is gitignored. Turbo's
+      # build.dependsOn ["^build"] builds shared first. The bare exec form only
+      # worked because the earlier typecheck step happened to leave dist/ on
+      # disk — reordering these steps would have broken it.
       - name: Build web
-        run: pnpm --filter @puente/web exec next build
+        run: pnpm turbo run build --filter=@puente/web
         env:
           NEXT_TELEMETRY_DISABLED: 1
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}

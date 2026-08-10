@@ -13,6 +13,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@puente/shared": "workspace:*",
     "@stripe/react-stripe-js": "6.8.0",
     "@stripe/stripe-js": "9.13.0",
     "next": "^16.3.0",

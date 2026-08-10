@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { parseApiError, errorMessage, parseCancellationRequiresSupport } from './apiError'
-import { translations } from './translations'
+import { parseApiError, errorMessage, parseCancellationRequiresSupport } from './apiError.js'
+import { translations } from '../i18n/translations.js'
 
 const errors = translations.en.send.errors
 
