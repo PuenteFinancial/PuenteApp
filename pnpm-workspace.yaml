@@ -10,3 +10,20 @@ allowBuilds:
   esbuild: true         # downloads platform esbuild binary (tsup, Next.js)
   sharp: true           # native image addon (Next.js image optimisation)
   unrs-resolver: true   # Rust-based module resolver
+
+# Security overrides — force vulnerable transitives up to their patched
+# versions. Each entry exists because no direct dependency will pull the fix
+# in on its own; revisit whenever the parent package catches up.
+overrides:
+  sharp: ^0.35.0            # High: inherited libvips CVEs; next pins 0.34.5
+  postcss: ^8.5.26          # High: path traversal + arbitrary file read; next pins 8.4.31
+  nanoid: ^3.3.18           # High: infinite loop in custom generators (<3.3.17)
+  js-yaml: ^4.3.1           # High: quadratic CPU in !!omap resolution
+  shell-quote: ^1.9.0       # High: quadratic-complexity DoS in parse()
+  # Medium: IN_PLACE hook removal leaves a detached subtree executable.
+  # posthog-js 1.414+ pulls this in on its own — drop this entry once the
+  # misc-group bump lands and posthog-js is past 1.409.
+  dompurify: ^3.4.13
+  # Scoped by range on purpose: 1.1.16 is outside the advisory (>=3.0.0 <5.0.7)
+  # and forcing it to 5.x would jump a major for whatever still needs v1.
+  brace-expansion@>=3.0.0 <5.0.7: ^5.0.9
