@@ -13,7 +13,7 @@ exception. No secret ever lands in git, client code, or logs (Gitleaks enforces 
 | Doppler `puente-web` | 3 configs → synced to Vercel | `INTERNAL_API_URL` + PostHog tokens (public), ~3 vars each |
 | GitHub Actions — repo secrets | all workflows | `STAGING_DB_URL` (session-pooler string), `TURBO_TOKEN`, `TURBO_TEAM=puente-financial` |
 | GitHub Actions — `production` environment secret | readable **only** inside the approval-gated Promote job | `PROD_DB_URL` (session-pooler string) |
-| EAS | mobile builds | Expo/EAS-side config (no provider secrets — mobile never calls providers) |
+| EAS environment variables (`eas env:set --scope project`) | mobile builds; per-environment (`production` / `preview` / `development`) | Expo/EAS-side **build-time** config. The app itself still calls no providers, so no runtime provider secrets live here. **`SENTRY_AUTH_TOKEN`** (`production` only, `--visibility secret` so it is write-only and unreadable afterwards) — used by the Xcode "Upload Debug Symbols to Sentry" phase, never shipped in the binary; get it from Sentry → Settings → Auth Tokens with `project:releases` scope, **not** from the Expo dashboard. Deliberately NOT in Doppler: Doppler syncs to Railway and Vercel, not EAS, and this is consumed only by the build. `simulator`/`preview` profiles set `SENTRY_DISABLE_AUTO_UPLOAD=true` in `eas.json` (a boolean, not a secret) and need no token |
 | Local | `apps/api/.env` (staging + sandbox values), `apps/web/.env.local` (`INTERNAL_API_URL` + PostHog public only) | see `local-dev.md` |
 
 Supabase DB passwords are **write-only** (reset-only in Database→Settings, new UI). Their only
