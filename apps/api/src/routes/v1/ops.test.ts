@@ -90,6 +90,9 @@ const OVERVIEW = {
   transferCounts: [{ state: 'COMPLETED', count: 3 }],
   ledgerBalances: null,
   reconciliationRuns: [],
+  workerHeartbeats: [
+    { worker: 'worker', beatAt: '2026-08-01T11:58:00.000Z', ageSeconds: 120, stale: false },
+  ],
 }
 
 beforeEach(() => {
