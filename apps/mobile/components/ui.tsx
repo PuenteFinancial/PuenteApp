@@ -1,6 +1,8 @@
 import {
   ActivityIndicator,
+  KeyboardAvoidingView,
   Linking,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -40,13 +42,23 @@ export function Screen({
   if (scroll) {
     return (
       <SafeAreaView style={styles.screen} edges={['top', 'bottom']}>
-        <ScrollView
-          contentContainerStyle={[styles.screenInner, style]}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="interactive"
+        {/* Without this the keyboard covers the submit button on any form long
+            enough to need scrolling — which is all of them once a field has
+            focus. 'padding' on iOS is the documented pairing with a ScrollView;
+            Android resizes the window itself, so 'height' is the no-op-ish
+            choice rather than double-handling it. */}
+        <KeyboardAvoidingView
+          style={styles.screen}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
-          {children}
-        </ScrollView>
+          <ScrollView
+            contentContainerStyle={[styles.screenInner, style]}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
+          >
+            {children}
+          </ScrollView>
+        </KeyboardAvoidingView>
       </SafeAreaView>
     )
   }
