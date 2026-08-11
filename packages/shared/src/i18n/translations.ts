@@ -355,6 +355,13 @@ export type Translations = {
       }
     }
   }
+  // Native-app-only copy. The web equivalents of these states are handled by
+  // Next's error boundaries and server-side redirects, so there is nothing on
+  // web to share with — but they still belong in the one string table, because
+  // parity is what the `Record<Lang, Translations>` type enforces.
+  mobile: {
+    connection: { error: string; retry: string }
+  }
 }
 
 const en: Translations = {
@@ -842,6 +849,15 @@ const en: Translations = {
     heartbeatStale: 'no beat in 15+ min',
     heartbeatDead: 'Worker heartbeat stopped — scheduled jobs are probably not running',
   },
+  mobile: {
+    connection: {
+      // Deliberately not "signed out" or "session expired": a failed request
+      // here is almost always the phone's network, and telling a user their
+      // session died sends them back through SMS for nothing.
+      error: 'We couldn’t reach Puente. Check your connection and try again.',
+      retry: 'Try again',
+    },
+  },
 }
 
 const es: Translations = {
@@ -1297,6 +1313,12 @@ const es: Translations = {
     heartbeatStale: 'sin latido hace 15+ min',
     heartbeatDead:
       'El latido del worker se detuvo \u2014 es probable que los trabajos programados no se est\u00e9n ejecutando',
+  },
+  mobile: {
+    connection: {
+      error: 'No pudimos conectar con Puente. Revisa tu conexi\u00f3n e int\u00e9ntalo de nuevo.',
+      retry: 'Intentar de nuevo',
+    },
   },
 }
 

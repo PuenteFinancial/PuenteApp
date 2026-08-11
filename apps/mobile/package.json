@@ -8,7 +8,7 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "build": "echo 'Use EAS Build: eas build'",
-    "lint": "eslint app/ lib/",
+    "lint": "eslint app/ lib/ components/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
