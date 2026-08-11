@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { routeAfterSignIn } from './routeAfterSignIn.js'
-import type { MeResponse } from './types.js'
+import { routeAfterSignIn } from './routeAfterSignIn'
+import type { MeResponse } from './types'
 
 function me(overrides: Partial<MeResponse> = {}): MeResponse {
   return {
@@ -18,7 +18,7 @@ function me(overrides: Partial<MeResponse> = {}): MeResponse {
 // who signs in on web and on mobile has to land in the same place.
 describe('routeAfterSignIn', () => {
   it('sends a fully-onboarded approved user to the app', () => {
-    expect(routeAfterSignIn({ status: 200, body: me() })).toBe('/(app)')
+    expect(routeAfterSignIn({ status: 200, body: me() })).toBe('/(app)/home')
   })
 
   it('sends a 404 (missing users row) to the profile form, not back to auth', () => {

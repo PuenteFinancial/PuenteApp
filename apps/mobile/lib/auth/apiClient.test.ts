@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createApiClient } from './apiClient.js'
-import type { TokenStore, Tokens } from './types.js'
+import { createApiClient } from './apiClient'
+import type { TokenStore, Tokens } from './types'
 
 const BASE = 'http://api.test'
 

@@ -1,4 +1,4 @@
-import type { MeResponse } from './types.js'
+import type { MeResponse } from './types'
 
 // Mobile's counterpart to apps/web/app/continue/page.tsx — the single
 // post-sign-in router. Every entry point converges here: OTP verify, a cold
@@ -12,7 +12,12 @@ import type { MeResponse } from './types.js'
 // the mitigation here is that the rules are trivially inspectable and tested.
 export type Destination =
   | '/(auth)'
-  | '/(app)'
+  // `/(app)/home`, not `/(app)`: an index route inside (app) would resolve to
+  // the same `/` as (auth)'s index, leaving the cold-launch destination up to
+  // whichever group expo-router happens to match first. Every route in the
+  // authenticated group is named, so `/` unambiguously means the sign-in
+  // screen.
+  | '/(app)/home'
   | '/(app)/profile'
   | '/(app)/kyc'
   | '/(app)/pending'
@@ -42,7 +47,7 @@ export function routeAfterSignIn(res: MeResult): Destination {
     case 'rejected':
       return '/(app)/rejected'
     case 'approved':
-      return '/(app)'
+      return '/(app)/home'
     default:
       // pending, manual_review, and anything unrecognized. Defaulting to
       // pending rather than throwing means a kyc_status added server-side

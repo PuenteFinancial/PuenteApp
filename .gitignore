@@ -29,6 +29,12 @@ Thumbs.db
 # Expo
 .expo/
 apps/mobile/.expo/
+# Continuous Native Generation: ios/ and android/ are build output, regenerated
+# by `expo prebuild` (locally) or by EAS (in the cloud) from app.json + the
+# config plugins. Committing them turns every plugin change into a hand-merge
+# and is how a managed project quietly becomes a bare one.
+apps/mobile/ios/
+apps/mobile/android/
 
 # Testing
 coverage/

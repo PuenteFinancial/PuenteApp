@@ -4,25 +4,45 @@
     "appVersionSource": "remote"
   },
   "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "simulator": true
+      },
+      "env": {
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
+        "EXPO_PUBLIC_API_URL": "https://puenteapi-staging.up.railway.app",
+        "EXPO_PUBLIC_SENTRY_DSN": "https://13dc23c5a7e0419a69be171fc528bc63@o4511587496099840.ingest.us.sentry.io/4511587602661376"
+      }
+    },
     "simulator": {
       "distribution": "internal",
       "ios": {
         "simulator": true
       },
       "env": {
-        "SENTRY_DISABLE_AUTO_UPLOAD": "true"
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
+        "EXPO_PUBLIC_API_URL": "https://puenteapi-staging.up.railway.app",
+        "EXPO_PUBLIC_SENTRY_DSN": "https://13dc23c5a7e0419a69be171fc528bc63@o4511587496099840.ingest.us.sentry.io/4511587602661376"
       }
     },
     "preview": {
       "distribution": "internal",
       "channel": "preview",
       "env": {
-        "SENTRY_DISABLE_AUTO_UPLOAD": "true"
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true",
+        "EXPO_PUBLIC_API_URL": "https://puenteapi-staging.up.railway.app",
+        "EXPO_PUBLIC_SENTRY_DSN": "https://13dc23c5a7e0419a69be171fc528bc63@o4511587496099840.ingest.us.sentry.io/4511587602661376"
       }
     },
     "production": {
       "channel": "production",
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://puenteapi-production.up.railway.app",
+        "EXPO_PUBLIC_SENTRY_DSN": "https://13dc23c5a7e0419a69be171fc528bc63@o4511587496099840.ingest.us.sentry.io/4511587602661376"
+      }
     }
   },
   "submit": {

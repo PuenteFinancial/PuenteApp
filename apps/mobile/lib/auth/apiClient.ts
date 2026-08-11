@@ -4,7 +4,7 @@ import {
   tokensFromSession,
   type TokenStore,
   type Tokens,
-} from './types.js'
+} from './types'
 
 export interface ApiClientDeps {
   baseUrl: string
