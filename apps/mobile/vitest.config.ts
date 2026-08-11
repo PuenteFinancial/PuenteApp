@@ -1,3 +1,4 @@
+import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
@@ -10,9 +11,17 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   // Mirrors the "@/*" -> "./*" mapping in tsconfig.json; vitest does not read
   // tsconfig paths on its own (same reason apps/web/vitest.config.ts has it).
+  //
+  // Resolved through `dirname(fileURLToPath(...))` rather than `new URL('./',
+  // import.meta.url)`. Once `expo start` has run once it generates
+  // expo-env.d.ts, which this tsconfig includes and which pulls in Expo's DOM
+  // lib — and DOM's `URL` is then not assignable to node:url's `URL`, so the
+  // whole workspace stops typechecking. CI never hits it (nothing runs `expo
+  // start` there); every developer does, exactly once, and the error names a
+  // file they did not touch.
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('./', import.meta.url)),
+      '@': dirname(fileURLToPath(import.meta.url)),
     },
   },
   test: {
