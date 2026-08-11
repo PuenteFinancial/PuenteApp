@@ -6,6 +6,30 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-08-10 · pnpm's `minimumReleaseAge` is never waived to satisfy a tool; the tool takes the
+older version (#168).** `npx expo install` wanted expo 57.0.12 during the SDK 57 migration and
+silently appended a 14-entry `minimumReleaseAgeExclude` to `pnpm-workspace.yaml` to get it — the
+whole 57.0.12 release had gone out hours earlier, inside pnpm's 24h supply-chain window, on the
+same day we spent repairing a lockfile that policy had correctly rejected. Punching a per-package
+hole in a supply-chain control to save one patch version is the wrong trade every time it is
+offered, and it *will* be offered again: `expo install` reaches for the exclusion list on any SDK
+bump whose bundled set is fresher than the window, and it does it without asking. The standing
+answer is to take the older version. Mobile therefore pins 57.0.11 (Aug 6) and its entire bundled
+set, which clears the cutoff with no exclusions at all. The cost is `npx expo-doctor` reporting
+patch-level version mismatches until the newer patches age out — 4 packages the day of #168, 5 the
+next morning, which is the shape of this debt: it accrues slowly, then clears in one PR. Nothing
+needs doing by hand, because the `expo` group in `.github/dependabot.yml` covers `expo*`/`@expo/*`
+on minor and patch (only majors are ignored) under a 3-day cooldown deliberately stricter than
+pnpm's own 24h — the bump lands on the first Monday run after the release ages out. **This is
+timer-bound debt, and it is a different category from the SDK-managed pins in the same file**:
+`react-native`, `react-native-safe-area-context`, `react-native-screens` and `@sentry/react-native`
+are hard-ignored for *all* update types and move only inside a deliberate SDK upgrade, because
+their versions come from the installed SDK's `bundledNativeModules.json` rather than from semver.
+One waits on a clock and resolves itself; the other is frozen by decision and resolves only when
+someone decides. Do not "tidy up" the second while clearing the first — that is precisely how
+mobile drifted a full major ahead on Sentry and a minor ahead on react-native while still on SDK
+56. **Status: active** — the 57.0.11 pin lapses on its own; the policy it illustrates does not.
+
 **2026-08-01 · Ops v1.1 admin gate = double-control env pair, not RBAC/step-up; refusals are
 non-2xx; JWT claims pinned (8.5-v1.1).** The promised "real admin-auth design" for the first
 ops write path (`POST /v1/ops/cancellations/resolve` — refund/deny buttons on the
