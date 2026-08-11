@@ -65,6 +65,41 @@ waitlist entry, confirm the row lands in **puente-staging**.
    service-role JWT** (the newer `sb_secret_…` keys also 42501 locally), plus
    `SUPABASE_JWKS_URL=http://127.0.0.1:54321/auth/v1/.well-known/jwks.json`, `HOST=::`, `PORT=3001`.
 
+## Mobile on the iOS simulator
+
+`apps/mobile` is a managed (CNG) Expo project — `ios/` and `android/` are generated, gitignored
+build output. Day to day you want `pnpm --filter @puente/mobile dev` (Metro) against an installed
+dev-client build. Building the native app locally is only needed when a native dependency changes.
+
+```bash
+cd apps/mobile && npx expo prebuild --platform ios --clean
+```
+
+```bash
+cd apps/mobile/ios && LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 pod install
+```
+
+Three things that will stop you, all of them host setup rather than the repo:
+
+- **`pod install` dies with `Unicode Normalization not appropriate for ASCII-8BIT`.** CocoaPods
+  1.16.2 on Ruby 4.x, with a non-UTF-8 shell locale. The `LANG`/`LC_ALL` prefix above is the fix.
+- **`xcodebuild` reports `iOS 26.5 is not installed` and lists no simulator destinations at all**,
+  even though `xcrun simctl list runtimes` shows runtimes and `xcodebuild -showsdks` shows the SDK.
+  Xcode 26.x treats the *platform* (SDK + its matching runtime) as one unit, and an older runtime
+  left over from a previous Xcode does not satisfy it. Fix: `xcodebuild -downloadPlatform iOS`, or
+  Xcode → Settings → Components. Multi-GB download.
+- **A bundle check does not need any of the above.** `npx expo export --platform ios` runs the
+  whole Metro graph and is the fast way to catch a module-resolution regression:
+  ```bash
+  cd apps/mobile && npx expo export --platform ios --output-dir /tmp/export-check
+  ```
+
+**Relative imports in `apps/mobile` are extensionless — never `./types.js`.** Mobile's tsconfig uses
+`moduleResolution: "bundler"`, and Metro does not remap a `.js` specifier onto a `.ts` file the way
+Vitest and NodeNext do. `packages/shared` is NodeNext and does need the extension; the two
+conventions are not interchangeable. A `.js` specifier in mobile passes typecheck, passes unit
+tests, and fails only when Metro first pulls the file into a bundle.
+
 ## Hard-won rules
 
 - **One `next dev` per checkout.** Two instances share `.next` and corrupt it (ENOENT page.js 500s).
