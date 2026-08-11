@@ -35,3 +35,21 @@ export const api: ApiClient = createApiClient({
   tokens: secureTokenStore,
   onSignedOut: () => signedOutHandler?.(),
 })
+
+/**
+ * For the public routes only — `/v1/auth/otp/send` and `/v1/auth/otp/verify`.
+ *
+ * Shares the base URL and nothing else. Routing these through `api.fetch`
+ * looks harmless (it skips the bearer header when there are no tokens) but a
+ * *stale* session in the keychain changes that: the client would spend a
+ * proactive refresh on a request that never needed one, and a refresh failure
+ * mid-verify clears the store and fires the signed-out handler, yanking the
+ * user out of the screen they are actively using. Signing in is not a session
+ * operation, so it does not touch the session machinery.
+ */
+export async function publicFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(`${baseUrl}${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...init.headers },
+  })
+}

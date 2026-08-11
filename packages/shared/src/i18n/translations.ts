@@ -69,7 +69,7 @@ export type Translations = {
   footer: { tagline: string; privacyLink: string; termsLink: string; disclaimer: [string, string]; disclaimer2: string; rights: string; note: string }
   onboarding: {
     signup: { title: string; sub: string; phone: string; phonePh: string; smsConsent: string; legal: { pre: string; privacyLink: string; and: string; termsLink: string; post: string }; cta: string; sending: string; error: string }
-    verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resent: string; error: string }
+    verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resendIn: (seconds: number) => string; resent: string; error: string }
     profile: { title: string; sub: string; firstName: string; lastName: string; email: string; emailNote: string; cta: string; saving: string; error: string }
     kyc: { title: string; body: string; dataNotice: string; cta: string; starting: string; error: string }
     pending: { title: string; body: string; autoNote: string }
@@ -361,6 +361,7 @@ export type Translations = {
   // parity is what the `Record<Lang, Translations>` type enforces.
   mobile: {
     connection: { error: string; retry: string }
+    signOut: string
   }
 }
 
@@ -498,6 +499,11 @@ const en: Translations = {
       cta: 'Verify',
       verifying: 'Verifying…',
       resend: 'Resend code',
+      // Every resend is a real, billed SMS. The countdown is a client-side
+      // courtesy only — there is no per-phone rate limit on the API yet
+      // (docs/pre-implementation-todo.md), so it slows an impatient user, not
+      // a hostile one.
+      resendIn: (seconds: number) => `Resend code in ${seconds}s`,
       resent: 'Code sent again',
       error: 'That code didn’t work. Try again or resend it.',
     },
@@ -857,6 +863,7 @@ const en: Translations = {
       error: 'We couldn’t reach Puente. Check your connection and try again.',
       retry: 'Try again',
     },
+    signOut: 'Sign out',
   },
 }
 
@@ -981,6 +988,7 @@ const es: Translations = {
       cta: 'Verificar',
       verifying: 'Verificando…',
       resend: 'Reenviar código',
+      resendIn: (seconds: number) => `Reenviar código en ${seconds}s`,
       resent: 'Código reenviado',
       error: 'Ese código no funcionó. Inténtalo de nuevo o reenvíalo.',
     },
@@ -1319,6 +1327,7 @@ const es: Translations = {
       error: 'No pudimos conectar con Puente. Revisa tu conexi\u00f3n e int\u00e9ntalo de nuevo.',
       retry: 'Intentar de nuevo',
     },
+    signOut: 'Cerrar sesi\u00f3n',
   },
 }
 
