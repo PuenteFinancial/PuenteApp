@@ -1,0 +1,37 @@
+# expo-doctor checks that are known-benign in this workspace and must not fail CI.
+#
+# One check name per line, byte-identical to expo-doctor's "✖ <name>" output.
+# scripts/check-expo-doctor.sh fails if expo-doctor reports a failing check whose
+# name is NOT listed here — so a new problem is caught, while these stay quiet.
+# All of it was diagnosed in #168; please don't re-investigate.
+#
+#   Check npm/yarn versions
+#     Asserts npm >= 3.0.0, which is meaningless here — this workspace is pnpm and
+#     nothing in apps/mobile is installed by npm. It fails on any machine where
+#     corepack shims `npm` away ("Could not determine npm version"), and unlike the
+#     `npm explain` checks below it reaches a real verdict, so it cannot be
+#     tolerated automatically. Permanently benign; not worth chasing.
+#
+#   Check that no duplicate dependencies are installed
+#     apps/web's react@19.2.8 seen from apps/mobile's react@19.2.3 — the
+#     intentional monorepo split, not a duplicate inside mobile's own tree. Web is
+#     live in production on ^19.2.8; SDK 57 pins mobile to 19.2.3 exactly, to match
+#     react-native's renderer. See the `react` note at the end of dependabot.yml.
+#
+#   Check that packages match versions required by installed Expo SDK
+#     The deliberate expo 57.0.11 pin (docs/decisions.md, 2026-08-10). Timer-bound:
+#     it clears itself when Dependabot bumps the expo group. Delete this line then —
+#     the script does not care if a listed failure stops happening.
+#
+# Deliberately NOT listed: the three checks that shell out to `npm explain` (support
+# packages, legacy global CLI, vector-icons). They fail for the same corepack reason,
+# but expo-doctor reports them as "Unexpected error while running '<name>' check:"
+# rather than as a verdict, and the script tolerates any check that errored out that
+# way. Listing them would give up a real gate — they each detect something worth
+# detecting — for no gain, since the tolerance already covers every runner. Observed
+# both ways on one machine in one session: 6 failing checks with npm shimmed, 2 once
+# corepack had provisioned a real npm.
+
+Check npm/yarn versions
+Check that no duplicate dependencies are installed
+Check that packages match versions required by installed Expo SDK
