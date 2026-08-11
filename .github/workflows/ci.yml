@@ -94,3 +94,86 @@ jobs:
           SUPABASE_URL: http://127.0.0.1:54321
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
           TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+
+  # apps/mobile is otherwise only seen by typecheck, lint and test — and those run
+  # TypeScript's resolver and Node's, never Metro's or the config plugins'. That is
+  # the blind spot the first EAS build fell into. Separate job so `check` stays
+  # fast; ubuntu only, no macOS runner, no EAS build, no signing. This lane proves
+  # config validity and module resolution, NOT native compilation.
+  mobile:
+    name: Mobile Config & Bundle
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6.0.10
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: .
+
+      # Through turbo for the same reason as "Build web" above, and it bites harder
+      # here: apps/mobile imports @puente/shared/theme, and shared's dist/ is
+      # gitignored, so a fresh checkout has nothing for Metro to resolve.
+      # build.dependsOn ["^build"] is what puts dist/ on disk.
+      # `eas-build-post-install` in apps/mobile/package.json is this same fix on the
+      # EAS side — three places now, all one constraint.
+      - name: Build shared
+        run: pnpm turbo run build --filter=@puente/shared
+        working-directory: .
+        env:
+          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+          TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+
+      # Evaluates app.json THROUGH the config plugins (expo-router,
+      # expo-splash-screen, @sentry/react-native/expo) rather than just parsing it.
+      # Catches a plugin that throws and schema keys a new SDK rejects — SDK 57
+      # rejecting the top-level `splash` key was found exactly this way (#168).
+      - name: Expo config resolves
+        run: npx expo config --type public > /dev/null
+
+      # The only step in CI that runs Metro. app/_layout.tsx pulls
+      # @puente/shared/theme into the graph deliberately, so a subpath-export
+      # regression fails here — tsc and vitest cannot see it, they resolve through
+      # TypeScript's and Node's resolvers respectively.
+      - name: Metro bundles for iOS
+        run: npx expo export --platform ios --output-dir "$RUNNER_TEMP/expo-export"
+
+      # MUST stay ahead of prebuild. An ios/ directory on disk makes expo-doctor
+      # treat the project as bare rather than CNG, which changes which checks it
+      # runs — observed on the same checkout: 6 failing checks before prebuild, 3
+      # after, including a spurious "app config fields may not be synced in a
+      # non-CNG project" for a project that IS CNG.
+      - name: expo-doctor (no new failures)
+        run: ./scripts/check-expo-doctor.sh
+
+      # Generates ios/ from the config plugins. No Xcode and no CocoaPods involved,
+      # so it runs on ubuntu. Side effect: prebuild rewrites the ios/android scripts
+      # in package.json. Harmless on an ephemeral runner — but if you run this
+      # locally, revert it.
+      - name: Generate native iOS project
+        run: npx expo prebuild --platform ios --no-install
+
+      # The actual first-EAS-build failure (#178). Sentry's "Upload Debug Symbols"
+      # Xcode phase does require.resolve('@sentry/cli') from ios/, and pnpm links
+      # only DIRECT dependencies into a package's node_modules — so a transitive
+      # @sentry/cli sits in the store and is invisible from there. npm and yarn
+      # hoist it, which is why this is pnpm-monorepo-only and why no amount of
+      # Sentry configuration fixes it. Declaring it directly was the fix; this
+      # asserts it stays declared, without needing a macOS runner to find out.
+      - name: Xcode build phases can resolve their Node deps
+        run: |
+          if node -e "require.resolve('@sentry/cli', { paths: ['./ios'] })"; then
+            echo "@sentry/cli resolves from apps/mobile/ios"
+          else
+            echo "::error::@sentry/cli is not resolvable from apps/mobile/ios, where Sentry's Xcode build phase looks for it. pnpm links only direct dependencies, so declare it in apps/mobile/package.json."
+            exit 1
+          fi
