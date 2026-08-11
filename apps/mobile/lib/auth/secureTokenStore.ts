@@ -1,5 +1,5 @@
 import * as SecureStore from 'expo-secure-store'
-import type { TokenStore, Tokens } from './types.js'
+import type { TokenStore, Tokens } from './types'
 
 // Keychain (iOS) / Keystore (Android) keys. Namespaced so they cannot collide
 // with anything a library writes.

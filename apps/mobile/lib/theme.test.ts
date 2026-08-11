@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { colors, radii, fonts } from './theme.js'
+import { colors, radii, fonts } from './theme'
 
 // This suite is really a resolution test: it proves apps/mobile can reach
 // @puente/shared/theme through the package's `exports` subpath. If the shared
