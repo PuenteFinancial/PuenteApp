@@ -21,13 +21,24 @@ export default function Verify() {
   const [status, setStatus] = useState<Status>('idle')
   const [cooldown, setCooldown] = useState(RESEND_COOLDOWN_SECONDS)
 
-  // A cold mount has no phone — the context is scoped to the (auth) layout and
-  // holds nothing after a deep link, process death or a fast refresh. There is
-  // no code to verify without it, so start over rather than render a form that
-  // cannot submit. Mirrors OtpForm.tsx:19-26 on web.
+  // "Did this screen open without a phone?" — captured once, at mount.
+  //
+  // Deliberately NOT a live read of `phone`. A successful verify clears the
+  // number on purpose, and a live read cannot tell that apart from a cold
+  // mount: it fires the guard below, which races `router.replace('/continue')`
+  // and wins, dropping the user back on the sign-in screen with a perfectly
+  // good session already in the keychain. That is what this looked like on the
+  // simulator — verify returned 200 and /v1/users/me was never called.
+  //
+  // The cold-mount case this protects is real (deep link, process death, fast
+  // refresh): the context is scoped to the (auth) layout and holds nothing.
+  // There is no code to verify without a number, so start over rather than
+  // render a form that cannot submit. Mirrors OtpForm.tsx:19-26 on web.
+  const [mountedWithPhone] = useState(() => phone !== null)
+
   useEffect(() => {
-    if (!phone) router.replace('/(auth)')
-  }, [phone, router])
+    if (!mountedWithPhone) router.replace('/(auth)')
+  }, [mountedWithPhone, router])
 
   // One interval for the life of the screen; `resend` restarts the count by
   // setting the number, not by re-arming a timer. The first cooldown starts on
@@ -86,7 +97,7 @@ export default function Verify() {
     }
   }, [phone, cooldown])
 
-  if (!phone) return null
+  if (!mountedWithPhone) return null
 
   return (
     <Screen scroll>
