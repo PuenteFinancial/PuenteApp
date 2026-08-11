@@ -169,6 +169,85 @@ describe('POST /v1/users/me/tos-link', () => {
     await app.close()
   })
 
+  // Bridge's ToS page performs the return leg as a bare `location.href` with no
+  // validation whatsoever, so the redirect URI is trustworthy only because this
+  // route mints it. These tests pin that: the scheme is ours, and nothing a
+  // caller sends can widen the URL.
+  describe('mobile platform', () => {
+    it('builds a custom-scheme redirect carrying the caller nonce', async () => {
+      createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({ platform: 'mobile', state: 'abcdefghijklmnop' })
+
+      expect(res.status).toBe(200)
+      expect(createTosLink).toHaveBeenCalledWith('puente://kyc/tos-return?state=abcdefghijklmnop')
+      await app.close()
+    })
+
+    it('ignores origin entirely on mobile', async () => {
+      createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+      const app = await buildApp()
+
+      await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({ platform: 'mobile', state: 'abcdefghijklmnop', origin: 'https://evil.example' })
+
+      expect(createTosLink).toHaveBeenCalledWith('puente://kyc/tos-return?state=abcdefghijklmnop')
+      await app.close()
+    })
+
+    it('refuses a mobile request with no nonce rather than starting an unverifiable flow', async () => {
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({ platform: 'mobile' })
+
+      expect(res.status).toBe(400)
+      expect(createTosLink).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it.each([
+      ['a query separator', 'abcdefghijklmnop&extra=1'],
+      ['a fragment', 'abcdefghijklmnop#frag'],
+      ['a second scheme', 'https://evil.example/abcdefghij'],
+      ['a path separator', 'abcdefgh/ijklmnop'],
+      ['too short to be unguessable', 'short'],
+      ['absurdly long', 'a'.repeat(65)],
+    ])('rejects a state containing %s', async (_case, state) => {
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({ platform: 'mobile', state })
+
+      expect(res.status).toBe(400)
+      expect(createTosLink).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('still builds a web redirect when platform is absent', async () => {
+      createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+      const app = await buildApp()
+
+      await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({})
+
+      expect(createTosLink).toHaveBeenCalledWith('http://localhost:3000/onboarding/kyc/tos-return')
+      await app.close()
+    })
+  })
+
   it('returns 502 when Bridge errors', async () => {
     createTosLink.mockRejectedValue(new BridgeApiError(500, { code: 'server_error' }))
     const app = await buildApp()

@@ -61,6 +61,8 @@ interface UpdateMeBody {
 
 interface TosLinkBody {
   origin?: string
+  platform?: 'web' | 'mobile'
+  state?: string
 }
 
 interface KycLinkBody {
@@ -76,6 +78,25 @@ function resolveWebOrigin(origin?: string): string {
   if (origin && env.ALLOWED_ORIGINS.includes(origin)) return origin
   // splitting a non-empty env var always yields at least one entry
   return env.ALLOWED_ORIGINS[0]!
+}
+
+// The mobile app's URL scheme. Must match "scheme" in apps/mobile/app.json.
+//
+// Hardcoded, never taken from the request. Bridge's ToS page performs the
+// return leg as a bare `location.href = <redirect_uri>` with no validation of
+// any kind — verified against their sandbox on 2026-08-11 — so the redirect
+// target is only ever as trustworthy as whoever supplied it. Minting it here
+// is what keeps it out of a caller's hands.
+const MOBILE_SCHEME = 'puente'
+
+// Bridge appends `signed_agreement_id` to whatever redirect_uri it is given,
+// preserving existing query params (verified in the same session). That is what
+// lets the app round-trip a nonce and refuse a return it did not initiate.
+//
+// `state` is schema-constrained to an opaque token below, so it cannot smuggle
+// extra query parameters or a fragment into the URL built here.
+function mobileTosRedirect(state: string): string {
+  return `${MOBILE_SCHEME}://kyc/tos-return?state=${encodeURIComponent(state)}`
 }
 
 export async function usersRoute(server: FastifyInstance) {
@@ -167,6 +188,12 @@ export async function usersRoute(server: FastifyInstance) {
           type: 'object',
           properties: {
             origin: { type: 'string' },
+            // Absent means web, so every existing caller is unaffected.
+            platform: { type: 'string', enum: ['web', 'mobile'] },
+            // Opaque nonce, mobile only. The pattern is the security control:
+            // it admits nothing that could add a query parameter, a fragment,
+            // or a second scheme to the redirect URI this route builds.
+            state: { type: 'string', pattern: '^[A-Za-z0-9_-]{16,64}$' },
           },
           additionalProperties: false,
         },
@@ -175,15 +202,28 @@ export async function usersRoute(server: FastifyInstance) {
             type: 'object',
             properties: { url: { type: 'string' } },
           },
+          400: errorResponseSchema,
           502: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
       const userId = request.user!.id
-      const webOrigin = resolveWebOrigin(request.body?.origin)
+      const platform = request.body?.platform ?? 'web'
+
+      // A mobile caller with no nonce has no way to tell its own return from a
+      // forged one, so the flow is refused rather than started insecurely.
+      if (platform === 'mobile' && !request.body?.state) {
+        return sendError(reply, 400, 'validation_error', 'state is required for mobile')
+      }
+
+      const redirectUri =
+        platform === 'mobile'
+          ? mobileTosRedirect(request.body!.state!)
+          : `${resolveWebOrigin(request.body?.origin)}/onboarding/kyc/tos-return`
+
       try {
-        const { url } = await createTosLink(`${webOrigin}/onboarding/kyc/tos-return`)
+        const { url } = await createTosLink(redirectUri)
         return { url }
       } catch (err) {
         if (err instanceof BridgeApiError) {
