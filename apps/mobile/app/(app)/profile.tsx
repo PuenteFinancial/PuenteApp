@@ -16,7 +16,6 @@ import { api } from '@/lib/api'
 import type { MeResponse } from '@/lib/auth/types'
 import { isValidProfile, NAME_MAX_LENGTH, toProfilePayload, type ProfileDraft } from '@/lib/profile'
 
-const EMPTY: ProfileDraft = { firstName: '', lastName: '', email: '' }
 
 /**
  * Legal name + email — everything Bridge needs before identity verification.
@@ -37,7 +36,17 @@ export default function Profile() {
   const s = t.onboarding.profile
   const router = useRouter()
 
-  const [draft, setDraft] = useState<ProfileDraft>(EMPTY)
+  // One useState per field, not one object holding all three.
+  //
+  // With a single object, every keystroke ran `setDraft(d => ({...d, [f]: v}))`
+  // and re-rendered all three inputs. A controlled TextInput re-rendered with a
+  // `value` that lags the native text gets reset to that older value, and the
+  // keystrokes in between are lost — typing "Ruiz" fast landed "R". Found on
+  // the simulator; apps/web/components/onboarding/ProfileForm.tsx has used
+  // per-field state all along, and this is why.
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName] = useState('')
+  const [email, setEmail] = useState('')
   const [loadState, setLoadState] = useState<'loading' | 'ready' | 'failed'>('loading')
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'error'>('idle')
   const [attempt, setAttempt] = useState(0)
@@ -54,11 +63,9 @@ export default function Profile() {
           const user = (await res.json().catch(() => null)) as MeResponse | null
           if (cancelled) return
           if (user) {
-            setDraft({
-              firstName: user.firstName ?? '',
-              lastName: user.lastName ?? '',
-              email: user.email ?? '',
-            })
+            setFirstName(user.firstName ?? '')
+            setLastName(user.lastName ?? '')
+            setEmail(user.email ?? '')
           }
         }
         // A 404 legitimately means there is nothing saved yet — the verify
@@ -77,23 +84,23 @@ export default function Profile() {
     }
   }, [attempt])
 
-  const set = useCallback(
-    (field: keyof ProfileDraft) => (value: string) => {
-      setDraft((current) => ({ ...current, [field]: value }))
-      // Clear a stale failure the moment the user starts fixing it.
-      setSaveState((current) => (current === 'error' ? 'idle' : current))
-    },
-    [],
-  )
+  const draft: ProfileDraft = { firstName, lastName, email }
+  const canSave = isValidProfile(draft) && saveState !== 'saving'
+
+  // Clear a stale failure the moment the user starts fixing it. Kept out of the
+  // per-keystroke path above so a field update stays a single plain setState.
+  useEffect(() => {
+    setSaveState((current) => (current === 'error' ? 'idle' : current))
+  }, [firstName, lastName, email])
 
   const save = useCallback(async () => {
-    if (!isValidProfile(draft) || saveState === 'saving') return
+    if (!canSave) return
     setSaveState('saving')
 
     try {
       const res = await api.fetch('/v1/users/me', {
         method: 'PATCH',
-        body: JSON.stringify(toProfilePayload(draft)),
+        body: JSON.stringify(toProfilePayload({ firstName, lastName, email })),
       })
       if (!res.ok) {
         setSaveState('error')
@@ -105,7 +112,7 @@ export default function Profile() {
     } catch {
       setSaveState('error')
     }
-  }, [draft, saveState, router])
+  }, [canSave, firstName, lastName, email, router])
 
   if (loadState === 'loading') return <Loading />
 
@@ -134,8 +141,8 @@ export default function Profile() {
 
         <Field
           label={s.firstName}
-          value={draft.firstName}
-          onChangeText={set('firstName')}
+          value={firstName}
+          onChangeText={setFirstName}
           autoComplete="given-name"
           textContentType="givenName"
           maxLength={NAME_MAX_LENGTH}
@@ -145,8 +152,8 @@ export default function Profile() {
 
         <Field
           label={s.lastName}
-          value={draft.lastName}
-          onChangeText={set('lastName')}
+          value={lastName}
+          onChangeText={setLastName}
           autoComplete="family-name"
           textContentType="familyName"
           maxLength={NAME_MAX_LENGTH}
@@ -155,8 +162,8 @@ export default function Profile() {
 
         <Field
           label={s.email}
-          value={draft.email}
-          onChangeText={set('email')}
+          value={email}
+          onChangeText={setEmail}
           keyboardType="email-address"
           autoComplete="email"
           textContentType="emailAddress"
@@ -169,7 +176,7 @@ export default function Profile() {
         <Button
           label={saveState === 'saving' ? s.saving : s.cta}
           onPress={() => void save()}
-          disabled={!isValidProfile(draft) || saveState === 'saving'}
+          disabled={!canSave}
         />
 
         {saveState === 'error' && <ErrorText>{s.error}</ErrorText>}
