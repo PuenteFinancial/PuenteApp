@@ -74,8 +74,9 @@ input + response schema validation; authenticated routes write an audit-log entr
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/v1/auth/otp/request` | public | Body `{ phone }`. Sends Twilio SMS OTP. Requires prior TCPA consent record. |
-| POST | `/v1/auth/otp/verify` | public | Body `{ phone, code }`. Wraps Supabase Auth; returns session JWT + whether profile is new. |
+| POST | `/v1/auth/otp/send` | public | Body `{ phone, smsConsent }`. `smsConsent` is schema-pinned to `const: true` — TCPA consent is collected on the same submit that sends the SMS, not looked up from a prior record. Sends Twilio SMS OTP. |
+| POST | `/v1/auth/otp/verify` | public | Body `{ phone, token }`. Wraps Supabase Auth. Returns `{ accessToken, refreshToken, expiresIn, userId }` — **not** a "profile is new" flag; callers route on `GET /v1/users/me` instead (`apps/web/app/continue/page.tsx`, `apps/mobile/lib/auth/routeAfterSignIn.ts`). Also self-heals a missing `users` row, stamps `sms_consent_at`, and writes a `sign_in_events` record. |
+| POST | `/v1/auth/refresh` | public | Body `{ refreshToken }`. Same response shape as verify. Supabase rotates refresh tokens single-use — the rotated token must be persisted or the session dies at the next expiry. |
 
 ## Profile & consent
 
