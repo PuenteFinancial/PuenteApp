@@ -171,12 +171,45 @@ funded in production right now**, and that is a safety property, not an oversigh
 | Gap | Status |
 |---|---|
 | **Stripe has never made a real API call** | Adapter written and unit-tested against a dummy client. Creating a payment, refunding, and the payment form are all unproven. Blocked on sandbox keys. |
-| **SMS is not live** | Twilio A2P registration pending. Real sign-in doesn't work outside local test numbers. |
+| **SMS: A2P approved, provider config outstanding** | The A2P 10DLC campaign was approved 2026-08-05 (2FA use case). Real sign-in still doesn't work until the Twilio credentials are entered in **Supabase Auth → Providers → Phone**, per project — the API holds no Twilio config. See "Turning SMS on" below. |
 | **Reg E disclosure wording** | Drafted; counsel sign-off outstanding, plus a native-Spanish review. |
 | **Support mailbox** | The disclosure tells customers to contact an address that doesn't receive mail yet. |
 | **Delivery confirmation in sandbox** | Bridge sandbox parks payouts and never delivers; we drive the final step with a signed test webhook. |
 
 None of these block the demo. All of them block real customers.
+
+### Turning SMS on
+
+Nothing in this repo sends SMS. The chain is web/mobile → `POST /v1/auth/otp/send` →
+`signInWithOtp({ channel: 'sms' })` → GoTrue → Twilio, so every Twilio setting lives in the
+Supabase dashboard, **per project** — staging (`namdkmsmdkmdffgscqgd`) and prod
+(`goyfagidfkjyhyepsaup`) are configured separately, and neither reads Doppler for this.
+
+Under **Authentication → Providers → Phone**: enable the provider, choose **Twilio** (not Twilio
+Verify — Verify runs its own OTP and ignores the template below), then enter the account SID, auth
+token, and the Messaging Service SID whose sender pool is attached to the approved A2P campaign.
+Traffic from a number outside that pool is unregistered and gets filtered.
+
+The SMS template must match the registered campaign sample verbatim — carriers compare delivered
+traffic against what was registered:
+
+```
+Puente Financial: Your verification code is {{ .Code }}. It expires in 10 minutes. Do not share this code with anyone.
+```
+
+Set the SMS OTP expiry to **600 seconds** to match that "10 minutes". It is a separate setting and
+its default is far shorter, so left alone the message lies and users hit dead codes.
+
+`supabase/config.toml` is local-only and stays as it is: the dummy Twilio block exists because
+GoTrue refuses phone auth without an enabled provider, and test number `15005550006` / `123456`
+bypasses it entirely.
+
+**Spend controls are part of turning it on, not a follow-up.** `/v1/auth/otp/send` is public and
+unauthenticated, which is the SMS-pumping setup — an attacker cycles premium-rate international
+numbers and bills us. Twilio **Geo Permissions restricted to US** removes most of the value (our
+users' phones are US numbers; MXN is the destination of money, not of SMS) and was set 2026-08-05.
+Pair it with GoTrue's per-phone cooldown and hourly SMS cap under **Authentication → Rate Limits**,
+and Twilio usage triggers — Twilio has no hard spend stop, so those are alerts someone must act on.
 
 ---
 

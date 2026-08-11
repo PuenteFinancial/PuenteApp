@@ -224,9 +224,12 @@ const envSchema = z.object({
   // design (weekend false positives accepted); statutory-clock tracking waits
   // for counsel's error-resolution process adoption.
   STUCK_UNDER_REVIEW_AFTER_HOURS: z.coerce.number().int().min(1).default(24),
-  TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
-  TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
-  TWILIO_PHONE_NUMBER: z.string().min(1).optional(),
+  // No TWILIO_* vars here on purpose. The API never calls Twilio: phone OTP
+  // goes through Supabase Auth (`signInWithOtp({ channel: 'sms' })`), and
+  // GoTrue holds the Twilio account SID / auth token / Messaging Service SID
+  // in the Supabase dashboard, per project. Three optional TWILIO_* vars used
+  // to be declared here and were read by nothing — setting them in Doppler
+  // looked like configuring SMS while changing precisely nothing.
   SENTRY_DSN: z.string().url().optional(),
   // Declared here for validation + documentation only — instrument.ts reads it
   // straight off process.env, because Sentry.init must run before anything
