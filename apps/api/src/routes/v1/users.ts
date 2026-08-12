@@ -298,7 +298,10 @@ export async function usersRoute(server: FastifyInstance) {
         `${MOBILE_SCHEME}://kyc/tos-return` +
         `?state=${encodeURIComponent(request.query.state)}` +
         `&signed_agreement_id=${encodeURIComponent(request.query.signed_agreement_id)}`
-      return reply.redirect(target, 302)
+      // The Location carries a one-time nonce and an agreement id. Nothing
+      // between here and the device should keep a copy: no shared cache has any
+      // use for a redirect that is valid exactly once.
+      return reply.header('Cache-Control', 'no-store').redirect(target, 302)
     },
   )
 

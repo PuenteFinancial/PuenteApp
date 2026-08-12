@@ -317,6 +317,15 @@ describe('GET /v1/kyc/tos-return', () => {
     await app.close()
   })
 
+  it('tells caches not to keep a redirect that is valid exactly once', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server).get(
+      `/v1/kyc/tos-return?state=${NONCE}&signed_agreement_id=${AGREEMENT}`,
+    )
+    expect(res.headers['cache-control']).toBe('no-store')
+    await app.close()
+  })
+
   it('needs no credentials — Bridge redirects the browser here with none', async () => {
     const app = await buildApp()
     const res = await supertest(app.server).get(
