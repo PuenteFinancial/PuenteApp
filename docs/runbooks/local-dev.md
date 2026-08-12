@@ -137,9 +137,19 @@ tests, and fails only when Metro first pulls the file into a bundle.
 - **Identity is the phone number** — one account per phone, forever. A shared test number = one
   shared account (caused the poisoned-row 404 incident on 2026-07-08). Multi-tester work uses
   Supabase test phone numbers (fixed OTP, no Twilio).
-- Bridge **sandbox cannot test hosted KYC links** (API-created customers + `simulate_kyc_approval`
-  only) — KYC UI testing happens on prod with test phone numbers + Bridge-customer delete reset.
-  Sandbox is right for remittance API testing (wallets, simulate_deposit, transfers with dummy data).
+- Bridge **sandbox DOES mint hosted KYC links** — corrected 2026-08-11 after this note said the
+  opposite for weeks and sent KYC UI testing to prod unnecessarily. `POST /v1/users/me/kyc-link`
+  with a real `signed_agreement_id` returns a live `bridge.withpersona.com/verify?...` URL against
+  sandbox credentials. The ToS leg works too: mint with `POST /v1/users/me/tos-link`, accept in a
+  browser, and the page redirects to your `redirect_uri` with `signed_agreement_id` appended.
+  Sandbox is also right for remittance API testing (wallets, simulate_deposit, transfers).
+- **A Bridge customer is one-per-email.** Clearing `users.bridge_customer_id` locally without
+  deleting the Bridge-side customer makes the next `kyc-link` call fail with
+  `400 invalid_parameters` — the API tries to create a duplicate. Reset by using a fresh email or
+  deleting the customer at Bridge, not by nulling the column.
+- **`signed_agreement_id` is single-use.** Re-using one that has already created a customer fails
+  the same way, which makes the two causes easy to confuse: check whether `bridge_customer_id` is
+  null before blaming the agreement id.
 - Never point local API `.env` at the prod project. Roles: `goyfagidfkjyhyepsaup` = PROD (live
   waitlist data); `namdkmsmdkmdffgscqgd` = dev + staging.
 - **A second send 403s (`transfer_in_progress`) until the first is cleared** — the slice-8 O3

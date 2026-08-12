@@ -169,6 +169,118 @@ describe('POST /v1/users/me/tos-link', () => {
     await app.close()
   })
 
+  // Bridge's ToS page performs the return leg as a bare `location.href` with no
+  // validation whatsoever, so the redirect URI is trustworthy only because this
+  // route mints it. These tests pin that: the scheme is ours, and nothing a
+  // caller sends can widen the URL.
+  describe('mobile platform', () => {
+    it('points the return leg at this API, not at the app scheme directly', async () => {
+      // Not a style choice. iOS does not surface a custom scheme reached by a
+      // page's own location.href to ASWebAuthenticationSession, which is how
+      // Bridge ends its ToS flow — the sheet never closes. Routing through an
+      // https URL that answers 302 is what makes the return work at all.
+      createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({ platform: 'mobile', state: 'abcdefghijklmnop' })
+
+      expect(res.status).toBe(200)
+      expect(createTosLink).toHaveBeenCalledWith(
+        'https://api.test.puente/v1/kyc/tos-return?state=abcdefghijklmnop',
+      )
+      await app.close()
+    })
+
+    it('ignores origin entirely on mobile', async () => {
+      createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+      const app = await buildApp()
+
+      await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({ platform: 'mobile', state: 'abcdefghijklmnop', origin: 'https://evil.example' })
+
+      expect(createTosLink).toHaveBeenCalledWith(
+        'https://api.test.puente/v1/kyc/tos-return?state=abcdefghijklmnop',
+      )
+      await app.close()
+    })
+
+    it('refuses a mobile request with no nonce rather than starting an unverifiable flow', async () => {
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({ platform: 'mobile' })
+
+      expect(res.status).toBe(400)
+      expect(createTosLink).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it.each([
+      ['a query separator', 'abcdefghijklmnop&extra=1'],
+      ['a fragment', 'abcdefghijklmnop#frag'],
+      ['a second scheme', 'https://evil.example/abcdefghij'],
+      ['a path separator', 'abcdefgh/ijklmnop'],
+      ['too short to be unguessable', 'short'],
+      ['absurdly long', 'a'.repeat(65)],
+    ])('rejects a state containing %s', async (_case, state) => {
+      const app = await buildApp()
+
+      const res = await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({ platform: 'mobile', state })
+
+      expect(res.status).toBe(400)
+      expect(createTosLink).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('refuses rather than silently redirecting to web when PUBLIC_API_URL is unset', async () => {
+      // A web redirect here would strand a mobile user in a browser with no way
+      // back into the app — worse than an honest failure they can retry.
+      const original = process.env.PUBLIC_API_URL
+      delete process.env.PUBLIC_API_URL
+      vi.resetModules()
+      const { usersRoute: freshRoute } = await import('./users.js')
+
+      const app = Fastify()
+      await app.register(mockAuth)
+      await app.register(freshRoute, { prefix: '/v1' })
+      await app.ready()
+
+      const res = await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({ platform: 'mobile', state: 'abcdefghijklmnop' })
+
+      expect(res.status).toBe(503)
+      await app.close()
+
+      process.env.PUBLIC_API_URL = original
+      vi.resetModules()
+    })
+
+    it('still builds a web redirect when platform is absent', async () => {
+      createTosLink.mockResolvedValue({ url: 'https://dashboard.bridge.xyz/accept-terms-of-service?session_token=tok' })
+      const app = await buildApp()
+
+      await supertest(app.server)
+        .post('/v1/users/me/tos-link')
+        .set('Authorization', 'Bearer test-token')
+        .send({})
+
+      expect(createTosLink).toHaveBeenCalledWith('http://localhost:3000/onboarding/kyc/tos-return')
+      await app.close()
+    })
+  })
+
   it('returns 502 when Bridge errors', async () => {
     createTosLink.mockRejectedValue(new BridgeApiError(500, { code: 'server_error' }))
     const app = await buildApp()
@@ -179,6 +291,97 @@ describe('POST /v1/users/me/tos-link', () => {
       .send({})
 
     expect(res.status).toBe(502)
+    await app.close()
+  })
+})
+
+// This route exists solely to convert a navigation iOS ignores into a redirect
+// iOS intercepts. It reads and writes nothing, which is why it can be public —
+// but it does build a URL from caller input, so the constraints below are the
+// whole security story on this side. The nonce check in the app is the other.
+describe('GET /v1/kyc/tos-return', () => {
+  const NONCE = 'abcdefghijklmnop'
+  const AGREEMENT = '0ca658b3-65b6-4812-b934-a95229c21efe'
+
+  it('302s into the app scheme carrying both parameters', async () => {
+    const app = await buildApp()
+
+    const res = await supertest(app.server).get(
+      `/v1/kyc/tos-return?state=${NONCE}&signed_agreement_id=${AGREEMENT}`,
+    )
+
+    expect(res.status).toBe(302)
+    expect(res.headers.location).toBe(
+      `puente://kyc/tos-return?state=${NONCE}&signed_agreement_id=${AGREEMENT}`,
+    )
+    await app.close()
+  })
+
+  it('tells caches not to keep a redirect that is valid exactly once', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server).get(
+      `/v1/kyc/tos-return?state=${NONCE}&signed_agreement_id=${AGREEMENT}`,
+    )
+    expect(res.headers['cache-control']).toBe('no-store')
+    await app.close()
+  })
+
+  it('needs no credentials — Bridge redirects the browser here with none', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server).get(
+      `/v1/kyc/tos-return?state=${NONCE}&signed_agreement_id=${AGREEMENT}`,
+    )
+    expect(res.status).not.toBe(401)
+    await app.close()
+  })
+
+  it.each([
+    ['no state', `/v1/kyc/tos-return?signed_agreement_id=${AGREEMENT}`],
+    ['no agreement id', `/v1/kyc/tos-return?state=${NONCE}`],
+    ['neither', '/v1/kyc/tos-return'],
+  ])('400s with %s rather than emitting a half-built deep link', async (_case, url) => {
+    const app = await buildApp()
+    const res = await supertest(app.server).get(url)
+    expect(res.status).toBe(400)
+    await app.close()
+  })
+
+  it.each([
+    ['a query separator in state', `state=${NONCE}%26x=1&signed_agreement_id=${AGREEMENT}`],
+    ['a fragment in state', `state=${NONCE}%23f&signed_agreement_id=${AGREEMENT}`],
+    ['a scheme in state', `state=https://evil.example/aaaaaaaaaaaaaaaa&signed_agreement_id=${AGREEMENT}`],
+    ['a query separator in the agreement id', `state=${NONCE}&signed_agreement_id=${AGREEMENT}%26x=1`],
+    ['a scheme in the agreement id', `state=${NONCE}&signed_agreement_id=https://evil.example/aaaaaaaa`],
+    ['a path separator in the agreement id', `state=${NONCE}&signed_agreement_id=aaaa/bbbb`],
+  ])('rejects %s', async (_case, qs) => {
+    const app = await buildApp()
+    const res = await supertest(app.server).get(`/v1/kyc/tos-return?${qs}`)
+    expect(res.status).toBe(400)
+    expect(res.headers.location).toBeUndefined()
+    await app.close()
+  })
+})
+
+// Persona's return leg. Unlike the ToS relay this carries nothing — its only
+// job is to be a URL Persona will redirect to and iOS will intercept, so the
+// app stops waiting without the user having to close a browser by hand.
+describe('GET /v1/kyc/return', () => {
+  it('302s into the app scheme and carries nothing', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server).get('/v1/kyc/return')
+
+    expect(res.status).toBe(302)
+    expect(res.headers.location).toBe('puente://kyc/return')
+    expect(res.headers['cache-control']).toBe('no-store')
+    await app.close()
+  })
+
+  it('needs no credentials and no parameters', async () => {
+    // Persona redirects a browser here with neither. A forged call achieves
+    // nothing beyond making a signed-in app re-read its own KYC status.
+    const app = await buildApp()
+    const res = await supertest(app.server).get('/v1/kyc/return')
+    expect(res.status).toBe(302)
     await app.close()
   })
 })
@@ -361,6 +564,24 @@ describe('GET /v1/users/me/kyc-rejection', () => {
 })
 
 describe('POST /v1/users/me/kyc-link/retry', () => {
+  it('sends a mobile retry back through the relay, not to web', async () => {
+    // Same reason as the first attempt: a mobile user who retries must get a
+    // browser that closes itself, not one they have to dismiss.
+    from
+      .mockReturnValueOnce(selectResult({ data: rejectedRow, error: null }))
+      .mockReturnValueOnce(guardedUpdateReturningResult({ data: { kyc_retry_count: 2 }, error: null }))
+    getKycLink.mockResolvedValue({ url: 'https://bridge.example/kyc/retry' })
+    const app = await buildApp()
+
+    await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({ platform: 'mobile' })
+
+    expect(getKycLink).toHaveBeenCalledWith('cust_rejected', 'https://api.test.puente/v1/kyc/return')
+    await app.close()
+  })
+
   it('consumes a retry and returns a fresh KYC url', async () => {
     const bump = guardedUpdateReturningResult({ data: { kyc_retry_count: 2 }, error: null })
     from

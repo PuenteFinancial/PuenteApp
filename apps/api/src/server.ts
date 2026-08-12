@@ -1,6 +1,7 @@
 import './instrument.js'
 import * as Sentry from '@sentry/node'
 import Fastify from 'fastify'
+import type { FastifyRequest } from 'fastify'
 import cors from '@fastify/cors'
 import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
@@ -30,6 +31,37 @@ const server = Fastify({
   logger: {
     level: env.LOG_LEVEL,
     ...(env.NODE_ENV === 'development' && { transport: { target: 'pino-pretty' } }),
+    serializers: {
+      // Pino's default req serializer logs the full URL, query string included.
+      // Query strings here can carry one-time secrets — the mobile KYC return
+      // leg arrives as GET /v1/kyc/tos-return?state=<nonce>&signed_agreement_id=…
+      // because iOS only intercepts a 302, so the nonce has nowhere else to
+      // ride. Log the path and drop the query.
+      //
+      // Wholesale rather than a denylist of known-sensitive keys: a denylist
+      // silently fails the next time someone adds a token to a query param, and
+      // the ids worth having are already logged as structured fields by the
+      // audit plugin rather than scraped out of URLs. Allowlist a specific
+      // parameter here if one ever proves worth keeping.
+      //
+      // NOTE: this only covers OUR logs. Railway's edge sees the full URL and
+      // its retention is not ours to set — which is why the nonce is single-use
+      // and useless without the copy in the device keychain.
+      req(request: FastifyRequest) {
+        const [path] = request.url.split('?')
+        const host = request.headers.host
+        const remotePort = request.socket?.remotePort
+        // Conditional spreads because exactOptionalPropertyTypes rejects an
+        // explicit `undefined` for pino's optional serializer fields.
+        return {
+          method: request.method,
+          url: path ?? request.url,
+          remoteAddress: request.ip,
+          ...(host !== undefined && { host }),
+          ...(remotePort !== undefined && { remotePort }),
+        }
+      },
+    },
   },
   // Railway's edge appends the real client IP as the RIGHTMOST X-Forwarded-For
   // entry; a hop count trusts exactly that. Without this, request.ip is the
