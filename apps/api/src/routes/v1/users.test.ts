@@ -362,6 +362,30 @@ describe('GET /v1/kyc/tos-return', () => {
   })
 })
 
+// Persona's return leg. Unlike the ToS relay this carries nothing — its only
+// job is to be a URL Persona will redirect to and iOS will intercept, so the
+// app stops waiting without the user having to close a browser by hand.
+describe('GET /v1/kyc/return', () => {
+  it('302s into the app scheme and carries nothing', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server).get('/v1/kyc/return')
+
+    expect(res.status).toBe(302)
+    expect(res.headers.location).toBe('puente://kyc/return')
+    expect(res.headers['cache-control']).toBe('no-store')
+    await app.close()
+  })
+
+  it('needs no credentials and no parameters', async () => {
+    // Persona redirects a browser here with neither. A forged call achieves
+    // nothing beyond making a signed-in app re-read its own KYC status.
+    const app = await buildApp()
+    const res = await supertest(app.server).get('/v1/kyc/return')
+    expect(res.status).toBe(302)
+    await app.close()
+  })
+})
+
 describe('GET /v1/users/me', () => {
   it('returns the current user in camelCase', async () => {
     from.mockReturnValue(selectResult({ data: userRow, error: null }))
@@ -540,6 +564,24 @@ describe('GET /v1/users/me/kyc-rejection', () => {
 })
 
 describe('POST /v1/users/me/kyc-link/retry', () => {
+  it('sends a mobile retry back through the relay, not to web', async () => {
+    // Same reason as the first attempt: a mobile user who retries must get a
+    // browser that closes itself, not one they have to dismiss.
+    from
+      .mockReturnValueOnce(selectResult({ data: rejectedRow, error: null }))
+      .mockReturnValueOnce(guardedUpdateReturningResult({ data: { kyc_retry_count: 2 }, error: null }))
+    getKycLink.mockResolvedValue({ url: 'https://bridge.example/kyc/retry' })
+    const app = await buildApp()
+
+    await supertest(app.server)
+      .post('/v1/users/me/kyc-link/retry')
+      .set('Authorization', 'Bearer test-token')
+      .send({ platform: 'mobile' })
+
+    expect(getKycLink).toHaveBeenCalledWith('cust_rejected', 'https://api.test.puente/v1/kyc/return')
+    await app.close()
+  })
+
   it('consumes a retry and returns a fresh KYC url', async () => {
     const bump = guardedUpdateReturningResult({ data: { kyc_retry_count: 2 }, error: null })
     from

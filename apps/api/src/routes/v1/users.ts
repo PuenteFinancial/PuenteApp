@@ -68,6 +68,7 @@ interface TosLinkBody {
 interface KycLinkBody {
   signed_agreement_id: string
   origin?: string
+  platform?: 'web' | 'mobile'
 }
 
 // Bridge redirects the browser back to the web app after ToS/KYC, so the
@@ -104,6 +105,26 @@ const MOBILE_SCHEME = 'puente'
 // query parameters or a fragment into the URL built here.
 function mobileTosRedirect(publicApiUrl: string, state: string): string {
   return `${publicApiUrl}/v1/kyc/tos-return?state=${encodeURIComponent(state)}`
+}
+
+/**
+ * Where Persona sends the browser once hosted KYC finishes.
+ *
+ * Web lands on its own /onboarding/kyc/return page, which reads the user and
+ * routes. Mobile needs the same thing — a redirect, not a dismissal — because
+ * asking the user to close the browser themselves is ambiguous: if that
+ * dismissal does not resolve, the app waits forever with no way out. Observed
+ * happening on a simulator, 2026-08-11.
+ *
+ * So mobile gets the same relay treatment as the ToS leg, and for the same iOS
+ * reason. No nonce here: this leg carries no payload the app acts on —
+ * kyc_status arrives by webhook and the app re-reads /v1/users/me — so there is
+ * nothing for a forged call to forge.
+ */
+function kycReturnRedirect(platform: 'web' | 'mobile', publicApiUrl: string | undefined, origin?: string): string {
+  return platform === 'mobile' && publicApiUrl
+    ? `${publicApiUrl}/v1/kyc/return`
+    : `${resolveWebOrigin(origin)}/onboarding/kyc/return`
 }
 
 export async function usersRoute(server: FastifyInstance) {
@@ -305,6 +326,26 @@ export async function usersRoute(server: FastifyInstance) {
     },
   )
 
+  /**
+   * The mobile KYC return leg. Persona sends the browser here; this bounces it
+   * back into the app.
+   *
+   * Carries nothing — no nonce, no identifiers. Its entire job is to be a URL
+   * Persona will redirect to and iOS will intercept, so the app learns the user
+   * is done without asking them to close a browser by hand. What actually
+   * happened is read from /v1/users/me afterwards; this is a doorbell.
+   *
+   * That also means a forged call achieves nothing: the worst an attacker can
+   * do is make a signed-in app re-read its own KYC status.
+   */
+  server.get(
+    '/kyc/return',
+    { config: { public: true } },
+    async (_request, reply) => {
+      return reply.header('Cache-Control', 'no-store').redirect(`${MOBILE_SCHEME}://kyc/return`, 302)
+    },
+  )
+
   server.get(
     '/users/me/kyc-rejection',
     {
@@ -368,6 +409,7 @@ export async function usersRoute(server: FastifyInstance) {
           type: 'object',
           properties: {
             origin: { type: 'string' },
+            platform: { type: 'string', enum: ['web', 'mobile'] },
           },
           additionalProperties: false,
         },
@@ -420,7 +462,7 @@ export async function usersRoute(server: FastifyInstance) {
       try {
         const { url } = await getKycLink(
           user.bridge_customer_id,
-          `${resolveWebOrigin(request.body?.origin)}/onboarding/kyc/return`,
+          kycReturnRedirect(request.body?.platform ?? 'web', env.PUBLIC_API_URL, request.body?.origin),
         )
         return { url }
       } catch (err) {
@@ -461,6 +503,7 @@ export async function usersRoute(server: FastifyInstance) {
           properties: {
             signed_agreement_id: { type: 'string', minLength: 1 },
             origin: { type: 'string' },
+            platform: { type: 'string', enum: ['web', 'mobile'] },
           },
           additionalProperties: false,
         },
@@ -515,7 +558,7 @@ export async function usersRoute(server: FastifyInstance) {
 
         const { url } = await getKycLink(
           bridgeCustomerId,
-          `${resolveWebOrigin(request.body.origin)}/onboarding/kyc/return`,
+          kycReturnRedirect(request.body.platform ?? 'web', env.PUBLIC_API_URL, request.body.origin),
         )
         return { url }
       } catch (err) {

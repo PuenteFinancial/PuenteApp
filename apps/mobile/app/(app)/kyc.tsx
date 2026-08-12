@@ -20,6 +20,9 @@ import {
 // The scheme half of the redirect the API mints. openAuthSessionAsync closes
 // the browser as soon as the page navigates here and hands the full URL back.
 const TOS_RETURN_URL = 'puente://kyc/tos-return'
+// The KYC leg's equivalent. Carries nothing — it exists so the sheet closes on
+// a redirect instead of on the user finding the close button.
+const KYC_RETURN_URL = 'puente://kyc/return'
 
 /**
  * Identity verification: Bridge's Terms of Service, then Persona's hosted KYC.
@@ -87,7 +90,10 @@ export default function Kyc() {
 
       const kycRes = await api.fetch('/v1/users/me/kyc-link', {
         method: 'POST',
-        body: JSON.stringify({ signed_agreement_id: returned.signedAgreementId }),
+        body: JSON.stringify({
+          signed_agreement_id: returned.signedAgreementId,
+          platform: 'mobile',
+        }),
       })
       if (!kycRes.ok) {
         setStatus('error')
@@ -95,10 +101,21 @@ export default function Kyc() {
       }
       const { url: kycUrl } = (await kycRes.json()) as { url: string }
 
-      // Persona needs the camera for document capture, which is unreliable
-      // inside an embedded WebView — the system browser is the supported
-      // surface for it.
-      await WebBrowser.openBrowserAsync(kycUrl)
+      // An auth session, not openBrowserAsync, so the return is a redirect
+      // rather than a dismissal.
+      //
+      // openBrowserAsync only resolves when the user closes the browser
+      // themselves, which is ambiguous: observed on a simulator resolving never,
+      // leaving the button disabled on 'starting' with no way out but killing
+      // the app. Persona redirects to the relay when KYC finishes, iOS
+      // intercepts that, and the sheet closes on its own — the same mechanism
+      // web gets for free, and the same one the ToS leg already uses.
+      //
+      // Every result type is treated the same on purpose. 'success' means
+      // Persona finished; 'cancel'/'dismiss' means the user backed out. Both
+      // mean "stop waiting and ask the server what is true", and neither is
+      // trustworthy enough to route on by itself.
+      await WebBrowser.openAuthSessionAsync(kycUrl, KYC_RETURN_URL)
 
       // The user is back from Persona. Ask the server rather than assuming —
       // but route on RETURN rules, not sign-in rules.
