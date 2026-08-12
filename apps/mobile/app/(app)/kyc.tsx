@@ -8,7 +8,14 @@ import { Body, Button, Caption, Card, ErrorText, Heading, Screen } from '@/compo
 import { api } from '@/lib/api'
 import { routeAfterSignIn } from '@/lib/auth/routeAfterSignIn'
 import type { MeResponse } from '@/lib/auth/types'
-import { KYC_STATE_KEY, parseTosReturn, stateMatches } from '@/lib/kyc'
+import {
+  KYC_STATE_KEY,
+  parseStoredState,
+  parseTosReturn,
+  routeAfterKycReturn,
+  serializeState,
+  stateMatches,
+} from '@/lib/kyc'
 
 // The scheme half of the redirect the API mints. openAuthSessionAsync closes
 // the browser as soon as the page navigates here and hands the full URL back.
@@ -44,7 +51,7 @@ export default function Kyc() {
       // return. randomUUID is 122 bits of entropy and satisfies the API's
       // pattern for `state` as-is.
       const state = Crypto.randomUUID()
-      await SecureStore.setItemAsync(KYC_STATE_KEY, state)
+      await SecureStore.setItemAsync(KYC_STATE_KEY, serializeState(state, Date.now()))
 
       const tosRes = await api.fetch('/v1/users/me/tos-link', {
         method: 'POST',
@@ -66,11 +73,11 @@ export default function Kyc() {
       }
 
       const returned = parseTosReturn(result.url)
-      const stored = await SecureStore.getItemAsync(KYC_STATE_KEY)
+      const stored = parseStoredState(await SecureStore.getItemAsync(KYC_STATE_KEY))
       // Single-use: consumed whether or not it matched.
       await SecureStore.deleteItemAsync(KYC_STATE_KEY)
 
-      if (!returned || !stateMatches(returned.state, stored)) {
+      if (!returned || !stateMatches(returned.state, stored, Date.now())) {
         // Either a malformed return or one this app never initiated. The
         // agreement id is discarded unexchanged — this is the branch the whole
         // nonce exists for.
@@ -93,12 +100,23 @@ export default function Kyc() {
       // surface for it.
       await WebBrowser.openBrowserAsync(kycUrl)
 
-      // The user is back. The webhook may or may not have landed yet, so ask
-      // the server rather than assuming: routeAfterSignIn sends them to pending
-      // when the answer has not arrived, which is the honest holding state.
+      // The user is back from Persona. Ask the server rather than assuming —
+      // but route on RETURN rules, not sign-in rules.
+      //
+      // The webhook that flips kyc_status has almost certainly not landed yet:
+      // kyc-link only records bridge_customer_id, so the status is still
+      // `not_started` at this moment, and routeAfterSignIn maps that to the KYC
+      // screen. Using it here would drop the user back onto "verify your
+      // identity" seconds after they finished it.
+      //
+      // A body we cannot read is a different problem — an unusable session, not
+      // an undecided KYC — so that falls through to the general router, which
+      // sends it back to auth.
       const meRes = await api.fetch('/v1/users/me')
       const body = meRes.ok ? ((await meRes.json().catch(() => null)) as MeResponse | null) : null
-      router.replace(routeAfterSignIn({ status: meRes.status, body }))
+      router.replace(
+        body ? routeAfterKycReturn(body.kycStatus) : routeAfterSignIn({ status: meRes.status, body: null }),
+      )
     } catch {
       // Transport failure at any step. The nonce may be orphaned in the
       // keychain; it is overwritten on the next attempt and useless meanwhile.
