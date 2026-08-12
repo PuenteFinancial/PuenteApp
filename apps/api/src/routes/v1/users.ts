@@ -90,13 +90,20 @@ function resolveWebOrigin(origin?: string): string {
 const MOBILE_SCHEME = 'puente'
 
 // Bridge appends `signed_agreement_id` to whatever redirect_uri it is given,
-// preserving existing query params (verified in the same session). That is what
-// lets the app round-trip a nonce and refuse a return it did not initiate.
+// preserving existing query params (verified against their sandbox). That is
+// what lets a nonce round-trip so the app can refuse a return it did not start.
 //
-// `state` is schema-constrained to an opaque token below, so it cannot smuggle
-// extra query parameters or a fragment into the URL built here.
-function mobileTosRedirect(state: string): string {
-  return `${MOBILE_SCHEME}://kyc/tos-return?state=${encodeURIComponent(state)}`
+// The target is this API rather than the app's own scheme, and that indirection
+// is not optional: Bridge's ToS page ends with a client-side `location.href`,
+// and iOS does not surface that to ASWebAuthenticationSession for a custom
+// scheme — the sheet lands on about:blank and never closes. Pointing at an
+// https URL that answers 302 → puente:// turns it into the redirect form iOS
+// does intercept. Measured both ways on a simulator, 2026-08-11.
+//
+// `state` is schema-constrained to an opaque token, so it cannot smuggle extra
+// query parameters or a fragment into the URL built here.
+function mobileTosRedirect(publicApiUrl: string, state: string): string {
+  return `${publicApiUrl}/v1/kyc/tos-return?state=${encodeURIComponent(state)}`
 }
 
 export async function usersRoute(server: FastifyInstance) {
@@ -217,9 +224,22 @@ export async function usersRoute(server: FastifyInstance) {
         return sendError(reply, 400, 'validation_error', 'state is required for mobile')
       }
 
+      // Misconfiguration, not a bad request: without this the return leg has
+      // nowhere to land, and a silently-web redirect would strand the user in a
+      // browser instead of returning them to the app.
+      if (platform === 'mobile' && !env.PUBLIC_API_URL) {
+        server.log.error({ userId }, 'PUBLIC_API_URL is unset — mobile KYC cannot return')
+        return sendError(
+          reply,
+          503,
+          'not_configured',
+          'Identity verification is unavailable, try again shortly',
+        )
+      }
+
       const redirectUri =
         platform === 'mobile'
-          ? mobileTosRedirect(request.body!.state!)
+          ? mobileTosRedirect(env.PUBLIC_API_URL!, request.body!.state!)
           : `${resolveWebOrigin(request.body?.origin)}/onboarding/kyc/tos-return`
 
       try {
@@ -233,6 +253,52 @@ export async function usersRoute(server: FastifyInstance) {
         }
         throw err
       }
+    },
+  )
+
+  /**
+   * The mobile ToS return leg. Bridge sends the browser here; this bounces it
+   * into the app.
+   *
+   * It exists only because of an iOS behaviour: ASWebAuthenticationSession does
+   * not intercept a custom scheme reached by a page's own `location.href`, which
+   * is how Bridge finishes its ToS flow — the sheet lands on about:blank and
+   * never closes, stranding the user. It DOES intercept a 302 to that scheme.
+   * So this converts the one into the other and does nothing else.
+   *
+   * Public because Bridge's redirect arrives with no credentials, and it needs
+   * none: nothing here reads or writes user state. It forwards two validated
+   * parameters and redirects. The security boundary is the nonce the app checks
+   * on the other side — a forged call to this route can only produce a deep link
+   * the app then refuses.
+   */
+  server.get<{ Querystring: { state: string; signed_agreement_id: string } }>(
+    '/kyc/tos-return',
+    {
+      config: { public: true },
+      schema: {
+        querystring: {
+          type: 'object',
+          required: ['state', 'signed_agreement_id'],
+          properties: {
+            // Same pattern the tos-link route pins, for the same reason: it
+            // admits nothing that could add a parameter, a fragment or a second
+            // scheme to the redirect built below.
+            state: { type: 'string', pattern: '^[A-Za-z0-9_-]{16,64}$' },
+            // Bridge issues UUIDs. Constrained rather than trusted, so a
+            // hostile caller cannot inject URL syntax through it either.
+            signed_agreement_id: { type: 'string', pattern: '^[A-Za-z0-9-]{8,64}$' },
+          },
+        },
+        response: { 400: errorResponseSchema },
+      },
+    },
+    async (request, reply) => {
+      const target =
+        `${MOBILE_SCHEME}://kyc/tos-return` +
+        `?state=${encodeURIComponent(request.query.state)}` +
+        `&signed_agreement_id=${encodeURIComponent(request.query.signed_agreement_id)}`
+      return reply.redirect(target, 302)
     },
   )
 

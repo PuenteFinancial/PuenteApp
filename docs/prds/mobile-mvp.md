@@ -208,9 +208,19 @@ finishing KYC lands in Safari on the web dashboard.
 existing host allowlist on the outbound Bridge URL unchanged — that guard protects against a
 different threat and stays. Treat the scheme allowlist as security-reviewed surface.
 
-**Blocked on:** Bridge sandbox cannot exercise hosted KYC links, so this slice is testable
-end-to-end only against prod Bridge. Build it, unit-test the deep-link parsing, and flag the E2E as
-deferred rather than claiming coverage it doesn't have.
+~~**Blocked on:** Bridge sandbox cannot exercise hosted KYC links.~~ **Wrong — corrected
+2026-08-11.** Sandbox mints hosted KYC links fine; this slice is testable end-to-end without prod.
+
+**What the return leg actually needs** (measured on a simulator, not inferred): iOS does **not**
+surface a custom scheme reached by a page's own `location.href` to `ASWebAuthenticationSession`,
+and that is exactly how Bridge finishes its ToS flow — the sheet lands on `about:blank` and never
+closes, stranding the user with a signed agreement the app never sees. iOS **does** intercept a
+`302` to the same scheme. So the redirect target is `GET /v1/kyc/tos-return` on this API, which
+answers `302 puente://kyc/tos-return?...`. Needs `PUBLIC_API_URL`.
+
+The earlier plan here — allowlist the app's scheme as a redirect target and hand it to Bridge
+directly — was built and does not work on device. It fails silently, which is the worst shape:
+the user accepts real Terms of Service and then nothing happens.
 
 **Gate:** `security-reviewer` on the scheme allowlist · `compliance-reviewer` on the GLBA
 data-notice copy (`KycStart.tsx` renders `s.dataNotice` before the hand-off — it must survive the

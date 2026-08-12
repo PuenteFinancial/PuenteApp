@@ -9,6 +9,20 @@ const envSchema = z.object({
     .string()
     .default('http://localhost:3000,http://localhost:8081')
     .transform((s) => s.split(',')),
+  // This API's own public base URL, no trailing slash (e.g.
+  // https://puenteapi-staging.up.railway.app).
+  //
+  // Needed because the mobile KYC flow hands Bridge a URL pointing back HERE:
+  // Bridge's ToS page finishes with a client-side `location.href`, and iOS does
+  // NOT surface that to ASWebAuthenticationSession when the target is a custom
+  // scheme — verified on a simulator 2026-08-11. An HTTP 302 to the same scheme
+  // IS intercepted, so the return leg goes Bridge → this API → 302 → puente://.
+  //
+  // Optional so the API still boots without it and web is untouched; the mobile
+  // branch of /v1/users/me/tos-link fails loudly instead. Deriving it from the
+  // request Host header was rejected: that header is client-controlled, and this
+  // value becomes a redirect target handed to a third party.
+  PUBLIC_API_URL: z.string().url().optional(),
   // How many proxy hops sit in front of the API (Railway edge = 1). Drives
   // trustProxy so request.ip = the rightmost X-Forwarded-For entry, i.e. the
   // address the trusted proxy actually saw. NEVER set trustProxy: true —

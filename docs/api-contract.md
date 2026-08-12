@@ -77,6 +77,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | POST | `/v1/auth/otp/send` | public | Body `{ phone, smsConsent }`. `smsConsent` is schema-pinned to `const: true` — TCPA consent is collected on the same submit that sends the SMS, not looked up from a prior record. Sends Twilio SMS OTP. |
 | POST | `/v1/auth/otp/verify` | public | Body `{ phone, token }`. Wraps Supabase Auth. Returns `{ accessToken, refreshToken, expiresIn, userId }` — **not** a "profile is new" flag; callers route on `GET /v1/users/me` instead (`apps/web/app/continue/page.tsx`, `apps/mobile/lib/auth/routeAfterSignIn.ts`). Also self-heals a missing `users` row, stamps `sms_consent_at`, and writes a `sign_in_events` record. |
 | POST | `/v1/auth/refresh` | public | Body `{ refreshToken }`. Same response shape as verify. Supabase rotates refresh tokens single-use — the rotated token must be persisted or the session dies at the next expiry. |
+| GET | `/v1/kyc/tos-return` | public | Mobile KYC return leg. Query `{ state, signed_agreement_id }`, both pattern-constrained; answers `302` to `puente://kyc/tos-return` with the same two params. Exists because iOS does not surface a custom scheme reached by a page's own `location.href` to `ASWebAuthenticationSession` (which is how Bridge ends its ToS flow), but does intercept a `302`. Reads and writes nothing; the nonce check in the app is the security boundary. Needs `PUBLIC_API_URL`. |
 
 ## Profile & consent
 
