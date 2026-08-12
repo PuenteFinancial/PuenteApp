@@ -193,6 +193,25 @@ verified against the API log. **This build goes to TestFlight.**
 Profile form (`ProfileForm.tsx`, 103 LOC — thin), `pending` / `rejected` screens, and the
 foreground-resume poller (`PendingPoller.tsx`, 59 LOC — `visibilitychange` → `AppState`).
 
+**Status 2026-08-11 — two of three shipped, the third is what finishes onboarding.**
+
+| Piece | State |
+|---|---|
+| Profile form | #182, merged |
+| KYC handoff (ToS → Persona, relay, nonce) | #183, open |
+| **Foreground-resume poller** | **not built — the flow currently dead-ends** |
+
+Without the poller the chain is: Bridge → webhook → DB ✅ → *app finds out* ❌ → screen ✅.
+Mobile has no Supabase client, no realtime and no subscription, so the app only learns
+`kyc_status` by asking, and it only asks on cold launch and immediately after the KYC browser
+closes. Neither happens while the user sits on `pending`. Demonstrated on a simulator: flipping
+`kyc_status` to `approved` while the app was on that screen changed nothing; a relaunch went
+straight to home. So the routing is right and only the liveness is missing — a user today
+completes KYC and then waits on a screen that never updates until they kill the app.
+
+Web's `visibilitychange` maps to **`AppState`** here, which is the bulk of it; a modest interval
+while foregrounded covers the case where the webhook lands during the wait rather than before it.
+
 **The hard part is the Bridge handoff, and it needs an API change.** Web's flow is three redirects:
 `POST /v1/users/me/tos-link` → Bridge ToS → `/onboarding/kyc/tos-return?signed_agreement_id=…` →
 `POST /v1/users/me/kyc-link` → Persona → `/onboarding/kyc/return`. Both return pages are no-UI
@@ -360,7 +379,7 @@ the entity providing the service. Verify current requirements directly — Apple
 |---|---|---|---|---|
 | M1 | Foundation | M | — | ~~NativeWind × SDK 57~~ — gate failed, StyleSheet shipped |
 | M2 | Auth + shell | M | M1 | — (Twilio approved 8/10) |
-| M3 | Profile + KYC | M | M2 | prod Bridge for E2E; needs an API change |
+| M3 | Profile + KYC | M | M2 | ~~prod Bridge for E2E~~ — wrong, sandbox mints hosted KYC links (§5). API change shipped in #183. **Poller still unbuilt** |
 | M4 | Recipients | M | M2 | — |
 | M5 | Quote + disclosure | M | M4 | — |
 | M6 | Pay | L | M5 | **Stripe sandbox keys** |
@@ -391,6 +410,8 @@ Worth deciding before M4.
       a session for.
 - [ ] Every slice: tests alongside, typecheck green, `security-reviewer` on auth/financial paths,
       `compliance-reviewer` on consent-adjacent screens.
+- [ ] **At least the sign-in → KYC path runs unattended in an E2E harness.** See the risk below —
+      this is currently the largest hole in the plan, and it widens with every screen.
 - [ ] `packages/shared` has exactly one definition of `TransferState`, error codes, and
       translations — no mirrors left in `apps/web/lib/`.
 
@@ -407,6 +428,32 @@ Worth deciding before M4.
   `{phone, smsConsent}` and verify takes `token`). Fix in M2.
 - Prior PRDs this follows: `docs/prds/remittance-mvp.md`, `user-onboarding.md`,
   `account-lifecycle.md`
+
+### Risk — no automated E2E on mobile (added 2026-08-11)
+
+**Web has Playwright. Mobile has nothing.** Every device check so far has been a person driving a
+simulator by hand, and that is not a gap in diligence — it is the plan's largest hole, because the
+class of bug it misses is the class this app produces.
+
+Five bugs in the M3 KYC slice alone passed typecheck, lint, unit tests **and** a full Metro bundle,
+and were only found by running the app:
+
+1. `lib/auth/*` imported `./types.js` — Metro does not remap `.js` onto `.ts`, so the entire auth
+   substrate could never bundle. tsc and Vitest both do the remap, so nothing offline saw it.
+2. A successful OTP verify bounced back to sign-in — the "no phone" guard fired on the deliberate
+   post-verify clear and beat `router.replace`.
+3. Returning from Persona routed to the KYC screen the user had just finished, because
+   `routeAfterSignIn` maps `not_started` there and the webhook had not landed yet.
+4. `openBrowserAsync` never resolved, leaving the button disabled on `starting` with no way out
+   but killing the app.
+5. Controlled `TextInput`s dropped keystrokes under a single-object form state.
+
+None are exotic. All are ordinary consequences of a form, a navigation, or an effect — the things
+every remaining slice is made of. The exposure grows with M4–M7.
+
+**Maestro** is the likely tool: it drives system browser sheets, which is what this flow is full of
+and what Detox handles poorly. Sizing and placement are open; doing it before M4 is the argument,
+since recipients, quote and pay are all more of the same shapes.
 
 ### Out of scope, noted so it isn't lost
 
