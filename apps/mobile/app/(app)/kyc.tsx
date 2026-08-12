@@ -24,6 +24,16 @@ const TOS_RETURN_URL = 'puente://kyc/tos-return'
 // a redirect instead of on the user finding the close button.
 const KYC_RETURN_URL = 'puente://kyc/return'
 
+// Ephemeral, which also removes iOS's "Puente Wants to Use bridge.xyz to Sign
+// In" consent alert — that alert exists because an auth session shares Safari's
+// cookies by default, and an ephemeral one shares nothing, so the system stops
+// asking. Two legs meant two alerts before this.
+//
+// Nothing is lost: there is no pre-existing bridge.xyz or withpersona.com login
+// worth reusing, and a KYC session has no business persisting into Safari's
+// cookie jar afterwards.
+const AUTH_SESSION_OPTIONS = { preferEphemeralSession: true } as const
+
 /**
  * Identity verification: Bridge's Terms of Service, then Persona's hosted KYC.
  *
@@ -34,9 +44,9 @@ const KYC_RETURN_URL = 'puente://kyc/return'
  *      auth session that closes on our own scheme. A nonce proves the return is
  *      one we started (see lib/kyc.ts for why that matters).
  *   2. **Persona** — returns nothing the app needs; `kyc_status` arrives by
- *      webhook. So it opens in an ordinary browser the user closes, and the app
- *      re-reads the server afterwards. No redirect interception, and nothing
- *      that depends on Bridge accepting a custom scheme on that leg.
+ *      webhook. It still runs in an auth session, so the sheet closes on a
+ *      redirect rather than on the user finding the close button, and the app
+ *      then re-reads the server rather than believing anything in the URL.
  */
 export default function Kyc() {
   const { t } = useLanguage()
@@ -66,7 +76,7 @@ export default function Kyc() {
       }
       const { url: tosUrl } = (await tosRes.json()) as { url: string }
 
-      const result = await WebBrowser.openAuthSessionAsync(tosUrl, TOS_RETURN_URL)
+      const result = await WebBrowser.openAuthSessionAsync(tosUrl, TOS_RETURN_URL, AUTH_SESSION_OPTIONS)
       if (result.type !== 'success') {
         // Cancelled or dismissed — not a failure, just a user who backed out.
         // Drop the nonce so it cannot validate anything later.
@@ -115,7 +125,7 @@ export default function Kyc() {
       // Persona finished; 'cancel'/'dismiss' means the user backed out. Both
       // mean "stop waiting and ask the server what is true", and neither is
       // trustworthy enough to route on by itself.
-      await WebBrowser.openAuthSessionAsync(kycUrl, KYC_RETURN_URL)
+      await WebBrowser.openAuthSessionAsync(kycUrl, KYC_RETURN_URL, AUTH_SESSION_OPTIONS)
 
       // The user is back from Persona. Ask the server rather than assuming —
       // but route on RETURN rules, not sign-in rules.
