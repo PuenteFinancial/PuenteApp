@@ -142,3 +142,38 @@ export function routeAfterKycReturn(kycStatus: string | null | undefined): KycRe
   if (kycStatus === 'rejected') return '/(app)/rejected'
   return '/(app)/pending'
 }
+
+// Statuses that mean "still waiting" to someone already sitting on the pending
+// screen. The counterpart to routeAfterKycReturn: that one decides where a
+// returning user goes, this one decides whether they may leave yet.
+//
+// `not_started` is in here on purpose, and it is the difference between this
+// set and web's. It is the status during the gap between Persona finishing and
+// Bridge's webhook landing — kyc-link records only bridge_customer_id and does
+// not move the status — so treating it as decided would send the user back to
+// the KYC screen seconds after they completed it, on a timer. That is the
+// regression 804dde1 fixed for the return leg, and a poller would reintroduce
+// it in a worse shape, because no user action triggers it.
+//
+// Parking it cannot strand anyone: the only route onto this screen with
+// not_started is the KYC return leg, which is exactly the case that must wait.
+// A cold launch with not_started goes to /(app)/kyc via routeAfterSignIn and
+// never reaches pending at all.
+const PARKED_KYC_STATUSES = ['pending', 'manual_review', 'not_started']
+
+/**
+ * Has this user's KYC reached a state that should move them off pending?
+ *
+ * A missing status is not a decision — an absent or unreadable field means we
+ * do not know, which is what the pending screen is already for.
+ *
+ * Anything unrecognized returns true and is handed to routeAfterSignIn, which
+ * defaults unknown statuses back to pending. The double default is deliberate:
+ * this decides *when* to re-route and routeAfterSignIn decides *where*, so a
+ * kyc_status added server-side surfaces as a re-render rather than a user
+ * stuck behind a client that has never heard of it.
+ */
+export function hasLeftPending(kycStatus: string | null | undefined): boolean {
+  if (!kycStatus) return false
+  return !PARKED_KYC_STATUSES.includes(kycStatus)
+}
