@@ -10,7 +10,12 @@ import { useRouter } from 'next/navigation'
 // /continue: with no session there, the silent-refresh hop takes over and
 // routes by state. Errors just wait for the next tick — never dead-end.
 const POLL_INTERVAL_MS = 30_000
-const PARKED_STATUSES = ['pending', 'manual_review']
+// `not_started` is parked because it is the status during the gap between
+// Persona finishing and Bridge's webhook landing — kyc/return/page.tsx sends
+// exactly that user here. Treating it as decided sent them to /continue, which
+// maps not_started to the KYC screen they had just completed. Must stay in step
+// with hasLeftPending in apps/mobile/lib/kyc.ts.
+const PARKED_STATUSES = ['pending', 'manual_review', 'not_started']
 
 export default function PendingPoller() {
   const router = useRouter()

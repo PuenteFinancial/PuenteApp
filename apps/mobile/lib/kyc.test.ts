@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
+import { routeAfterSignIn } from './auth/routeAfterSignIn'
+import type { MeResponse } from './auth/types'
 import {
+  hasLeftPending,
   isValidState,
   KYC_STATE_TTL_MS,
   parseStoredState,
@@ -143,5 +146,49 @@ describe('routeAfterKycReturn', () => {
 
   it.each([[null], [undefined]])('treats a missing status as undecided', (status) => {
     expect(routeAfterKycReturn(status)).toBe('/(app)/pending')
+  })
+})
+
+describe('hasLeftPending', () => {
+  it.each([['approved'], ['rejected']])('lets a %s user off the pending screen', (status) => {
+    expect(hasLeftPending(status)).toBe(true)
+  })
+
+  it.each([['pending'], ['manual_review']])('holds a %s user', (status) => {
+    expect(hasLeftPending(status)).toBe(false)
+  })
+
+  it('holds not_started — the webhook gap, and where web bounces the user', () => {
+    // The only way onto the pending screen with this status is the KYC return
+    // leg, which fires before Bridge's webhook lands. Letting it through would
+    // route the user to /(app)/kyc, i.e. back onto the screen they just
+    // finished — on a 30 s timer, with no action of their own. This single
+    // assertion is why the parked set here differs from web's.
+    expect(hasLeftPending('not_started')).toBe(false)
+  })
+
+  it.each([[null], [undefined], ['']])('treats a missing status as undecided', (status) => {
+    // An absent field is not a decision. Polling again costs one request;
+    // routing on a status we never received costs a stranded user.
+    expect(hasLeftPending(status)).toBe(false)
+  })
+
+  it('cannot strand a user on a status it has never heard of', () => {
+    // The property that matters is the composition, not either half: an
+    // unrecognized status releases the poller, and routeAfterSignIn then puts
+    // the user back on pending. So a kyc_status added server-side after this
+    // binary shipped costs a re-render, never a dead end.
+    const status = 'some_new_state'
+    expect(hasLeftPending(status)).toBe(true)
+
+    const body: MeResponse = {
+      id: 'usr-1',
+      firstName: 'Ana',
+      lastName: 'Ruiz',
+      email: 'ana@example.com',
+      kycStatus: status,
+      bridgeCustomerId: 'cus-1',
+    }
+    expect(routeAfterSignIn({ status: 200, body })).toBe('/(app)/pending')
   })
 })
