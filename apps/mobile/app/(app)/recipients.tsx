@@ -46,11 +46,9 @@ export default function Recipients() {
   // A 403 is the API saying this user is not KYC-approved, which is a routing
   // problem and not something to render. Web redirects in the server component;
   // the equivalent here is to send them back through the single routing brain
-  // rather than leave them on an error they cannot act on.
-  //
-  // Defensive only today — the GET handlers do not actually enforce the gate
-  // (see isKycGateError in lib/queries/recipients.ts for what was measured).
-  // Kept so this screen is already right if they are tightened.
+  // rather than leave them on an error they cannot act on. Only reachable by
+  // deep link or a session that went stale mid-screen — the entry point on home
+  // already implies approved.
   const gated = isKycGateError(list.error)
   useEffect(() => {
     if (gated) router.replace('/continue')

@@ -316,12 +316,14 @@ export async function destinationsRoute(server: FastifyInstance) {
               data: { type: 'array', items: destinationResponseSchema },
             },
           },
+          403: errorResponseSchema,
           404: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
       const userId = request.user!.id
+      if (!(await requireApprovedUser(userId, reply))) return
 
       // Archived recipients stay readable — history, not UI actions.
       const { data: recipient } = await supabaseAdmin

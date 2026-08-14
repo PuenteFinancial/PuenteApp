@@ -76,18 +76,14 @@ export async function fetchDestinations(recipientId: string): Promise<PayoutDest
 /**
  * Is this failure the API telling us the user does not belong on this screen?
  *
- * DEFENSIVE, AND CURRENTLY UNREACHABLE ON THE READ PATH — verified on a
- * simulator 2026-08-14, not assumed. `requireApprovedUser`
- * (apps/api/src/routes/v1/recipients.ts) is called by the write handlers only;
- * both GET handlers skip it, so a `pending` user who reaches this screen gets
- * their list back with a 200. The comment above that helper says "the whole
- * /v1/recipients surface is post-KYC", which is the intent but not what the
- * code does.
+ * `requireApprovedUser` (apps/api/src/routes/v1/recipients.ts) answers 403
+ * kyc_required on every handler of this surface, reads included. Web deals with
+ * it by redirecting inside the server component before it ever calls; mobile
+ * has to notice it in the client and hand off to the router, or a user who is
+ * not approved yet sits on an error state with nothing to act on.
  *
- * This stays because the cost is three lines and the failure mode it prevents
- * is a user parked on an error they cannot act on. If the API is ever tightened
- * to match its own comment, this is already correct rather than a follow-up
- * nobody remembers to write.
+ * Reachable but rare: the entry point on home already implies approved, so this
+ * is the stale-session and deep-link path.
  */
 export function isKycGateError(error: unknown): boolean {
   return error instanceof ApiRequestError && error.status === 403
