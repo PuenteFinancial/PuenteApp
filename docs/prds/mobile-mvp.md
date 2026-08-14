@@ -7,8 +7,11 @@ add a recipient, get a quote, fund, track, and receive a receipt — from an iOS
 capability the web dashboard has that the app lacks. **Definition of done:** one real send completed
 end-to-end from a TestFlight build.
 
-**Status (2026-08-10):** Not started. `apps/mobile` is a 15-file stub — two screens that `return
-null` plus a Sentry init.
+**Status (2026-08-13):** M1–M3 shipped — foundation (#176–#179), auth + shell (#180–#181),
+profile (#182), KYC handoff (#183), and the pending poller that closes M3. A user can sign in,
+complete their profile, verify identity through Bridge → Persona, and be moved off the holding
+screen when the webhook decides. **Next: M4 — recipients + destinations**, which also establishes
+the TanStack Query data layer (§6).
 
 **Context:** `apps/web` is a complete remittance client (signup → onboarding/KYC → recipients →
 quote → send → receipt → ops). The target users are mobile-first, so the app isn't optional; the
@@ -193,24 +196,34 @@ verified against the API log. **This build goes to TestFlight.**
 Profile form (`ProfileForm.tsx`, 103 LOC — thin), `pending` / `rejected` screens, and the
 foreground-resume poller (`PendingPoller.tsx`, 59 LOC — `visibilitychange` → `AppState`).
 
-**Status 2026-08-11 — two of three shipped, the third is what finishes onboarding.**
+**Status 2026-08-13 — M3 complete.**
 
 | Piece | State |
 |---|---|
 | Profile form | #182, merged |
-| KYC handoff (ToS → Persona, relay, nonce) | #183, open |
-| **Foreground-resume poller** | **not built — the flow currently dead-ends** |
+| KYC handoff (ToS → Persona, relay, nonce) | #183, merged |
+| Foreground-resume poller | shipped — `app/(app)/pending.tsx` |
 
-Without the poller the chain is: Bridge → webhook → DB ✅ → *app finds out* ❌ → screen ✅.
+Before the poller the chain was: Bridge → webhook → DB ✅ → *app finds out* ❌ → screen ✅.
 Mobile has no Supabase client, no realtime and no subscription, so the app only learns
-`kyc_status` by asking, and it only asks on cold launch and immediately after the KYC browser
-closes. Neither happens while the user sits on `pending`. Demonstrated on a simulator: flipping
+`kyc_status` by asking, and it only asked on cold launch and immediately after the KYC browser
+closed. Neither happens while the user sits on `pending`. Demonstrated on a simulator: flipping
 `kyc_status` to `approved` while the app was on that screen changed nothing; a relaunch went
-straight to home. So the routing is right and only the liveness is missing — a user today
-completes KYC and then waits on a screen that never updates until they kill the app.
+straight to home. The routing was already right; only the liveness was missing.
 
-Web's `visibilitychange` maps to **`AppState`** here, which is the bulk of it; a modest interval
-while foregrounded covers the case where the webhook lands during the wait rather than before it.
+Web's `visibilitychange` maps to **`AppState`**, which is the bulk of it; a 30 s interval while
+foregrounded covers the case where the webhook lands during the wait rather than before it. The
+interval is stopped while backgrounded and a check fires on resume — iOS throttles background
+timers unpredictably, so this is honest about when polling actually happens.
+
+**`not_started` is a parked status on mobile, and now on web too.** It is the status during the
+gap between Persona finishing and Bridge's webhook landing (`kyc-link` records only
+`bridge_customer_id`). Web's poller parked only `pending`/`manual_review`, so a user sent to
+`/onboarding/pending` by `kyc/return/page.tsx` was routed back out to the KYC screen they had
+just completed — the same regression `804dde1` fixed for mobile's return leg, but on a timer and
+with no user action to blame. `hasLeftPending` (`apps/mobile/lib/kyc.ts`) and web's
+`PARKED_STATUSES` must stay in step. Neither can strand anyone: an unrecognized status releases
+the poller and `routeAfterSignIn` puts the user back on pending.
 
 **The hard part is the Bridge handoff, and it needs an API change.** Web's flow is three redirects:
 `POST /v1/users/me/tos-link` → Bridge ToS → `/onboarding/kyc/tos-return?signed_agreement_id=…` →
