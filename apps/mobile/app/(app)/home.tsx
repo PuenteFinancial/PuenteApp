@@ -1,3 +1,4 @@
+import { useRouter } from 'expo-router'
 import { useLanguage } from '@/components/LanguageProvider'
 import { Body, Button, Card, Heading, Screen } from '@/components/ui'
 import { api } from '@/lib/api'
@@ -12,6 +13,7 @@ import { api } from '@/lib/api'
 export default function Home() {
   const { t } = useLanguage()
   const s = t.onboarding.dashboard
+  const router = useRouter()
 
   return (
     <Screen>
@@ -19,6 +21,11 @@ export default function Home() {
         <Heading>{s.title}</Heading>
         <Body>{s.body}</Body>
       </Card>
+
+      {/* Only reachable from here, and this screen is only reachable with an
+          approved KYC status — which is what makes the recipients screen's own
+          403 handling a deep-link guard rather than the normal path. */}
+      <Button label={t.recipients.title} onPress={() => router.push('/(app)/recipients')} />
       {/* api.signOut clears the token store and fires the root layout's
           signed-out handler, which routes back to (auth). Local-only: there is
           no server-side revocation endpoint, same posture as web. */}
