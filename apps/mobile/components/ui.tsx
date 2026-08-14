@@ -4,6 +4,7 @@ import {
   Linking,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -30,10 +31,19 @@ export function Screen({
   children,
   style,
   scroll = false,
+  onRefresh,
+  refreshing = false,
 }: {
   children: ReactNode
   style?: ViewStyle
   scroll?: boolean
+  // Pull-to-refresh. Lives here rather than in each screen so the gesture, the
+  // spinner colour and the "only in scroll mode" rule are decided once —
+  // otherwise every list screen from M4 on re-implements it slightly
+  // differently. Ignored unless `scroll` is set, because a non-scrolling View
+  // has no gesture to attach it to.
+  onRefresh?: () => void
+  refreshing?: boolean
 }) {
   // `scroll` is load-bearing on the consent screen, not a nicety: the TCPA
   // string is ~330 characters and must render in full, unmodified, on the
@@ -52,9 +62,18 @@ export function Screen({
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
           <ScrollView
-            contentContainerStyle={[styles.screenInner, style]}
+            contentContainerStyle={[styles.screenScrollInner, style]}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="interactive"
+            {...(onRefresh && {
+              refreshControl: (
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={onRefresh}
+                  tintColor={colors.hero}
+                />
+              ),
+            })}
           >
             {children}
           </ScrollView>
@@ -208,6 +227,22 @@ const styles = StyleSheet.create({
   },
   screenInner: {
     flex: 1,
+    paddingHorizontal: 20,
+    paddingVertical: 24,
+    gap: 16,
+  },
+  // The same padding, but `flexGrow` instead of `flex` — and the difference is
+  // load-bearing, not cosmetic.
+  //
+  // A ScrollView's contentContainerStyle describes the *content*, not the
+  // viewport. `flex: 1` pins that content to exactly the scroll view's height,
+  // so it can never be taller than one screen: nothing scrolls, nothing
+  // overscrolls, and a RefreshControl can never be pulled far enough to fire.
+  // Anything past the fold is simply clipped. `flexGrow: 1` fills the screen
+  // when the content is short and lets it grow when it is not, which is what a
+  // scrolling container actually wants.
+  screenScrollInner: {
+    flexGrow: 1,
     paddingHorizontal: 20,
     paddingVertical: 24,
     gap: 16,
