@@ -10,6 +10,7 @@ export * from './types/transfer.js'
 // Client-side helpers. Framework-free by construction — anything that needs
 // React, the DOM, or a bundler belongs in the app that consumes it.
 export * from './api/apiError.js'
+export * from './api/recipientErrors.js'
 export * from './phone.js'
 export * from './support.js'
 
