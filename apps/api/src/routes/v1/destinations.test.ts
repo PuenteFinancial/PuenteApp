@@ -511,6 +511,7 @@ describe('POST /v1/recipients/:id/destinations', () => {
 describe('GET /v1/recipients/:id/destinations', () => {
   it('lists active destinations in masked form only', async () => {
     from
+      .mockReturnValueOnce(chain({ data: approvedUser }))
       .mockReturnValueOnce(chain({ data: { id: RECIPIENT_ID } }))
       .mockReturnValueOnce(chain({ data: [destinationRow] }))
     const app = await buildApp()
@@ -526,8 +527,28 @@ describe('GET /v1/recipients/:id/destinations', () => {
     await app.close()
   })
 
+  // Regression, same shape as the recipients list: this read skipped
+  // requireApprovedUser until 2026-08-14 and handed back payout metadata
+  // (bank label, CLABE last-4) to a caller who had not verified identity.
+  it('403s when the user is not KYC-approved and never reads destinations', async () => {
+    from.mockReturnValueOnce(chain({ data: { kyc_status: 'pending', bridge_customer_id: null } }))
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('kyc_required')
+    expect(from).toHaveBeenCalledTimes(1)
+    expect(from).toHaveBeenCalledWith('users')
+    await app.close()
+  })
+
   it("404s on another user's recipient", async () => {
-    from.mockReturnValueOnce(chain({ data: null, error: { code: 'PGRST116' } }))
+    from
+      .mockReturnValueOnce(chain({ data: approvedUser }))
+      .mockReturnValueOnce(chain({ data: null, error: { code: 'PGRST116' } }))
     const app = await buildApp()
 
     const res = await supertest(app.server)

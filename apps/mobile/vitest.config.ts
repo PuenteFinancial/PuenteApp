@@ -28,5 +28,14 @@ export default defineConfig({
     environment: 'node',
     include: ['lib/**/*.test.ts'],
     exclude: ['node_modules/**', 'app/**', '.expo/**'],
+    // lib/api.ts throws at import time when this is missing — deliberately, so
+    // a broken build fails with one legible message instead of a scatter of
+    // "fetch failed to undefined/v1/...". That makes it an import-time
+    // dependency for anything that pulls the api singleton in transitively,
+    // including the query fetchers. The value is never dialled: every test that
+    // reaches the network mocks the client.
+    env: {
+      EXPO_PUBLIC_API_URL: 'http://api.test',
+    },
   },
 })

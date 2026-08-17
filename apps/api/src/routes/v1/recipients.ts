@@ -46,6 +46,14 @@ export const recipientResponseSchema = {
 // The whole /v1/recipients surface is post-KYC: recipient rows are PII we
 // only hold for onboarded senders. Returns the user's bridge_customer_id
 // for the destination-create path; replies 403 and returns null otherwise.
+//
+// "The whole surface" now means the reads too. Until 2026-08-14 this was called
+// by the write handlers only, so the sentence above described the intent while
+// the list, single-read and destination-list handlers returned 200 to any
+// authenticated user — recipient names, relationships and CLABE last-4 readable
+// before identity verification. Found by porting the screen to mobile and
+// measuring the gate rather than trusting this comment. Every handler on this
+// surface calls it now; a new one that does not is the bug.
 export async function requireApprovedUser(
   userId: string,
   reply: FastifyReply,
@@ -179,11 +187,15 @@ export async function recipientsRoute(server: FastifyInstance) {
             },
           },
           400: errorResponseSchema,
+          403: errorResponseSchema,
+          404: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
       const userId = request.user!.id
+      if (!(await requireApprovedUser(userId, reply))) return
+
       const { limit } = request.query
 
       // Validate the cursor before touching the DB.
@@ -234,12 +246,15 @@ export async function recipientsRoute(server: FastifyInstance) {
         },
         response: {
           200: recipientResponseSchema,
+          403: errorResponseSchema,
           404: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
       const userId = request.user!.id
+      if (!(await requireApprovedUser(userId, reply))) return
+
       const { data, error } = await supabaseAdmin
         .from('recipients')
         .select(RECIPIENT_COLUMNS)

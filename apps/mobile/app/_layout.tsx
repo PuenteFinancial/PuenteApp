@@ -1,4 +1,5 @@
 import * as Sentry from '@sentry/react-native'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { Stack, useRouter } from 'expo-router'
 import * as SplashScreen from 'expo-splash-screen'
 import { useEffect, useState } from 'react'
@@ -6,6 +7,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { LanguageProvider } from '@/components/LanguageProvider'
 import { setSignedOutHandler } from '@/lib/api'
 import { secureTokenStore } from '@/lib/auth/secureTokenStore'
+import { queryClient } from '@/lib/queries/client'
 import { colors } from '@/lib/theme'
 
 Sentry.init({
@@ -34,7 +36,12 @@ export default Sentry.wrap(function RootLayout() {
           which is why the splash above has to be held rather than left to
           auto-hide. */}
       <LanguageProvider>
-        <Shell />
+        {/* Inside LanguageProvider, so a screen that suspends on a query still
+            has translations available when it renders. The client itself is a
+            module singleton — see lib/queries/client.ts. */}
+        <QueryClientProvider client={queryClient}>
+          <Shell />
+        </QueryClientProvider>
       </LanguageProvider>
     </SafeAreaProvider>
   )

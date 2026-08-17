@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { errorKeyFor } from '@puente/shared'
 import { useLanguage } from '@/components/LanguageProvider'
 
 export interface RecipientWithDestinations {
@@ -19,18 +20,6 @@ export interface RecipientWithDestinations {
     label: string | null
     status: string
   }[]
-}
-
-// Maps API failures to translated copy — API error strings are English-only
-// and never shown raw.
-function errorKeyFor(
-  status: number,
-): 'invalidClabe' | 'bankRejected' | 'alreadySaved' | 'providerDown' | 'generic' {
-  if (status === 400) return 'invalidClabe'
-  if (status === 409) return 'alreadySaved'
-  if (status === 422) return 'bankRejected'
-  if (status === 502) return 'providerDown'
-  return 'generic'
 }
 
 function AddRecipientForm({ onDone }: { onDone: () => void }) {

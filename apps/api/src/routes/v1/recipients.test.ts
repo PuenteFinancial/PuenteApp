@@ -170,7 +170,7 @@ describe('POST /v1/recipients', () => {
 describe('GET /v1/recipients', () => {
   it('lists active recipients with nextCursor null when the page is not full', async () => {
     const list = chain({ data: [recipientRow] })
-    from.mockReturnValueOnce(list)
+    from.mockReturnValueOnce(chain({ data: approvedUser })).mockReturnValueOnce(list)
     const app = await buildApp()
 
     const res = await supertest(app.server)
@@ -190,7 +190,7 @@ describe('GET /v1/recipients', () => {
     const second = { ...recipientRow, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }
     const third = { ...recipientRow, id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }
     const list = chain({ data: [recipientRow, second, third] })
-    from.mockReturnValueOnce(list)
+    from.mockReturnValueOnce(chain({ data: approvedUser })).mockReturnValueOnce(list)
     const app = await buildApp()
 
     const res = await supertest(app.server)
@@ -203,7 +203,7 @@ describe('GET /v1/recipients', () => {
 
     // feed the cursor back — the keyset .or() filter must be applied
     const page2 = chain({ data: [third] })
-    from.mockReturnValueOnce(page2)
+    from.mockReturnValueOnce(chain({ data: approvedUser })).mockReturnValueOnce(page2)
     const res2 = await supertest(app.server)
       .get(`/v1/recipients?limit=2&cursor=${encodeURIComponent(res.body.nextCursor)}`)
       .set('Authorization', 'Bearer test-token')
@@ -215,7 +215,29 @@ describe('GET /v1/recipients', () => {
     await app.close()
   })
 
+  // Regression: until 2026-08-14 the read handlers skipped requireApprovedUser
+  // entirely, so this returned 200 with the caller's full recipient list —
+  // names, relationships and all — before identity verification. The helper's
+  // own comment claimed the whole surface was gated; only the writes were.
+  it('403s when the user is not KYC-approved and never reads recipients', async () => {
+    from.mockReturnValueOnce(chain({ data: { kyc_status: 'pending', bridge_customer_id: null } }))
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/recipients')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('kyc_required')
+    // The PII query must never run — a 403 that still hit `recipients` would
+    // mean the row was read and then thrown away.
+    expect(from).toHaveBeenCalledTimes(1)
+    expect(from).toHaveBeenCalledWith('users')
+    await app.close()
+  })
+
   it('400s on a malformed cursor', async () => {
+    from.mockReturnValueOnce(chain({ data: approvedUser }))
     const app = await buildApp()
     const res = await supertest(app.server)
       .get('/v1/recipients?cursor=%2Enot-valid%2E')
@@ -227,7 +249,7 @@ describe('GET /v1/recipients', () => {
 
 describe('GET /v1/recipients/:id', () => {
   it('returns the mapped recipient', async () => {
-    from.mockReturnValueOnce(chain({ data: recipientRow }))
+    from.mockReturnValueOnce(chain({ data: approvedUser })).mockReturnValueOnce(chain({ data: recipientRow }))
     const app = await buildApp()
 
     const res = await supertest(app.server)
@@ -239,8 +261,23 @@ describe('GET /v1/recipients/:id', () => {
     await app.close()
   })
 
+  it('403s when the user is not KYC-approved', async () => {
+    from.mockReturnValueOnce(chain({ data: { kyc_status: 'pending', bridge_customer_id: null } }))
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get(`/v1/recipients/${recipientRow.id}`)
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(403)
+    expect(from).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
   it("404s on another user's recipient (query scoped by user_id misses)", async () => {
-    from.mockReturnValueOnce(chain({ data: null, error: { code: 'PGRST116' } }))
+    from
+      .mockReturnValueOnce(chain({ data: approvedUser }))
+      .mockReturnValueOnce(chain({ data: null, error: { code: 'PGRST116' } }))
     const app = await buildApp()
 
     const res = await supertest(app.server)
