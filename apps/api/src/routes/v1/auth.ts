@@ -1,6 +1,32 @@
 import type { FastifyInstance } from 'fastify'
+import { admitOtpSend } from '../../services/otp-rate-limit.js'
 import { supabaseAdmin, supabaseAuth } from '../../services/supabase.js'
-import { sendError } from '../../utils/errors.js'
+import { sendError, errorResponseSchema } from '../../utils/errors.js'
+
+// North American Numbering Plan: `1`, area code, exchange, line — with the
+// standard rule that neither the area code nor the exchange may begin with 0
+// or 1. Matches the wire format the clients send (normalizePhone in
+// packages/shared emits bare digits with `1` prepended, no `+`).
+//
+// THIS IS AN ALLOWLIST, NOT A FORMAT CHECK. `525512345678` is perfectly
+// well-formed E.164 and is refused anyway. The point is SMS pumping: that fraud
+// only pays on expensive international termination, so restricting the
+// destination range removes the motive rather than merely slowing it down.
+//
+// Two things this deliberately is not:
+//   - It is not "US only". `1` is NANP, which includes Canada and ~20 Caribbean
+//     countries. Filtering to real US area codes is brittle (they get added)
+//     and would wrongly exclude Puerto Rico and USVI users, who ARE US
+//     residents. This is the pragmatic line, not the tight one.
+//   - It is not protection against a user typing a Mexican number. Those are
+//     also ten digits, so normalizePhone turns one into a well-formed US number
+//     that passes this check (see the note on that function). Only a visible
+//     `+1` in the input fixes that.
+//
+// It encodes a product decision as much as a security one: the sender is a US
+// resident, and the Mexican recipient never holds an account or receives an
+// OTP. The day senders outside NANP are in scope, this changes.
+const NANP_PHONE_PATTERN = '^1[2-9]\\d{2}[2-9]\\d{6}$'
 
 interface OtpSendBody {
   phone: string
@@ -26,7 +52,7 @@ export async function authRoute(server: FastifyInstance) {
           type: 'object',
           required: ['phone', 'smsConsent'],
           properties: {
-            phone: { type: 'string', minLength: 1 },
+            phone: { type: 'string', pattern: NANP_PHONE_PATTERN },
             // TCPA: no SMS without affirmative consent — enforced server-side
             smsConsent: { type: 'boolean', const: true },
           },
@@ -37,10 +63,26 @@ export async function authRoute(server: FastifyInstance) {
             type: 'object',
             properties: { message: { type: 'string' } },
           },
+          400: errorResponseSchema,
+          429: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
+      // Budget check BEFORE the provider call, and it records the attempt as it
+      // admits it — see services/otp-rate-limit.ts for why admission rather
+      // than success is what gets counted.
+      const admission = await admitOtpSend(request.body.phone)
+      if (!admission.allowed) {
+        void reply.header('Retry-After', String(admission.retryAfterSeconds))
+        return sendError(
+          reply,
+          429,
+          'rate_limited',
+          'Too many codes requested. Wait a moment and try again.',
+        )
+      }
+
       const { error } = await supabaseAuth.auth.signInWithOtp({
         phone: request.body.phone,
         options: { channel: 'sms' },
@@ -65,7 +107,11 @@ export async function authRoute(server: FastifyInstance) {
           type: 'object',
           required: ['phone', 'token'],
           properties: {
-            phone: { type: 'string', minLength: 1 },
+            // Same allowlist as the send leg. A code can only exist for a
+            // number we agreed to send to, so anything outside the range is
+            // unanswerable by construction — rejecting it here keeps the two
+            // legs from disagreeing about what a valid number is.
+            phone: { type: 'string', pattern: NANP_PHONE_PATTERN },
             token: { type: 'string', minLength: 1 },
           },
           additionalProperties: false,
