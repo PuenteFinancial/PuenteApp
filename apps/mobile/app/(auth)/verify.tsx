@@ -1,3 +1,4 @@
+import { OTP_RESEND_COOLDOWN_SECONDS } from '@puente/shared'
 import { useRouter } from 'expo-router'
 import { useCallback, useEffect, useState } from 'react'
 import { useLanguage } from '@/components/LanguageProvider'
@@ -7,9 +8,7 @@ import { publicFetch } from '@/lib/api'
 import { secureTokenStore } from '@/lib/auth/secureTokenStore'
 import { isSessionResponse, tokensFromSession } from '@/lib/auth/types'
 
-const RESEND_COOLDOWN_SECONDS = 30
-
-type Status = 'idle' | 'loading' | 'error' | 'resent'
+type Status = 'idle' | 'loading' | 'error' | 'resent' | 'rateLimited'
 
 export default function Verify() {
   const { t } = useLanguage()
@@ -19,7 +18,7 @@ export default function Verify() {
 
   const [code, setCode] = useState('')
   const [status, setStatus] = useState<Status>('idle')
-  const [cooldown, setCooldown] = useState(RESEND_COOLDOWN_SECONDS)
+  const [cooldown, setCooldown] = useState(OTP_RESEND_COOLDOWN_SECONDS)
 
   // "Did this screen open without a phone?" — captured once, at mount.
   //
@@ -82,7 +81,7 @@ export default function Verify() {
 
   const resend = useCallback(async () => {
     if (!phone || cooldown > 0) return
-    setCooldown(RESEND_COOLDOWN_SECONDS)
+    setCooldown(OTP_RESEND_COOLDOWN_SECONDS)
 
     try {
       const res = await publicFetch('/v1/auth/otp/send', {
@@ -91,7 +90,12 @@ export default function Verify() {
         // this to `const: true` and records the timestamp at verify.
         body: JSON.stringify({ phone, smsConsent: true }),
       })
-      setStatus(res.ok ? 'resent' : 'error')
+      // 429 is its own state. `s.error` says the CODE did not work, which is
+      // the wrong story for a send that was refused for being too soon — and
+      // the misleading one, because it points the user at the digits they
+      // typed rather than at the wait.
+      if (res.ok) setStatus('resent')
+      else setStatus(res.status === 429 ? 'rateLimited' : 'error')
     } catch {
       setStatus('error')
     }
@@ -131,6 +135,7 @@ export default function Verify() {
         />
 
         {status === 'resent' && <Caption>{s.resent}</Caption>}
+        {status === 'rateLimited' && <ErrorText>{t.send.errors.rate_limited}</ErrorText>}
         {status === 'error' && <ErrorText>{s.error}</ErrorText>}
       </Card>
     </Screen>
