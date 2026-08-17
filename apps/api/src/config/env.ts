@@ -42,6 +42,19 @@ const envSchema = z.object({
     .min(1)
     .transform((v) => Buffer.from(v, 'base64'))
     .refine((b) => b.length === 32, 'must be 32 bytes of base64'),
+  // Per-phone budget on POST /v1/auth/otp/send — the endpoint is public,
+  // unauthenticated, and every call is a billed SMS. Enforced in one atomic
+  // statement by the otp_attempt_admit function (services/otp-rate-limit.ts);
+  // windows are rolling, not calendar, for the same boundary-game reason as the
+  // RISK_* caps below. DEFAULTED rather than required so the control cannot be
+  // switched off by omitting configuration.
+  //
+  // OTP_COOLDOWN_SECONDS must stay >= the client's resend timer, which is
+  // OTP_RESEND_COOLDOWN_SECONDS in packages/shared — a server window longer
+  // than the client's turns Resend into a button that returns 429.
+  OTP_COOLDOWN_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
+  OTP_MAX_PER_HOUR: z.coerce.number().int().min(1).default(5),
+  OTP_MAX_PER_DAY: z.coerce.number().int().min(1).default(10),
   BRIDGE_API_KEY: z.string().min(1),
   BRIDGE_API_BASE: z.string().url().default('https://api.bridge.xyz'),
   // Hard deadline on every Bridge HTTP call (AbortSignal.timeout in

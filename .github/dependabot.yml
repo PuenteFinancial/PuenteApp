@@ -1,4 +1,27 @@
 version: 2
+#
+# EXPECTED FAILURE — Dependabot SECURITY updates for transitive packages will
+# fail here, and there is nothing to fix in this file. Investigated 2026-08-17
+# after 24 such failures dating from 2026-08-10.
+#
+# Why: a security advisory lands on a transitive (dompurify, nanoid, js-yaml,
+# shell-quote, sharp, brace-expansion, uuid, esbuild, @hono/node-server so far —
+# none of them a direct dependency of anything in this repo). The only way to
+# pin a transitive under pnpm 11 is an `overrides` entry in
+# pnpm-workspace.yaml. Dependabot's npm_and_yarn updater does not know that; it
+# writes `overrides` into package.json, where pnpm 11 SILENTLY IGNORES it. Its
+# update_files step therefore cannot produce a working change and the job dies
+# with a bare `unknown_error` per package.
+#
+# What to do instead: add the pin by hand to the `overrides` block in
+# pnpm-workspace.yaml (it already carries six of them, each with a note on why
+# it exists and when it can go). The GitHub security alert still fires and is
+# still the signal — only the automated PR is broken.
+#
+# How to tell this apart from a real problem: these failures are always
+# npm_and_yarn, always a single named package, and always one you will not find
+# in any package.json. Regular grouped version bumps in the same run succeed.
+#
 updates:
   # Root workspace + all pnpm packages
   - package-ecosystem: npm

@@ -18,6 +18,7 @@ import {
   JOB_PAYMENT_EVENT_PROCESS,
   JOB_RECONCILE_PENDING,
   JOB_IDEMPOTENCY_PURGE,
+  JOB_OTP_ATTEMPT_PURGE,
   JOB_LOSS_CORRECTION_WATCH,
   JOB_LEDGER_RECONCILE,
   JOB_STUCK_WATCH,
@@ -29,6 +30,7 @@ import {
 import { reconcilePendingTransfers } from './jobs/reconcile-pending.js'
 import { watchLossCorrections } from './jobs/correction-watch.js'
 import { purgeExpiredIdempotencyKeys } from './jobs/purge-idempotency.js'
+import { purgeExpiredOtpAttempts } from './jobs/purge-otp-attempts.js'
 import { reconcileLedger } from './jobs/ledger-reconcile.js'
 import { watchStuckTransfers } from './jobs/stuck-watch.js'
 import { submitPayout } from './jobs/payout-submit.js'
@@ -134,6 +136,7 @@ const boss = await withBootRetry(
       JOB_IDEMPOTENCY_PURGE,
       handle(JOB_IDEMPOTENCY_PURGE, purgeExpiredIdempotencyKeys),
     )
+    await boss.work(JOB_OTP_ATTEMPT_PURGE, handle(JOB_OTP_ATTEMPT_PURGE, purgeExpiredOtpAttempts))
     await boss.work(
       JOB_LOSS_CORRECTION_WATCH,
       handle(JOB_LOSS_CORRECTION_WATCH, watchLossCorrections),
@@ -183,6 +186,8 @@ const boss = await withBootRetry(
     // test — plus the 1-min payout sweep (PR 2). payout.poll is scheduled in PR 3.
     await boss.schedule(JOB_RECONCILE_PENDING, '*/5 * * * *')
     await boss.schedule(JOB_IDEMPOTENCY_PURGE, '0 4 * * *')
+    // Same housekeeping slot: both drop rows nothing can read any more.
+    await boss.schedule(JOB_OTP_ATTEMPT_PURGE, '0 4 * * *')
     await boss.schedule(JOB_PAYOUT_SWEEP, '* * * * *')
     await boss.schedule(JOB_PAYOUT_POLL, pollCron)
     await boss.schedule(JOB_LOSS_CORRECTION_WATCH, '0 * * * *')
