@@ -229,22 +229,58 @@ node --env-file=<env> --import tsx -e \
 
 ## 8. Production: what you can and cannot do
 
-**Production is deliberately inert.** Do not plan a demo there.
+Prod is inert **by default** and stays that way under `FUNDING_PROCESSOR=mock`:
 
 - `MOCK_FUNDING_WEBHOOK_SECRET` is absent in prod **on purpose** — its absence makes the funding
-  webhook and confirm return 503. That is the production lock against fake funding.
-- There are no Stripe keys, and `FUNDING_PROCESSOR` defaults to `mock`.
-
-Together: **no transfer can be funded in production today.** Read-only inspection is safe;
-nothing else is possible.
+  webhook and confirm return 503. That is the production lock against fake funding, and it must
+  stay absent. Note that *absent* means the variable does not exist: setting it to an empty string
+  fails `config/env.ts` validation and the API will not boot (cost us a failed deploy 2026-08-17).
+- There are no Stripe keys. The Stripe adapter has still never made a live API call.
 
 **Safe in prod:** the ops board once you allowlist yourself (read-only until `OPS_WRITE_ENABLED`),
 the reconciliation runbook queries, Sentry.
 
-**To make prod capable of real money**, in order: Stripe keys in Doppler → flip
-`FUNDING_PROCESSOR=stripe` → treasury wallet + `DATABASE_URL` + `FLOAT_CEILING_MINOR` for the
-worker → Bridge webhook keys → promote to production if you want the ops actions. Each is a
-deliberate gate, not an oversight.
+### Out-of-band funding (`FUNDING_PROCESSOR=manual`)
+
+The path that makes prod capable of real money without a payment gateway. The sender moves USD on
+a rail Puente does not operate — a Bridge onramp deposit funded by FedNow, wire, or ACH — and an
+allowlisted operator records that it landed. The manual processor refuses every webhook signature,
+so there is no public surface that can fund a transfer; the ops action is the only route to
+`FUNDED`.
+
+Standing it up, in order — **every step before the last must be complete first**:
+
+1. Prod worker live and beating (`deploy-and-promote.md`) — without it a funded transfer parks at
+   `FUNDED` forever, and silently, since `stuck-watch` is itself a worker cron.
+2. Bridge webhook subscribed to `transfer` with a current `BRIDGE_WEBHOOK_PUBLIC_KEY`.
+3. `OPS_ADMIN_USER_IDS` + `OPS_WRITE_ENABLED` in Doppler, **then restart the API** — both are read
+   at boot. `/dashboard/ops` rendering instead of 404ing is the confirmation.
+4. PostHog `web-send-money` enabled, or `/dashboard/send` silently redirects away.
+5. Treasury wallet funded, and the top-up recorded (`scripts/record-float-topup.ts`) — otherwise
+   `bridge_wallet_float` goes negative on the first payout and the daily reconciliation opens a
+   discrepancy.
+6. **Last:** `FUNDING_PROCESSOR=manual` → restart. This value must not be set until the deployed
+   code's enum knows it; the API `process.exit(1)`s on an unknown value and the deploy fails.
+
+Driving a transfer, once a sender has confirmed and their deposit has actually landed (check the
+wallet **balance**, not that a payment was sent):
+
+```
+POST /v1/ops/transfers/funding
+{ "transferId": "...", "kind": "funded",
+  "externalRef": "<the Bridge deposit transfer id>",
+  "amountMinor": <send + fee, to the cent>, "currency": "USD" }
+```
+
+`kind: "funded"` opens the receivable and releases the payout. `kind: "cleared"` settles that
+receivable to cash and is fired **later** — under the pre-funded-float model the payout goes out
+against Puente's float and the sender's money reimburses it days afterward, so these are two
+separate assertions, not one. The amount must match the transfer exactly; a mismatch is a 409
+rather than a payout against a number nobody reconciled.
+
+**Cancellation under manual funding rests at `CANCELED`, not `REFUNDED`.** Nothing was disbursed —
+a human has to return the money (`manual-refund.md`) — and `REFUNDED` is what tells the sender
+they were made whole. The obligation stays visibly open until it is discharged.
 
 **Changing ops admins in staging/prod:** Doppler → project `puente-api` → config `stg_main` /
 `prd_main` → set `OPS_ADMIN_USER_IDS` (and `OPS_WRITE_ENABLED`) → **restart the Railway service**.

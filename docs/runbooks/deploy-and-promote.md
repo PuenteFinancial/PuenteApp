@@ -58,10 +58,28 @@ service would inherit `railway.toml` and boot the API instead):
 - **Healthcheck:** `/health` — **not** `/v1/health` (the API's path).
 - **Tracks:** the `production` branch + Doppler `prd_main`, same as the API service.
 
-**The prod worker is deferred to slice 7** (PRD §9): the mock-funding lock keeps prod inert until
-real funding, so there is no point running it yet. It runs in **staging only** today. Consequence:
-a Promote today cuts over **API + Vercel only** — there is no prod worker to deploy. Stand it up as
-part of slice 7, then add its healthcheck (below) to this drill.
+**The prod worker is live as of 2026-08-17** (`puente-worker`, prod project), stood up alongside
+out-of-band funding — the first thing that gives prod a real path to `FUNDED`, and therefore the
+first thing that needs a worker to carry a transfer past it. Both environments now run both
+services, and a Promote cuts over API + worker + Vercel.
+
+Standing it up, in the order that matters (the first two must precede the first build):
+
+1. **Source:** connect the repo, then set the branch to `production`. A worker tracking `main`
+   would run unpromoted code against the prod database.
+2. **Config File Path:** `railway.worker.toml`. Left at the default it boots `dist/server.js` — a
+   second API that passes health checks, serves nothing, and runs zero jobs. Nothing looks wrong.
+3. **Variables:** a second Doppler sync from the same `prd_main` config (not a new config) —
+   `DATABASE_URL`, `BRIDGE_TREASURY_WALLET_ID`, `FLOAT_CEILING_MINOR` must all be present.
+   `FLOAT_CEILING_MINOR` is the quiet one: no default, and it throws at *payout* time rather than
+   at boot, so a worker missing it looks perfectly healthy until the first payout fails.
+4. **Redeploy explicitly** after the sync — Railway does not restart on every var change.
+5. **Leave it unexposed.** A worker needs no public domain; `/health` is for Railway's internal check.
+
+Do NOT set `FUNDING_PROCESSOR` on the worker (or the API) to a value the *deployed* code's enum
+doesn't know. `config/env.ts` `process.exit(1)`s on an unknown value, the healthcheck never
+answers, and the deploy fails — cost us two failed deploys on 2026-08-17. Order is always: merge →
+promote → then flip the var.
 
 ## Post-deploy verification drill
 
@@ -70,8 +88,11 @@ part of slice 7, then add its healthcheck (below) to this drill.
 - **www identity:** confirm the live deployment's `meta.githubCommitRef == "production"` (Vercel MCP
   `get_deployment` or dashboard). Don't trust "it looks deployed."
 - **Prod API:** `curl -s https://puenteapi-production.up.railway.app/v1/health`.
-- **Worker (staging today; prod when stood up in slice 7):** `curl -s https://<worker-host>.up.railway.app/health`
-  — note `/health`, **not** `/v1/health`.
+- **Worker (both environments):** the healthcheck is `/health`, **not** `/v1/health` — but it
+  returns 200 unconditionally and therefore proves only that a process exists. The real check is a
+  fresh `worker_heartbeat.updated_at` (one row, `worker = 'worker'`; the beat is written by a
+  database trigger, and the cron ticks on `*/5`, so allow up to 5 minutes after a deploy). Green in
+  Railway is exactly what the dashboard showed throughout the 22.4-hour August outage.
 - After anything touching rate limiting / IPs: check a staging audit-log row records a real client
   IP (bump `TRUST_PROXY_HOPS` if not).
 

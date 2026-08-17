@@ -47,8 +47,8 @@ consumers are the two pipeline secrets above.
 - **Doppler → Railway:** confirm the service redeployed after a sync; Railway does not restart on
   every var change.
 - **`DATABASE_URL` goes to BOTH Railway services (API + worker), not just the worker.** (Both
-  services run in **staging** today; the prod worker is deferred to slice 7 — see
-  `deploy-and-promote.md` — so in prod only the API consumes it for now.) It's the
+  services now run in **both** environments — the prod worker went live 2026-08-17, see
+  `deploy-and-promote.md`.) It's the
   Supabase **session-mode** pooler string (port 5432, never transaction mode 6543 — pg-boss needs
   session semantics). The worker asserts it at startup; the **API needs it too** so money-moving
   webhooks (funding-success, Bridge `transfer.*`) enqueue jobs immediately. Without it on the API,
