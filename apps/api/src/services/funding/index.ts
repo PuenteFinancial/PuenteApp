@@ -134,6 +134,25 @@ export function undoModeForRef(ref: string): 'voided' | 'refunded' {
   return 'refunded'
 }
 
+/**
+ * Whether an undo still needs a HUMAN to move money — the same ref-namespace
+ * encoding as undoModeForRef, and durable for the same reason (the resume path
+ * reaches here holding nothing but transfers.refund_payment_ref).
+ *
+ * The distinction is NOT "is it settled yet". A Stripe ACH refund is unsettled
+ * for days, but it was genuinely ISSUED — the disbursement is in flight and the
+ * sender's copy ("issued, may take a few business days") is true. An
+ * out-of-band undo has issued nothing at all: the funds were collected on a
+ * rail we don't operate, and until an operator sends them back by hand the
+ * sender has not been made whole. Only that case may not settle to REFUNDED.
+ *
+ * Unknown prefixes return false — the pre-existing behavior for every processor
+ * that can actually disburse, so this narrows nothing that already worked.
+ */
+export function undoRequiresManualDisbursement(ref: string): boolean {
+  return ref.startsWith('manualrefund_')
+}
+
 // The funding seam: initiation on confirm, plus the webhook-side verify +
 // normalize. Implementations never throw from verifySignature or parseEvent;
 // parseEvent classifies unusable payloads as malformed rather than throwing.

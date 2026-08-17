@@ -690,9 +690,13 @@ const en: Translations = {
         },
         canceled: {
           title: 'Canceled',
-          // "Issued", not "back": a real ACH refund posts days later; asserting
-          // arrival is a claim we can't verify (PR7 truthfulness pass).
-          body: 'This transfer was canceled. Your full refund, including the fee, has been issued — depending on your bank, it can take a few business days to appear.',
+          // NOT "issued": CANCELED is now also the resting state for a refund
+          // that still needs a human to send the money back (out-of-band
+          // funding), where nothing has been disbursed at all. REFUNDED is
+          // where issuance is asserted; this state only promises it is coming.
+          // ("Issued", not "back", remains the rule there: a real ACH refund
+          // posts days later and asserting arrival is unverifiable — PR7.)
+          body: 'This transfer was canceled. Your full refund, including the fee, is on its way — depending on your bank, it can take a few business days to appear.',
         },
         refunded: {
           title: 'Refunded',
@@ -1177,7 +1181,9 @@ const es: Translations = {
         canceled: {
           title: 'Cancelada',
           // NEEDS LEGAL REVIEW (ES) — PR7 truthfulness pass, mirrors en.
-          body: 'Esta transferencia fue cancelada. Tu reembolso completo, incluida la comisión, ya fue emitido; según tu banco, puede tardar unos días hábiles en aparecer.',
+          // NO "ya fue emitido": esta ahora es también la etapa de un reembolso
+          // que aún requiere que una persona devuelva el dinero.
+          body: 'Esta transferencia fue cancelada. Tu reembolso completo, incluida la comisión, está en camino; según tu banco, puede tardar unos días hábiles en aparecer.',
         },
         refunded: {
           title: 'Reembolsada',

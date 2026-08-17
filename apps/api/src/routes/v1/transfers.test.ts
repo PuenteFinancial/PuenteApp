@@ -45,16 +45,24 @@ const voidFunding = vi.fn()
 const getClientSession = vi.fn()
 const isConfigured = vi.fn(() => true)
 
-vi.mock('../../services/funding/index.js', () => ({
-  getFundingProcessor: () => ({
-    provider: 'mock',
-    signatureHeader: 'funding-signature',
-    isConfigured: () => isConfigured(),
-    initiateFunding,
-    voidFunding,
-    getClientSession,
-  }),
-}))
+// Only the PROCESSOR is mocked. The ref-namespace helpers (undoModeForRef,
+// undoRequiresManualDisbursement) are pure and are what the cancel tail reads to
+// decide whether a refund may settle to REFUNDED — stubbing them out would hide
+// exactly the branch that matters.
+vi.mock('../../services/funding/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/funding/index.js')>()
+  return {
+    ...actual,
+    getFundingProcessor: () => ({
+      provider: 'mock',
+      signatureHeader: 'funding-signature',
+      isConfigured: () => isConfigured(),
+      initiateFunding,
+      voidFunding,
+      getClientSession,
+    }),
+  }
+})
 
 // Per-user velocity gate (slice-7 PR5) + uncleared cap (slice-8 O3) are mocked
 // ok by default so existing paths stay green; the trip cases flip them. The
@@ -550,6 +558,34 @@ describe('POST /v1/transfers/:id/cancel', () => {
     const transitionArg = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
     expect(transitionArg).toMatchObject({ fromState: 'CANCELED', toState: 'REFUNDED' })
     expect(transitionArg['ledgerEntries']).toBeUndefined()
+    await app.close()
+  })
+
+  it('an out-of-band refund holds at CANCELED — never claims REFUNDED before a human sends the money back', async () => {
+    // REFUNDED means "the sender has been made whole" and the copy says so.
+    // Under manual funding the money was collected on a rail we do not operate,
+    // so voidFunding issues NOTHING — an operator must return it by hand.
+    // Settling REFUNDED here would tell the sender their money came back when
+    // nobody has sent it. (Compliance review finding, 2026-08-17.)
+    routeTables({ transfers: () => chain({ data: fundedRow }) })
+    cancelTransfer.mockResolvedValue({ ...fundedRow, state: 'CANCELED' })
+    voidFunding.mockResolvedValue({
+      provider: 'manual',
+      ref: 'manualrefund_5f2c1d7e-0000-4000-8000-000000000000',
+      status: 'pending',
+      mode: 'refunded',
+    })
+    const app = await buildApp()
+
+    const res = await cancel(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ state: 'CANCELED' })
+    expect(res.body.state).not.toBe('REFUNDED')
+    // The cancellation itself is real and the ledger reversal still posted —
+    // only the "made whole" claim is withheld.
+    expect(cancelTransfer).toHaveBeenCalledTimes(1)
+    expect(transitionTransfer).not.toHaveBeenCalled()
     await app.close()
   })
 

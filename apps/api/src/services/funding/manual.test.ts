@@ -93,3 +93,22 @@ describe('manual undo ops never claim the money moved', () => {
     expect(undoModeForRef(undo.ref)).toBe(undo.mode)
   })
 })
+
+describe('undoRequiresManualDisbursement — the REFUNDED gate', () => {
+  it('is true for a manual undo: nothing has been disbursed yet', async () => {
+    const { undoRequiresManualDisbursement } = await import('./index.js')
+    const undo = await processor.refund()
+    expect(undoRequiresManualDisbursement(undo.ref)).toBe(true)
+  })
+
+  it.each(['pi_3abc', 'mockvoid_abc', 're_1abc', 'mockrefund_abc'])(
+    'is false for %s — those processors genuinely issued a disbursement',
+    async (ref) => {
+      // A Stripe ACH refund is unsettled for days but WAS issued; only the
+      // out-of-band case has moved no money at all. Narrowing this would stop
+      // real refunds settling to REFUNDED.
+      const { undoRequiresManualDisbursement } = await import('./index.js')
+      expect(undoRequiresManualDisbursement(ref)).toBe(false)
+    },
+  )
+})
