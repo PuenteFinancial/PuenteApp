@@ -3,9 +3,9 @@
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useLanguage } from '@/components/LanguageProvider'
-import { SIGNUP_PHONE_KEY } from '@/lib/phone'
+import { OTP_RESEND_COOLDOWN_SECONDS, SIGNUP_PHONE_KEY } from '@/lib/phone'
 
-type Status = 'idle' | 'loading' | 'error' | 'resent'
+type Status = 'idle' | 'loading' | 'error' | 'resent' | 'rateLimited'
 
 export default function OtpForm() {
   const { t } = useLanguage()
@@ -15,6 +15,12 @@ export default function OtpForm() {
   const [phone, setPhone] = useState<string | null>(null)
   const [code, setCode] = useState('')
   const [status, setStatus] = useState<Status>('idle')
+  // Resend was previously unthrottled here. The API now enforces a per-phone
+  // cooldown of the same length (OTP_COOLDOWN_SECONDS defaults to this shared
+  // constant), so without this the button's only feedback for a second tap
+  // would be a 429. Starts armed: this screen is only reached by a code having
+  // just been sent.
+  const [cooldown, setCooldown] = useState(OTP_RESEND_COOLDOWN_SECONDS)
 
   useEffect(() => {
     const stored = sessionStorage.getItem(SIGNUP_PHONE_KEY)
@@ -24,6 +30,15 @@ export default function OtpForm() {
     }
     setPhone(stored)
   }, [router])
+
+  // One interval for the life of the form; resending restarts the count by
+  // setting the number, not by re-arming a timer.
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCooldown((n) => (n > 0 ? n - 1 : 0))
+    }, 1000)
+    return () => clearInterval(id)
+  }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -47,7 +62,8 @@ export default function OtpForm() {
   }
 
   const handleResend = async () => {
-    if (!phone) return
+    if (!phone || cooldown > 0) return
+    setCooldown(OTP_RESEND_COOLDOWN_SECONDS)
     try {
       // Consent was already given on the signup form that sent them here
       const res = await fetch('/api/auth/otp/send', {
@@ -55,6 +71,12 @@ export default function OtpForm() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone, smsConsent: true }),
       })
+      // 429 is its own state — see the note in mobile's verify screen. The
+      // generic error claims the code was wrong, which is not what happened.
+      if (res.status === 429) {
+        setStatus('rateLimited')
+        return
+      }
       if (!res.ok) throw new Error('Failed')
       setStatus('resent')
     } catch {
@@ -98,9 +120,9 @@ export default function OtpForm() {
           type="button"
           className="btn btn--ghost btn--sm"
           onClick={handleResend}
-          disabled={status === 'loading'}
+          disabled={cooldown > 0 || status === 'loading'}
         >
-          {s.resend}
+          {cooldown > 0 ? s.resendIn(cooldown) : s.resend}
         </button>
 
         {status === 'resent' && (
@@ -108,6 +130,12 @@ export default function OtpForm() {
             {s.resent}
           </p>
         )}
+        {status === 'rateLimited' && (
+          <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, textAlign: 'center', margin: '4px 0 0' }}>
+            {t.send.errors.rate_limited}
+          </p>
+        )}
+
         {status === 'error' && (
           <p role="alert" style={{ color: 'var(--color-error)', fontFamily: 'var(--mono)', fontSize: 12, textAlign: 'center', margin: '4px 0 0' }}>
             {s.error}
