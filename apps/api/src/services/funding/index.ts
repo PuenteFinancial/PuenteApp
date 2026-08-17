@@ -1,6 +1,7 @@
 import { env } from '../../config/env.js'
 import { MockFundingProcessor } from './mock.js'
 import { StripeFundingProcessor } from './stripe.js'
+import { ManualFundingProcessor } from './manual.js'
 
 export type FundingEventType =
   | 'funding_succeeded'
@@ -123,11 +124,33 @@ export interface FundingUndo {
  * after FUNDING_PROCESSOR flips to stripe), so this knows every namespace.
  * Unknown prefixes classify as 'refunded' — the pre-S2 posting, and the arm
  * whose books recon can catch (an uncollected receivable ages visibly; a
- * silently reversed one vanishes).
+ * silently reversed one vanishes). `manualrefund_` (out-of-band funding) relies
+ * on exactly that default and is correct there: manual funds are COLLECTED
+ * before the transfer is ever marked funded, so an undo is always a real
+ * disbursement back, never a voided pull.
  */
 export function undoModeForRef(ref: string): 'voided' | 'refunded' {
   if (ref.startsWith('pi_') || ref.startsWith('mockvoid_')) return 'voided'
   return 'refunded'
+}
+
+/**
+ * Whether an undo still needs a HUMAN to move money — the same ref-namespace
+ * encoding as undoModeForRef, and durable for the same reason (the resume path
+ * reaches here holding nothing but transfers.refund_payment_ref).
+ *
+ * The distinction is NOT "is it settled yet". A Stripe ACH refund is unsettled
+ * for days, but it was genuinely ISSUED — the disbursement is in flight and the
+ * sender's copy ("issued, may take a few business days") is true. An
+ * out-of-band undo has issued nothing at all: the funds were collected on a
+ * rail we don't operate, and until an operator sends them back by hand the
+ * sender has not been made whole. Only that case may not settle to REFUNDED.
+ *
+ * Unknown prefixes return false — the pre-existing behavior for every processor
+ * that can actually disburse, so this narrows nothing that already worked.
+ */
+export function undoRequiresManualDisbursement(ref: string): boolean {
+  return ref.startsWith('manualrefund_')
 }
 
 // The funding seam: initiation on confirm, plus the webhook-side verify +
@@ -215,6 +238,7 @@ export interface FundingProcessor {
 const processors: Record<typeof env.FUNDING_PROCESSOR, () => FundingProcessor> = {
   mock: () => new MockFundingProcessor(),
   stripe: () => new StripeFundingProcessor(),
+  manual: () => new ManualFundingProcessor(),
 }
 
 let instance: FundingProcessor | undefined

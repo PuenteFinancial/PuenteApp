@@ -1,5 +1,5 @@
 import { env } from '../config/env.js'
-import { getAccountBalance } from './ledger.js'
+import { getAccountBalance, postLedgerTransaction } from './ledger.js'
 import { supabaseAdmin } from './supabase.js'
 import type { LedgerEntryJson } from './transfers.js'
 
@@ -60,6 +60,56 @@ export function submittedLedgerEntries(input: {
     currency: 'USD',
   })
   return entries
+}
+
+// ── Treasury float top-up ──────────────────────────────────────────────────
+// The counterpart to the SUBMITTED draw above. Payouts CREDIT
+// bridge_wallet_float on every submission, so without a matching debit when the
+// wallet is topped up, the account only ever falls — it goes negative on the
+// first payout and the daily bridge_wallet_float reconciliation check opens a
+// discrepancy against the real Bridge balance. ledger-rules.md specified this
+// batch from the start; it had no implementation until out-of-band funding
+// made a real top-up routine.
+//
+//   DR bridge_wallet_float  X   (USDC now sitting at Bridge)
+//   CR cash_clearing        X   (cash that left our bank to get it there)
+//
+// A batch event, not a transfer event: transferId is null and the idempotency
+// key is the depositing rail's own reference, so re-running the script for the
+// same deposit is a no-op rather than a double-count.
+export function floatTopUpLedgerEntries(amountMinor: number): LedgerEntryJson[] {
+  if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
+    throw new PayoutValidationError(`amountMinor must be a positive integer, got ${amountMinor}`)
+  }
+  return [
+    { account_code: 'bridge_wallet_float', direction: 'debit', amount_minor: amountMinor, currency: 'USD' },
+    { account_code: 'cash_clearing', direction: 'credit', amount_minor: amountMinor, currency: 'USD' },
+  ]
+}
+
+/**
+ * Record a treasury wallet top-up. `externalRef` is the depositing transfer's
+ * provider id — it becomes the ledger idempotency key, so the same deposit can
+ * never be booked twice.
+ */
+export async function recordFloatTopUp(input: {
+  amountMinor: number
+  externalRef: string
+}): Promise<{ idempotencyKey: string }> {
+  const ref = input.externalRef.trim()
+  if (!ref) throw new PayoutValidationError('externalRef is required')
+
+  const idempotencyKey = `float_topup:${ref}`
+  await postLedgerTransaction({
+    idempotencyKey,
+    description: `treasury float top-up (${ref})`,
+    entries: floatTopUpLedgerEntries(input.amountMinor).map((e) => ({
+      accountCode: e.account_code,
+      direction: e.direction,
+      money: { amountMinor: e.amount_minor, currency: e.currency },
+    })),
+  })
+  return { idempotencyKey }
 }
 
 // ── FX drift ───────────────────────────────────────────────────────────────

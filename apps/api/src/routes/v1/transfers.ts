@@ -3,7 +3,10 @@ import * as Sentry from '@sentry/node'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { buildPrepaymentDisclosure } from '../../services/disclosures.js'
-import { getFundingProcessor } from '../../services/funding/index.js'
+import {
+  getFundingProcessor,
+  undoRequiresManualDisbursement,
+} from '../../services/funding/index.js'
 import {
   cancelTransfer,
   canceledLedgerEntries,
@@ -753,6 +756,9 @@ export async function transfersRoute(server: FastifyInstance) {
       // REFUNDED. A FUNDED/CANCELED transfer always carries a funding_payment_ref
       // (set at confirm); its absence is a data-integrity fault — fail loudly
       // rather than void with an empty ref a real Stripe adapter could misapply.
+      // Survives both arms below: a fresh void sets it from the processor, a
+      // resumed cancel reads it off the row. The REFUNDED gate needs it either way.
+      let refundRef = transfer.refund_payment_ref
       if (!transfer.refund_payment_ref) {
         if (!transfer.funding_payment_ref) {
           server.log.error(
@@ -793,6 +799,30 @@ export async function transfersRoute(server: FastifyInstance) {
           )
           return sendError(reply, 500, 'internal_error', 'Failed to cancel transfer')
         }
+        refundRef = undo.ref
+      }
+
+      // REFUNDED means "the sender has been made whole", and the user-facing
+      // copy says so. Only settle it when the undo actually COMPLETED.
+      //
+      // A 'pending' undo (out-of-band funding: the money was collected by a rail
+      // we don't operate, so a human must send it back) leaves the transfer at
+      // CANCELED with its refund ref recorded — the cancellation is real and the
+      // ledger reversal already posted, but the disbursement has not happened.
+      // Claiming REFUNDED here would tell the sender their money was returned
+      // when nobody has returned it. CANCELED is the honest resting state: the
+      // obligation stays visibly open on the ops board until it is discharged.
+      if (refundRef && undoRequiresManualDisbursement(refundRef)) {
+        server.log.warn(
+          { audit: true, userId, transferId: transfer.id, refundRef },
+          'cancel: refund awaits an out-of-band disbursement — holding at CANCELED',
+        )
+        // `transfer` is already the CANCELED row (cancelTransfer returned it, or
+        // the initial read found it on a resume), so no re-read is needed —
+        // just reflect the ref we persisted a moment ago.
+        return reply
+          .status(200)
+          .send(toApiTransfer({ ...transfer, refund_payment_ref: refundRef }))
       }
 
       // CANCELED → REFUNDED carries NO ledger: the FUNDED reversal already zeroed

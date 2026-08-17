@@ -29,6 +29,14 @@ vi.mock('../../services/cancellation-review.js', () => ({
   denyCancellation: (...args: unknown[]) => denyCancellation(...args),
 }))
 
+// Same split for out-of-band funding: the appliers and every refusal rule are
+// pinned in funding-apply tests; here the service is mocked so these cover only
+// the gate, validation, and result→HTTP mapping.
+const recordManualFunding = vi.hoisted(() => vi.fn())
+vi.mock('../../services/funding-apply.js', () => ({
+  recordManualFunding: (...args: unknown[]) => recordManualFunding(...args),
+}))
+
 // supabaseAdmin backs only the idempotency plugin here — claims always win.
 const from = vi.hoisted(() => vi.fn())
 vi.mock('../../services/supabase.js', () => ({
@@ -101,6 +109,7 @@ beforeEach(() => {
   buildOpsOverview.mockReset().mockResolvedValue(OVERVIEW)
   refundCancellation.mockReset()
   denyCancellation.mockReset()
+  recordManualFunding.mockReset()
   from.mockReset().mockImplementation(() => chain({ data: { id: 'claim-1' } }))
 })
 
@@ -534,6 +543,222 @@ describe('POST /v1/ops/cancellations/resolve', () => {
       const res = await resolvePost(app, ADMIN).send({ transferId: TRANSFER_ID, decision: 'refund' })
       expect(res.status).toBe(200)
       expect(res.body).toEqual({ transferId: TRANSFER_ID, outcome: 'refunded' })
+      await app.close()
+    })
+  })
+})
+
+const FUNDING_PATH = '/v1/ops/transfers/funding'
+const EXTERNAL_REF = 'c8617cef-1adf-4dba-b978-c68150901663'
+
+function fundingPost(app: Awaited<ReturnType<typeof buildApp>>, token: string) {
+  return supertest(app.server)
+    .post(FUNDING_PATH)
+    .set('Authorization', `Bearer ${token}`)
+    .set('Idempotency-Key', 'funding-key-1')
+}
+
+const FUNDED_BODY = {
+  transferId: TRANSFER_ID,
+  kind: 'funded' as const,
+  externalRef: EXTERNAL_REF,
+  amountMinor: 5100,
+  currency: 'USD' as const,
+}
+
+describe('POST /v1/ops/transfers/funding', () => {
+  beforeEach(() => {
+    envMock.OPS_WRITE_ENABLED = true
+    recordManualFunding.mockResolvedValue({ done: true, outcome: 'funded' })
+  })
+
+  describe('gate', () => {
+    it('is not registered at all when OPS_WRITE_ENABLED is false (router 404)', async () => {
+      envMock.OPS_WRITE_ENABLED = false
+      const app = await buildApp()
+      const res = await fundingPost(app, ADMIN).send(FUNDED_BODY)
+      expect(res.status).toBe(404)
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('401s an unauthenticated request', async () => {
+      const app = await buildApp()
+      const res = await supertest(app.server).post(FUNDING_PATH).send(FUNDED_BODY)
+      expect(res.status).toBe(401)
+      await app.close()
+    })
+
+    it('404s a non-admin with a body identical to a genuinely missing route', async () => {
+      const app = await buildApp()
+      const gated = await fundingPost(app, NON_ADMIN).send(FUNDED_BODY)
+      const missing = await supertest(app.server)
+        .post('/v1/ops/nonexistent')
+        .set('Authorization', `Bearer ${NON_ADMIN}`)
+        .send({})
+      expect(gated.status).toBe(404)
+      expect(gated.body.error.code).toBe(missing.body.error.code)
+      expect(gated.body.error.message).toBe(missing.body.error.message)
+      expect(Object.keys(gated.body.error).sort()).toEqual(Object.keys(missing.body.error).sort())
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('404s a non-admin BEFORE validation and the idempotency plugin', async () => {
+      // No Idempotency-Key and a garbage body: either would answer 400 and
+      // confirm the route exists if the gate ran after validation.
+      const app = await buildApp()
+      const res = await supertest(app.server)
+        .post(FUNDING_PATH)
+        .set('Authorization', `Bearer ${NON_ADMIN}`)
+        .send({ nonsense: true })
+      expect(res.status).toBe(404)
+      expect(res.body.error.code).toBe('not_found')
+      expect(from).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('404s even an admin when the write flag drops after registration', async () => {
+      const app = await buildApp()
+      envMock.OPS_WRITE_ENABLED = false
+      const res = await fundingPost(app, ADMIN).send(FUNDED_BODY)
+      expect(res.status).toBe(404)
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      await app.close()
+    })
+  })
+
+  describe('validation', () => {
+    it('400s without an Idempotency-Key header (money-moving POST)', async () => {
+      const app = await buildApp()
+      const res = await supertest(app.server)
+        .post(FUNDING_PATH)
+        .set('Authorization', `Bearer ${ADMIN}`)
+        .send(FUNDED_BODY)
+      expect(res.status).toBe(400)
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it.each([
+      ['transferId', { ...FUNDED_BODY, transferId: undefined }],
+      ['kind', { ...FUNDED_BODY, kind: undefined }],
+      ['externalRef', { ...FUNDED_BODY, externalRef: undefined }],
+      ['amountMinor', { ...FUNDED_BODY, amountMinor: undefined }],
+      ['currency', { ...FUNDED_BODY, currency: undefined }],
+    ])('400s a missing %s', async (_field, body) => {
+      const app = await buildApp()
+      const res = await fundingPost(app, ADMIN).send(body)
+      expect(res.status).toBe(400)
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('400s an unknown kind', async () => {
+      const app = await buildApp()
+      const res = await fundingPost(app, ADMIN).send({ ...FUNDED_BODY, kind: 'settled' })
+      expect(res.status).toBe(400)
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('400s a non-USD currency — the ledger is USD-only', async () => {
+      const app = await buildApp()
+      const res = await fundingPost(app, ADMIN).send({ ...FUNDED_BODY, currency: 'MXN' })
+      expect(res.status).toBe(400)
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('400s a zero or negative amount', async () => {
+      const app = await buildApp()
+      expect((await fundingPost(app, ADMIN).send({ ...FUNDED_BODY, amountMinor: 0 })).status).toBe(400)
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('strips an unknown field so it can never reach the service', async () => {
+      // additionalProperties:false + Fastify's removeAdditional means unknown
+      // input is dropped, not rejected. What matters is that a smuggled flag
+      // (`force`) cannot influence a money-moving call.
+      const app = await buildApp()
+      const res = await fundingPost(app, ADMIN).send({ ...FUNDED_BODY, force: true })
+      expect(res.status).toBe(200)
+      expect(recordManualFunding).toHaveBeenCalledWith(
+        expect.not.objectContaining({ force: expect.anything() }),
+      )
+      await app.close()
+    })
+  })
+
+  describe('outcome mapping', () => {
+    it('passes the authenticated admin as the operator', async () => {
+      const app = await buildApp()
+      await fundingPost(app, ADMIN).send(FUNDED_BODY)
+      expect(recordManualFunding).toHaveBeenCalledWith({
+        transferId: TRANSFER_ID,
+        kind: 'funded',
+        externalRef: EXTERNAL_REF,
+        amountMinor: 5100,
+        operator: ADMIN,
+      })
+      await app.close()
+    })
+
+    it('200s a recorded funding', async () => {
+      const app = await buildApp()
+      const res = await fundingPost(app, ADMIN).send(FUNDED_BODY)
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ transferId: TRANSFER_ID, outcome: 'funded' })
+      await app.close()
+    })
+
+    it('200s a cleared leg and a skipped one distinctly', async () => {
+      const app = await buildApp()
+      recordManualFunding.mockResolvedValue({ done: true, outcome: 'cleared_skipped', state: 'CANCELED' })
+      const res = await fundingPost(app, ADMIN).send({ ...FUNDED_BODY, kind: 'cleared' })
+      expect(res.status).toBe(200)
+      expect(res.body.outcome).toBe('cleared_skipped')
+      await app.close()
+    })
+
+    it.each([
+      [{ done: false, reason: 'transfer_not_found' }, 404, 'not_found'],
+      [{ done: false, reason: 'already_funded' }, 409, 'conflict'],
+      [{ done: false, reason: 'not_pending_payment', state: 'SUBMITTED' }, 409, 'conflict'],
+      [{ done: false, reason: 'funding_not_initiated' }, 409, 'conflict'],
+      [{ done: false, reason: 'amount_mismatch', expectedMinor: 5100 }, 409, 'conflict'],
+      [{ done: false, reason: 'stale' }, 409, 'conflict'],
+      [{ done: false, reason: 'processor_not_manual', provider: 'stripe' }, 409, 'conflict'],
+    ])('maps %j to %i', async (result, status, code) => {
+      const app = await buildApp()
+      recordManualFunding.mockResolvedValue(result)
+      const res = await fundingPost(app, ADMIN).send(FUNDED_BODY)
+      expect(res.status).toBe(status)
+      expect(res.body.error.code).toBe(code)
+      await app.close()
+    })
+
+    it('names the expected amount on a mismatch so the operator can self-correct', async () => {
+      const app = await buildApp()
+      recordManualFunding.mockResolvedValue({
+        done: false,
+        reason: 'amount_mismatch',
+        expectedMinor: 7300,
+      })
+      const res = await fundingPost(app, ADMIN).send(FUNDED_BODY)
+      expect(res.status).toBe(409)
+      expect(JSON.stringify(res.body)).toContain('7300')
+      await app.close()
+    })
+
+    it('500s a thrown service error without leaking the message', async () => {
+      const app = await buildApp()
+      recordManualFunding.mockRejectedValue(new Error('ledger post failed: account xyz'))
+      const res = await fundingPost(app, ADMIN).send(FUNDED_BODY)
+      expect(res.status).toBe(500)
+      expect(res.body.error.code).toBe('internal_error')
+      expect(JSON.stringify(res.body)).not.toContain('account xyz')
       await app.close()
     })
   })

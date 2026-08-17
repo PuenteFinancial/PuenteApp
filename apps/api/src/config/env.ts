@@ -81,12 +81,15 @@ const envSchema = z.object({
   QUOTE_FEE_BPS: z.coerce.number().int().min(0).max(9999).default(100),
   QUOTE_FX_BUFFER_BPS: z.coerce.number().int().min(0).max(9999).default(50),
   QUOTE_EXPIRY_SECONDS: z.coerce.number().int().min(60).max(86400).default(900),
-  // Funding (slice 4; 'stripe' joined in PR-S1). Selecting 'stripe' requires
-  // both STRIPE_* secrets — enforced by the superRefine below, so a
-  // half-configured stripe selection refuses to boot instead of 503ing at the
-  // first confirm. Prod stays 'mock' (and therefore inert — see the mock
-  // secret note) until Joshua flips Doppler.
-  FUNDING_PROCESSOR: z.enum(['mock', 'stripe']).default('mock'),
+  // Funding (slice 4; 'stripe' joined in PR-S1, 'manual' in the out-of-band
+  // funding slice). Selecting 'stripe' requires both STRIPE_* secrets —
+  // enforced by the superRefine below, so a half-configured stripe selection
+  // refuses to boot instead of 503ing at the first confirm. 'manual' takes no
+  // secrets: the sender moves USD by a rail we don't operate and an allowlisted
+  // operator asserts it landed, so its gate is OPS_ADMIN_USER_IDS (checked by
+  // ManualFundingProcessor.isConfigured) rather than a key. Prod stays 'mock'
+  // (and therefore inert — see the mock secret note) until Joshua flips Doppler.
+  FUNDING_PROCESSOR: z.enum(['mock', 'stripe', 'manual']).default('mock'),
   // Webhook HMAC secret for the mock processor. ABSENT IN PRODUCTION on
   // purpose — its absence 503s the funding webhook and confirm, which is the
   // production lock against mock funding. Doppler sets it dev/staging only.
