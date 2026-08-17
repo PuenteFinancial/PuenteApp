@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify'
 import { env } from '../../config/env.js'
 import { buildOpsOverview } from '../../services/ops-overview.js'
 import { refundCancellation, denyCancellation } from '../../services/cancellation-review.js'
+import { recordManualFunding } from '../../services/funding-apply.js'
 import { errorResponseSchema, sendError } from '../../utils/errors.js'
 
 // The money-ops surface (slices 8.5-v1 + v1.1, docs/api-contract.md).
@@ -180,6 +181,35 @@ const resolveResponseSchema = {
   },
 } as const
 
+// Same body-not-path reasoning as resolveBodySchema above. `amountMinor` is
+// required and checked against the transfer to the cent: the operator is
+// asserting a specific deposit, so making them state the amount turns a
+// wrong-transfer slip into a 409 instead of a payout.
+const manualFundingBodySchema = {
+  type: 'object',
+  required: ['transferId', 'kind', 'externalRef', 'amountMinor', 'currency'],
+  additionalProperties: false,
+  properties: {
+    transferId: { type: 'string', format: 'uuid' },
+    // 'funded' releases the payout against Puente's float; 'cleared' settles
+    // the receivable when the sender's money actually lands, days later.
+    kind: { type: 'string', enum: ['funded', 'cleared'] },
+    // The provider-side id of the real deposit (e.g. the Bridge transfer id) —
+    // the audit tie from this assertion back to money that moved.
+    externalRef: { type: 'string', minLength: 1, maxLength: 200 },
+    amountMinor: { type: 'integer', minimum: 1 },
+    currency: { type: 'string', enum: ['USD'] },
+  },
+} as const
+
+const manualFundingResponseSchema = {
+  type: 'object',
+  properties: {
+    transferId: { type: 'string' },
+    outcome: { type: 'string', enum: ['funded', 'cleared', 'cleared_skipped'] },
+  },
+} as const
+
 export const opsRoute: FastifyPluginAsync = async (server) => {
   server.get(
     '/ops/overview',
@@ -341,6 +371,117 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
         request.log.error(
           { route: 'ops/cancellations/resolve' },
           `ops resolve failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+        return sendError(reply, 500, 'internal_error', 'Something went wrong')
+      }
+    },
+  )
+
+  // Operator-asserted out-of-band funding. With no payment gateway, this is the
+  // ONLY path from PENDING_PAYMENT to FUNDED under FUNDING_PROCESSOR=manual —
+  // the manual processor refuses every webhook signature, so there is no public
+  // surface that can fund a transfer. Same double-control gate and 404 posture
+  // as the resolve route above; the service refuses on any other processor.
+  server.post<{
+    Body: {
+      transferId: string
+      kind: 'funded' | 'cleared'
+      externalRef: string
+      amountMinor: number
+      currency: 'USD'
+    }
+  }>(
+    '/ops/transfers/funding',
+    {
+      config: { idempotency: true },
+      onRequest: async (request, reply) => {
+        if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
+          return sendError(reply, 404, 'not_found', 'Route not found')
+        }
+      },
+      schema: {
+        body: manualFundingBodySchema,
+        response: {
+          200: manualFundingResponseSchema,
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          500: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
+        return sendError(reply, 404, 'not_found', 'Route not found')
+      }
+
+      const { transferId, kind, externalRef, amountMinor } = request.body
+
+      try {
+        const result = await recordManualFunding({
+          transferId,
+          kind,
+          externalRef,
+          amountMinor,
+          operator: request.user!.id,
+        })
+
+        if (result.done) {
+          return { transferId, outcome: result.outcome }
+        }
+
+        // Refusals are NON-2xx by design, same as resolve: the idempotency
+        // plugin stores and replays only 2xx, so a 200-refusal would freeze a
+        // transient state into every retry.
+        switch (result.reason) {
+          case 'transfer_not_found':
+            return sendError(reply, 404, 'not_found', 'Transfer not found')
+          case 'processor_not_manual':
+            // Not a 404: the operator is allowlisted and the route exists —
+            // this deployment simply is not configured for out-of-band funding,
+            // and silently 404ing would read as "wrong id" and invite retries.
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              `Out-of-band funding requires FUNDING_PROCESSOR=manual (currently ${result.provider})`,
+            )
+          case 'already_funded':
+            return sendError(reply, 409, 'conflict', 'Transfer is already funded')
+          case 'not_pending_payment':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              `Transfer is not awaiting payment (state ${result.state})`,
+            )
+          case 'funding_not_initiated':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              'Transfer has no funding reference — the sender has not confirmed it yet',
+            )
+          case 'amount_mismatch':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              'Stated amount does not match this transfer',
+              [{ path: 'amountMinor', issue: `expected ${result.expectedMinor}` }],
+            )
+          case 'stale':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              'Transfer moved while being funded — refresh and retry',
+            )
+        }
+      } catch (err) {
+        request.log.error(
+          { route: 'ops/transfers/funding' },
+          `ops manual funding failed: ${err instanceof Error ? err.message : String(err)}`,
         )
         return sendError(reply, 500, 'internal_error', 'Something went wrong')
       }

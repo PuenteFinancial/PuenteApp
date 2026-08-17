@@ -4,17 +4,16 @@ import type { FastifyInstance } from 'fastify'
 import type { KycStatus } from '@puente/shared'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
-import { getFundingProcessor, undoModeForRef } from '../../services/funding/index.js'
-import { enqueuePayoutSubmit, enqueuePaymentEventProcess } from '../../services/queue.js'
+import { getFundingProcessor } from '../../services/funding/index.js'
+import { enqueuePaymentEventProcess } from '../../services/queue.js'
 import { recordEvent, markProcessed } from '../../services/payment-events.js'
 import { actOnRefundTailEvent } from '../../services/refunds.js'
 import {
-  fundedLedgerEntries,
-  fundingClearedLedgerEntries,
-  transitionTransfer,
-  TransferRpcError,
-} from '../../services/transfers.js'
-import { postLedgerTransaction } from '../../services/ledger.js'
+  applyFundingCleared,
+  applyFundingFailed,
+  applyFundingSucceeded,
+  type ApplyFundingOutcome,
+} from '../../services/funding-apply.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 // Bridge statuses we don't recognize fall through unmapped and are only logged
@@ -386,87 +385,27 @@ export async function webhooksRoute(server: FastifyInstance) {
       )
 
       if (event.type === 'funding_cleared') {
-        // A flag, not a state: recorded for the WAIT_FOR_CLEARING policy, the
-        // one sanctioned guarded UPDATE outside the transition RPC.
-        const { data: clearedRow, error: clearedLoadError } = await supabaseAdmin
-          .from('transfers')
-          .select('state, send_amount_minor, fee_amount_minor, refund_payment_ref')
-          .eq('id', transferId)
-          .maybeSingle()
-        if (clearedLoadError) {
-          server.log.error(
-            { webhook: 'funding', transferId, supabaseError: clearedLoadError.code },
-            'funding_cleared load failed',
-          )
-          return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
-        }
-
-        const { error } = await supabaseAdmin
-          .from('transfers')
-          .update({ funding_cleared: true })
-          .eq('id', transferId)
-        if (error) {
-          server.log.error(
-            { webhook: 'funding', transferId, supabaseError: error.code },
-            'funding_cleared update failed',
-          )
-          return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
-        }
-
-        // The ACH CLEARS batch (ledger-rules.md): the receivable opened at
-        // FUNDED becomes cash. Posting this is what keeps funding_receivable
-        // meaning "outstanding fronted float" rather than lifetime volume —
-        // the float ceiling reads that balance, so without it the ceiling
-        // ratchets shut permanently (see fundingClearedLedgerEntries).
-        //
-        // Skipped when the receivable is already closed or was never opened:
-        // PENDING_PAYMENT/PAYMENT_FAILED never posted FUNDED; CANCELED and a
-        // VOIDED-mode refund already credited it back. Those all describe a
-        // pull that was voided and therefore never truly settles, so a cleared
-        // event on one is contradictory data — skip it rather than drive the
-        // receivable negative.
-        const row = clearedRow as {
-          state: string
-          send_amount_minor: number
-          fee_amount_minor: number
-          refund_payment_ref: string | null
-        } | null
-        const receivableClosed =
-          row === null ||
-          row.state === 'PENDING_PAYMENT' ||
-          row.state === 'PAYMENT_FAILED' ||
-          row.state === 'CANCELED' ||
-          (row.state === 'REFUNDED' &&
-            (row.refund_payment_ref === null || undoModeForRef(row.refund_payment_ref) === 'voided'))
-
-        if (!receivableClosed) {
-          try {
-            await postLedgerTransaction({
-              transferId,
-              transition: 'funding_cleared',
-              description: 'ach cleared: funding receivable settled to cash',
-              entries: fundingClearedLedgerEntries(row).map((e) => ({
-                accountCode: e.account_code,
-                direction: e.direction,
-                money: { amountMinor: e.amount_minor, currency: e.currency },
-              })),
-            })
-          } catch (err) {
-            // Never replay-safe to fail silently: the flag is already set, so a
-            // lost posting would leave the receivable open forever with no
-            // retry. The unique (transfer, transition) key makes a redelivery a
-            // no-op, so 500 and let the processor redeliver.
-            server.log.error(
-              { webhook: 'funding', transferId },
-              `funding_cleared ledger post failed: ${err instanceof Error ? err.message : String(err)}`,
+        // A flag, not a state: recorded for the WAIT_FOR_CLEARING policy, plus
+        // the ACH CLEARS cash leg. Both live in applyFundingCleared, shared with
+        // the ops manual-funding action.
+        try {
+          const cleared = await applyFundingCleared({ transferId })
+          if (cleared.outcome === 'skipped') {
+            server.log.info(
+              { webhook: 'funding', transferId, state: cleared.state },
+              'funding_cleared: receivable already closed, no cash leg posted',
             )
-            return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
           }
-        } else {
-          server.log.info(
-            { webhook: 'funding', transferId, state: row?.state ?? 'unknown' },
-            'funding_cleared: receivable already closed, no cash leg posted',
+        } catch (err) {
+          // Never replay-safe to fail silently: the flag is already set, so a
+          // lost posting would leave the receivable open forever with no retry.
+          // The unique (transfer, transition) key makes a redelivery a no-op, so
+          // 500 and let the processor redeliver.
+          server.log.error(
+            { webhook: 'funding', transferId },
+            `funding_cleared failed: ${err instanceof Error ? err.message : String(err)}`,
           )
+          return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
         }
         return { received: true }
       }
@@ -539,88 +478,54 @@ export async function webhooksRoute(server: FastifyInstance) {
         return { received: true }
       }
 
-      // funding_succeeded | funding_failed → state transition
-      const { data: transferData } = await supabaseAdmin
-        .from('transfers')
-        .select('id, state, send_amount_minor, fee_amount_minor')
-        .eq('id', transferId)
-        .single()
-      const transfer = transferData as {
-        id: string
-        state: string
-        send_amount_minor: number
-        fee_amount_minor: number
-      } | null
+      // funding_succeeded | funding_failed → state transition.
+      // Both appliers live in services/transfers.ts and are shared with the ops
+      // manual-funding action, so "a transfer became funded" has exactly one
+      // implementation regardless of what triggered it.
+      let result: ApplyFundingOutcome
+      try {
+        result =
+          event.type === 'funding_succeeded'
+            ? await applyFundingSucceeded({
+                transferId,
+                paymentRef: event.paymentRef,
+                eventId: event.eventId,
+                actor: 'webhook:funding',
+              })
+            : await applyFundingFailed({
+                transferId,
+                paymentRef: event.paymentRef,
+                eventId: event.eventId,
+                actor: 'webhook:funding',
+                ...(event.reason !== undefined && { reason: event.reason }),
+              })
+      } catch {
+        server.log.error(
+          { webhook: 'funding', transferId, eventId: event.eventId },
+          'funding transition failed',
+        )
+        // 500 so the provider redelivers into a clean row
+        return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
+      }
 
-      if (!transfer) {
+      if (result.outcome === 'unknown_transfer') {
         // signature was valid, so this is our own processor talking about a
         // transfer we don't have — ack (a retry cannot fix it) but log loudly
         server.log.error(
           { webhook: 'funding', transferId, eventId: event.eventId },
           'funding event for unknown transfer',
         )
-        return { received: true }
-      }
-
-      const toState = event.type === 'funding_succeeded' ? 'FUNDED' : 'PAYMENT_FAILED'
-      if (transfer.state === toState) {
-        return { received: true } // replayed delivery — already handled
-      }
-
-      try {
-        if (event.type === 'funding_succeeded') {
-          const paymentAt = new Date()
-          await transitionTransfer({
-            transferId: transfer.id,
-            fromState: 'PENDING_PAYMENT',
-            toState: 'FUNDED',
-            actor: 'webhook:funding',
-            reason: 'funding captured/initiated',
-            metadata: { eventId: event.eventId, paymentRef: event.paymentRef },
-            ledgerDescription: 'transfer FUNDED — funding initiated',
-            ledgerEntries: fundedLedgerEntries(transfer),
-            paymentAt,
-            cancelableUntil: new Date(paymentAt.getTime() + env.CANCEL_WINDOW_MINUTES * 60_000),
-            fundingPaymentRef: event.paymentRef,
-          })
-          // Immediate payout (slice-5 decision 1): enqueue-after-commit. An
-          // enqueue failure still acks — payout.sweep re-enqueues within a
-          // minute (decision 3), and the stately singleton dedupes.
-          try {
-            await enqueuePayoutSubmit(transfer.id, 'api')
-          } catch (enqueueErr) {
-            server.log.warn(
-              { webhook: 'funding', transferId: transfer.id },
-              'payout.submit enqueue failed — payout.sweep will heal',
-            )
-            Sentry.captureException(enqueueErr)
-          }
-        } else {
-          await transitionTransfer({
-            transferId: transfer.id,
-            fromState: 'PENDING_PAYMENT',
-            toState: 'PAYMENT_FAILED',
-            actor: 'webhook:funding',
-            reason: event.reason ?? 'funding failed',
-            metadata: { eventId: event.eventId, paymentRef: event.paymentRef },
-            // no ledger batch: no funds were ever collected
-          })
-        }
-      } catch (err) {
-        if (err instanceof TransferRpcError && err.code === 'transition_conflict') {
-          // stale delivery: the transfer has already moved past this event
-          server.log.warn(
-            { webhook: 'funding', transferId: transfer.id, eventId: event.eventId },
-            'stale funding event for advanced transfer',
-          )
-          return { received: true }
-        }
-        server.log.error(
-          { webhook: 'funding', transferId: transfer.id, eventId: event.eventId },
-          'funding transition failed',
+      } else if (result.outcome === 'stale') {
+        // the transfer has already moved past this event
+        server.log.warn(
+          { webhook: 'funding', transferId, eventId: event.eventId },
+          'stale funding event for advanced transfer',
         )
-        // 500 so the provider redelivers into a clean row
-        return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
+      } else if (result.outcome === 'applied' && result.enqueueFailed) {
+        server.log.warn(
+          { webhook: 'funding', transferId },
+          'payout.submit enqueue failed — payout.sweep will heal',
+        )
       }
 
       return { received: true }

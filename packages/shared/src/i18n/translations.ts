@@ -202,6 +202,12 @@ export type Translations = {
         // take the payment at all — no microdeposit fallback at pilot.
         bankNote: string
         paymentError: string
+        // Out-of-band funding (FUNDING_PROCESSOR=manual): the sender pays by a
+        // rail Puente does not operate, so there is nothing to click here. The
+        // copy must set the expectation without implying we received anything
+        // — the transfer only advances once an operator confirms the deposit.
+        offlineTitle: string
+        offlineBody: string
       }
       loadError: string
       retry: string
@@ -664,6 +670,9 @@ const en: Translations = {
         bankNote:
           "If you don't see your bank, we can't accept payments from it yet — you haven't been charged.",
         paymentError: 'Something went wrong with your payment. Please try again.',
+        offlineTitle: 'Waiting for your deposit',
+        offlineBody:
+          'Send your payment using the deposit details we gave you, including the reference code. This transfer moves as soon as we confirm the money arrived.',
       },
       loadError: 'We couldn’t load this transfer. Try again.',
       retry: 'Retry',
@@ -1147,6 +1156,9 @@ const es: Translations = {
         bankNote:
           'Si no ves tu banco, aún no podemos aceptar pagos desde ese banco — no se te ha cobrado.',
         paymentError: 'Algo salió mal con tu pago. Inténtalo de nuevo.',
+        offlineTitle: 'Esperando tu depósito',
+        offlineBody:
+          'Envía tu pago con los datos de depósito que te dimos, incluyendo el código de referencia. Esta transferencia avanza en cuanto confirmemos que el dinero llegó.',
       },
       loadError: 'No pudimos cargar esta transferencia. Inténtalo de nuevo.',
       retry: 'Reintentar',

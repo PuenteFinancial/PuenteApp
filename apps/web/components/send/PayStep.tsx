@@ -160,6 +160,24 @@ export default function PayStep({
     )
   }
 
+  // Out-of-band funding: nothing to click, but the sender must see that we are
+  // waiting on their deposit rather than a blank panel that reads as a broken
+  // page. Same informational panel as 'submitted' — the wording is the only
+  // difference, because the states are genuinely different: there we know a
+  // debit was submitted, here we are waiting for money to arrive.
+  if (affordance === 'offline') {
+    return (
+      <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
+        <p style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--ink)', margin: '0 0 4px' }}>
+          {s.pay.offlineTitle}
+        </p>
+        <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0, lineHeight: 1.5 }}>
+          {s.pay.offlineBody}
+        </p>
+      </div>
+    )
+  }
+
   if (affordance === 'none') return null
 
   if (affordance === 'error') {

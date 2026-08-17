@@ -1,6 +1,7 @@
 import { env } from '../../config/env.js'
 import { MockFundingProcessor } from './mock.js'
 import { StripeFundingProcessor } from './stripe.js'
+import { ManualFundingProcessor } from './manual.js'
 
 export type FundingEventType =
   | 'funding_succeeded'
@@ -123,7 +124,10 @@ export interface FundingUndo {
  * after FUNDING_PROCESSOR flips to stripe), so this knows every namespace.
  * Unknown prefixes classify as 'refunded' — the pre-S2 posting, and the arm
  * whose books recon can catch (an uncollected receivable ages visibly; a
- * silently reversed one vanishes).
+ * silently reversed one vanishes). `manualrefund_` (out-of-band funding) relies
+ * on exactly that default and is correct there: manual funds are COLLECTED
+ * before the transfer is ever marked funded, so an undo is always a real
+ * disbursement back, never a voided pull.
  */
 export function undoModeForRef(ref: string): 'voided' | 'refunded' {
   if (ref.startsWith('pi_') || ref.startsWith('mockvoid_')) return 'voided'
@@ -215,6 +219,7 @@ export interface FundingProcessor {
 const processors: Record<typeof env.FUNDING_PROCESSOR, () => FundingProcessor> = {
   mock: () => new MockFundingProcessor(),
   stripe: () => new StripeFundingProcessor(),
+  manual: () => new ManualFundingProcessor(),
 }
 
 let instance: FundingProcessor | undefined

@@ -36,9 +36,15 @@ const PAYABLE_PI_STATUSES = new Set([
  * 'error' instead — silently rendering nothing on a live stripe send would
  * strand the sender with no way to pay.
  */
-export type PayAffordance = 'stripe' | 'simulate' | 'submitted' | 'none' | 'error'
+export type PayAffordance = 'stripe' | 'simulate' | 'offline' | 'submitted' | 'none' | 'error'
 
 export function payAffordanceFor(session: FundingSession, canSimulate: boolean): PayAffordance {
+  // Out-of-band funding: the sender pays by a rail we don't operate, so there
+  // is nothing to click. This is a REAL affordance, not 'none' — the sender
+  // must see that we're waiting on their deposit rather than a blank panel
+  // that reads as a broken page. It never depends on canSimulate: the dev
+  // endpoint is off in every environment that uses this processor.
+  if (session.provider === 'manual') return 'offline'
   if (session.provider === 'stripe') {
     if (!session.clientSecret || !session.publishableKey) return 'error'
     // No status (older API) = payable — the pre-status behavior. processing/

@@ -78,6 +78,18 @@ describe('payAffordanceFor', () => {
   it('an unknown provider is an error — never silently nothing on a real send', () => {
     expect(payAffordanceFor({ provider: 'braintree' }, true)).toBe('error')
   })
+
+  it('renders the offline waiting state for manual funding', () => {
+    // Not 'none': the sender pays out of band, and a blank panel would read as
+    // a broken page on a transfer they are actively trying to pay for.
+    expect(payAffordanceFor({ provider: 'manual' }, false)).toBe('offline')
+  })
+
+  it('offline never depends on the dev simulate flag', () => {
+    // The dev endpoint is off in every environment that uses this processor —
+    // if canSimulate ever leaked true, manual must not gain a fake-fund button.
+    expect(payAffordanceFor({ provider: 'manual' }, true)).toBe('offline')
+  })
 })
 
 describe('classifyConfirmPaymentError', () => {
