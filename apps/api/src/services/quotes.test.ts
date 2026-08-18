@@ -27,22 +27,24 @@ describe('priceQuote', () => {
     expect(result.sendMinor).toBe(20000)
     // margin = residual of the old fee arithmetic: 20000 − floor(20000·10000/10100)
     expect(result.marginMinor).toBe(199)
-    // rate carries the margin: 17.34 × 0.99 = 17.1666
-    expect(result.fxRate4).toBe('17.1666')
-    // floor(20000 × 17.1666) = 343332
-    expect(result.receiveMinor).toBe(343332)
+    // rate carries the margin as the principal/send ratio:
+    // 17.34 × 19801/20000 = 17.16746… floored to 4 dp
+    expect(result.fxRate4).toBe('17.1674')
+    // floor(20000 × 17.1674) = 343348 — the fee era paid 343349 (within
+    // 4-dp rate quantization, the closest a disclosed-rate quote can get)
+    expect(result.receiveMinor).toBe(343348)
   })
 
   it('reproduces the live prod example from #193: $100 at buy 17.117109', () => {
-    // Design comment: structure at today's settings; the merged rate lands at
-    // 16.86 (displayed 2dp) and the split is the same $99.00 / $1.00.
+    // The issue's own target table: rate 16.8612 shown, recipient gets
+    // 1,686.12 MXN — same pesos as the fee era, same $99.00/$1.00 split.
     const result = priceQuote({ totalMinor: 10000, buyRate: '17.117109', config: cfg() })
     expect(result.sendMinor).toBe(10000)
     expect(result.marginMinor).toBe(100)
-    // 17.117109 × (1 − 0.0150) = 16.86035…, floored to 4 dp
-    expect(result.fxRate4).toBe('16.8603')
-    // floor(10000 × 16.8603) = 168603 centavos = 1,686.03 MXN
-    expect(result.receiveMinor).toBe(168603)
+    // floor4(17.117109 × 0.995) × 9900/10000 = 16.86121…, floored to 4 dp
+    expect(result.fxRate4).toBe('16.8612')
+    // floor(10000 × 16.8612) = 168612 centavos = 1,686.12 MXN
+    expect(result.receiveMinor).toBe(168612)
   })
 
   it('books the same split the fee era booked (economics-neutrality, #193)', () => {
@@ -60,14 +62,31 @@ describe('priceQuote', () => {
     }
   })
 
-  it('subtracts buffer AND margin from the rate (sandbox rate shape)', () => {
-    // buy 20.10025100, 150 bps off -> 19.79874723..., floored to 4 dp
+  it('applies the buffer then the margin ratio (sandbox rate shape)', () => {
+    // buy 20.10025100 → ×0.995 = 19.9997 (4 dp) territory, × 19801/20000
+    // → 19.80074…, floored to 4 dp
     const result = priceQuote({
       totalMinor: 20000,
       buyRate: '20.10025100',
       config: cfg(),
     })
-    expect(result.fxRate4).toBe('19.7987')
+    expect(result.fxRate4).toBe('19.8007')
+    // floor(20000 × 19.8007) = 396014 — the fee era's exact receive
+    expect(result.receiveMinor).toBe(396014)
+  })
+
+  it('matches the fee era receive to within 4-dp rate quantization', () => {
+    // The old flow floored the buffered rate to 4 dp and applied it to the
+    // principal; the new flow folds principal/send into the rate BEFORE
+    // quantizing. The two can differ only by the rate's last decimal applied
+    // to the full send — bound |diff| ≤ send/10⁴ centavos (+1 for flooring).
+    for (const total of [200, 999, 10000, 20000, 123457, 999999]) {
+      const { receiveMinor } = priceQuote({ totalMinor: total, buyRate: '20.10025100', config: cfg() })
+      const principal = Number((BigInt(total) * 10_000n) / 10_100n)
+      const oldRate4 = 199997n // floor4(20.10025100 × 0.995)
+      const oldReceive = Number((BigInt(principal) * oldRate4) / 10_000n)
+      expect(Math.abs(receiveMinor - oldReceive)).toBeLessThanOrEqual(Math.ceil(total / 10_000) + 1)
+    }
   })
 
   it('holds send + 0 = total and principal + margin = send exactly across a range of totals', () => {
@@ -197,7 +216,5 @@ describe('priceQuote', () => {
     expect(call({ marginBps: 10000 })).toThrow()
     expect(call({ marginBps: -1 })).toThrow()
     expect(call({ marginBps: 1.5 })).toThrow()
-    // individually valid, jointly a non-positive rate multiplier
-    expect(call({ marginBps: 5000, fxBufferBps: 5000 })).toThrow()
   })
 })

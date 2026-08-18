@@ -80,9 +80,9 @@ const envSchema = z.object({
   //   QUOTE_FX_BUFFER_BPS = RISK — covers market drift across the firm-quote
   //                         window (Bridge offers no rate lock)
   // Blending them into one number would make fx_slippage unreadable: the P&L
-  // could no longer tell margin from market movement. Both are subtracted from
-  // Bridge buy_rate to form the customer rate; expiry is our firm-offer
-  // window. Bounds keep a fat-fingered env var from quoting a zero/negative
+  // could no longer tell margin from market movement. The buffer is subtracted
+  // from Bridge buy_rate; the margin folds in as the principal/send ratio
+  // (services/quotes.ts); expiry is our firm-offer window. Bounds keep a fat-fingered env var from quoting a zero/negative
   // rate or a never-expiring offer. QUOTE_FEE_FLAT_MINOR / QUOTE_FEE_BPS are
   // gone: quotes now price fee_amount_minor = 0 always.
   QUOTE_MARGIN_BPS: z.coerce.number().int().min(0).max(9999).default(100),

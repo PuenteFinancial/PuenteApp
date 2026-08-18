@@ -54,12 +54,6 @@ function assertConfig(config: QuotePricingConfig): void {
   if (!Number.isSafeInteger(fxBufferBps) || fxBufferBps < 0 || fxBufferBps > 9999) {
     throw new Error(`Invalid QUOTE_FX_BUFFER_BPS: ${fxBufferBps}`)
   }
-  if (marginBps + fxBufferBps > 9999) {
-    // Individually valid knobs can still sum to a rate multiplier ≤ 0.
-    throw new Error(
-      `QUOTE_MARGIN_BPS + QUOTE_FX_BUFFER_BPS must stay below 10000, got ${marginBps + fxBufferBps}`,
-    )
-  }
 }
 
 /** Parse a validated buy_rate string to a scale-8 BigInt (17.34 → 1734000000n). */
@@ -108,12 +102,20 @@ export function priceQuote(input: {
   }
   const margin = send - principal
 
-  // Customer rate = buy_rate minus buffer minus margin, floored at every step
-  // (never promise MXN we might not be able to deliver), then quantized down
-  // to 4 dp. Both spreads come off the rate in one subtraction; the ledger
-  // split (fee_revenue vs fx_slippage) rides on margin_minor, not on the rate.
+  // Customer rate = buy_rate minus the buffer, then scaled by principal/send —
+  // the SAME factor the margin split uses — floored at every step (never
+  // promise MXN we might not be able to deliver), then quantized down to 4 dp.
+  //
+  // Multiplicative on purpose (Codex P1 on #193's first cut): an additive
+  // (1 − buffer − margin) discount uses 1 − m where the margin residual uses
+  // 1/(1 + m), a ~m²/10⁴ cross-term that systematically under-promised MXN vs
+  // the fee era and surfaced as phantom favorable fx_slippage. Folding the
+  // exact principal/send ratio in makes receive match the fee era to within
+  // 4-dp rate quantization, and reproduces #193's worked target exactly
+  // (buy 17.117109 → displayed 16.8612 → 1,686.12 MXN on $100).
   const buy8 = parseBuyRateScale8(buyRate)
-  const customer8 = (buy8 * (BPS_DIVISOR - bufferBps - marginBps)) / BPS_DIVISOR
+  const buffered8 = (buy8 * (BPS_DIVISOR - bufferBps)) / BPS_DIVISOR
+  const customer8 = (buffered8 * principal) / send
   const fxRate4 = customer8 / (RATE_SCALE_8 / BPS_DIVISOR)
   if (fxRate4 <= 0n) {
     throw new InvalidBuyRateError('Customer rate is not positive after buffer and margin')
