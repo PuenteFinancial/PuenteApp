@@ -354,8 +354,21 @@ export async function getKycLink(
 
 // ── Onramp deposit instructions (#199) ──────────────────────────────────────
 
+// Bridge's deposit rail names → Puente's canonical stored values. An explicit
+// allowlist, not a string transformation: the deposit_instructions table
+// constrains payment_rail to ('ach','wire','fednow'), and the first real prod
+// attach (2026-08-18) failed at that constraint because Bridge returned
+// 'ach_push' and we persisted it raw. Unknown rails throw — refuse loudly and
+// involve a human rather than store a rail we don't recognize.
+const DEPOSIT_RAIL_MAP: Record<string, 'ach' | 'wire' | 'fednow'> = {
+  ach: 'ach',
+  ach_push: 'ach',
+  wire: 'wire',
+  fednow: 'fednow',
+}
+
 export interface BridgeDepositInstructions {
-  paymentRail: string
+  paymentRail: 'ach' | 'wire' | 'fednow'
   currency: string
   /** Decimal string as Bridge reports it — caller parses strictly. */
   amount: string | null
@@ -411,8 +424,15 @@ export async function getBridgeDepositInstructions(
       })
     }
   }
+  const rail = DEPOSIT_RAIL_MAP[required.paymentRail!.toLowerCase()]
+  if (!rail) {
+    throw new BridgeApiError(502, {
+      code: 'bridge_unsupported_deposit_rail',
+      rail: required.paymentRail,
+    })
+  }
   return {
-    paymentRail: required.paymentRail!.toLowerCase(),
+    paymentRail: rail,
     currency: required.currency!.toLowerCase(),
     amount: raw.amount ?? null,
     bankName: required.bankName!,
