@@ -262,7 +262,8 @@ Standing it up, in order — **every step before the last must be complete first
 6. **Last:** `FUNDING_PROCESSOR=manual` → restart. This value must not be set until the deployed
    code's enum knows it; the API `process.exit(1)`s on an unknown value and the deploy fails.
 
-Driving a transfer under the manual processor, end to end:
+Driving a transfer under the manual processor, end to end (every command:
+`manual-funding-run.md`):
 
 1. Sender confirms in the web flow → `PENDING_PAYMENT`. It stays there up to
    `MANUAL_PENDING_MAX_AGE_DAYS` (default 7) before the reconcile sweep declares it abandoned —
