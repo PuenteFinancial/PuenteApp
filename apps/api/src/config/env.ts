@@ -97,6 +97,13 @@ const envSchema = z.object({
   // ManualFundingProcessor.isConfigured) rather than a key. Prod stays 'mock'
   // (and therefore inert — see the mock secret note) until Joshua flips Doppler.
   FUNDING_PROCESSOR: z.enum(['mock', 'stripe', 'manual']).default('mock'),
+  // How long a CONFIRMED transfer may sit in PENDING_PAYMENT under the manual
+  // processor before the reconcile sweep declares it abandoned. Webhook-driven
+  // processors keep the 30-minute rule (payment either happened or it didn't);
+  // out-of-band senders wire money on their own schedule, so the manual rail
+  // gets a days-scale window. The stale-quote FX gate at submit still protects
+  // the economics of a late-funded transfer.
+  MANUAL_PENDING_MAX_AGE_DAYS: z.coerce.number().int().min(1).max(30).default(7),
   // Webhook HMAC secret for the mock processor. ABSENT IN PRODUCTION on
   // purpose — its absence 503s the funding webhook and confirm, which is the
   // production lock against mock funding. Doppler sets it dev/staging only.

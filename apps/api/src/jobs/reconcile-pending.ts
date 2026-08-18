@@ -1,9 +1,21 @@
+import { env } from '../config/env.js'
 import { supabaseAdmin } from '../services/supabase.js'
 import { transitionTransfer, TransferRpcError } from '../services/transfers.js'
 
 // A PENDING_PAYMENT older than this never got its funding webhook — the
 // processor either failed silently or the user abandoned checkout.
 const STALE_AFTER_MS = 30 * 60 * 1000
+
+// Under the manual processor the 30-minute rule is wrong by design: an
+// out-of-band sender holds deposit instructions and wires money on their own
+// schedule, so "no funding yet" is the NORMAL state for hours-to-days. The
+// sweep killed exactly such a transfer on the 2026-08-18 staging dry run.
+// Days-scale window instead (MANUAL_PENDING_MAX_AGE_DAYS, default 7).
+function staleAfterMs(): number {
+  return env.FUNDING_PROCESSOR === 'manual'
+    ? env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60 * 1000
+    : STALE_AFTER_MS
+}
 
 // Codes that mean another actor moved the row between our select and the
 // RPC — the row is already handled, not an error.
@@ -14,7 +26,7 @@ const BENIGN_CODES = new Set(['transition_conflict', 'transfer_not_found'])
 // zero postings (the FUNDED batch never ran), so this is a dead row, not
 // lost money. Returns the count actually transitioned.
 export async function reconcilePendingTransfers(): Promise<number> {
-  const cutoff = new Date(Date.now() - STALE_AFTER_MS).toISOString()
+  const cutoff = new Date(Date.now() - staleAfterMs()).toISOString()
   const { data, error } = await supabaseAdmin
     .from('transfers')
     .select('id')
@@ -32,7 +44,10 @@ export async function reconcilePendingTransfers(): Promise<number> {
         fromState: 'PENDING_PAYMENT',
         toState: 'PAYMENT_FAILED',
         actor: 'worker:reconcile-pending',
-        reason: 'funding_not_received_within_30_minutes',
+        reason:
+          env.FUNDING_PROCESSOR === 'manual'
+            ? `funding_not_received_within_${env.MANUAL_PENDING_MAX_AGE_DAYS}_days`
+            : 'funding_not_received_within_30_minutes',
       })
       transitioned++
     } catch (err) {

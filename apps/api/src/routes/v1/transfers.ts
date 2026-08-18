@@ -117,12 +117,17 @@ interface ListQuery {
   scope?: 'all' | 'history'
 }
 
-// "History" (the user-facing transaction list) shows only transfers where
-// payment was actually made — FUNDED and beyond. Never-funded attempts
-// (PENDING_PAYMENT and its 30-min-stale reconciliation to PAYMENT_FAILED) are
-// abandoned sends, not transactions; they stay in the table + audit log but are
-// hidden from history. The raw endpoint (scope=all, the default) keeps returning
-// everything for ops. See docs/decisions.md.
+// "History" (the user-facing transaction list) shows transfers the sender has
+// actually committed to. Originally that meant FUNDED and beyond — under
+// webhook-driven funding PENDING_PAYMENT lasted seconds, so anything stuck
+// there was an abandoned send. Out-of-band funding changed the state's
+// meaning: a CONFIRMED transfer (funding_payment_ref set) now waits DAYS in
+// PENDING_PAYMENT while the sender wires money, and hiding it stranded them
+// with no route back to their own deposit instructions (found on the 2026-08-18
+// dry run). History therefore includes PENDING_PAYMENT once funding was
+// initiated; unconfirmed quote-commits and PAYMENT_FAILED (the stale sweep's
+// terminal for genuinely abandoned rows) stay hidden. scope=all stays raw.
+// See docs/decisions.md.
 const ABANDONED_STATES = '(PENDING_PAYMENT,PAYMENT_FAILED)'
 
 interface Cursor {
@@ -886,9 +891,13 @@ export async function transfersRoute(server: FastifyInstance) {
         .order('id', { ascending: false })
         .limit(limit + 1)
 
-      // scope=history hides abandoned (never-funded) sends; scope=all (default) is raw.
+      // scope=history hides abandoned sends; a confirmed PENDING_PAYMENT
+      // (funding initiated, sender mid-deposit on the manual rail) is a real
+      // transaction and stays visible. scope=all (default) is raw.
       if (scope === 'history') {
-        query = query.not('state', 'in', ABANDONED_STATES)
+        query = query.or(
+          `state.not.in.${ABANDONED_STATES},and(state.eq.PENDING_PAYMENT,funding_payment_ref.not.is.null)`,
+        )
       }
 
       if (cursor) {

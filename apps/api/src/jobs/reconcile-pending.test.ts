@@ -8,6 +8,15 @@ vi.mock('../services/supabase.js', () => ({
   },
 }))
 
+// Mutable so tests can flip the processor: the sweep window is 30 minutes for
+// webhook-driven processors and days-scale under manual (out-of-band senders
+// wire on their own schedule).
+const envMock = vi.hoisted(() => ({
+  FUNDING_PROCESSOR: 'mock' as string,
+  MANUAL_PENDING_MAX_AGE_DAYS: 7,
+}))
+vi.mock('../config/env.js', () => ({ env: envMock }))
+
 const transition = vi.hoisted(() => vi.fn())
 
 vi.mock('../services/transfers.js', async (importOriginal) => {
@@ -32,6 +41,8 @@ function mockStaleSelect(result: { data: unknown; error: unknown }) {
 beforeEach(() => {
   from.mockReset()
   transition.mockReset()
+  envMock.FUNDING_PROCESSOR = 'mock'
+  envMock.MANUAL_PENDING_MAX_AGE_DAYS = 7
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(new Date('2026-07-20T12:00:00.000Z'))
 })
@@ -39,6 +50,28 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('reconcilePendingTransfers', () => {
+  it('manual processor: the window is days-scale, not 30 minutes', async () => {
+    envMock.FUNDING_PROCESSOR = 'manual'
+    const { lt } = mockStaleSelect({ data: [], error: null })
+
+    await reconcilePendingTransfers()
+
+    // 7 days before the frozen clock — a sender mid-wire is NOT abandoned.
+    expect(lt).toHaveBeenCalledWith('created_at', '2026-07-13T12:00:00.000Z')
+  })
+
+  it('manual processor: the abandonment reason names the days window', async () => {
+    envMock.FUNDING_PROCESSOR = 'manual'
+    envMock.MANUAL_PENDING_MAX_AGE_DAYS = 5
+    mockStaleSelect({ data: [{ id: 'tr-old' }], error: null })
+    transition.mockResolvedValue({})
+
+    await reconcilePendingTransfers()
+
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input.reason).toBe('funding_not_received_within_5_days')
+  })
+
   it('selects PENDING_PAYMENT older than 30 minutes and returns 0 when none', async () => {
     const { select, eq, lt } = mockStaleSelect({ data: [], error: null })
 
