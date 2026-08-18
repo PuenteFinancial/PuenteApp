@@ -474,3 +474,70 @@ describe('bridgeFetch timeout + failure propagation', () => {
     await expect(getBridgeTransfer('t1')).rejects.not.toBeInstanceOf(BridgeApiError)
   })
 })
+
+describe('getBridgeDepositInstructions', () => {
+  const FULL = {
+    payment_rail: 'ACH',
+    currency: 'USD',
+    amount: '100.00',
+    bank_name: 'Lead Bank',
+    bank_routing_number: '101019644',
+    bank_account_number: '215268129123',
+    bank_beneficiary_name: 'Bridge Ventures Inc',
+    deposit_message: 'BRGABCD1234',
+  }
+
+  it('parses the full set and lowercases rail + currency', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { id: 'onramp_1', source_deposit_instructions: FULL }),
+    )
+    const { getBridgeDepositInstructions } = await import('./bridge.js')
+    const result = await getBridgeDepositInstructions('11111111-1111-4111-8111-111111111111')
+    expect(result).toEqual({
+      paymentRail: 'ach',
+      currency: 'usd',
+      amount: '100.00',
+      bankName: 'Lead Bank',
+      bankRoutingNumber: '101019644',
+      bankAccountNumber: '215268129123',
+      bankBeneficiaryName: 'Bridge Ventures Inc',
+      depositMessage: 'BRGABCD1234',
+    })
+  })
+
+  it('tolerates missing optional fields (amount, beneficiary)', async () => {
+    const required: Partial<typeof FULL> = { ...FULL }
+    delete required.amount
+    delete required.bank_beneficiary_name
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { id: 'onramp_1', source_deposit_instructions: required }),
+    )
+    const { getBridgeDepositInstructions } = await import('./bridge.js')
+    const result = await getBridgeDepositInstructions('11111111-1111-4111-8111-111111111111')
+    expect(result.amount).toBeNull()
+    expect(result.bankBeneficiaryName).toBeNull()
+  })
+
+  it('throws 502 when the transfer has no instructions at all (a payout)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { id: 'payout_1', state: 'payment_submitted' }))
+    const { getBridgeDepositInstructions } = await import('./bridge.js')
+    await expect(
+      getBridgeDepositInstructions('11111111-1111-4111-8111-111111111111'),
+    ).rejects.toMatchObject({ statusCode: 502 })
+  })
+
+  it.each(['payment_rail', 'currency', 'bank_name', 'bank_routing_number', 'bank_account_number', 'deposit_message'])(
+    'throws 502 when load-bearing field %s is missing — never a partial set',
+    async (field) => {
+      const partial: Record<string, unknown> = { ...FULL }
+      delete partial[field]
+      fetchMock.mockResolvedValue(
+        jsonResponse(200, { id: 'onramp_1', source_deposit_instructions: partial }),
+      )
+      const { getBridgeDepositInstructions } = await import('./bridge.js')
+      await expect(
+        getBridgeDepositInstructions('11111111-1111-4111-8111-111111111111'),
+      ).rejects.toMatchObject({ statusCode: 502 })
+    },
+  )
+})

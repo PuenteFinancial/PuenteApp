@@ -29,6 +29,7 @@ import {
   type RiskReason,
 } from '../../services/risk.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
+import { getDepositInstructions } from '../../services/deposit-instructions.js'
 
 const TRANSFER_COLUMNS =
   'id, user_id, payout_destination_id, quote_id, state, send_amount_minor, send_currency, ' +
@@ -994,6 +995,21 @@ export async function transfersRoute(server: FastifyInstance) {
               // Live PI status (stripe only) — lets a reload after
               // confirmPayment render "submitted" instead of the pay form.
               status: { type: 'string' },
+              // Out-of-band deposit coordinates (#199, manual only) — present
+              // once ops attaches them; the pay step renders them verbatim.
+              depositInstructions: {
+                type: 'object',
+                properties: {
+                  amountMinor: { type: 'integer' },
+                  currency: { type: 'string' },
+                  paymentRail: { type: 'string' },
+                  bankName: { type: 'string' },
+                  bankRoutingNumber: { type: 'string' },
+                  bankAccountNumber: { type: 'string' },
+                  bankBeneficiaryName: { type: 'string' },
+                  depositMessage: { type: 'string' },
+                },
+              },
             },
           },
           404: errorResponseSchema,
@@ -1037,6 +1053,32 @@ export async function transfersRoute(server: FastifyInstance) {
       const session = await getFundingProcessor().getClientSession({
         paymentRef: transfer.funding_payment_ref,
       })
+
+      // Manual only: the attached deposit coordinates ride along when they
+      // exist; their absence keeps the pay step on the fallback copy. Owner
+      // scoping is already proven by the transfer read above, and the row is
+      // Puente's own receiving account — not sender PII.
+      if (session.provider === 'manual') {
+        const instructions = await getDepositInstructions(transfer.id)
+        if (instructions) {
+          return {
+            provider: session.provider,
+            ...session.fields,
+            depositInstructions: {
+              amountMinor: instructions.amount_minor,
+              currency: instructions.currency,
+              paymentRail: instructions.payment_rail,
+              bankName: instructions.bank_name,
+              bankRoutingNumber: instructions.bank_routing_number,
+              bankAccountNumber: instructions.bank_account_number,
+              ...(instructions.bank_beneficiary_name
+                ? { bankBeneficiaryName: instructions.bank_beneficiary_name }
+                : {}),
+              depositMessage: instructions.deposit_message,
+            },
+          }
+        }
+      }
 
       return { provider: session.provider, ...session.fields }
     },

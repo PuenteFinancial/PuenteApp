@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  isDepositInstructionsShape,
   classifyConfirmPaymentError,
   isFundingSessionShape,
   payAffordanceFor,
@@ -105,5 +106,42 @@ describe('classifyConfirmPaymentError', () => {
     expect(classifyConfirmPaymentError({ type: 'api_connection_error' })).toBe('retryable')
     expect(classifyConfirmPaymentError({})).toBe('retryable')
     expect(classifyConfirmPaymentError({ type: undefined })).toBe('retryable')
+  })
+})
+
+describe('isDepositInstructionsShape', () => {
+  const FULL = {
+    amountMinor: 10000,
+    currency: 'USD',
+    paymentRail: 'ach',
+    bankName: 'Lead Bank',
+    bankRoutingNumber: '101019644',
+    bankAccountNumber: '215268129123',
+    bankBeneficiaryName: 'Bridge Ventures Inc',
+    depositMessage: 'BRGABCD1234',
+  }
+
+  it('accepts the full set, and without the optional beneficiary', () => {
+    expect(isDepositInstructionsShape(FULL)).toBe(true)
+    const rest: Partial<typeof FULL> = { ...FULL }
+    delete rest.bankBeneficiaryName
+    expect(isDepositInstructionsShape(rest)).toBe(true)
+  })
+
+  it('rejects a partial or malformed set — a sender must never wire against it', () => {
+    expect(isDepositInstructionsShape(undefined)).toBe(false)
+    expect(isDepositInstructionsShape({})).toBe(false)
+    expect(isDepositInstructionsShape({ ...FULL, depositMessage: '' })).toBe(false)
+    expect(isDepositInstructionsShape({ ...FULL, amountMinor: 100.5 })).toBe(false)
+    expect(isDepositInstructionsShape({ ...FULL, amountMinor: 0 })).toBe(false)
+    const missing: Partial<typeof FULL> = { ...FULL }
+    delete missing.bankAccountNumber
+    expect(isDepositInstructionsShape(missing)).toBe(false)
+  })
+
+  it('a malformed depositInstructions does NOT fail the whole session — render-time fallback', () => {
+    expect(
+      isFundingSessionShape({ provider: 'manual', depositInstructions: { broken: true } }),
+    ).toBe(true)
   })
 })

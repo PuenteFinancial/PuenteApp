@@ -10,6 +10,7 @@ import { parseApiError, errorMessage } from '@/lib/apiError'
 import { formatUsd } from '@/lib/sendFormat'
 import {
   classifyConfirmPaymentError,
+  isDepositInstructionsShape,
   isFundingSessionShape,
   payAffordanceFor,
   type FundingSession,
@@ -162,18 +163,79 @@ export default function PayStep({
 
   // Out-of-band funding: nothing to click, but the sender must see that we are
   // waiting on their deposit rather than a blank panel that reads as a broken
-  // page. Same informational panel as 'submitted' — the wording is the only
-  // difference, because the states are genuinely different: there we know a
-  // debit was submitted, here we are waiting for money to arrive.
+  // page. With attached coordinates (#199) the panel renders them verbatim —
+  // the reference code is what ties the deposit to this transfer at our
+  // partner. Without them (or with a malformed object), the fallback copy
+  // points at the out-of-band hand-off, same as before.
   if (affordance === 'offline') {
+    const instructions = isDepositInstructionsShape(session.depositInstructions)
+      ? session.depositInstructions
+      : null
+    const rowStyle = {
+      display: 'flex',
+      justifyContent: 'space-between',
+      gap: 12,
+      fontSize: 13.5,
+    } as const
+    const valStyle = { fontFamily: 'var(--mono)', color: 'var(--ink)', textAlign: 'right' } as const
     return (
       <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
         <p style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--ink)', margin: '0 0 4px' }}>
           {s.pay.offlineTitle}
         </p>
-        <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0, lineHeight: 1.5 }}>
-          {s.pay.offlineBody}
-        </p>
+        {instructions ? (
+          <>
+            <p style={{ fontSize: 13, color: 'var(--muted)', margin: '0 0 10px', lineHeight: 1.5 }}>
+              {s.pay.offlineInstructions.lead}
+            </p>
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 6,
+                padding: '11px 13px',
+                borderRadius: 'var(--r-sm)',
+                background: 'var(--surface-2)',
+                border: '1px solid var(--line-2)',
+                marginBottom: 10,
+              }}
+            >
+              <div style={rowStyle}>
+                <span style={{ color: 'var(--muted)' }}>{s.pay.offlineInstructions.amount}</span>
+                <b style={valStyle}>{formatUsd(instructions.amountMinor)}</b>
+              </div>
+              <div style={rowStyle}>
+                <span style={{ color: 'var(--muted)' }}>{s.pay.offlineInstructions.bank}</span>
+                <b style={valStyle}>{instructions.bankName}</b>
+              </div>
+              {instructions.bankBeneficiaryName && (
+                <div style={rowStyle}>
+                  <span style={{ color: 'var(--muted)' }}>{s.pay.offlineInstructions.beneficiary}</span>
+                  <b style={valStyle}>{instructions.bankBeneficiaryName}</b>
+                </div>
+              )}
+              <div style={rowStyle}>
+                <span style={{ color: 'var(--muted)' }}>{s.pay.offlineInstructions.routing}</span>
+                <b style={valStyle}>{instructions.bankRoutingNumber}</b>
+              </div>
+              <div style={rowStyle}>
+                <span style={{ color: 'var(--muted)' }}>{s.pay.offlineInstructions.account}</span>
+                <b style={valStyle}>{instructions.bankAccountNumber}</b>
+              </div>
+              <div style={rowStyle}>
+                <span style={{ color: 'var(--muted)' }}>{s.pay.offlineInstructions.reference}</span>
+                <b style={valStyle}>{instructions.depositMessage}</b>
+              </div>
+            </div>
+            <p style={{ fontSize: 12.5, color: 'var(--ink)', margin: 0, lineHeight: 1.5 }}>
+              {s.pay.offlineInstructions.referenceWarning}
+            </p>
+          </>
+        ) : (
+          <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0, lineHeight: 1.5 }}>
+            {s.pay.offlineBody}
+          </p>
+        )}
       </div>
     )
   }

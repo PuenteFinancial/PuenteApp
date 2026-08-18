@@ -43,6 +43,10 @@ vi.mock('../../services/transfers.js', async (importOriginal) => {
 const initiateFunding = vi.fn()
 const voidFunding = vi.fn()
 const getClientSession = vi.fn()
+const getDepositInstructions = vi.hoisted(() => vi.fn())
+vi.mock('../../services/deposit-instructions.js', () => ({
+  getDepositInstructions: (...args: unknown[]) => getDepositInstructions(...args),
+}))
 const isConfigured = vi.fn(() => true)
 
 // Only the PROCESSOR is mocked. The ref-namespace helpers (undoModeForRef,
@@ -208,6 +212,7 @@ beforeEach(() => {
   })
   getClientSession.mockReset()
   getClientSession.mockResolvedValue({ provider: 'mock', fields: {} })
+  getDepositInstructions.mockReset().mockResolvedValue(null)
   assessTransferRisk.mockReset()
   assessTransferRisk.mockResolvedValue({ ok: true })
   assessUnclearedCap.mockReset()
@@ -983,6 +988,69 @@ describe('GET /v1/transfers/:id/funding-session', () => {
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ provider: 'mock' })
+    await app.close()
+  })
+
+  it('manual + attached instructions: returns them on the session (#199)', async () => {
+    from.mockReturnValueOnce(chain({ data: pendingWithRef }))
+    getClientSession.mockResolvedValue({ provider: 'manual', fields: {} })
+    getDepositInstructions.mockResolvedValue({
+      transfer_id: TRANSFER_ID,
+      bridge_transfer_ref: 'dddddddd-1111-4222-8333-444444444444',
+      currency: 'USD',
+      amount_minor: 10000,
+      payment_rail: 'ach',
+      bank_name: 'Lead Bank',
+      bank_routing_number: '101019644',
+      bank_account_number: '215268129123',
+      bank_beneficiary_name: 'Bridge Ventures Inc',
+      deposit_message: 'BRGABCD1234',
+    })
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      provider: 'manual',
+      depositInstructions: {
+        amountMinor: 10000,
+        currency: 'USD',
+        paymentRail: 'ach',
+        bankName: 'Lead Bank',
+        bankRoutingNumber: '101019644',
+        bankAccountNumber: '215268129123',
+        bankBeneficiaryName: 'Bridge Ventures Inc',
+        depositMessage: 'BRGABCD1234',
+      },
+    })
+    expect(getDepositInstructions).toHaveBeenCalledWith(TRANSFER_ID)
+    await app.close()
+  })
+
+  it('manual + nothing attached: provider-only, and the key is absent', async () => {
+    from.mockReturnValueOnce(chain({ data: pendingWithRef }))
+    getClientSession.mockResolvedValue({ provider: 'manual', fields: {} })
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ provider: 'manual' })
+    await app.close()
+  })
+
+  it('never reads instructions for a non-manual provider', async () => {
+    from.mockReturnValueOnce(chain({ data: pendingWithRef }))
+    getClientSession.mockResolvedValue({
+      provider: 'stripe',
+      fields: { clientSecret: 'x', publishableKey: 'y' },
+    })
+    const app = await buildApp()
+
+    await get(app)
+
+    expect(getDepositInstructions).not.toHaveBeenCalled()
     await app.close()
   })
 
