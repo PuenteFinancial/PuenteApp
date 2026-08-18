@@ -86,9 +86,19 @@ doppler run -p puente-api -c stg_main -- sh -c 'curl -s -X POST "$BRIDGE_API_BAS
   }"'
 ```
 
-Gotchas learned live: the destination `payment_rail` is the **chain name** (`base`),
-not `bridge_wallet`; a "wrong environment" credentials error means you hit
-`api.bridge.xyz` instead of `$BRIDGE_API_BASE`. Note the returned onramp `id`.
+Gotchas learned live (staging dry run + first prod run, 2026-08-18):
+
+- The destination `payment_rail` is the **chain name** (`base`), not `bridge_wallet`.
+- **`BRIDGE_API_BASE` is UNSET in prd Doppler** — the app defaults it in
+  `config/env.ts`, but your shell doesn't. For prod curls use the literal
+  `https://api.bridge.xyz` (or `${BRIDGE_API_BASE:-https://api.bridge.xyz}`).
+  A "wrong environment" credentials error means base/key mismatch.
+- Bridge documents `developer_fee` as required — send `"0"`.
+- `amount` is a plain decimal string (`"5.00"`), never `$`-prefixed or empty.
+- Paste the curl as ONE line if editing by hand: a blank line after a `\`
+  continuation ends the command and the next `-H` executes as a command.
+- Note the returned onramp `id` — and it is NOT `provider_transfer_ref` (that
+  is the separate Bridge payout id the worker creates later).
 
 ---
 
