@@ -1,7 +1,6 @@
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
-import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import RecipientsManager, {
   type RecipientWithDestinations,
 } from '@/components/recipients/RecipientsManager'
@@ -59,8 +58,6 @@ export default async function RecipientsPage() {
   )
 
   return (
-    <OnboardingShell>
       <RecipientsManager initialRecipients={withDestinations} />
-    </OnboardingShell>
   )
 }

@@ -3,7 +3,6 @@ import { notFound, redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 import { isProductionEnv } from '@/lib/flags'
 import { isTransferShape } from '@/lib/transferState'
-import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import TransferTracker from '@/components/send/TransferTracker'
 import TransferLoadError from '@/components/send/TransferLoadError'
 
@@ -48,9 +47,7 @@ export default async function TransferPage({ params }: { params: Promise<{ id: s
   if (res.status === 404) notFound()
   if (!res.ok) {
     return (
-      <OnboardingShell>
         <TransferLoadError />
-      </OnboardingShell>
     )
   }
 
@@ -58,15 +55,11 @@ export default async function TransferPage({ params }: { params: Promise<{ id: s
   // An unrecognized shape is a contract fault, not a missing transfer.
   if (!isTransferShape(transfer)) {
     return (
-      <OnboardingShell>
         <TransferLoadError />
-      </OnboardingShell>
     )
   }
 
   return (
-    <OnboardingShell>
       <TransferTracker initialTransfer={transfer} canSimulate={!isProductionEnv()} />
-    </OnboardingShell>
   )
 }

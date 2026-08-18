@@ -42,9 +42,6 @@ export default function ReceiptView({
         <Link href="/dashboard/transfers" className="btn btn--ghost btn--sm" style={{ display: 'inline-block' }}>
           {s.viewHistory}
         </Link>
-        <Link href="/dashboard" className="btn btn--ghost btn--sm" style={{ display: 'inline-block' }}>
-          {t.send.track.done}
-        </Link>
       </div>
     </div>
   )

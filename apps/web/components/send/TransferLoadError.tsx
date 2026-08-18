@@ -1,7 +1,6 @@
 'use client'
 
 import { useRouter } from 'next/navigation'
-import Link from 'next/link'
 import { useLanguage } from '@/components/LanguageProvider'
 
 // Shown when the transfer exists but we couldn't load it right now (a 500/503
@@ -24,11 +23,6 @@ export default function TransferLoadError() {
       <button type="button" className="btn btn--accent btn--sm" onClick={() => router.refresh()}>
         {s.retry}
       </button>
-      <div>
-        <Link href="/dashboard" className="btn btn--ghost btn--sm" style={{ marginTop: 12 }}>
-          {s.done}
-        </Link>
-      </div>
     </div>
   )
 }

@@ -2,7 +2,6 @@ import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 import { isSendMoneyEnabled } from '@/lib/flags'
-import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import StatusCard from '@/components/onboarding/StatusCard'
 
 export const metadata: Metadata = {
@@ -25,8 +24,6 @@ export default async function DashboardPage() {
   const sendEnabled = await isSendMoneyEnabled(userId)
 
   return (
-    <OnboardingShell>
       <StatusCard variant="dashboard" sendEnabled={sendEnabled} />
-    </OnboardingShell>
   )
 }

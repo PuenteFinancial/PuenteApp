@@ -199,11 +199,6 @@ export default function QuoteScreen({
         <Link href="/dashboard/recipients" className="btn btn--accent" style={{ display: 'inline-block' }}>
           {s.manageRecipients}
         </Link>
-        <div style={{ marginTop: 12 }}>
-          <Link href="/dashboard" className="btn btn--ghost btn--sm" style={{ display: 'inline-block' }}>
-            {t.send.track.done}
-          </Link>
-        </div>
       </div>
     )
   }
@@ -313,15 +308,6 @@ export default function QuoteScreen({
           )}
         </div>
       )}
-
-      {/* The way out (the #194 family): the quote screen was the last send
-          surface without one — every sibling (tracker, history, recipients)
-          already links back to the dashboard from inside its card. */}
-      <div style={{ marginTop: 20 }}>
-        <Link href="/dashboard" className="btn btn--ghost btn--sm" style={{ display: 'inline-block' }}>
-          {t.send.track.done}
-        </Link>
-      </div>
     </div>
   )
 }
