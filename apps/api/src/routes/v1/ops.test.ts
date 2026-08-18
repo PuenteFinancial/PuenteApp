@@ -37,6 +37,13 @@ vi.mock('../../services/funding-apply.js', () => ({
   recordManualFunding: (...args: unknown[]) => recordManualFunding(...args),
 }))
 
+// Same split for #199: the attach rules (Bridge fetch, amount verify, upsert)
+// are pinned in deposit-instructions tests; here only gate + mapping.
+const attachDepositInstructions = vi.hoisted(() => vi.fn())
+vi.mock('../../services/deposit-instructions.js', () => ({
+  attachDepositInstructions: (...args: unknown[]) => attachDepositInstructions(...args),
+}))
+
 // supabaseAdmin backs only the idempotency plugin here — claims always win.
 const from = vi.hoisted(() => vi.fn())
 vi.mock('../../services/supabase.js', () => ({
@@ -110,6 +117,7 @@ beforeEach(() => {
   refundCancellation.mockReset()
   denyCancellation.mockReset()
   recordManualFunding.mockReset()
+  attachDepositInstructions.mockReset()
   from.mockReset().mockImplementation(() => chain({ data: { id: 'claim-1' } }))
 })
 
@@ -761,5 +769,88 @@ describe('POST /v1/ops/transfers/funding', () => {
       expect(JSON.stringify(res.body)).not.toContain('account xyz')
       await app.close()
     })
+  })
+})
+
+describe('POST /v1/ops/transfers/deposit-instructions', () => {
+  const PATH = '/v1/ops/transfers/deposit-instructions'
+  const TRANSFER_ID = 'cccccccc-1111-4222-8333-444444444444'
+  const ONRAMP_ID = 'dddddddd-1111-4222-8333-444444444444'
+  const BODY = { transferId: TRANSFER_ID, bridgeTransferId: ONRAMP_ID }
+
+  function post(app: Awaited<ReturnType<typeof buildApp>>, token: string) {
+    return supertest(app.server).post(PATH).set('Authorization', `Bearer ${token}`)
+  }
+
+  beforeEach(() => {
+    envMock.OPS_WRITE_ENABLED = true
+    attachDepositInstructions.mockResolvedValue({
+      outcome: 'attached',
+      row: { deposit_message: 'BRGABCD1234' },
+    })
+  })
+
+  it('404s when OPS_WRITE_ENABLED is false', async () => {
+    envMock.OPS_WRITE_ENABLED = false
+    const app = await buildApp()
+    const res = await post(app, ADMIN).send(BODY)
+    expect(res.status).toBe(404)
+    expect(attachDepositInstructions).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('404s a non-admin, 401s no auth', async () => {
+    const app = await buildApp()
+    expect((await post(app, NON_ADMIN).send(BODY)).status).toBe(404)
+    expect((await supertest(app.server).post(PATH).send(BODY)).status).toBe(401)
+    expect(attachDepositInstructions).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('400s a non-uuid bridgeTransferId', async () => {
+    const app = await buildApp()
+    const res = await post(app, ADMIN).send({ ...BODY, bridgeTransferId: 'onramp-1' })
+    expect(res.status).toBe(400)
+    expect(attachDepositInstructions).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('attaches and returns the reference code, with the operator as attached_by', async () => {
+    const app = await buildApp()
+    const res = await post(app, ADMIN).send(BODY)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      transferId: TRANSFER_ID,
+      outcome: 'attached',
+      depositMessage: 'BRGABCD1234',
+    })
+    expect(attachDepositInstructions).toHaveBeenCalledWith({
+      transferId: TRANSFER_ID,
+      bridgeTransferId: ONRAMP_ID,
+      operator: ADMIN,
+    })
+    await app.close()
+  })
+
+  it.each([
+    [{ outcome: 'unknown_transfer' }, 404],
+    [{ outcome: 'not_pending_payment', state: 'FUNDED' }, 409],
+    [{ outcome: 'amount_mismatch', expectedMinor: 10000, bridgeMinor: 25000 }, 409],
+    [{ outcome: 'instructions_unavailable' }, 409],
+  ] as const)('maps %o to %i', async (outcome, status) => {
+    attachDepositInstructions.mockResolvedValue(outcome)
+    const app = await buildApp()
+    const res = await post(app, ADMIN).send(BODY)
+    expect(res.status).toBe(status)
+    await app.close()
+  })
+
+  it('500s with the generic envelope when the service throws', async () => {
+    attachDepositInstructions.mockRejectedValue(new Error('bridge exploded'))
+    const app = await buildApp()
+    const res = await post(app, ADMIN).send(BODY)
+    expect(res.status).toBe(500)
+    expect(res.body.error.message).not.toContain('bridge exploded')
+    await app.close()
   })
 })

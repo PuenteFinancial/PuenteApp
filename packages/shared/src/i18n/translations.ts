@@ -208,6 +208,16 @@ export type Translations = {
         // — the transfer only advances once an operator confirms the deposit.
         offlineTitle: string
         offlineBody: string
+        offlineInstructions: {
+          lead: string
+          bank: string
+          routing: string
+          account: string
+          beneficiary: string
+          reference: string
+          amount: string
+          referenceWarning: string
+        }
       }
       loadError: string
       retry: string
@@ -676,6 +686,20 @@ const en: Translations = {
         // them here (#195).
         offlineBody:
           'Send your payment using the deposit instructions our team shared with you, including the reference code. This transfer moves as soon as we confirm the money arrived.',
+        // Rendered instead of offlineBody once ops attaches the coordinates
+        // (#199). The reference code is what ties the deposit to this
+        // transfer at our partner — hence the warning line.
+        offlineInstructions: {
+          lead: 'Send your deposit to this account. This transfer moves as soon as we confirm the money arrived.',
+          bank: 'Bank',
+          routing: 'Routing number',
+          account: 'Account number',
+          beneficiary: 'Account name',
+          reference: 'Reference code',
+          amount: 'Amount to send',
+          referenceWarning:
+            'Include the reference code with your payment — without it, we can’t match your deposit to this transfer.',
+        },
       },
       loadError: 'We couldn’t load this transfer. Try again.',
       retry: 'Retry',
@@ -1166,6 +1190,17 @@ const es: Translations = {
         offlineTitle: 'Esperando tu depósito',
         offlineBody:
           'Envía tu pago con las instrucciones de depósito que te compartió nuestro equipo, incluyendo el código de referencia. Esta transferencia avanza en cuanto confirmemos que el dinero llegó.',
+        offlineInstructions: {
+          lead: 'Envía tu depósito a esta cuenta. Esta transferencia avanza en cuanto confirmemos que el dinero llegó.',
+          bank: 'Banco',
+          routing: 'Número de ruta (routing)',
+          account: 'Número de cuenta',
+          beneficiary: 'Nombre de la cuenta',
+          reference: 'Código de referencia',
+          amount: 'Monto a enviar',
+          referenceWarning:
+            'Incluye el código de referencia con tu pago — sin él, no podemos vincular tu depósito con esta transferencia.',
+        },
       },
       loadError: 'No pudimos cargar esta transferencia. Inténtalo de nuevo.',
       retry: 'Reintentar',

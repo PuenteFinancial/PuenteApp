@@ -96,7 +96,7 @@ describe.skipIf(!runDb)('transfers core (integration, local Supabase)', () => {
       `truncate table public.ledger_entries, public.ledger_transactions,
        public.idempotency_keys, public.disputes, public.disclosures,
        public.payment_events, public.transfer_transitions,
-       public.cancellation_requests, public.transfers,
+       public.cancellation_requests, public.deposit_instructions, public.transfers,
        public.quotes, public.payout_destinations, public.recipients`,
     )
     await db.query('delete from auth.users where id in ($1, $2)', [USER_A, USER_B])
@@ -108,7 +108,7 @@ describe.skipIf(!runDb)('transfers core (integration, local Supabase)', () => {
       `truncate table public.ledger_entries, public.ledger_transactions,
        public.idempotency_keys, public.disputes, public.disclosures,
        public.payment_events, public.transfer_transitions,
-       public.cancellation_requests, public.transfers,
+       public.cancellation_requests, public.deposit_instructions, public.transfers,
        public.quotes, public.payout_destinations, public.recipients`,
     )
   })

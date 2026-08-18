@@ -1,6 +1,19 @@
 // Pure decision logic for the PENDING_PAYMENT pay step (PayStep.tsx), split
 // out for unit tests — same convention as transferState.ts ← TransferTracker.
 
+/** Out-of-band deposit coordinates (#199, manual only) — rendered verbatim. */
+export interface DepositInstructions {
+  amountMinor: number
+  currency: string
+  paymentRail: string
+  bankName: string
+  bankRoutingNumber: string
+  bankAccountNumber: string
+  bankBeneficiaryName?: string
+  /** The reference code Bridge matches the deposit by — the load-bearing field. */
+  depositMessage: string
+}
+
 /** Wire shape of GET /api/transfers/:id/funding-session. */
 export interface FundingSession {
   provider: string
@@ -8,6 +21,31 @@ export interface FundingSession {
   publishableKey?: string
   /** Live PI status (stripe only) — drives the reload-after-pay branch. */
   status?: string
+  /** Validated at RENDER time (isDepositInstructionsShape), not here — a
+   *  malformed object must degrade to the fallback copy, not to the error
+   *  card, so it is typed as unknown until the component proves it. */
+  depositInstructions?: unknown
+}
+
+// Every field the panel renders must be present and well-typed, or the whole
+// object is dropped: partial coordinates are worse than the fallback copy,
+// because a sender might wire money against them.
+export function isDepositInstructionsShape(value: unknown): value is DepositInstructions {
+  if (typeof value !== 'object' || value === null) return false
+  const v = value as Record<string, unknown>
+  return (
+    typeof v.amountMinor === 'number' &&
+    Number.isInteger(v.amountMinor) &&
+    v.amountMinor > 0 &&
+    typeof v.currency === 'string' &&
+    typeof v.paymentRail === 'string' &&
+    typeof v.bankName === 'string' &&
+    typeof v.bankRoutingNumber === 'string' &&
+    typeof v.bankAccountNumber === 'string' &&
+    (v.bankBeneficiaryName === undefined || typeof v.bankBeneficiaryName === 'string') &&
+    typeof v.depositMessage === 'string' &&
+    v.depositMessage !== ''
+  )
 }
 
 export function isFundingSessionShape(body: unknown): body is FundingSession {
@@ -17,6 +55,10 @@ export function isFundingSessionShape(body: unknown): body is FundingSession {
   if (b.clientSecret !== undefined && typeof b.clientSecret !== 'string') return false
   if (b.publishableKey !== undefined && typeof b.publishableKey !== 'string') return false
   if (b.status !== undefined && typeof b.status !== 'string') return false
+  // depositInstructions is deliberately NOT validated here: the offline panel
+  // works without it, so a malformed object degrades to the fallback copy
+  // (checked at render) rather than failing the whole session into the
+  // retry-error card.
   return true
 }
 
