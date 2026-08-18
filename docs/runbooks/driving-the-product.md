@@ -262,8 +262,24 @@ Standing it up, in order — **every step before the last must be complete first
 6. **Last:** `FUNDING_PROCESSOR=manual` → restart. This value must not be set until the deployed
    code's enum knows it; the API `process.exit(1)`s on an unknown value and the deploy fails.
 
-Driving a transfer, once a sender has confirmed and their deposit has actually landed (check the
-wallet **balance**, not that a payment was sent):
+Driving a transfer under the manual processor, end to end:
+
+1. Sender confirms in the web flow → `PENDING_PAYMENT`. It stays there up to
+   `MANUAL_PENDING_MAX_AGE_DAYS` (default 7) before the reconcile sweep declares it abandoned —
+   the 30-minute rule applies only to webhook-driven processors.
+2. Create the Bridge **onramp** for the exact total (`on_behalf_of` the sender's Bridge customer,
+   destination = treasury wallet), then attach its coordinates:
+   `scripts/attach-deposit-instructions.ts <transferId> --bridge-transfer <onrampId> …` — the pay
+   step renders them, reference code included.
+3. The sender pays at their bank. **Release policy (Joshua, 2026-08-18): the payout may be
+   released once the operator has satisfactory evidence the sender's ACH was INITIATED** — the
+   pre-funded-float model already carries settlement risk on every rail (Stripe releases on
+   `processing` too), and the uncleared-exposure cap bounds it to one in-flight send per sender.
+   `--kind funded` is that assertion (see below). `--kind cleared` + `record-float-topup.ts`
+   (same onramp ref) still wait for the money to actually LAND in the wallet — the books record
+   arrival, not intent, and the pair is what keeps the daily wallet-float reconciliation clean.
+
+The funded assertion:
 
 ```
 POST /v1/ops/transfers/funding

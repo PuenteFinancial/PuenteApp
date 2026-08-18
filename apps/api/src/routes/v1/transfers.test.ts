@@ -880,7 +880,7 @@ describe('GET /v1/transfers', () => {
     await app.close()
   })
 
-  it('scope=history hides abandoned (never-funded) transfers', async () => {
+  it('scope=history hides abandoned sends but keeps confirmed pending ones (manual rail)', async () => {
     const list = chain({ data: [transferRow] })
     from.mockReturnValueOnce(list)
     const app = await buildApp()
@@ -890,7 +890,13 @@ describe('GET /v1/transfers', () => {
       .set('Authorization', 'Bearer test-token')
 
     expect(res.status).toBe(200)
-    expect(list['not']).toHaveBeenCalledWith('state', 'in', '(PENDING_PAYMENT,PAYMENT_FAILED)')
+    // A confirmed PENDING_PAYMENT (funding_payment_ref set — sender is
+    // mid-deposit under out-of-band funding) is a real transaction and must
+    // stay visible; unconfirmed quote-commits and PAYMENT_FAILED stay hidden.
+    expect(list['or']).toHaveBeenCalledWith(
+      'state.not.in.(PENDING_PAYMENT,PAYMENT_FAILED),and(state.eq.PENDING_PAYMENT,funding_payment_ref.not.is.null)',
+    )
+    expect(list['not']).not.toHaveBeenCalled()
     await app.close()
   })
 
