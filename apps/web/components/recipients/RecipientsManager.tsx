@@ -308,6 +308,17 @@ export default function RecipientsManager({
             {s.addRecipient}
           </button>
         )}
+
+        {/* The way out. This page is where QuoteScreen routes a first-time
+            sender with no recipients yet, and there is no shared dashboard
+            nav — without this link the screen is a dead end (#194). Inside
+            the header card (the TransferHistory idiom), not floating under
+            the recipient list, per rehearsal feedback 2026-08-17. */}
+        <div style={{ marginTop: 12 }}>
+          <Link href="/dashboard" className="btn btn--ghost btn--sm" style={{ display: 'inline-block' }}>
+            {t.send.track.done}
+          </Link>
+        </div>
       </div>
 
       {initialRecipients.map((recipient) => (
@@ -366,16 +377,6 @@ export default function RecipientsManager({
           )}
         </div>
       ))}
-
-      {/* The way out. This page is where QuoteScreen routes a first-time
-          sender with no recipients yet, and there is no shared dashboard nav —
-          without this link the screen is a dead end (#194). Same copy + idiom
-          as TransferHistory's back link. */}
-      <div>
-        <Link href="/dashboard" className="btn btn--ghost btn--sm" style={{ display: 'inline-block' }}>
-          {t.send.track.done}
-        </Link>
-      </div>
     </div>
   )
 }
