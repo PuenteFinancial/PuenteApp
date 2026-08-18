@@ -73,12 +73,19 @@ const envSchema = z.object({
     .min(1)
     .transform((v) => v.replace(/\\n/g, '\n'))
     .optional(),
-  // Quote pricing knobs (slice 3). Fee = flat + bps of send (residual rule in
-  // services/quotes.ts); buffer is subtracted from Bridge buy_rate; expiry is
-  // our firm-offer window. Bounds keep a fat-fingered env var from quoting a
-  // zero/negative rate or a never-expiring offer.
-  QUOTE_FEE_FLAT_MINOR: z.coerce.number().int().min(0).default(0),
-  QUOTE_FEE_BPS: z.coerce.number().int().min(0).max(9999).default(100),
+  // Quote pricing knobs (slice 3; reshaped by #193 — the fee is merged into
+  // the displayed rate). TWO spreads, deliberately separate knobs:
+  //   QUOTE_MARGIN_BPS    = REVENUE — Puente's take, booked to fee_revenue via
+  //                         margin_minor
+  //   QUOTE_FX_BUFFER_BPS = RISK — covers market drift across the firm-quote
+  //                         window (Bridge offers no rate lock)
+  // Blending them into one number would make fx_slippage unreadable: the P&L
+  // could no longer tell margin from market movement. Both are subtracted from
+  // Bridge buy_rate to form the customer rate; expiry is our firm-offer
+  // window. Bounds keep a fat-fingered env var from quoting a zero/negative
+  // rate or a never-expiring offer. QUOTE_FEE_FLAT_MINOR / QUOTE_FEE_BPS are
+  // gone: quotes now price fee_amount_minor = 0 always.
+  QUOTE_MARGIN_BPS: z.coerce.number().int().min(0).max(9999).default(100),
   QUOTE_FX_BUFFER_BPS: z.coerce.number().int().min(0).max(9999).default(50),
   QUOTE_EXPIRY_SECONDS: z.coerce.number().int().min(60).max(86400).default(900),
   // Funding (slice 4; 'stripe' joined in PR-S1, 'manual' in the out-of-band

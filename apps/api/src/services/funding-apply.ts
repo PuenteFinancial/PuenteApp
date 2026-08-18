@@ -34,6 +34,7 @@ export interface FundingTransferRow {
   state: string
   send_amount_minor: number
   fee_amount_minor: number
+  margin_minor: number
 }
 
 export type ApplyFundingOutcome =
@@ -50,7 +51,7 @@ export type ApplyFundingOutcome =
 async function loadFundingTransfer(transferId: string): Promise<FundingTransferRow | null> {
   const { data } = await supabaseAdmin
     .from('transfers')
-    .select('id, state, send_amount_minor, fee_amount_minor')
+    .select('id, state, send_amount_minor, fee_amount_minor, margin_minor')
     .eq('id', transferId)
     .single()
   return (data as FundingTransferRow | null) ?? null
@@ -168,7 +169,7 @@ export async function applyFundingCleared(input: {
 }): Promise<ApplyFundingClearedOutcome> {
   const { data: clearedRow, error: loadError } = await supabaseAdmin
     .from('transfers')
-    .select('state, send_amount_minor, fee_amount_minor, refund_payment_ref')
+    .select('state, send_amount_minor, fee_amount_minor, margin_minor, refund_payment_ref')
     .eq('id', input.transferId)
     .maybeSingle()
   if (loadError) throw new Error(`funding_cleared load failed: ${loadError.message}`)
@@ -190,6 +191,7 @@ export async function applyFundingCleared(input: {
     state: string
     send_amount_minor: number
     fee_amount_minor: number
+    margin_minor: number
     refund_payment_ref: string | null
   } | null
   const receivableClosed =

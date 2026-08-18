@@ -32,7 +32,7 @@ import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 const TRANSFER_COLUMNS =
   'id, user_id, payout_destination_id, quote_id, state, send_amount_minor, send_currency, ' +
-  'receive_amount_minor, receive_currency, fee_amount_minor, fee_currency, fx_rate, ' +
+  'receive_amount_minor, receive_currency, fee_amount_minor, fee_currency, margin_minor, fx_rate, ' +
   'funding_source_type, funding_cleared, disclosure_accepted_at, payment_at, ' +
   'cancelable_until, idempotency_key, funding_payment_ref, provider_transfer_ref, ' +
   'refund_payment_ref, refunded_at, submit_attempted_at, cancellation_requested_at, ' +

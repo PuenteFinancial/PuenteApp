@@ -419,7 +419,7 @@ describe.skipIf(!runDb)('ledger core (integration, local Supabase)', () => {
   // Unit tests could not have caught it: each batch was individually correct.
   // Only summing them through real Postgres shows the receivable never closing.
   describe('funding lifecycle balances (float-ceiling ratchet regression)', () => {
-    const transfer = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const transfer = { send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 }
     const TOTAL = 20000
 
     const post = (transition: string, entries: ReturnType<typeof fundedLedgerEntries>) =>

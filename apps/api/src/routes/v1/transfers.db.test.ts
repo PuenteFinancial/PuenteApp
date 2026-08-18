@@ -129,6 +129,7 @@ describe.skipIf(!runDb)('transfers core (integration, local Supabase)', () => {
         send_amount_minor: '19801',
         receive_amount_minor: '396014',
         fee_amount_minor: '199',
+        margin_minor: '0',
         fx_rate: '19.9997',
         funding_cleared: false,
       })
@@ -171,6 +172,37 @@ describe.skipIf(!runDb)('transfers core (integration, local Supabase)', () => {
       } finally {
         await db2.end()
       }
+    })
+
+    it('snapshots margin_minor for merged-rate quotes and freezes it (#193)', async () => {
+      // A merged-rate quote: full charge in send, zero fee, take in margin.
+      const templateId = await seedQuote(USER_A)
+      const merged = await db.query(
+        `insert into public.quotes (user_id, payout_destination_id, send_amount_minor, send_currency,
+           receive_amount_minor, receive_currency, fee_amount_minor, fee_currency, margin_minor,
+           fx_rate, source_rate, fx_rate_at, expires_at)
+         select user_id, payout_destination_id, 20000, 'USD',
+           395974, 'MXN', 0, 'USD', 199,
+           19.7987, source_rate, fx_rate_at, expires_at
+         from public.quotes where id = $1 returning id`,
+        [templateId],
+      )
+      const { transfer } = await createTransfer(merged.rows[0].id, USER_A)
+
+      const row = await db.query(
+        'select send_amount_minor, fee_amount_minor, margin_minor from public.transfers where id = $1',
+        [transfer.id],
+      )
+      expect(row.rows[0]).toEqual({
+        send_amount_minor: '20000',
+        fee_amount_minor: '0',
+        margin_minor: '199',
+      })
+
+      // margin is an economic term: frozen like the rest of the snapshot.
+      await expect(
+        db.query('update public.transfers set margin_minor = 0 where id = $1', [transfer.id]),
+      ).rejects.toMatchObject({ code: 'P0001' })
     })
 
     it('rejects a lapsed quote with quote_expired and settles its status', async () => {

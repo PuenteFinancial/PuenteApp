@@ -48,6 +48,7 @@ export interface TransferRow {
   receive_currency: string
   fee_amount_minor: number
   fee_currency: string
+  margin_minor: number
   fx_rate: number
   funding_source_type: string
   funding_cleared: boolean
@@ -86,28 +87,47 @@ export interface LedgerEntryJson {
   currency: 'USD'
 }
 
-// The FUNDED batch (ledger-rules.md): recognize the receivable, the payable
-// to the recipient, and Puente's fee revenue. Zero-fee transfers omit the fee
-// line — the ledger rejects zero-amount entries.
-export function fundedLedgerEntries(transfer: {
+// ── The three money identities (#193) ────────────────────────────────────────
+// Two generations of rows share these builders. Pre-merge rows carry their
+// revenue in fee_amount_minor (margin_minor = 0); merged-rate rows carry it in
+// margin_minor (fee_amount_minor = 0, send_amount_minor = the full charge).
+// Every batch below is written against three identities that are exact for
+// BOTH generations:
+//   total     = send + fee      (what the customer pays)
+//   revenue   = fee + margin    (Puente's take → fee_revenue)
+//   principal = send − margin   (owed to the recipient → transfer_payable,
+//                                and the S that due_from_bridge tracks)
+// At equal bps the resulting batches are byte-identical across generations —
+// the economics-neutrality requirement of #193.
+
+interface TransferAmounts {
   send_amount_minor: number
   fee_amount_minor: number
-}): LedgerEntryJson[] {
+  margin_minor: number
+}
+
+const revenueMinor = (t: TransferAmounts): number => t.fee_amount_minor + t.margin_minor
+const principalMinor = (t: TransferAmounts): number => t.send_amount_minor - t.margin_minor
+
+// The FUNDED batch (ledger-rules.md): recognize the receivable, the payable
+// to the recipient, and Puente's revenue (fee + margin). Zero-revenue
+// transfers omit the fee_revenue line — the ledger rejects zero-amount entries.
+export function fundedLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
   const total = transfer.send_amount_minor + transfer.fee_amount_minor
   const entries: LedgerEntryJson[] = [
     { account_code: 'funding_receivable', direction: 'debit', amount_minor: total, currency: 'USD' },
     {
       account_code: 'transfer_payable',
       direction: 'credit',
-      amount_minor: transfer.send_amount_minor,
+      amount_minor: principalMinor(transfer),
       currency: 'USD',
     },
   ]
-  if (transfer.fee_amount_minor > 0) {
+  if (revenueMinor(transfer) > 0) {
     entries.push({
       account_code: 'fee_revenue',
       direction: 'credit',
-      amount_minor: transfer.fee_amount_minor,
+      amount_minor: revenueMinor(transfer),
       currency: 'USD',
     })
   }
@@ -134,10 +154,9 @@ export function fundedLedgerEntries(transfer: {
 // moment cash truly lands. The amount is exact; only the timing is approximate.
 // Reconciling `cash_clearing` against the real Stripe balance needs the
 // balance-transaction ingest (reconciliation.md "Known gaps").
-export function fundingClearedLedgerEntries(transfer: {
-  send_amount_minor: number
-  fee_amount_minor: number
-}): LedgerEntryJson[] {
+// Total-only: the receivable opened at FUNDED is the full charge regardless
+// of how the revenue inside it is labeled, so margin never appears here.
+export function fundingClearedLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
   const total = transfer.send_amount_minor + transfer.fee_amount_minor
   return [
     { account_code: 'cash_clearing', direction: 'debit', amount_minor: total, currency: 'USD' },
@@ -148,29 +167,26 @@ export function fundingClearedLedgerEntries(transfer: {
 // The CANCELED batch (ledger-rules.md "ACH not yet in flight"): a clean reversal
 // of the FUNDED batch. At FUNDED-pre-claim nothing has moved — no payout, no
 // float fronted — so the sender's uncleared ACH is *voided* and the FUNDED
-// receivable/payable/fee lines are booked back exactly. The fee is NOT earned on
-// a cancel, so its credit reverses too. Nets to zero; mirrors fundedLedgerEntries
-// line-for-line with directions flipped (zero-fee omits the fee line — the ledger
-// rejects zero-amount entries). CANCELED→REFUNDED then posts NO ledger: reversing
-// the receivable already zeroed the books.
-export function canceledLedgerEntries(transfer: {
-  send_amount_minor: number
-  fee_amount_minor: number
-}): LedgerEntryJson[] {
+// receivable/payable/revenue lines are booked back exactly. The revenue is NOT
+// earned on a cancel, so its credit reverses too. Nets to zero; mirrors
+// fundedLedgerEntries line-for-line with directions flipped (zero-revenue omits
+// the fee line — the ledger rejects zero-amount entries). CANCELED→REFUNDED then
+// posts NO ledger: reversing the receivable already zeroed the books.
+export function canceledLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
   const total = transfer.send_amount_minor + transfer.fee_amount_minor
   const entries: LedgerEntryJson[] = [
     {
       account_code: 'transfer_payable',
       direction: 'debit',
-      amount_minor: transfer.send_amount_minor,
+      amount_minor: principalMinor(transfer),
       currency: 'USD',
     },
   ]
-  if (transfer.fee_amount_minor > 0) {
+  if (revenueMinor(transfer) > 0) {
     entries.push({
       account_code: 'fee_revenue',
       direction: 'debit',
-      amount_minor: transfer.fee_amount_minor,
+      amount_minor: revenueMinor(transfer),
       currency: 'USD',
     })
   }
@@ -185,21 +201,21 @@ export function canceledLedgerEntries(transfer: {
 
 // The COMPLETED batch (ledger-rules.md): Bridge confirmed the SPEI deposit —
 // extinguish the payable to the recipient against what Bridge owed us.
-// S = quoted send principal; slippage was already recognized at SUBMITTED.
-export function completedLedgerEntries(transfer: {
-  send_amount_minor: number
-}): LedgerEntryJson[] {
+// S = quoted principal (send − margin); slippage was already recognized at
+// SUBMITTED.
+export function completedLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
+  const principal = principalMinor(transfer)
   return [
     {
       account_code: 'transfer_payable',
       direction: 'debit',
-      amount_minor: transfer.send_amount_minor,
+      amount_minor: principal,
       currency: 'USD',
     },
     {
       account_code: 'due_from_bridge',
       direction: 'credit',
-      amount_minor: transfer.send_amount_minor,
+      amount_minor: principal,
       currency: 'USD',
     },
   ]
@@ -216,20 +232,19 @@ export function completedLedgerEntries(transfer: {
 // due_from_bridge claim opened at SUBMITTED settles. (⚠️ assumes Bridge returns
 // S, not the actual USDC draw A incl. slippage — slice-7 verification item; the
 // fx_slippage recognized at SUBMITTED stays realized, never reversed here.)
-export function bridgeReturnLedgerEntries(transfer: {
-  send_amount_minor: number
-}): LedgerEntryJson[] {
+export function bridgeReturnLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
+  const principal = principalMinor(transfer)
   return [
     {
       account_code: 'cash_clearing',
       direction: 'debit',
-      amount_minor: transfer.send_amount_minor,
+      amount_minor: principal,
       currency: 'USD',
     },
     {
       account_code: 'due_from_bridge',
       direction: 'credit',
-      amount_minor: transfer.send_amount_minor,
+      amount_minor: principal,
       currency: 'USD',
     },
   ]
@@ -240,24 +255,21 @@ export function bridgeReturnLedgerEntries(transfer: {
 // refunds_payable recognize-then-pay pair (it would net to zero instantly, the
 // refund being paid from float the same moment) straight to cash_clearing. Nets
 // to zero; zero-fee omits the fee line (the ledger rejects zero-amount entries).
-export function refundedLedgerEntries(transfer: {
-  send_amount_minor: number
-  fee_amount_minor: number
-}): LedgerEntryJson[] {
+export function refundedLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
   const total = transfer.send_amount_minor + transfer.fee_amount_minor
   const entries: LedgerEntryJson[] = [
     {
       account_code: 'transfer_payable',
       direction: 'debit',
-      amount_minor: transfer.send_amount_minor,
+      amount_minor: principalMinor(transfer),
       currency: 'USD',
     },
   ]
-  if (transfer.fee_amount_minor > 0) {
+  if (revenueMinor(transfer) > 0) {
     entries.push({
       account_code: 'fee_revenue',
       direction: 'debit',
-      amount_minor: transfer.fee_amount_minor,
+      amount_minor: revenueMinor(transfer),
       currency: 'USD',
     })
   }
@@ -289,10 +301,7 @@ export function refundedLedgerEntries(transfer: {
 //
 // The fee rides with it: the sender is made whole, so send + fee both come back.
 // Nets to zero.
-export function correctionRefundLedgerEntries(transfer: {
-  send_amount_minor: number
-  fee_amount_minor: number
-}): LedgerEntryJson[] {
+export function correctionRefundLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
   const total = transfer.send_amount_minor + transfer.fee_amount_minor
   return [
     {
@@ -325,10 +334,7 @@ export function correctionRefundLedgerEntries(transfer: {
 // bridge_return batch (posted separately) is unchanged: Bridge really did send
 // the payout principal back to our cash regardless of how the sender was made
 // whole. Nets to zero.
-export function voidRefundLedgerEntries(transfer: {
-  send_amount_minor: number
-  fee_amount_minor: number
-}): LedgerEntryJson[] {
+export function voidRefundLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
   return canceledLedgerEntries(transfer)
 }
 
@@ -339,10 +345,7 @@ export function voidRefundLedgerEntries(transfer: {
 // (loss S+F, fee stands as booked); only the credited ASSET differs: a real
 // refund pays cash out and lets the receivable settle on its own clearing leg,
 // a void writes the receivable off directly. Nets to zero.
-export function correctionVoidLedgerEntries(transfer: {
-  send_amount_minor: number
-  fee_amount_minor: number
-}): LedgerEntryJson[] {
+export function correctionVoidLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
   const total = transfer.send_amount_minor + transfer.fee_amount_minor
   return [
     {

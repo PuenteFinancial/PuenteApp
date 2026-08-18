@@ -104,6 +104,7 @@ const baseTransfer = {
   payout_destination_id: 'dest-1',
   state: 'FUNDED',
   send_amount_minor: 19801,
+  margin_minor: 0,
   receive_amount_minor: 396014,
   funding_cleared: false,
   idempotency_key: 'idem-1',

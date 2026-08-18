@@ -42,6 +42,7 @@ const PENDING = {
   state: 'PENDING_PAYMENT',
   send_amount_minor: 5000,
   fee_amount_minor: 100,
+  margin_minor: 0,
   funding_payment_ref: 'manualpay_abc',
 }
 

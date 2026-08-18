@@ -55,6 +55,17 @@ Worked example: sender pays **$100** ($98 to send + **$2** Puente fee); at payou
 `fx_slippage` (Bridge charges no explicit per-transfer fee — see FX & provider economics); MVP
 instant-ACH policy (we front from `cash_clearing` before the ACH clears).
 
+> **Merged-rate rows (#193, 2026-08-17).** Since the fee merged into the displayed FX rate,
+> new quotes/transfers carry `send_amount_minor` = the FULL charge, `fee_amount_minor` = 0, and
+> the take in `margin_minor` (`QUOTE_MARGIN_BPS`, kept separate from `QUOTE_FX_BUFFER_BPS` —
+> revenue vs. drift cover; blending them would make `fx_slippage` unreadable). Every batch below
+> is written against three identities that hold for BOTH generations of rows:
+> `total = send + fee`, `revenue = fee + margin` (→ `fee_revenue`), `principal = send − margin`
+> (→ `transfer_payable` / `due_from_bridge`, the S in the SUBMITTED batch). At equal bps the
+> batches are byte-identical across generations, so this worked example stays valid — read its
+> "$98 send / $2 fee" as principal/revenue. Enforced by the generation-equivalence suite in
+> `apps/api/src/services/transfers.test.ts`.
+
 ### Happy path
 
 ```
