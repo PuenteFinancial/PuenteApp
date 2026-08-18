@@ -191,9 +191,11 @@ const boss = await withBootRetry(
     await boss.schedule(JOB_PAYOUT_SWEEP, '* * * * *')
     await boss.schedule(JOB_PAYOUT_POLL, pollCron)
     await boss.schedule(JOB_LOSS_CORRECTION_WATCH, '0 * * * *')
-    // Daily reconciliation (slice-8 O2): 6am UTC = overnight US — off-peak, after
-    // the 4am idempotency purge, before the workday reads the findings.
-    await boss.schedule(JOB_LEDGER_RECONCILE, '0 6 * * *')
+    // Reconciliation (slice-8 O2) every 6h: bumped from daily while real money
+    // moves through out-of-band operations, so book-vs-provider drift surfaces
+    // within hours instead of the next morning. 00/06/12/18 UTC keeps the
+    // original 6am overnight-US slot (after the 4am idempotency purge).
+    await boss.schedule(JOB_LEDGER_RECONCILE, '0 */6 * * *')
     // Stuck-transfer pager (slice-8 O1): 5-min sweep of non-terminal dwell.
     await boss.schedule(JOB_STUCK_WATCH, '*/5 * * * *')
     // Liveness beat (Workstream A). Last in the block because it is not a
