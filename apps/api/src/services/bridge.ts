@@ -351,3 +351,74 @@ export async function getKycLink(
 
   return { url: link.url }
 }
+
+// ── Onramp deposit instructions (#199) ──────────────────────────────────────
+
+export interface BridgeDepositInstructions {
+  paymentRail: string
+  currency: string
+  /** Decimal string as Bridge reports it — caller parses strictly. */
+  amount: string | null
+  bankName: string
+  bankRoutingNumber: string
+  bankAccountNumber: string
+  bankBeneficiaryName: string | null
+  /** The reference code Bridge matches the incoming deposit by. */
+  depositMessage: string
+}
+
+/**
+ * source_deposit_instructions from a hand-created onramp transfer — the bank
+ * coordinates the sender must wire/ACH money to, plus the reference code that
+ * ties the deposit to the transfer at Bridge. Throws BridgeApiError(502) when
+ * the object has no instructions (a payout, or an onramp Bridge hasn't issued
+ * coordinates for yet) or when a load-bearing field is missing — the ops
+ * action must refuse loudly rather than store a partial set the sender would
+ * then wire money against.
+ */
+export async function getBridgeDepositInstructions(
+  bridgeTransferId: string,
+): Promise<BridgeDepositInstructions> {
+  const response = (await bridgeFetch(`/v0/transfers/${bridgeTransferId}`)) as {
+    source_deposit_instructions?: {
+      payment_rail?: string
+      currency?: string
+      amount?: string
+      bank_name?: string
+      bank_routing_number?: string
+      bank_account_number?: string
+      bank_beneficiary_name?: string
+      deposit_message?: string
+    }
+  }
+  const raw = response.source_deposit_instructions
+  if (!raw) {
+    throw new BridgeApiError(502, { code: 'bridge_no_deposit_instructions' })
+  }
+  const required = {
+    paymentRail: raw.payment_rail,
+    currency: raw.currency,
+    bankName: raw.bank_name,
+    bankRoutingNumber: raw.bank_routing_number,
+    bankAccountNumber: raw.bank_account_number,
+    depositMessage: raw.deposit_message,
+  }
+  for (const [field, value] of Object.entries(required)) {
+    if (typeof value !== 'string' || value.trim() === '') {
+      throw new BridgeApiError(502, {
+        code: 'bridge_deposit_instructions_incomplete',
+        field,
+      })
+    }
+  }
+  return {
+    paymentRail: required.paymentRail!.toLowerCase(),
+    currency: required.currency!.toLowerCase(),
+    amount: raw.amount ?? null,
+    bankName: required.bankName!,
+    bankRoutingNumber: required.bankRoutingNumber!,
+    bankAccountNumber: required.bankAccountNumber!,
+    bankBeneficiaryName: raw.bank_beneficiary_name ?? null,
+    depositMessage: required.depositMessage!,
+  }
+}

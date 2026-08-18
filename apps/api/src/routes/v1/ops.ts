@@ -3,6 +3,7 @@ import { env } from '../../config/env.js'
 import { buildOpsOverview } from '../../services/ops-overview.js'
 import { refundCancellation, denyCancellation } from '../../services/cancellation-review.js'
 import { recordManualFunding } from '../../services/funding-apply.js'
+import { attachDepositInstructions } from '../../services/deposit-instructions.js'
 import { errorResponseSchema, sendError } from '../../utils/errors.js'
 
 // The money-ops surface (slices 8.5-v1 + v1.1, docs/api-contract.md).
@@ -482,6 +483,99 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
         request.log.error(
           { route: 'ops/transfers/funding' },
           `ops manual funding failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+        return sendError(reply, 500, 'internal_error', 'Something went wrong')
+      }
+    },
+  )
+
+  // POST /v1/ops/transfers/deposit-instructions (#199) — pull the deposit
+  // coordinates from a hand-created Bridge onramp and attach them to the
+  // transfer, so the pay step can render them instead of pointing at a text
+  // message. Same double-control gate as the funding assertion; NOT idempotency
+  // -keyed because the operation is naturally idempotent (upsert of a pure
+  // read from Bridge — re-running refreshes, never duplicates).
+  server.post<{ Body: { transferId: string; bridgeTransferId: string } }>(
+    '/ops/transfers/deposit-instructions',
+    {
+      onRequest: async (request, reply) => {
+        if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
+          return sendError(reply, 404, 'not_found', 'Route not found')
+        }
+      },
+      schema: {
+        body: {
+          type: 'object',
+          required: ['transferId', 'bridgeTransferId'],
+          properties: {
+            transferId: { type: 'string', format: 'uuid' },
+            bridgeTransferId: { type: 'string', format: 'uuid' },
+          },
+          additionalProperties: false,
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              transferId: { type: 'string' },
+              outcome: { type: 'string' },
+              depositMessage: { type: 'string' },
+            },
+          },
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          500: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
+        return sendError(reply, 404, 'not_found', 'Route not found')
+      }
+
+      try {
+        const result = await attachDepositInstructions({
+          transferId: request.body.transferId,
+          bridgeTransferId: request.body.bridgeTransferId,
+          operator: request.user!.id,
+        })
+        switch (result.outcome) {
+          case 'attached':
+            return {
+              transferId: request.body.transferId,
+              outcome: 'attached',
+              depositMessage: result.row.deposit_message,
+            }
+          case 'unknown_transfer':
+            return sendError(reply, 404, 'not_found', 'Transfer not found')
+          case 'not_pending_payment':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              `Transfer is not awaiting payment (state ${result.state})`,
+            )
+          case 'amount_mismatch':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              'Bridge onramp amount does not match this transfer',
+              [{ path: 'bridgeTransferId', issue: `expected ${result.expectedMinor} minor units` }],
+            )
+          case 'instructions_unavailable':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              'Bridge has no complete deposit instructions on that transfer',
+            )
+        }
+      } catch (err) {
+        request.log.error(
+          { route: 'ops/transfers/deposit-instructions' },
+          `ops attach instructions failed: ${err instanceof Error ? err.message : String(err)}`,
         )
         return sendError(reply, 500, 'internal_error', 'Something went wrong')
       }
