@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { errorKeyFor } from '@puente/shared'
 import { useLanguage } from '@/components/LanguageProvider'
@@ -365,6 +366,16 @@ export default function RecipientsManager({
           )}
         </div>
       ))}
+
+      {/* The way out. This page is where QuoteScreen routes a first-time
+          sender with no recipients yet, and there is no shared dashboard nav —
+          without this link the screen is a dead end (#194). Same copy + idiom
+          as TransferHistory's back link. */}
+      <div>
+        <Link href="/dashboard" className="btn btn--ghost btn--sm" style={{ display: 'inline-block' }}>
+          {t.send.track.done}
+        </Link>
+      </div>
     </div>
   )
 }
