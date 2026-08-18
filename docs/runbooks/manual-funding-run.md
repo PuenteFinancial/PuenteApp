@@ -28,6 +28,13 @@ and — last — `FUNDING_PROCESSOR=manual`.
 Relevant knobs: `MANUAL_PENDING_MAX_AGE_DAYS` (default 7) is how long a confirmed
 transfer may wait for its deposit before the sweep declares it abandoned.
 
+**Size the send under the float.** `--kind funded` releases a payout that draws
+≈ the transfer total from the treasury wallet immediately — the sender's deposit
+reimburses it later. If the total exceeds the current wallet balance, the submit
+loops on drained-wallet 400s until money arrives. Check the balance first
+(Bridge dashboard, or the ops board's ledger balances) and keep the send
+comfortably under it, or top up first.
+
 ---
 
 ## 1. Sender confirms (their side)
@@ -48,8 +55,22 @@ Bridge can't match.
 **Primary: Bridge dashboard** — create a transfer with source `wire`/`ach` USD,
 destination = the treasury wallet, `on_behalf_of` = the sender's Bridge customer.
 
-**Alternative: API.** Needs the sender's `bridge_customer_id` (users table — via the
-transfer row's `user_id`; Supabase dashboard or the ops board). Then:
+**Alternative: API.** First look up the sender's `bridge_customer_id` and the exact
+total off the transfer:
+
+```bash
+doppler run -p puente-api -c stg_main -- node_modules/.bin/tsx -e "
+import { Client } from 'pg'
+const c = new Client({ connectionString: process.env.DATABASE_URL })
+await c.connect()
+const r = await c.query(\`select u.bridge_customer_id, t.send_amount_minor + t.fee_amount_minor as total_minor
+  from public.transfers t join public.users u on u.id = t.user_id where t.id = '<transferId>'\`)
+await c.end()
+console.log(r.rows[0])
+"
+```
+
+Then create the onramp (`amount` = `total_minor / 100`, to the cent):
 
 ```bash
 doppler run -p puente-api -c stg_main -- sh -c 'curl -s -X POST "$BRIDGE_API_BASE/v0/transfers" \
