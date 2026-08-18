@@ -80,6 +80,11 @@ export type Translations = {
     }
     dashboard: { title: string; body: string; recipientsCta: string; historyCta: string }
   }
+  dashNav: {
+    send: string
+    transfers: string
+    recipients: string
+  }
   recipients: {
     title: string
     sub: string
@@ -570,6 +575,14 @@ const en: Translations = {
       recipientsCta: 'Manage recipients',
       historyCta: 'Transfer history',
     },
+  },
+  // The persistent dashboard nav (#202) — the structural fix for the
+  // dead-end family (#194 and friends): every /dashboard screen shares this
+  // chrome, so no screen needs its own way out.
+  dashNav: {
+    send: 'Send money',
+    transfers: 'Transfers',
+    recipients: 'Recipients',
   },
   recipients: {
     title: 'Your recipients',
@@ -1079,6 +1092,11 @@ const es: Translations = {
       recipientsCta: 'Administrar destinatarios',
       historyCta: 'Historial de transferencias',
     },
+  },
+  dashNav: {
+    send: 'Enviar dinero',
+    transfers: 'Transferencias',
+    recipients: 'Destinatarios',
   },
   recipients: {
     title: 'Tus destinatarios',

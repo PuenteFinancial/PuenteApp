@@ -3,7 +3,6 @@ import { notFound, redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 import { isTransferShape } from '@/lib/transferState'
 import { isReceiptContent } from '@/lib/disclosure'
-import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import ReceiptView from '@/components/send/ReceiptView'
 import TransferLoadError from '@/components/send/TransferLoadError'
 
@@ -31,9 +30,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
   if (transferRes.status === 404) notFound()
   if (!transferRes.ok) {
     return (
-      <OnboardingShell>
         <TransferLoadError />
-      </OnboardingShell>
     )
   }
 
@@ -42,9 +39,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
   const transfer = await transferRes.json().catch(() => null)
   if (!isTransferShape(transfer)) {
     return (
-      <OnboardingShell>
         <TransferLoadError />
-      </OnboardingShell>
     )
   }
 
@@ -57,24 +52,18 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
     // COMPLETED but the receipt row isn't readable yet (a brief write race) or a
     // transient fault — a retryable load error, not a dead end.
     return (
-      <OnboardingShell>
         <TransferLoadError />
-      </OnboardingShell>
     )
   }
 
   const body = await receiptRes.json().catch(() => null)
   if (!isReceiptContent(body)) {
     return (
-      <OnboardingShell>
         <TransferLoadError />
-      </OnboardingShell>
     )
   }
 
   return (
-    <OnboardingShell>
       <ReceiptView content={body.content} transferId={id} />
-    </OnboardingShell>
   )
 }

@@ -2,7 +2,6 @@ import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 import { isTransferShape } from '@/lib/transferState'
-import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import TransferHistory from '@/components/send/TransferHistory'
 
 export const metadata: Metadata = {
@@ -46,8 +45,6 @@ export default async function TransfersPage() {
   const initial = data.filter(isTransferShape)
 
   return (
-    <OnboardingShell>
       <TransferHistory initial={initial} initialCursor={nextCursor} loadFailed={loadFailed} />
-    </OnboardingShell>
   )
 }

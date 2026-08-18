@@ -82,13 +82,6 @@ export default function TransferHistory({
     }
   }
 
-  const backLink = (
-    <div style={{ marginTop: 16 }}>
-      <Link href="/dashboard" className="btn btn--ghost btn--sm" style={{ display: 'inline-block' }}>
-        {t.send.track.done}
-      </Link>
-    </div>
-  )
 
   const heading = (
     <h1 style={{ fontFamily: 'var(--font)', fontSize: 24, fontWeight: 700, margin: '0 0 16px', color: 'var(--ink)' }}>
@@ -108,8 +101,7 @@ export default function TransferHistory({
         <Link href="/dashboard/transfers" className="btn btn--accent btn--sm" style={{ display: 'inline-block' }}>
           {s.retry}
         </Link>
-        {backLink}
-      </div>
+        </div>
     )
   }
 
@@ -121,8 +113,7 @@ export default function TransferHistory({
         <Link href="/dashboard/send" className="btn btn--accent btn--sm" style={{ display: 'inline-block' }}>
           {t.send.cta}
         </Link>
-        {backLink}
-      </div>
+        </div>
     )
   }
 
@@ -214,7 +205,6 @@ export default function TransferHistory({
         </p>
       )}
 
-      {backLink}
     </div>
   )
 }

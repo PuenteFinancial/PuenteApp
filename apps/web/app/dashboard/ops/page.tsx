@@ -2,7 +2,6 @@ import type { Metadata } from 'next'
 import { notFound, redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
 import { isOpsOverviewShape } from '@/lib/opsOverview'
-import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import OpsOverviewView from '@/components/ops/OpsOverviewView'
 import OpsLoadFailed from '@/components/ops/OpsLoadFailed'
 
@@ -29,9 +28,7 @@ export default async function OpsPage() {
 
   if (!res.ok) {
     return (
-      <OnboardingShell>
         <OpsLoadFailed />
-      </OnboardingShell>
     )
   }
 
@@ -40,15 +37,11 @@ export default async function OpsPage() {
     // A 2xx that isn't the overview contract (gateway HTML, drift) is a fault,
     // never an empty-but-healthy ops board.
     return (
-      <OnboardingShell>
         <OpsLoadFailed />
-      </OnboardingShell>
     )
   }
 
   return (
-    <OnboardingShell>
       <OpsOverviewView overview={body} />
-    </OnboardingShell>
   )
 }

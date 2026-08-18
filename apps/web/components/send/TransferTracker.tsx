@@ -429,9 +429,6 @@ export default function TransferTracker({
         />
       )}
 
-      <Link href="/dashboard" className="btn btn--ghost btn--sm">
-        {s.done}
-      </Link>
     </div>
   )
 }
