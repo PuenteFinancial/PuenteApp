@@ -671,8 +671,11 @@ const en: Translations = {
           "If you don't see your bank, we can't accept payments from it yet — you haven't been charged.",
         paymentError: 'Something went wrong with your payment. Please try again.',
         offlineTitle: 'Waiting for your deposit',
+        // The deposit instructions live with the ops team, not in the app —
+        // nothing in the schema stores them, so this copy must not promise
+        // them here (#195).
         offlineBody:
-          'Send your payment using the deposit details we gave you, including the reference code. This transfer moves as soon as we confirm the money arrived.',
+          'Send your payment using the deposit instructions our team shared with you, including the reference code. This transfer moves as soon as we confirm the money arrived.',
       },
       loadError: 'We couldn’t load this transfer. Try again.',
       retry: 'Retry',
@@ -1162,7 +1165,7 @@ const es: Translations = {
         paymentError: 'Algo salió mal con tu pago. Inténtalo de nuevo.',
         offlineTitle: 'Esperando tu depósito',
         offlineBody:
-          'Envía tu pago con los datos de depósito que te dimos, incluyendo el código de referencia. Esta transferencia avanza en cuanto confirmemos que el dinero llegó.',
+          'Envía tu pago con las instrucciones de depósito que te compartió nuestro equipo, incluyendo el código de referencia. Esta transferencia avanza en cuanto confirmemos que el dinero llegó.',
       },
       loadError: 'No pudimos cargar esta transferencia. Inténtalo de nuevo.',
       retry: 'Reintentar',

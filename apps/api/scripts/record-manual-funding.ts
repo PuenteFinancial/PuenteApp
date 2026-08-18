@@ -44,6 +44,7 @@
 //   node --env-file=.env --import tsx scripts/record-manual-funding.ts …  (local)
 import { formatMoney } from '@puente/shared'
 import { recordManualFunding } from '../src/services/funding-apply.js'
+import { stopBoss } from '../src/services/queue.js'
 import { getFundingProcessor } from '../src/services/funding/index.js'
 import { supabaseAdmin } from '../src/services/supabase.js'
 import { parseUsdToMinor } from './record-float-topup.js'
@@ -221,10 +222,35 @@ async function main(): Promise<void> {
   process.exit(1)
 }
 
+// The --kind funded path releases the payout through applyFundingSucceeded →
+// enqueuePayoutSubmit, which lazily opens a pg-boss pool. Nothing in a one-shot
+// process ever closed it, so the command sat at the terminal indefinitely after
+// its work was already committed — an operator watching a real payout could not
+// tell success from failure without querying the database (#196).
+//
+// stopBoss() releases the pool; the unref'd watchdog is the backstop for
+// anything else still holding the loop (the same idiom worker.ts uses on
+// shutdown). Unref'd so it never DELAYS an otherwise-clean exit — it only fires
+// if the process is somehow still alive when it comes due. Deliberately not a
+// bare process.exit(): exiting while stdout is a pipe can truncate the outcome
+// line, which is the one line the operator needs.
+async function exitCleanly(code: number): Promise<void> {
+  process.exitCode = code
+  try {
+    await stopBoss()
+  } catch (err) {
+    console.error(`pg-boss stop failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  setTimeout(() => process.exit(code), 2000).unref()
+}
+
 // Only run when invoked directly, so the parser stays unit-testable.
 if (process.argv[1]?.includes('record-manual-funding')) {
-  main().catch((err: unknown) => {
-    console.error(err instanceof Error ? err.message : String(err))
-    process.exit(1)
-  })
+  main().then(
+    () => exitCleanly(0),
+    (err: unknown) => {
+      console.error(err instanceof Error ? err.message : String(err))
+      return exitCleanly(1)
+    },
+  )
 }

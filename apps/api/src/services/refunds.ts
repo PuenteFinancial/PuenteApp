@@ -52,6 +52,7 @@ interface RefundableTransfer {
   state: string
   send_amount_minor: number
   fee_amount_minor: number
+  margin_minor: number
   refund_payment_ref: string | null
   funding_payment_ref: string | null
   idempotency_key: string
@@ -60,7 +61,7 @@ interface RefundableTransfer {
 }
 
 const REFUNDABLE_COLUMNS =
-  'id, state, send_amount_minor, fee_amount_minor, refund_payment_ref, ' +
+  'id, state, send_amount_minor, fee_amount_minor, margin_minor, refund_payment_ref, ' +
   'funding_payment_ref, idempotency_key, refund_claimed_at, refund_claimed_by'
 
 // How long an unfinished claim stays "in progress" before it is ABANDONED.
@@ -483,6 +484,7 @@ export interface ParkedRefund {
   id: string
   send_amount_minor: number
   fee_amount_minor: number
+  margin_minor: number
   provider_transfer_ref: string | null
   /** Non-null = the sender was already paid but the state never settled. */
   refund_payment_ref: string | null
@@ -496,7 +498,7 @@ export interface ParkedRefund {
 // One string literal, not a concatenation: supabase-js parses the column list at
 // the TYPE level, and splitting it collapses the row type to GenericStringError.
 const PARKED_COLUMNS =
-  'id, send_amount_minor, fee_amount_minor, provider_transfer_ref, refund_payment_ref, created_at, refund_claimed_at, refund_claimed_by'
+  'id, send_amount_minor, fee_amount_minor, margin_minor, provider_transfer_ref, refund_payment_ref, created_at, refund_claimed_at, refund_claimed_by'
 
 // Classifying here rather than in the CLI keeps CLAIM_STALE_AFTER_MS in one
 // place: an operator must never be handed the window arithmetic to do by eye.

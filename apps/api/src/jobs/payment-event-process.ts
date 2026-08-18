@@ -42,6 +42,7 @@ interface TransferRow {
   // (The refund tail's own inputs — refund_payment_ref, funding_payment_ref,
   // idempotency_key — live in services/refunds.ts, which re-reads them itself.)
   fee_amount_minor: number
+  margin_minor: number
   receive_amount_minor: number
   fx_rate: number
   // slice-7 PR7 receipt: §1005.31(b)(2)(iii) wants the recipient's name on the
@@ -323,7 +324,7 @@ async function resolveTransfer(event: EventRow): Promise<TransferRow | null> {
     const { data, error } = await supabaseAdmin
       .from('transfers')
       .select(
-        'id, user_id, state, send_amount_minor, fee_amount_minor, ' +
+        'id, user_id, state, send_amount_minor, fee_amount_minor, margin_minor, ' +
           'receive_amount_minor, fx_rate, payout_destination_id',
       )
       .eq(column, value)

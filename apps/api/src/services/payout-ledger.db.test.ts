@@ -109,7 +109,7 @@ describe.skipIf(!runDb)('payout ledger walk (integration, local Supabase)', () =
       fromState: 'PENDING_PAYMENT',
       toState: 'FUNDED',
       actor: 'webhook:funding',
-      ledgerEntries: fundedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE }),
+      ledgerEntries: fundedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE, margin_minor: 0 }),
     })
     const submitted = await transitionTransfer({
       transferId,
@@ -131,7 +131,7 @@ describe.skipIf(!runDb)('payout ledger walk (integration, local Supabase)', () =
       fromState: 'IN_FLIGHT',
       toState: 'COMPLETED',
       actor: 'webhook:bridge',
-      ledgerEntries: completedLedgerEntries({ send_amount_minor: S }),
+      ledgerEntries: completedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE, margin_minor: 0 }),
     })
     expect(completed.state).toBe('COMPLETED')
     expect(completed.completed_at).not.toBeNull()
@@ -193,7 +193,7 @@ describe.skipIf(!runDb)('payout ledger walk (integration, local Supabase)', () =
         fromState: 'IN_FLIGHT',
         toState: 'COMPLETED',
         actor: 'webhook:bridge',
-        ledgerEntries: completedLedgerEntries({ send_amount_minor: S }),
+        ledgerEntries: completedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE, margin_minor: 0 }),
       }),
     ).resolves.toMatchObject({ state: 'COMPLETED' })
     const after = await db.query(

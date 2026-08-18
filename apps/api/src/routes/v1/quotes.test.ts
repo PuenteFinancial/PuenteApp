@@ -155,13 +155,17 @@ describe('POST /v1/quotes', () => {
     expect(inserted).toMatchObject({
       user_id: 'user-123',
       payout_destination_id: destinationId,
-      send_amount_minor: 19801,
+      // #193 merged rate: the customer's full $200.00, no fee carve-out; the
+      // take rides in margin_minor and the rate (buffer off buy, then the
+      // principal/send ratio: 20.10025100 × 0.995 × 19801/20000 → 19.8007).
+      send_amount_minor: 20000,
       send_currency: 'USD',
-      receive_amount_minor: 396014,
+      receive_amount_minor: 396014, // floor(20000 × 19.8007) — the fee era's exact receive
       receive_currency: 'MXN',
-      fee_amount_minor: 199,
+      fee_amount_minor: 0,
       fee_currency: 'USD',
-      fx_rate: '19.9997', // written as the fixed-scale string, never a float
+      margin_minor: 199, // residual of the old fee arithmetic — same take
+      fx_rate: '19.8007', // written as the fixed-scale string, never a float
       source_rate: '20.10025100', // Bridge string passthrough for reconciliation
     })
     const expiresAt = new Date(inserted['expires_at'] as string).getTime()

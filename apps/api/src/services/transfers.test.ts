@@ -14,6 +14,7 @@ const {
   cancelTransfer,
   fundedLedgerEntries,
   canceledLedgerEntries,
+  completedLedgerEntries,
   fundingClearedLedgerEntries,
   bridgeReturnLedgerEntries,
   refundedLedgerEntries,
@@ -47,6 +48,7 @@ const transferRow = {
   receive_currency: 'MXN',
   fee_amount_minor: 199,
   fee_currency: 'USD',
+  margin_minor: 0,
   fx_rate: 19.9997,
   funding_source_type: 'ach',
   funding_cleared: false,
@@ -142,7 +144,7 @@ describe('transitionTransfer', () => {
 
 describe('fundedLedgerEntries', () => {
   it('builds the net-zero FUNDED batch', () => {
-    const entries = fundedLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199 })
+    const entries = fundedLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 })
     expect(entries).toEqual([
       { account_code: 'funding_receivable', direction: 'debit', amount_minor: 20000, currency: 'USD' },
       { account_code: 'transfer_payable', direction: 'credit', amount_minor: 19801, currency: 'USD' },
@@ -154,7 +156,7 @@ describe('fundedLedgerEntries', () => {
   })
 
   it('omits the fee line at zero fee (ledger rejects zero entries)', () => {
-    const entries = fundedLedgerEntries({ send_amount_minor: 100, fee_amount_minor: 0 })
+    const entries = fundedLedgerEntries({ send_amount_minor: 100, fee_amount_minor: 0, margin_minor: 0 })
     expect(entries).toHaveLength(2)
     expect(entries.map((e) => e.account_code)).not.toContain('fee_revenue')
   })
@@ -162,7 +164,7 @@ describe('fundedLedgerEntries', () => {
 
 describe('fundingClearedLedgerEntries', () => {
   it('builds the net-zero ACH CLEARS batch — the receivable becomes cash', () => {
-    const entries = fundingClearedLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199 })
+    const entries = fundingClearedLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 })
     expect(entries).toEqual([
       { account_code: 'cash_clearing', direction: 'debit', amount_minor: 20000, currency: 'USD' },
       { account_code: 'funding_receivable', direction: 'credit', amount_minor: 20000, currency: 'USD' },
@@ -176,7 +178,7 @@ describe('fundingClearedLedgerEntries', () => {
     // The bug this fixes: without this batch, funding_receivable accumulated
     // lifetime volume and the float ceiling (which reads that balance) became a
     // one-way ratchet that permanently halts payouts.
-    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 }
     const opened = fundedLedgerEntries(t).find((e) => e.account_code === 'funding_receivable')!
     const relieved = fundingClearedLedgerEntries(t).find((e) => e.account_code === 'funding_receivable')!
     expect(relieved.amount_minor).toBe(opened.amount_minor)
@@ -185,7 +187,7 @@ describe('fundingClearedLedgerEntries', () => {
   })
 
   it('includes the fee in the relief even on a zero-fee transfer', () => {
-    const entries = fundingClearedLedgerEntries({ send_amount_minor: 5000, fee_amount_minor: 0 })
+    const entries = fundingClearedLedgerEntries({ send_amount_minor: 5000, fee_amount_minor: 0, margin_minor: 0 })
     expect(entries).toHaveLength(2)
     expect(entries[0]!.amount_minor).toBe(5000)
   })
@@ -193,7 +195,7 @@ describe('fundingClearedLedgerEntries', () => {
 
 describe('canceledLedgerEntries', () => {
   it('builds the net-zero CANCELED batch — the exact reversal of FUNDED', () => {
-    const entries = canceledLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199 })
+    const entries = canceledLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 })
     expect(entries).toEqual([
       { account_code: 'transfer_payable', direction: 'debit', amount_minor: 19801, currency: 'USD' },
       { account_code: 'fee_revenue', direction: 'debit', amount_minor: 199, currency: 'USD' },
@@ -205,7 +207,7 @@ describe('canceledLedgerEntries', () => {
   })
 
   it('is the direction-flipped mirror of fundedLedgerEntries (per account)', () => {
-    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 }
     const funded = fundedLedgerEntries(t)
     const canceled = canceledLedgerEntries(t)
     // same accounts + amounts, every direction inverted → the two batches sum to nothing
@@ -217,7 +219,7 @@ describe('canceledLedgerEntries', () => {
   })
 
   it('omits the fee line at zero fee (ledger rejects zero entries)', () => {
-    const entries = canceledLedgerEntries({ send_amount_minor: 100, fee_amount_minor: 0 })
+    const entries = canceledLedgerEntries({ send_amount_minor: 100, fee_amount_minor: 0, margin_minor: 0 })
     expect(entries).toHaveLength(2)
     expect(entries.map((e) => e.account_code)).not.toContain('fee_revenue')
   })
@@ -225,7 +227,7 @@ describe('canceledLedgerEntries', () => {
 
 describe('bridgeReturnLedgerEntries', () => {
   it('books the returned principal back to cash, settling due_from_bridge (nets to zero)', () => {
-    const entries = bridgeReturnLedgerEntries({ send_amount_minor: 19801 })
+    const entries = bridgeReturnLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 })
     expect(entries).toEqual([
       { account_code: 'cash_clearing', direction: 'debit', amount_minor: 19801, currency: 'USD' },
       { account_code: 'due_from_bridge', direction: 'credit', amount_minor: 19801, currency: 'USD' },
@@ -236,7 +238,7 @@ describe('bridgeReturnLedgerEntries', () => {
 
 describe('refundedLedgerEntries', () => {
   it('recognizes + pays the full refund incl. fee from cash (nets to zero)', () => {
-    const entries = refundedLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199 })
+    const entries = refundedLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 })
     expect(entries).toEqual([
       { account_code: 'transfer_payable', direction: 'debit', amount_minor: 19801, currency: 'USD' },
       { account_code: 'fee_revenue', direction: 'debit', amount_minor: 199, currency: 'USD' },
@@ -246,7 +248,7 @@ describe('refundedLedgerEntries', () => {
   })
 
   it('omits the fee line at zero fee (ledger rejects zero entries)', () => {
-    const entries = refundedLedgerEntries({ send_amount_minor: 100, fee_amount_minor: 0 })
+    const entries = refundedLedgerEntries({ send_amount_minor: 100, fee_amount_minor: 0, margin_minor: 0 })
     expect(entries).toHaveLength(2)
     expect(entries.map((e) => e.account_code)).not.toContain('fee_revenue')
     expect(netsToZero(entries)).toBe(0)
@@ -255,7 +257,7 @@ describe('refundedLedgerEntries', () => {
 
 describe('the two-batch refund tail (bridge_return + refunded)', () => {
   it('each batch nets to zero, and their combined deltas close the open positions leaving cash −fee', () => {
-    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 }
     expect(netsToZero(bridgeReturnLedgerEntries(t))).toBe(0)
     expect(netsToZero(refundedLedgerEntries(t))).toBe(0)
     // combined (debit − credit) deltas: cash +S then −(S+F) = −F (fee refunded);
@@ -272,14 +274,14 @@ describe('the two-batch refund tail (bridge_return + refunded)', () => {
 
 describe('voidRefundLedgerEntries (PR-S2 — the undo VOIDED the pull)', () => {
   it('is exactly the FUNDED reversal: the sender was never debited, so no cash line exists', () => {
-    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 }
     expect(voidRefundLedgerEntries(t)).toEqual(canceledLedgerEntries(t))
     expect(netsToZero(voidRefundLedgerEntries(t))).toBe(0)
     expect(voidRefundLedgerEntries(t).map((e) => e.account_code)).not.toContain('cash_clearing')
   })
 
   it('the voided two-batch tail: receivable and payable close, cash keeps the returned float, fee unearned', () => {
-    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 }
     expect(signedNet([...bridgeReturnLedgerEntries(t), ...voidRefundLedgerEntries(t)])).toEqual({
       cash_clearing: 19801, // Bridge returned the fronted principal — ours again
       due_from_bridge: -19801,
@@ -292,7 +294,7 @@ describe('voidRefundLedgerEntries (PR-S2 — the undo VOIDED the pull)', () => {
 
 describe('correctionVoidLedgerEntries (PR-S2 — correction payment on a voided pull)', () => {
   it('books the compliance loss against the never-collectable receivable (nets to zero, no cash line)', () => {
-    const entries = correctionVoidLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199 })
+    const entries = correctionVoidLedgerEntries({ send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 })
     expect(entries).toEqual([
       {
         account_code: 'loss_cancellation_correction',
@@ -311,12 +313,57 @@ describe('correctionVoidLedgerEntries (PR-S2 — correction payment on a voided 
   })
 
   it('same P&L as the refunded-mode correction — only the credited ASSET differs', () => {
-    const t = { send_amount_minor: 19801, fee_amount_minor: 199 }
+    const t = { send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 }
     const voided = signedNet(correctionVoidLedgerEntries(t))
     const refunded = signedNet(correctionRefundLedgerEntries(t))
     expect(voided['loss_cancellation_correction']).toBe(refunded['loss_cancellation_correction'])
     expect(voided['funding_receivable']).toBe(-20000)
     expect(refunded['cash_clearing']).toBe(-20000)
+  })
+})
+
+describe('generation equivalence (#193 — fee era vs merged-rate era)', () => {
+  // The same $200.00 transfer, priced by each generation. At equal bps the
+  // batches must be BYTE-IDENTICAL: the customer pays the same, the recipient
+  // is owed the same principal, and the same revenue books to fee_revenue —
+  // only which COLUMN carries the revenue differs.
+  const feeEra = { send_amount_minor: 19801, fee_amount_minor: 199, margin_minor: 0 }
+  const mergedEra = { send_amount_minor: 20000, fee_amount_minor: 0, margin_minor: 199 }
+
+  it.each([
+    ['fundedLedgerEntries', fundedLedgerEntries],
+    ['canceledLedgerEntries', canceledLedgerEntries],
+    ['fundingClearedLedgerEntries', fundingClearedLedgerEntries],
+    ['completedLedgerEntries', completedLedgerEntries],
+    ['bridgeReturnLedgerEntries', bridgeReturnLedgerEntries],
+    ['refundedLedgerEntries', refundedLedgerEntries],
+    ['voidRefundLedgerEntries', voidRefundLedgerEntries],
+    ['correctionRefundLedgerEntries', correctionRefundLedgerEntries],
+    ['correctionVoidLedgerEntries', correctionVoidLedgerEntries],
+  ] as const)('%s books identical batches for both generations', (_name, build) => {
+    expect(build(mergedEra)).toEqual(build(feeEra))
+    expect(netsToZero(build(mergedEra))).toBe(0)
+  })
+
+  it('merged-era FUNDED books revenue from margin_minor, not fx_slippage', () => {
+    // The #193 trap: fee = 0 with no margin would silently drop the revenue
+    // line and the whole take would surface later as fx_slippage.
+    const entries = fundedLedgerEntries(mergedEra)
+    const fee = entries.find((e) => e.account_code === 'fee_revenue')!
+    expect(fee.amount_minor).toBe(199)
+    expect(fee.direction).toBe('credit')
+    const payable = entries.find((e) => e.account_code === 'transfer_payable')!
+    expect(payable.amount_minor).toBe(19801) // send − margin, the principal
+  })
+
+  it('a genuinely zero-revenue transfer still omits the fee_revenue line', () => {
+    const entries = fundedLedgerEntries({
+      send_amount_minor: 20000,
+      fee_amount_minor: 0,
+      margin_minor: 0,
+    })
+    expect(entries.map((e) => e.account_code)).not.toContain('fee_revenue')
+    expect(netsToZero(entries)).toBe(0)
   })
 })
 

@@ -183,7 +183,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       fromState: 'PENDING_PAYMENT',
       toState: 'FUNDED',
       actor: 'webhook:funding',
-      ledgerEntries: fundedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE }),
+      ledgerEntries: fundedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE, margin_minor: 0 }),
     })
     await transitionTransfer({
       transferId,
@@ -211,7 +211,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       transferId,
       transition: 'bridge_return',
       description: 'bridge returned principal on payout failure',
-      entries: toInput(bridgeReturnLedgerEntries({ send_amount_minor: S })),
+      entries: toInput(bridgeReturnLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE, margin_minor: 0 })),
     })
     // 2) REFUNDED — a DISTINCT key {id}:REFUNDED, posted with the transition
     return transitionTransfer({
@@ -219,7 +219,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       fromState: 'PAYOUT_FAILED',
       toState: 'REFUNDED',
       actor: 'worker:payment-event',
-      ledgerEntries: refundedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE }),
+      ledgerEntries: refundedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE, margin_minor: 0 }),
     })
   }
 
@@ -262,7 +262,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       transferId: T_REFUND,
       transition: 'bridge_return',
       description: 'bridge returned principal on payout failure',
-      entries: toInput(bridgeReturnLedgerEntries({ send_amount_minor: S })),
+      entries: toInput(bridgeReturnLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE, margin_minor: 0 })),
     })
     // replay the REFUNDED transition (already REFUNDED → RPC replay no-op)
     await expect(
@@ -271,7 +271,7 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
         fromState: 'PAYOUT_FAILED',
         toState: 'REFUNDED',
         actor: 'worker:payment-event',
-        ledgerEntries: refundedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE }),
+        ledgerEntries: refundedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE, margin_minor: 0 }),
       }),
     ).resolves.toMatchObject({ state: 'REFUNDED' })
 

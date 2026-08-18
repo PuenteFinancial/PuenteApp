@@ -148,3 +148,24 @@ export async function enqueuePaymentEventProcess(
   const options: SendOptions = { singletonKey: paymentEventId, ...PAYMENT_EVENT_RETRY }
   return boss.send(JOB_PAYMENT_EVENT_PROCESS, payload, options)
 }
+
+// Releases the pg-boss connection pool and clears the memos.
+//
+// Long-lived processes shut down through worker.ts's signal handler; this
+// exists for SHORT-LIVED ones — the operator scripts. `applyFundingSucceeded`
+// enqueues payout.submit, which lazily opens a pool that nothing in a one-shot
+// process ever closes, so the script sat at the terminal indefinitely after its
+// work was already committed (#196). Never starts an instance that does not
+// already exist: a dry run, or a `--kind cleared` that touches no queue, must
+// stay a no-op rather than open a pool just to close it.
+//
+// graceful: false because a send-only process has no in-flight work to drain —
+// waiting out the 30s graceful timeout would be the same hang with a deadline.
+export async function stopBoss(): Promise<void> {
+  const started = bossPromise
+  if (!started) return
+  bossPromise = undefined
+  queuesPromise = undefined
+  const boss = await started
+  await boss.stop({ graceful: false })
+}

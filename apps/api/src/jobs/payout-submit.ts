@@ -35,6 +35,7 @@ interface SubmitTransferRow {
   payout_destination_id: string
   state: string
   send_amount_minor: number
+  margin_minor: number
   receive_amount_minor: number
   funding_cleared: boolean
   idempotency_key: string
@@ -99,7 +100,7 @@ export async function submitPayout(transferId: string): Promise<number> {
   const { data: transferData, error: transferError } = await supabaseAdmin
     .from('transfers')
     .select(
-      'id, user_id, quote_id, payout_destination_id, state, send_amount_minor, receive_amount_minor, funding_cleared, idempotency_key, provider_transfer_ref, payout_hold_reason, submit_attempted_at, disclosure_accepted_at',
+      'id, user_id, quote_id, payout_destination_id, state, send_amount_minor, margin_minor, receive_amount_minor, funding_cleared, idempotency_key, provider_transfer_ref, payout_hold_reason, submit_attempted_at, disclosure_accepted_at',
     )
     .eq('id', transferId)
     .maybeSingle()
@@ -317,8 +318,12 @@ export async function submitPayout(transferId: string): Promise<number> {
         ...(driftBps !== undefined ? { driftBps } : {}),
       },
       ledgerDescription: 'transfer SUBMITTED — payout sent to Bridge',
+      // S = the quoted principal (send − margin, #193): what the recipient is
+      // owed and what due_from_bridge tracks. On merged-rate rows the margin
+      // stays behind in fee_revenue; on pre-merge rows margin is 0 and this is
+      // send_amount_minor exactly as before.
       ledgerEntries: submittedLedgerEntries({
-        sendAmountMinor: transfer.send_amount_minor,
+        sendAmountMinor: transfer.send_amount_minor - transfer.margin_minor,
         actualSourceAmountMinor,
       }),
       providerTransferRef: result.bridgeTransferId,

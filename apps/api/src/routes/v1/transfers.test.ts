@@ -136,6 +136,7 @@ const transferRow = {
   send_currency: 'USD',
   receive_amount_minor: 396014,
   receive_currency: 'MXN',
+  margin_minor: 0,
   fee_amount_minor: 199,
   fee_currency: 'USD',
   fx_rate: 19.9997,

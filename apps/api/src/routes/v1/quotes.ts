@@ -198,8 +198,7 @@ export async function quotesRoute(server: FastifyInstance) {
           totalMinor: request.body.totalAmount.amountMinor,
           buyRate,
           config: {
-            feeFlatMinor: env.QUOTE_FEE_FLAT_MINOR,
-            feeBps: env.QUOTE_FEE_BPS,
+            marginBps: env.QUOTE_MARGIN_BPS,
             fxBufferBps: env.QUOTE_FX_BUFFER_BPS,
           },
         })
@@ -227,8 +226,12 @@ export async function quotesRoute(server: FastifyInstance) {
           send_currency: 'USD',
           receive_amount_minor: priced.receiveMinor,
           receive_currency: 'MXN',
-          fee_amount_minor: priced.feeMinor,
+          // The take is embedded in the rate (#193): the fee column stays for
+          // pre-merge rows and the wire shape, but new quotes always price 0
+          // and carry their revenue in margin_minor instead.
+          fee_amount_minor: 0,
           fee_currency: 'USD',
+          margin_minor: priced.marginMinor,
           // strings into numeric columns — the fixed-scale value is preserved
           // verbatim; a JS float never touches the write path
           fx_rate: priced.fxRate4,

@@ -35,6 +35,7 @@ interface ReviewableTransfer {
   state: string
   send_amount_minor: number
   fee_amount_minor: number
+  margin_minor: number
   payment_at: string | null
   refund_payment_ref: string | null
   funding_payment_ref: string | null
@@ -44,7 +45,7 @@ interface ReviewableTransfer {
 }
 
 const REVIEWABLE_COLUMNS =
-  'id, state, send_amount_minor, fee_amount_minor, payment_at, refund_payment_ref, funding_payment_ref, idempotency_key, refund_claimed_at, refund_claimed_by'
+  'id, state, send_amount_minor, fee_amount_minor, margin_minor, payment_at, refund_payment_ref, funding_payment_ref, idempotency_key, refund_claimed_at, refund_claimed_by'
 
 export type ReviewOutcome =
   // `already_disbursed` = the money left in a PRIOR run (a crash between the

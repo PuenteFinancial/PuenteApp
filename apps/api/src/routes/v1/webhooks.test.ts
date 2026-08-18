@@ -361,6 +361,7 @@ const transferRow = {
   state: 'PENDING_PAYMENT',
   send_amount_minor: 19801,
   fee_amount_minor: 199,
+  margin_minor: 0,
 }
 
 function selectChain(result: { data?: unknown; error?: unknown }) {

@@ -112,7 +112,7 @@ describe.skipIf(!runDb)('cancellation review exits (integration, local Supabase)
       fromState: 'PENDING_PAYMENT',
       toState: 'FUNDED',
       actor: 'webhook:funding',
-      ledgerEntries: fundedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE }),
+      ledgerEntries: fundedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE, margin_minor: 0 }),
     })
     await transitionTransfer({
       transferId,
@@ -138,7 +138,7 @@ describe.skipIf(!runDb)('cancellation review exits (integration, local Supabase)
       fromState: 'IN_FLIGHT',
       toState: 'COMPLETED',
       actor: 'worker:payment-event',
-      ledgerEntries: completedLedgerEntries({ send_amount_minor: S }),
+      ledgerEntries: completedLedgerEntries({ send_amount_minor: S, fee_amount_minor: FEE, margin_minor: 0 }),
     })
     return request
   }

@@ -108,6 +108,7 @@ const transfer = (state: string, over: Record<string, unknown> = {}) => ({
     user_id: 'user-1',
     state,
     send_amount_minor: 19801,
+    margin_minor: 0,
     // PR2 refund-tail fields (harmless for the pre-PR2 tests that ignore them)
     fee_amount_minor: 199,
     refund_payment_ref: null,
