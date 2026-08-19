@@ -487,6 +487,40 @@ describe('getBridgeDepositInstructions', () => {
     deposit_message: 'BRGABCD1234',
   }
 
+  it.each([
+    ['ach_push', 'ach'],
+    ['ACH_PUSH', 'ach'],
+    ['ach', 'ach'],
+    ['wire', 'wire'],
+    ['fednow', 'fednow'],
+  ])('maps Bridge rail %s to canonical stored rail %s', async (bridgeRail, stored) => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        id: 'onramp_1',
+        source_deposit_instructions: { ...FULL, payment_rail: bridgeRail },
+      }),
+    )
+    const { getBridgeDepositInstructions } = await import('./bridge.js')
+    const result = await getBridgeDepositInstructions('11111111-1111-4111-8111-111111111111')
+    // The stored value must satisfy the deposit_instructions payment_rail
+    // check constraint — persisting a raw Bridge rail is the prod bug
+    // (2026-08-18: 'ach_push' violated the constraint on the first real attach).
+    expect(result.paymentRail).toBe(stored)
+  })
+
+  it('rejects an unknown Bridge rail before anything can be persisted', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        id: 'onramp_1',
+        source_deposit_instructions: { ...FULL, payment_rail: 'rtp' },
+      }),
+    )
+    const { getBridgeDepositInstructions } = await import('./bridge.js')
+    await expect(
+      getBridgeDepositInstructions('11111111-1111-4111-8111-111111111111'),
+    ).rejects.toMatchObject({ statusCode: 502 })
+  })
+
   it('parses the full set and lowercases rail + currency', async () => {
     fetchMock.mockResolvedValue(
       jsonResponse(200, { id: 'onramp_1', source_deposit_instructions: FULL }),
