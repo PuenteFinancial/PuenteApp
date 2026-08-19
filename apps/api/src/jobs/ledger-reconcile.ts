@@ -15,7 +15,7 @@ import {
 // others — the error becomes that check's outcome ('error': its findings are
 // UNKNOWN, not zero) and is paged. The job itself only throws when the run row
 // cannot be persisted (worker handle() reports it; the queue's no-retry policy
-// means the next tick is tomorrow, which is exactly what a broken audit write
+// means the next tick is hours away, which is exactly what a broken audit write
 // should surface as: loudly, not silently).
 //
 // NOTHING here mutates money. The one auto-action in the registry is the
