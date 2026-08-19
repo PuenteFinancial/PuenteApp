@@ -80,6 +80,7 @@ doppler run -p puente-api -c stg_main -- sh -c 'curl -s -X POST "$BRIDGE_API_BAS
   -d "{
     \"amount\": \"<total, e.g. 57.0>\",
     \"on_behalf_of\": \"<bridge_customer_id>\",
+    \"developer_fee\": \"0\",
     \"source\": { \"payment_rail\": \"ach_push\", \"currency\": \"usd\" },
     \"destination\": { \"payment_rail\": \"base\", \"currency\": \"usdc\", \"bridge_wallet_id\": \"$BRIDGE_TREASURY_WALLET_ID\" },
     \"client_reference_id\": \"<transferId>\"
