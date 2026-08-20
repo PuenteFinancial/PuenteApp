@@ -20,6 +20,7 @@ const envMock = vi.hoisted(() => ({
   STUCK_SUBMITTED_AFTER_MINUTES: 30,
   STUCK_IN_FLIGHT_AFTER_MINUTES: 60,
   STUCK_UNDER_REVIEW_AFTER_HOURS: 24,
+  MANUAL_PENDING_MAX_AGE_DAYS: 7,
   FLOAT_CEILING_MINOR: undefined as number | undefined,
 }))
 vi.mock('../config/env.js', () => ({ env: envMock }))
@@ -46,6 +47,7 @@ const nowMs = NOW.getTime()
 const minutesAgo = (m: number) => new Date(nowMs - m * 60_000).toISOString()
 
 let transfersResult: { data: unknown; error: unknown }
+let instructionsResult: { data: unknown; error: unknown }
 let runsResult: { data: unknown; error: unknown }
 let heartbeatResult: { data: unknown; error: unknown }
 let transfersIn: ReturnType<typeof vi.fn>
@@ -64,6 +66,7 @@ const openRow = (over: Record<string, unknown> = {}) => ({
   user_id: 'u-1',
   state: 'FUNDED',
   send_amount_minor: 30_000,
+  fee_amount_minor: 500,
   funding_cleared: false,
   payout_hold_reason: null,
   disclosure_accepted_at: minutesAgo(90),
@@ -71,6 +74,7 @@ const openRow = (over: Record<string, unknown> = {}) => ({
   submit_attempted_at: null,
   cancellation_requested_at: null,
   created_at: minutesAgo(95),
+  funding_payment_ref: 'manualpay_ref-1',
   ...over,
 })
 
@@ -98,11 +102,13 @@ beforeEach(() => {
   getAccountBalance.mockReset().mockResolvedValue({ amountMinor: 0, currency: 'USD' })
   envMock.FLOAT_CEILING_MINOR = undefined
   transfersResult = { data: [], error: null }
+  instructionsResult = { data: [], error: null }
   runsResult = { data: [], error: null }
   heartbeatResult = { data: [], error: null }
   transfersIn = vi.fn()
   from.mockImplementation((table: string) => {
     if (table === 'transfers') return chain(() => transfersResult)
+    if (table === 'deposit_instructions') return chain(() => instructionsResult)
     if (table === 'reconciliation_runs') return chain(() => runsResult)
     if (table === 'worker_heartbeat') return chain(() => heartbeatResult)
     throw new Error(`unexpected supabase.from('${table}')`)
@@ -136,8 +142,15 @@ describe('buildOpsOverview', () => {
     expect(rpc).toHaveBeenCalledWith('ops_transfer_state_counts')
     expect(overview.ledgerBalances).toBeNull()
     expect(overview.reconciliationRuns).toEqual([])
-    // The open-transfers select sweeps exactly the pager's states.
-    expect(transfersIn).toHaveBeenCalledWith('state', ['FUNDED', 'SUBMITTED', 'IN_FLIGHT', 'UNDER_REVIEW'])
+    // The open-transfers select sweeps the pager's states PLUS
+    // PENDING_PAYMENT (board-only — the pager itself stays untouched).
+    expect(transfersIn).toHaveBeenCalledWith('state', [
+      'PENDING_PAYMENT',
+      'FUNDED',
+      'SUBMITTED',
+      'IN_FLIGHT',
+      'UNDER_REVIEW',
+    ])
   })
 
   it('maps open transfers with the pager clocks and sorts by dwell descending', async () => {
@@ -168,6 +181,7 @@ describe('buildOpsOverview', () => {
       transferId: 't-3',
       state: 'FUNDED',
       sendAmountMinor: 30_000,
+      feeAmountMinor: 500,
       enteredStateAt: minutesAgo(200), // cancel tap does NOT reset a FUNDED clock
       dwellMinutes: 200,
       thresholdMinutes: 15,
@@ -176,6 +190,8 @@ describe('buildOpsOverview', () => {
       fundingCleared: false,
       submitAttempted: false,
       cancellationRequested: true,
+      fundingInitiated: true,
+      onrampRef: null,
     })
     expect(overview.openTransfers[2]).toMatchObject({
       transferId: 't-2',
@@ -184,6 +200,94 @@ describe('buildOpsOverview', () => {
       overThreshold: false,
       submitAttempted: true,
     })
+  })
+
+  it('shows PENDING_PAYMENT rows on the board with the reconcile-pending clock, not the pager clock', async () => {
+    transfersResult = {
+      data: [
+        openRow({
+          id: 't-pp',
+          state: 'PENDING_PAYMENT',
+          // A confirmed-but-unpaid manual transfer: no payment yet, no payout.
+          payment_at: null,
+          funding_payment_ref: 'manualpay_pp',
+          created_at: minutesAgo(60 * 24 * 2), // 2 days old
+        }),
+      ],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+
+    expect(overview.openTransfers[0]).toMatchObject({
+      transferId: 't-pp',
+      state: 'PENDING_PAYMENT',
+      enteredStateAt: minutesAgo(60 * 24 * 2), // dwell anchors on creation
+      dwellMinutes: 60 * 24 * 2,
+      thresholdMinutes: 7 * 24 * 60, // MANUAL_PENDING_MAX_AGE_DAYS, not a pager knob
+      overThreshold: false, // 2 days into a 7-day window is NORMAL for ACH
+      fundingInitiated: true,
+      onrampRef: null,
+    })
+  })
+
+  it('flags a PENDING_PAYMENT row past the abandonment window', async () => {
+    transfersResult = {
+      data: [
+        openRow({
+          id: 't-old',
+          state: 'PENDING_PAYMENT',
+          payment_at: null,
+          created_at: minutesAgo(60 * 24 * 8), // 8 days > the 7-day window
+        }),
+      ],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+
+    expect(overview.openTransfers[0]).toMatchObject({ transferId: 't-old', overThreshold: true })
+  })
+
+  it('maps onramp refs from deposit_instructions and reports unconfirmed rows', async () => {
+    transfersResult = {
+      data: [
+        openRow({ id: 't-attached', state: 'PENDING_PAYMENT', payment_at: null }),
+        openRow({
+          id: 't-bare',
+          state: 'PENDING_PAYMENT',
+          payment_at: null,
+          funding_payment_ref: null, // not confirmed yet — nothing to act on
+        }),
+      ],
+      error: null,
+    }
+    instructionsResult = {
+      data: [{ transfer_id: 't-attached', bridge_transfer_ref: 'onramp-bridge-1' }],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+    const byId = new Map(overview.openTransfers.map((t) => [t.transferId, t]))
+
+    expect(byId.get('t-attached')).toMatchObject({
+      onrampRef: 'onramp-bridge-1',
+      fundingInitiated: true,
+    })
+    expect(byId.get('t-bare')).toMatchObject({ onrampRef: null, fundingInitiated: false })
+  })
+
+  it('fails closed when the deposit_instructions lookup breaks', async () => {
+    transfersResult = { data: [openRow()], error: null }
+    instructionsResult = { data: null, error: { message: 'boom' } }
+
+    await expect(buildOpsOverview()).rejects.toThrow(/deposit-instructions select failed/)
+  })
+
+  it('skips the deposit_instructions lookup entirely when there are no open transfers', async () => {
+    await buildOpsOverview()
+
+    expect(from).not.toHaveBeenCalledWith('deposit_instructions')
   })
 
   it('maps pending cancellations to the camelCase wire shape', async () => {

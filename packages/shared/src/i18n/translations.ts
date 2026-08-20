@@ -313,6 +313,7 @@ export type Translations = {
     waitClaimed: string
     waitUncleared: string
     waitCancelRequested: string
+    waitNoInstructions: string
     floatCeiling: string
     floatNotConfigured: string
     floatTripped: string
@@ -373,6 +374,30 @@ export type Translations = {
         not_found: string
         validation: string
         generic: string
+      }
+      // funding-ops-automation slice 1: per-row transfer actions (attach /
+      // release / deposit-landed). Operator jargon, same posture as above.
+      transfer: {
+        attach: string
+        release: string
+        depositLanded: string
+        confirmAttach: string
+        confirmRelease: string
+        confirmDepositLanded: string
+        totalLabel: string
+        onrampIdLabel: string
+        onrampIdInvalid: string
+        refLabel: string
+        refRequired: string
+        attachNote: string
+        releaseConsequence: string
+        depositLandedConsequence: string
+        outcomes: {
+          funded: string
+          cleared: string
+          cleared_skipped: string
+          attached: string
+        }
       }
     }
   }
@@ -865,6 +890,34 @@ const en: Translations = {
         generic:
           'The action failed. Nothing was changed silently — refresh and re-check the row before retrying.',
       },
+      transfer: {
+        attach: 'Attach instructions',
+        release: 'Release payout',
+        depositLanded: 'Deposit landed',
+        confirmAttach: 'Confirm attach',
+        confirmRelease: 'Confirm release',
+        confirmDepositLanded: 'Confirm deposit landed',
+        totalLabel: 'Transfer total',
+        onrampIdLabel: 'Bridge onramp transfer id',
+        onrampIdInvalid:
+          'Enter the onramp id as a UUID — it is the deposit-side transfer, NOT the payout id.',
+        refLabel: 'Deposit reference (the Bridge onramp id)',
+        refRequired: 'The reference is required — it is the audit tie to the money that moved.',
+        attachNote:
+          'Pulls the deposit coordinates off the onramp and renders them on the sender’s pay step. Re-attaching overwrites.',
+        releaseConsequence:
+          'Releases the payout NOW against the treasury float for this amount — release only on evidence the sender’s ACH was initiated.',
+        depositLandedConsequence:
+          'Books ARRIVAL, not intent: settles the receivable and tops up the float. Run when the wallet balance actually moved. Re-tapping is safe.',
+        outcomes: {
+          funded: 'Released — the worker submits the payout within about a minute.',
+          cleared: 'Deposit recorded — receivable settled and float topped up.',
+          cleared_skipped:
+            'Already recorded — the top-up re-posted as a no-op; nothing double-counted.',
+          attached:
+            'Instructions attached — the sender’s pay step now shows the coordinates.',
+        },
+      },
     },
     refundMoving: 'refund in motion',
     openTransfers: 'Open transfers',
@@ -882,6 +935,7 @@ const en: Translations = {
     waitClaimed: 'claimed (crash recovery)',
     waitUncleared: 'awaiting ACH clearing',
     waitCancelRequested: 'cancellation requested',
+    waitNoInstructions: 'no deposit instructions attached',
     floatCeiling: 'Float ceiling',
     floatNotConfigured: 'Float ceiling not configured in this environment.',
     floatTripped: 'Float ceiling tripped \u2014 payout submission paused',
@@ -1352,6 +1406,35 @@ const es: Translations = {
         generic:
           'La acci\u00f3n fall\u00f3. Nada cambi\u00f3 silenciosamente \u2014 actualiza y verifica la fila antes de reintentar.',
       },
+      transfer: {
+        attach: 'Adjuntar instrucciones',
+        release: 'Liberar pago',
+        depositLanded: 'Dep\u00f3sito recibido',
+        confirmAttach: 'Confirmar adjuntar',
+        confirmRelease: 'Confirmar liberaci\u00f3n',
+        confirmDepositLanded: 'Confirmar dep\u00f3sito recibido',
+        totalLabel: 'Total de la transferencia',
+        onrampIdLabel: 'Id del onramp de Bridge',
+        onrampIdInvalid:
+          'Ingresa el id del onramp como UUID \u2014 es la transferencia del lado del dep\u00f3sito, NO el id del payout.',
+        refLabel: 'Referencia del dep\u00f3sito (id del onramp de Bridge)',
+        refRequired:
+          'La referencia es obligatoria \u2014 es el v\u00ednculo de auditor\u00eda con el dinero que se movi\u00f3.',
+        attachNote:
+          'Toma las coordenadas de dep\u00f3sito del onramp y las muestra en el paso de pago del remitente. Re-adjuntar sobrescribe.',
+        releaseConsequence:
+          'Libera el pago AHORA contra el float de tesorer\u00eda por este monto \u2014 libera solo con evidencia de que el ACH del remitente fue iniciado.',
+        depositLandedConsequence:
+          'Registra LLEGADA, no intenci\u00f3n: liquida la cuenta por cobrar y repone el float. Ejecuta cuando el saldo de la billetera realmente cambi\u00f3. Volver a tocar es seguro.',
+        outcomes: {
+          funded: 'Liberado \u2014 el worker env\u00eda el payout en aproximadamente un minuto.',
+          cleared: 'Dep\u00f3sito registrado \u2014 cuenta por cobrar liquidada y float repuesto.',
+          cleared_skipped:
+            'Ya registrado \u2014 la reposici\u00f3n se re-public\u00f3 como no-op; nada se cont\u00f3 doble.',
+          attached:
+            'Instrucciones adjuntadas \u2014 el paso de pago del remitente ya muestra las coordenadas.',
+        },
+      },
     },
     refundMoving: 'reembolso en curso',
     openTransfers: 'Transferencias abiertas',
@@ -1369,6 +1452,7 @@ const es: Translations = {
     waitClaimed: 'reclamada (recuperaci\u00f3n tras fallo)',
     waitUncleared: 'esperando liquidaci\u00f3n ACH',
     waitCancelRequested: 'cancelaci\u00f3n solicitada',
+    waitNoInstructions: 'sin instrucciones de dep\u00f3sito adjuntas',
     floatCeiling: 'Techo de flotaci\u00f3n',
     floatNotConfigured: 'El techo de flotaci\u00f3n no est\u00e1 configurado en este entorno.',
     floatTripped: 'Techo de flotaci\u00f3n alcanzado \u2014 env\u00edo de pagos en pausa',
