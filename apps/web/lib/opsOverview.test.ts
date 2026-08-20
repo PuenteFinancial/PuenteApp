@@ -8,6 +8,9 @@ import {
   latestRun,
   latestFindings,
   isOpsResolveSuccessShape,
+  isOpsTransferFundingSuccessShape,
+  isOpsAttachSuccessShape,
+  transferActions,
   resolveErrorKind,
   firstDetailIssue,
   workerHeartbeatAlarm,
@@ -229,5 +232,57 @@ describe('worker heartbeat derivations', () => {
       ],
     })
     expect(stalestHeartbeat(o)?.worker).toBe('b')
+  })
+})
+
+describe('transferActions (funding-ops-automation slice 1)', () => {
+  // A row from a slice-1 API: action fields present.
+  const actionable = (over: Partial<OpsOpenTransfer> = {}): OpsOpenTransfer =>
+    openTransfer({ feeAmountMinor: 500, fundingInitiated: true, onrampRef: null, ...over })
+
+  it('returns [] on deploy skew — an older API omits the action fields', () => {
+    expect(transferActions(openTransfer())).toEqual([])
+    expect(transferActions(openTransfer({ state: 'PENDING_PAYMENT' }))).toEqual([])
+  })
+
+  it('offers attach + release on a confirmed PENDING_PAYMENT row', () => {
+    expect(transferActions(actionable({ state: 'PENDING_PAYMENT' }))).toEqual([
+      'attach',
+      'release',
+    ])
+  })
+
+  it('offers NOTHING on an unconfirmed PENDING_PAYMENT row — no ref to act on yet', () => {
+    expect(
+      transferActions(actionable({ state: 'PENDING_PAYMENT', fundingInitiated: false })),
+    ).toEqual([])
+  })
+
+  it('offers deposit-landed on released rows until the receivable settles', () => {
+    for (const state of ['FUNDED', 'SUBMITTED', 'IN_FLIGHT', 'UNDER_REVIEW']) {
+      expect(transferActions(actionable({ state }))).toEqual(['depositLanded'])
+      expect(transferActions(actionable({ state, fundingCleared: true }))).toEqual([])
+    }
+  })
+})
+
+describe('transfer action success shapes', () => {
+  it('accepts every funding outcome and rejects the rest', () => {
+    for (const outcome of ['funded', 'cleared', 'cleared_skipped']) {
+      expect(isOpsTransferFundingSuccessShape({ transferId: 't-1', outcome })).toBe(true)
+    }
+    expect(isOpsTransferFundingSuccessShape({ transferId: 't-1', outcome: 'attached' })).toBe(false)
+    expect(isOpsTransferFundingSuccessShape({ outcome: 'funded' })).toBe(false)
+    expect(isOpsTransferFundingSuccessShape(null)).toBe(false)
+  })
+
+  it('requires the attach shape to carry the reference code', () => {
+    expect(
+      isOpsAttachSuccessShape({ transferId: 't-1', outcome: 'attached', depositMessage: 'BRGABC' }),
+    ).toBe(true)
+    expect(isOpsAttachSuccessShape({ transferId: 't-1', outcome: 'attached' })).toBe(false)
+    expect(
+      isOpsAttachSuccessShape({ transferId: 't-1', outcome: 'funded', depositMessage: 'BRGABC' }),
+    ).toBe(false)
   })
 })

@@ -3,7 +3,11 @@ import { env } from '../../config/env.js'
 import { buildOpsOverview } from '../../services/ops-overview.js'
 import { refundCancellation, denyCancellation } from '../../services/cancellation-review.js'
 import { recordManualFunding } from '../../services/funding-apply.js'
-import { attachDepositInstructions } from '../../services/deposit-instructions.js'
+import { recordFloatTopUp } from '../../services/payouts.js'
+import {
+  attachDepositInstructions,
+  getDepositInstructions,
+} from '../../services/deposit-instructions.js'
 import { errorResponseSchema, sendError } from '../../utils/errors.js'
 
 // The money-ops surface (slices 8.5-v1 + v1.1, docs/api-contract.md).
@@ -76,6 +80,7 @@ const overviewResponseSchema = {
           transferId: { type: 'string' },
           state: { type: 'string' },
           sendAmountMinor: { type: 'number' },
+          feeAmountMinor: { type: 'number' },
           enteredStateAt: { type: 'string' },
           dwellMinutes: { type: 'number' },
           thresholdMinutes: { type: 'number' },
@@ -84,6 +89,8 @@ const overviewResponseSchema = {
           fundingCleared: { type: 'boolean' },
           submitAttempted: { type: 'boolean' },
           cancellationRequested: { type: 'boolean' },
+          fundingInitiated: { type: 'boolean' },
+          onrampRef: { type: ['string', 'null'] },
         },
       },
     },
@@ -208,6 +215,31 @@ const manualFundingResponseSchema = {
   properties: {
     transferId: { type: 'string' },
     outcome: { type: 'string', enum: ['funded', 'cleared', 'cleared_skipped'] },
+  },
+} as const
+
+// Same body-not-path reasoning as the schemas above, same to-the-cent amount
+// assertion as manualFundingBodySchema — deposit-landed is the cleared
+// assertion plus the float top-up in one action, so it takes the same inputs.
+const depositLandedBodySchema = {
+  type: 'object',
+  required: ['transferId', 'externalRef', 'amountMinor', 'currency'],
+  additionalProperties: false,
+  properties: {
+    transferId: { type: 'string', format: 'uuid' },
+    externalRef: { type: 'string', minLength: 1, maxLength: 200 },
+    amountMinor: { type: 'integer', minimum: 1 },
+    currency: { type: 'string', enum: ['USD'] },
+  },
+} as const
+
+const depositLandedResponseSchema = {
+  type: 'object',
+  properties: {
+    transferId: { type: 'string' },
+    // cleared_skipped still 200s — the receivable was already settled and the
+    // top-up (idempotent on the ref) was still posted; a re-tap is a success.
+    outcome: { type: 'string', enum: ['cleared', 'cleared_skipped'] },
   },
 } as const
 
@@ -576,6 +608,147 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
         request.log.error(
           { route: 'ops/transfers/deposit-instructions' },
           `ops attach instructions failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+        return sendError(reply, 500, 'internal_error', 'Something went wrong')
+      }
+    },
+  )
+
+  // POST /v1/ops/transfers/deposit-landed (funding-ops-automation slice 1) —
+  // the "deposit landed" button: one action, both books. Runs the cleared
+  // assertion (settles the funding receivable) and then the treasury float
+  // top-up (the deposit physically landed in the wallet), the same pair the
+  // runbook's §6 commands post.
+  //
+  // Deliberately NOT idempotency-keyed (deposit-instructions precedent): both
+  // legs are naturally idempotent on the onramp ref — cleared replays as
+  // cleared_skipped, and the top-up's ledger key is float_topup:<ref>. The
+  // ordering invariant is cleared FIRST: a crash between the legs leaves a
+  // state where a re-tap skips the receivable and still posts the top-up,
+  // which is why the top-up must run on cleared_skipped too, never only on a
+  // fresh cleared.
+  server.post<{
+    Body: { transferId: string; externalRef: string; amountMinor: number; currency: 'USD' }
+  }>(
+    '/ops/transfers/deposit-landed',
+    {
+      onRequest: async (request, reply) => {
+        if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
+          return sendError(reply, 404, 'not_found', 'Route not found')
+        }
+      },
+      schema: {
+        body: depositLandedBodySchema,
+        response: {
+          200: depositLandedResponseSchema,
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          500: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
+        return sendError(reply, 404, 'not_found', 'Route not found')
+      }
+
+      const { transferId, amountMinor } = request.body
+      // Trimmed once and used for BOTH legs, so the cleared assertion and the
+      // ledger idempotency key can never disagree about the ref. An all-
+      // whitespace ref would pass minLength yet blow up recordFloatTopUp AFTER
+      // the receivable settled — refuse it before any money moves.
+      const externalRef = request.body.externalRef.trim()
+      if (externalRef.length === 0) {
+        return sendError(reply, 400, 'validation_error', 'externalRef must not be blank', [
+          { path: 'externalRef', issue: 'must contain a non-whitespace character' },
+        ])
+      }
+
+      try {
+        // Ref-typo guard (security review, slice 1): the float top-up's ledger
+        // key is float_topup:<ref> GLOBALLY — another transfer's ref typed
+        // here would settle THIS receivable while consuming THAT transfer's
+        // top-up key, leaving the float ledger silently short until recon.
+        // When instructions are attached the prefill is authoritative: the
+        // stated ref must match. A transfer with nothing attached keeps the
+        // CLI-parity behavior (operator-asserted ref, runbook §6).
+        const instructions = await getDepositInstructions(transferId)
+        if (instructions != null && instructions.bridge_transfer_ref !== externalRef) {
+          return sendError(
+            reply,
+            409,
+            'conflict',
+            'Stated reference does not match the attached deposit instructions',
+            [{ path: 'externalRef', issue: `expected ${instructions.bridge_transfer_ref}` }],
+          )
+        }
+
+        const result = await recordManualFunding({
+          transferId,
+          kind: 'cleared',
+          externalRef,
+          amountMinor,
+          operator: request.user!.id,
+        })
+
+        if (result.done) {
+          // On cleared AND cleared_skipped: the skip means the receivable was
+          // already settled (a prior tap, or this tap's crashed predecessor) —
+          // the top-up is idempotent on the ref, so posting again is a no-op,
+          // and skipping it here is what would strand a half-recorded deposit.
+          await recordFloatTopUp({ amountMinor, externalRef })
+          return { transferId, outcome: result.outcome }
+        }
+
+        // Same refusal taxonomy as the funding route (and the funded-only
+        // reasons stay mapped so the switch is exhaustive over the type).
+        switch (result.reason) {
+          case 'transfer_not_found':
+            return sendError(reply, 404, 'not_found', 'Transfer not found')
+          case 'processor_not_manual':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              `Out-of-band funding requires FUNDING_PROCESSOR=manual (currently ${result.provider})`,
+            )
+          case 'already_funded':
+            return sendError(reply, 409, 'conflict', 'Transfer is already funded')
+          case 'not_pending_payment':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              `Transfer is not awaiting payment (state ${result.state})`,
+            )
+          case 'funding_not_initiated':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              'Transfer has no funding reference — the sender has not confirmed it yet',
+            )
+          case 'amount_mismatch':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              'Stated amount does not match this transfer',
+              [{ path: 'amountMinor', issue: `expected ${result.expectedMinor}` }],
+            )
+          case 'stale':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              'Transfer moved while being funded — refresh and retry',
+            )
+        }
+      } catch (err) {
+        request.log.error(
+          { route: 'ops/transfers/deposit-landed' },
+          `ops deposit-landed failed: ${err instanceof Error ? err.message : String(err)}`,
         )
         return sendError(reply, 500, 'internal_error', 'Something went wrong')
       }

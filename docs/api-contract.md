@@ -286,6 +286,9 @@ row has no postings and no funds moved — a dead row, not lost money).
 |---|---|---|---|---|
 | GET | `/v1/ops/overview` | bearer + `OPS_ADMIN_USER_IDS` allowlist | read-only | Non-admins get **404 `not_found`** with a body identical to a missing route — never 403. Route is not even registered when the allowlist is unset (fail closed). |
 | POST | `/v1/ops/cancellations/resolve` | bearer + allowlist + `OPS_WRITE_ENABLED` (double control) | `Idempotency-Key` required | Same 404 posture, both layers: not registered unless BOTH env controls are set, handler re-checks both + membership first. Wraps the SAME services as `resolve-cancellation.ts` (the CLI stays break-glass). |
+| POST | `/v1/ops/transfers/funding` | double control | `Idempotency-Key` required | Out-of-band funding assertion (#190): `kind: funded` releases the payout (`PENDING_PAYMENT → FUNDED`), `kind: cleared` settles the receivable when the deposit lands. Body: `{ transferId, kind, externalRef, amountMinor, currency }` — amount checked to the cent (409 `conflict` on mismatch). CLI `record-manual-funding.ts` is break-glass. |
+| POST | `/v1/ops/transfers/deposit-instructions` | double control | naturally idempotent (no key) | Attach (#203, for #199): pulls the deposit coordinates off a hand-created Bridge onramp and upserts them onto the transfer. Body: `{ transferId, bridgeTransferId }`. Re-attach overwrites. CLI `attach-deposit-instructions.ts` is break-glass. |
+| POST | `/v1/ops/transfers/deposit-landed` | double control | naturally idempotent (no key) | Slice 1, funding-ops-automation: one action, both books — `recordManualFunding(kind: cleared)` then `recordFloatTopUp`, idempotent on the shared onramp ref (cleared replays as `cleared_skipped`; ledger key `float_topup:<ref>`). Ordering invariant: cleared FIRST, and the top-up runs on `cleared_skipped` too, so a re-tap after a mid-action crash heals. When instructions are attached, `externalRef` MUST match `deposit_instructions.bridge_transfer_ref` (409 `conflict` otherwise) — the ledger key is global, so a cross-transfer ref typo would silently consume another transfer's top-up. Body: `{ transferId, externalRef, amountMinor, currency }` → 200 `{ transferId, outcome: cleared \| cleared_skipped }`. |
 
 One aggregate for the ops page (`/dashboard/ops`, no nav entry — direct URL).
 **The response schema is the output allowlist**: every field is enumerated; recon check
@@ -303,13 +306,16 @@ timestamps, states, hold reasons, booleans; never names, destinations, or user i
       "feeAmountMinor": 550, "requestedAt": "…", "withinWindow": false,
       "refundPaymentRef": null }   // non-null ⇒ a refund is already in motion
   ],
-  "openTransfers": [               // every FUNDED|SUBMITTED|IN_FLIGHT|UNDER_REVIEW row (bounded 1000)
+  "openTransfers": [               // every PENDING_PAYMENT|FUNDED|SUBMITTED|IN_FLIGHT|UNDER_REVIEW row (bounded 1000)
     { "transferId": "…", "state": "FUNDED", "sendAmountMinor": 30000,
+      "feeAmountMinor": 500,       // slice 1: buttons must state the total to the cent
       "enteredStateAt": "…",       // coarse stamp anchor — may predate the current stay on a state round trip
-      "dwellMinutes": 83, "thresholdMinutes": 15,
+      "dwellMinutes": 83, "thresholdMinutes": 15,  // PENDING_PAYMENT thresholds on MANUAL_PENDING_MAX_AGE_DAYS (the sweep's clock), not a pager knob
       "overThreshold": true,       // page marker only; the stuck-watch Sentry pager owns verdicts
       "holdReason": null,          // fx_drift | payability | submit_error | velocity_review | null
-      "fundingCleared": false, "submitAttempted": false, "cancellationRequested": false }
+      "fundingCleared": false, "submitAttempted": false, "cancellationRequested": false,
+      "fundingInitiated": true,    // slice 1: funding_payment_ref set — actions render only on confirmed rows
+      "onrampRef": null }          // slice 1: Bridge onramp id from deposit_instructions (prefills deposit-landed); null = nothing attached
   ],
   "floatCeiling": {                // live funding_receivable vs FLOAT_CEILING_MINOR
     "configured": true,            // false when the env knob is unset in the API process (not an error)

@@ -3,7 +3,7 @@ import { supabaseAdmin } from './supabase.js'
 import { listPendingReviews } from './cancellation-review.js'
 import { isFloatCeilingTripped } from './payouts.js'
 import { getAccountBalance } from './ledger.js'
-import { coarseAnchor, thresholdMs, WATCHED_STATES, type WatchedState } from '../jobs/stuck-watch.js'
+import { coarseAnchor, thresholdMs, WATCHED_STATES } from '../jobs/stuck-watch.js'
 
 // The 8.5-v1 ops overview (GET /v1/ops/overview, docs/api-contract.md): one
 // read-only aggregate the admin page renders in a single pass. Panels are all
@@ -31,10 +31,22 @@ export interface OpsPendingCancellation {
   refundPaymentRef: string | null
 }
 
+// The board watches the pager's states PLUS PENDING_PAYMENT (slice 1,
+// docs/prds/funding-ops-automation.md): the attach and release actions act on
+// PENDING_PAYMENT rows, so the operator must see them here. Board-only —
+// WATCHED_STATES itself is shared with the stuck-watch pager, and a days-scale
+// PENDING_PAYMENT dwell is NORMAL under the manual rail (the sender's ACH is
+// in flight), so widening the pager would only teach it to cry wolf.
+const OVERVIEW_STATES = ['PENDING_PAYMENT', ...WATCHED_STATES] as const
+export type OpsOverviewState = (typeof OVERVIEW_STATES)[number]
+
 export interface OpsOpenTransfer {
   transferId: string
-  state: WatchedState
+  state: OpsOverviewState
   sendAmountMinor: number
+  // The action buttons must state the transfer total to the cent (the funding
+  // assertion 409s amount_mismatch otherwise) — send alone is not enough.
+  feeAmountMinor: number
   enteredStateAt: string
   dwellMinutes: number
   thresholdMinutes: number
@@ -43,6 +55,13 @@ export interface OpsOpenTransfer {
   fundingCleared: boolean
   submitAttempted: boolean
   cancellationRequested: boolean
+  // funding_payment_ref non-null — the sender confirmed; actions render only
+  // on confirmed rows (before confirm there is nothing to attach or release).
+  fundingInitiated: boolean
+  // The Bridge onramp id from deposit_instructions, when attached: prefills
+  // the deposit-landed ref and marks PENDING_PAYMENT rows that still need the
+  // attach step. Provider id, not PII (refundPaymentRef precedent).
+  onrampRef: string | null
 }
 
 export interface OpsFloatCeiling {
@@ -96,8 +115,9 @@ export interface OpsOverview {
 interface OpenRow {
   id: string
   user_id: string
-  state: WatchedState
+  state: OpsOverviewState
   send_amount_minor: number
+  fee_amount_minor: number
   funding_cleared: boolean
   payout_hold_reason: string | null
   disclosure_accepted_at: string | null
@@ -105,15 +125,32 @@ interface OpenRow {
   submit_attempted_at: string | null
   cancellation_requested_at: string | null
   created_at: string
+  funding_payment_ref: string | null
+}
+
+// PENDING_PAYMENT precedes every lifecycle stamp coarseAnchor folds in, so its
+// dwell runs from creation; every other state keeps the pager's own anchor.
+function overviewAnchor(row: OpenRow): string {
+  if (row.state === 'PENDING_PAYMENT') return row.created_at
+  return coarseAnchor({ ...row, state: row.state })
+}
+
+// PENDING_PAYMENT's threshold mirrors the reconcile-pending sweep's
+// abandonment window (MANUAL_PENDING_MAX_AGE_DAYS) the same way the other
+// states mirror the stuck-watch pager — the board must tick with the clock
+// that actually acts on the row.
+function overviewThresholdMs(state: OpsOverviewState): number {
+  if (state === 'PENDING_PAYMENT') return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60_000
+  return thresholdMs(state)
 }
 
 async function readOpenTransfers(nowMs: number): Promise<OpsOpenTransfer[]> {
   const { data, error } = await supabaseAdmin
     .from('transfers')
     .select(
-      'id, user_id, state, send_amount_minor, funding_cleared, payout_hold_reason, disclosure_accepted_at, payment_at, submit_attempted_at, cancellation_requested_at, created_at',
+      'id, user_id, state, send_amount_minor, fee_amount_minor, funding_cleared, payout_hold_reason, disclosure_accepted_at, payment_at, submit_attempted_at, cancellation_requested_at, created_at, funding_payment_ref',
     )
-    .in('state', [...WATCHED_STATES])
+    .in('state', [...OVERVIEW_STATES])
     .limit(ROW_BOUND)
   if (error || data == null) {
     throw new Error(`ops open-transfers select failed: ${error?.message ?? 'no rows returned'}`)
@@ -124,18 +161,42 @@ async function readOpenTransfers(nowMs: number): Promise<OpsOpenTransfer[]> {
       `ops open-transfers hit the ${ROW_BOUND}-row PostgREST cap — results may be silently truncated`,
     )
   }
+
+  // Onramp refs for the action buttons. Same fail-closed posture as every
+  // other panel read: a broken lookup must not render as "nothing attached".
+  const onrampRefs = new Map<string, string>()
+  if (rows.length > 0) {
+    const { data: instructions, error: diError } = await supabaseAdmin
+      .from('deposit_instructions')
+      .select('transfer_id, bridge_transfer_ref')
+      .in(
+        'transfer_id',
+        rows.map((row) => row.id),
+      )
+      .limit(ROW_BOUND)
+    if (diError || instructions == null) {
+      throw new Error(
+        `ops deposit-instructions select failed: ${diError?.message ?? 'no rows returned'}`,
+      )
+    }
+    for (const row of instructions as Array<{ transfer_id: string; bridge_transfer_ref: string }>) {
+      onrampRefs.set(row.transfer_id, row.bridge_transfer_ref)
+    }
+  }
+
   return rows
     .map((row) => {
       // coarseAnchor may predate the current stay after a state round trip —
       // the page over-states age in that rare case; the stuck-watch pager owns
       // exact verdicts (its page carries the transitions-log entry time).
-      const enteredStateAt = coarseAnchor(row)
+      const enteredStateAt = overviewAnchor(row)
       const dwellMs = nowMs - new Date(enteredStateAt).getTime()
-      const threshold = thresholdMs(row.state)
+      const threshold = overviewThresholdMs(row.state)
       return {
         transferId: row.id,
         state: row.state,
         sendAmountMinor: row.send_amount_minor,
+        feeAmountMinor: row.fee_amount_minor,
         enteredStateAt,
         dwellMinutes: Math.max(0, Math.round(dwellMs / 60_000)),
         thresholdMinutes: Math.round(threshold / 60_000),
@@ -144,6 +205,8 @@ async function readOpenTransfers(nowMs: number): Promise<OpsOpenTransfer[]> {
         fundingCleared: row.funding_cleared,
         submitAttempted: row.submit_attempted_at != null,
         cancellationRequested: row.cancellation_requested_at != null,
+        fundingInitiated: row.funding_payment_ref != null,
+        onrampRef: onrampRefs.get(row.id) ?? null,
       }
     })
     .sort((a, b) => b.dwellMinutes - a.dwellMinutes)

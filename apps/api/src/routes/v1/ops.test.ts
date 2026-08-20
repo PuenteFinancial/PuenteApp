@@ -40,8 +40,17 @@ vi.mock('../../services/funding-apply.js', () => ({
 // Same split for #199: the attach rules (Bridge fetch, amount verify, upsert)
 // are pinned in deposit-instructions tests; here only gate + mapping.
 const attachDepositInstructions = vi.hoisted(() => vi.fn())
+const getDepositInstructions = vi.hoisted(() => vi.fn())
 vi.mock('../../services/deposit-instructions.js', () => ({
   attachDepositInstructions: (...args: unknown[]) => attachDepositInstructions(...args),
+  getDepositInstructions: (...args: unknown[]) => getDepositInstructions(...args),
+}))
+
+// The float top-up ledger rules are pinned in payouts tests; deposit-landed
+// tests cover only gate + ordering (cleared first, top-up on BOTH outcomes).
+const recordFloatTopUp = vi.hoisted(() => vi.fn())
+vi.mock('../../services/payouts.js', () => ({
+  recordFloatTopUp: (...args: unknown[]) => recordFloatTopUp(...args),
 }))
 
 // supabaseAdmin backs only the idempotency plugin here — claims always win.
@@ -118,6 +127,8 @@ beforeEach(() => {
   denyCancellation.mockReset()
   recordManualFunding.mockReset()
   attachDepositInstructions.mockReset()
+  getDepositInstructions.mockReset().mockResolvedValue(null)
+  recordFloatTopUp.mockReset().mockResolvedValue({ idempotencyKey: 'float_topup:x' })
   from.mockReset().mockImplementation(() => chain({ data: { id: 'claim-1' } }))
 })
 
@@ -852,5 +863,224 @@ describe('POST /v1/ops/transfers/deposit-instructions', () => {
     expect(res.status).toBe(500)
     expect(res.body.error.message).not.toContain('bridge exploded')
     await app.close()
+  })
+})
+
+describe('POST /v1/ops/transfers/deposit-landed', () => {
+  const PATH = '/v1/ops/transfers/deposit-landed'
+  const BODY = {
+    transferId: TRANSFER_ID,
+    externalRef: EXTERNAL_REF,
+    amountMinor: 5100,
+    currency: 'USD' as const,
+  }
+  const post = (app: Awaited<ReturnType<typeof buildApp>>, token: string) =>
+    supertest(app.server).post(PATH).set('Authorization', `Bearer ${token}`)
+
+  beforeEach(() => {
+    envMock.OPS_WRITE_ENABLED = true
+    recordManualFunding.mockResolvedValue({ done: true, outcome: 'cleared' })
+  })
+
+  describe('gate', () => {
+    it('is not registered at all when OPS_WRITE_ENABLED is false (router 404)', async () => {
+      envMock.OPS_WRITE_ENABLED = false
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(404)
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      expect(recordFloatTopUp).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('401s an unauthenticated request', async () => {
+      const app = await buildApp()
+      const res = await supertest(app.server).post(PATH).send(BODY)
+      expect(res.status).toBe(401)
+      await app.close()
+    })
+
+    it('404s a non-admin with a body identical to a genuinely missing route', async () => {
+      const app = await buildApp()
+      const gated = await post(app, NON_ADMIN).send(BODY)
+      const missing = await supertest(app.server)
+        .post('/v1/ops/nonexistent')
+        .set('Authorization', `Bearer ${NON_ADMIN}`)
+        .send(BODY)
+      expect(gated.status).toBe(404)
+      expect(gated.body.error.code).toBe(missing.body.error.code)
+      expect(gated.body.error.message).toBe(missing.body.error.message)
+      expect(Object.keys(gated.body.error).sort()).toEqual(Object.keys(missing.body.error).sort())
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      expect(recordFloatTopUp).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('404s a non-admin BEFORE validation — garbage body must not leak a 400', async () => {
+      const app = await buildApp()
+      const res = await post(app, NON_ADMIN).send({ nonsense: true })
+      expect(res.status).toBe(404)
+      await app.close()
+    })
+
+    it('404s even an admin when the write flag drops after registration', async () => {
+      const app = await buildApp()
+      envMock.OPS_WRITE_ENABLED = false
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(404)
+      await app.close()
+    })
+  })
+
+  describe('validation', () => {
+    it('400s a missing externalRef', async () => {
+      const app = await buildApp()
+      const rest: Record<string, unknown> = { ...BODY }
+      delete rest.externalRef
+      const res = await post(app, ADMIN).send(rest)
+      expect(res.status).toBe(400)
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('400s an all-whitespace externalRef BEFORE any leg runs — it would settle the receivable and then blow up the top-up', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, externalRef: '   ' })
+      expect(res.status).toBe(400)
+      expect(res.body.error.details[0].path).toBe('externalRef')
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      expect(recordFloatTopUp).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('400s a non-USD currency', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, currency: 'MXN' })
+      expect(res.status).toBe(400)
+      await app.close()
+    })
+
+    it('strips an unknown field so it can never reach the services', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, kind: 'funded' })
+      expect(res.status).toBe(200)
+      expect(recordManualFunding).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'cleared' }),
+      )
+      await app.close()
+    })
+  })
+
+  describe('outcome mapping and ordering', () => {
+    it('200s a cleared deposit and posts the top-up with the SAME trimmed ref', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, externalRef: `  ${EXTERNAL_REF}  ` })
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ transferId: TRANSFER_ID, outcome: 'cleared' })
+      expect(recordManualFunding).toHaveBeenCalledWith({
+        transferId: TRANSFER_ID,
+        kind: 'cleared',
+        externalRef: EXTERNAL_REF,
+        amountMinor: 5100,
+        operator: ADMIN,
+      })
+      expect(recordFloatTopUp).toHaveBeenCalledWith({
+        amountMinor: 5100,
+        externalRef: EXTERNAL_REF,
+      })
+      await app.close()
+    })
+
+    it('still posts the top-up on cleared_skipped — the re-tap-heals invariant', async () => {
+      recordManualFunding.mockResolvedValue({
+        done: true,
+        outcome: 'cleared_skipped',
+        state: 'SUBMITTED',
+      })
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ transferId: TRANSFER_ID, outcome: 'cleared_skipped' })
+      expect(recordFloatTopUp).toHaveBeenCalledWith({
+        amountMinor: 5100,
+        externalRef: EXTERNAL_REF,
+      })
+      await app.close()
+    })
+
+    it('409s a ref that does not match the attached instructions — the cross-transfer typo guard', async () => {
+      getDepositInstructions.mockResolvedValue({ bridge_transfer_ref: 'the-real-onramp-id' })
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, externalRef: 'some-other-ref' })
+      expect(res.status).toBe(409)
+      expect(res.body.error.details[0].issue).toContain('the-real-onramp-id')
+      // NEITHER book moved: the typo would have consumed another transfer's
+      // float_topup key and left the float silently short until recon.
+      expect(recordManualFunding).not.toHaveBeenCalled()
+      expect(recordFloatTopUp).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('accepts a ref that matches the attached instructions', async () => {
+      getDepositInstructions.mockResolvedValue({ bridge_transfer_ref: EXTERNAL_REF })
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(200)
+      expect(recordFloatTopUp).toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('accepts an operator-asserted ref when nothing is attached (CLI-parity path)', async () => {
+      getDepositInstructions.mockResolvedValue(null)
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(200)
+      await app.close()
+    })
+
+    it('never tops up when the cleared assertion refuses', async () => {
+      recordManualFunding.mockResolvedValue({
+        done: false,
+        reason: 'amount_mismatch',
+        expectedMinor: 5200,
+      })
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(409)
+      expect(res.body.error.details[0].issue).toContain('5200')
+      expect(recordFloatTopUp).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('404s transfer_not_found without touching the ledger', async () => {
+      recordManualFunding.mockResolvedValue({ done: false, reason: 'transfer_not_found' })
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(404)
+      expect(recordFloatTopUp).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('409s processor_not_manual naming the configured provider', async () => {
+      recordManualFunding.mockResolvedValue({
+        done: false,
+        reason: 'processor_not_manual',
+        provider: 'stripe',
+      })
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(409)
+      expect(res.body.error.message).toContain('stripe')
+      await app.close()
+    })
+
+    it('500s (generic envelope) when the top-up throws AFTER cleared — the re-tap path', async () => {
+      recordFloatTopUp.mockRejectedValue(new Error('ledger down'))
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(500)
+      expect(res.body.error.message).not.toContain('ledger down')
+      await app.close()
+    })
   })
 })

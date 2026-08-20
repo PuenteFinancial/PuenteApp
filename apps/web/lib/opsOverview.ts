@@ -33,6 +33,13 @@ export interface OpsOpenTransfer {
   fundingCleared: boolean
   submitAttempted: boolean
   cancellationRequested: boolean
+  // funding-ops-automation slice 1 — OPTIONAL with the same deploy-skew
+  // semantics as actionsEnabled: an older API omits them and transferActions()
+  // returns [], so the row renders read-only instead of a button that would
+  // 409 on a total it cannot state.
+  feeAmountMinor?: number
+  fundingInitiated?: boolean
+  onrampRef?: string | null
 }
 
 export interface OpsFloatCeiling {
@@ -177,6 +184,54 @@ export function firstDetailIssue(body: unknown): string | null {
   const details = body.error.details
   if (!Array.isArray(details) || !isRecord(details[0])) return null
   return typeof details[0].issue === 'string' ? details[0].issue : null
+}
+
+// ── Transfer actions (funding-ops-automation slice 1) ────────────────────────
+
+const TRANSFER_FUNDING_OUTCOMES = ['funded', 'cleared', 'cleared_skipped'] as const
+export type OpsTransferFundingOutcome = (typeof TRANSFER_FUNDING_OUTCOMES)[number]
+
+export interface OpsTransferFundingSuccess {
+  transferId: string
+  outcome: OpsTransferFundingOutcome
+}
+
+// One guard for both money writes: the funding route answers 'funded', the
+// deposit-landed route 'cleared' | 'cleared_skipped' — same envelope.
+export function isOpsTransferFundingSuccessShape(v: unknown): v is OpsTransferFundingSuccess {
+  if (!isRecord(v)) return false
+  if (typeof v.transferId !== 'string') return false
+  return TRANSFER_FUNDING_OUTCOMES.includes(v.outcome as OpsTransferFundingOutcome)
+}
+
+export interface OpsAttachSuccess {
+  transferId: string
+  outcome: 'attached'
+  depositMessage: string
+}
+
+export function isOpsAttachSuccessShape(v: unknown): v is OpsAttachSuccess {
+  if (!isRecord(v)) return false
+  if (typeof v.transferId !== 'string') return false
+  if (v.outcome !== 'attached') return false
+  return typeof v.depositMessage === 'string'
+}
+
+export type OpsTransferAction = 'attach' | 'release' | 'depositLanded'
+
+/**
+ * Which actions a row supports. Encodes the operational order, not the API's
+ * full reachability: attach and release act on a confirmed PENDING_PAYMENT
+ * row; deposit-landed acts on any released row whose receivable is still open
+ * (the runbook's §5-then-§6 order — cleared before release is not offered even
+ * though the API would take it). Deploy skew (missing fields) → no actions.
+ */
+export function transferActions(tr: OpsOpenTransfer): OpsTransferAction[] {
+  if (tr.feeAmountMinor === undefined || tr.fundingInitiated === undefined) return []
+  if (tr.state === 'PENDING_PAYMENT') {
+    return tr.fundingInitiated ? ['attach', 'release'] : []
+  }
+  return tr.fundingCleared ? [] : ['depositLanded']
 }
 
 // ── Derivations (the API ships two lists; the page shows five panels) ────────

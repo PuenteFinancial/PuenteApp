@@ -9,6 +9,7 @@
 // Everything else stays read-only; trigger-refund for PAYOUT_FAILED is v1.2.
 import { useLanguage } from '@/components/LanguageProvider'
 import CancellationActions from '@/components/ops/CancellationActions'
+import TransferActions from '@/components/ops/TransferActions'
 import { badgeTone, type TransferState } from '@/lib/transferState'
 import type { BadgeTone } from '@/lib/transferState'
 import { formatUsd, formatDate } from '@/lib/sendFormat'
@@ -102,6 +103,11 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
     // receivable is a fact, not a wait reason (review note).
     if (!tr.fundingCleared && tr.state === 'FUNDED') notes.push(s.waitUncleared)
     if (tr.cancellationRequested) notes.push(s.waitCancelRequested)
+    // A confirmed manual transfer whose sender still has nowhere to pay — the
+    // attach step is the operator's move (slice 3 automates it; until then
+    // this is the loudest "your move" on a PENDING_PAYMENT row).
+    if (tr.state === 'PENDING_PAYMENT' && tr.fundingInitiated === true && tr.onrampRef == null)
+      notes.push(s.waitNoInstructions)
     return notes
   }
 
@@ -127,6 +133,7 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
           {waitAnnotations(tr).join(' · ')}
         </div>
       )}
+      {overview.actionsEnabled === true && <TransferActions tr={tr} />}
     </Card>
   )
 
