@@ -16,6 +16,7 @@ import {
   JOB_PAYOUT_SWEEP,
   JOB_PAYOUT_POLL,
   JOB_PAYMENT_EVENT_PROCESS,
+  JOB_FUNDING_ONRAMP_PREPARE,
   JOB_RECONCILE_PENDING,
   JOB_IDEMPOTENCY_PURGE,
   JOB_OTP_ATTEMPT_PURGE,
@@ -26,6 +27,7 @@ import {
   WORKER_HEARTBEAT_CRON,
   type PayoutSubmitPayload,
   type PaymentEventProcessPayload,
+  type FundingOnrampPreparePayload,
 } from './services/queue.js'
 import { reconcilePendingTransfers } from './jobs/reconcile-pending.js'
 import { watchLossCorrections } from './jobs/correction-watch.js'
@@ -37,6 +39,7 @@ import { submitPayout } from './jobs/payout-submit.js'
 import { sweepPayouts } from './jobs/payout-sweep.js'
 import { pollPayouts } from './jobs/payout-poll.js'
 import { processPaymentEvent } from './jobs/payment-event-process.js'
+import { prepareOnramp } from './jobs/onramp-prepare.js'
 import {
   recordWorkerHeartbeat,
   WORKER_HEARTBEAT_MONITOR,
@@ -162,6 +165,19 @@ const boss = await withBootRetry(
         } catch (err) {
           Sentry.captureException(err)
           console.error(`worker: ${JOB_PAYMENT_EVENT_PROCESS} failed: ${errMessage(err)}`)
+          throw err
+        }
+      }
+    })
+    // funding.onramp_prepare (slice 3): same batch-of-1 payload semantics.
+    await boss.work<FundingOnrampPreparePayload>(JOB_FUNDING_ONRAMP_PREPARE, async (jobs) => {
+      for (const job of jobs) {
+        try {
+          const attached = await prepareOnramp(job.data.transferId)
+          console.log(`worker: ${JOB_FUNDING_ONRAMP_PREPARE} handled (attached=${attached})`)
+        } catch (err) {
+          Sentry.captureException(err)
+          console.error(`worker: ${JOB_FUNDING_ONRAMP_PREPARE} failed: ${errMessage(err)}`)
           throw err
         }
       }

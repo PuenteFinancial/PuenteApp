@@ -13,9 +13,18 @@ vi.mock('../../services/supabase.js', () => ({
 
 const captureMessage = vi.hoisted(() => vi.fn())
 const setFingerprint = vi.hoisted(() => vi.fn())
+const captureException = vi.hoisted(() => vi.fn())
 vi.mock('@sentry/node', () => ({
   withScope: (fn: (s: unknown) => void) => fn({ setFingerprint, setContext: vi.fn() }),
   captureMessage: (...a: unknown[]) => captureMessage(...a),
+  captureException: (...a: unknown[]) => captureException(...a),
+}))
+
+// Slice 3: confirm hands onramp creation to the worker — mocked so the suite
+// never touches pg-boss, and so the enqueue-failure posture can be pinned.
+const enqueueFundingOnrampPrepare = vi.hoisted(() => vi.fn())
+vi.mock('../../services/queue.js', () => ({
+  enqueueFundingOnrampPrepare: (...a: unknown[]) => enqueueFundingOnrampPrepare(...a),
 }))
 
 const recordCancellationRequest = vi.fn()
@@ -229,6 +238,8 @@ beforeEach(() => {
   })
   captureMessage.mockReset()
   setFingerprint.mockReset()
+  captureException.mockReset()
+  enqueueFundingOnrampPrepare.mockReset().mockResolvedValue('job-1')
 })
 
 describe('POST /v1/transfers', () => {
@@ -375,6 +386,8 @@ describe('POST /v1/transfers/:id/confirm', () => {
     expect(assessTransferRisk).not.toHaveBeenCalled()
     // …and the uncleared cap for the same reason: its slot is already occupied
     expect(assessUnclearedCap).not.toHaveBeenCalled()
+    // mock rail: no deposit coordinates to prepare
+    expect(enqueueFundingOnrampPrepare).not.toHaveBeenCalled()
     await app.close()
   })
 
@@ -383,6 +396,43 @@ describe('POST /v1/transfers/:id/confirm', () => {
     const app = await buildApp()
     const res = await confirm(app, { disclosureId: DISCLOSURE_ID, accepted: false })
     expect(res.status).toBe(400)
+    await app.close()
+  })
+
+  // ── slice 3: confirm hands onramp creation to the worker (manual rail) ──
+  it('manual rail: enqueues funding.onramp_prepare after the ref persists', async () => {
+    routeTables()
+    initiateFunding.mockResolvedValue({
+      provider: 'manual',
+      method: 'ach',
+      paymentRef: 'manualpay_new',
+      clientFields: {},
+    })
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(200)
+    expect(enqueueFundingOnrampPrepare).toHaveBeenCalledWith(TRANSFER_ID, 'api')
+    await app.close()
+  })
+
+  it('manual rail: a failed enqueue never fails the confirm (attach button recovers)', async () => {
+    routeTables()
+    initiateFunding.mockResolvedValue({
+      provider: 'manual',
+      method: 'ach',
+      paymentRef: 'manualpay_new',
+      clientFields: {},
+    })
+    enqueueFundingOnrampPrepare.mockRejectedValue(new Error('pg-boss down'))
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ id: TRANSFER_ID, state: 'PENDING_PAYMENT' })
+    expect(captureException).toHaveBeenCalled()
     await app.close()
   })
 

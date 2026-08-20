@@ -9,7 +9,7 @@ vi.mock('./supabase.js', () => ({
   },
 }))
 
-const { mapBridgeState, recordEvent, markProcessed, markIgnored } = await import(
+const { mapBridgeState, recordEvent, markProcessed, markIgnored, earliestDepositEvidenceAt } = await import(
   './payment-events.js'
 )
 
@@ -258,5 +258,56 @@ describe('mark helpers', () => {
     from.mockReturnValue({ update })
 
     await expect(markProcessed('pe-1')).rejects.toThrow(/mark processed failed: db down/)
+  })
+})
+
+// ── earliestDepositEvidenceAt (slice-3 payout-ref bound) ────────────────────
+// The manual rail's onramp also emits payment_processed for the same
+// transfer_id (the sender's USD deposit landing), so the evidence query is
+// bounded to the payout object's provider_ref. The full filter contract is
+// pinned in payment-event-process.test.ts; what lives here is the
+// short-circuit and the bound itself.
+
+describe('earliestDepositEvidenceAt', () => {
+  function mockTransferRefRead(result: { data: unknown; error: unknown }) {
+    const maybeSingle = vi.fn().mockResolvedValue(result)
+    const eq = vi.fn().mockReturnValue({ maybeSingle })
+    const select = vi.fn().mockReturnValue({ eq })
+    return { select }
+  }
+  function mockEvidenceQuery(result: { data: unknown; error: unknown }) {
+    const calls: Array<[string, ...unknown[]]> = []
+    const c: Record<string, unknown> = {}
+    for (const m of ['select', 'eq', 'order', 'limit']) {
+      c[m] = (...a: unknown[]) => {
+        calls.push([m, ...a])
+        return c
+      }
+    }
+    c.then = (resolve: (v: unknown) => void) => resolve(result)
+    return { c, calls }
+  }
+
+  it('returns null without touching payment_events when the transfer has no payout ref', async () => {
+    const transferRead = mockTransferRefRead({ data: { provider_transfer_ref: null }, error: null })
+    from.mockReturnValueOnce({ select: transferRead.select })
+
+    await expect(earliestDepositEvidenceAt('tr-1')).resolves.toBeNull()
+    // no payout object ⇒ no SPEI deposit evidence — no second query at all
+    expect(from).toHaveBeenCalledTimes(1)
+    expect(from).toHaveBeenCalledWith('transfers')
+  })
+
+  it('bounds the evidence query to the payout provider_ref', async () => {
+    const transferRead = mockTransferRefRead({ data: { provider_transfer_ref: 'bt-9' }, error: null })
+    const evidence = mockEvidenceQuery({
+      data: [{ received_at: '2026-08-20T12:00:00.000Z' }],
+      error: null,
+    })
+    from.mockReturnValueOnce({ select: transferRead.select }).mockReturnValueOnce(evidence.c)
+
+    await expect(earliestDepositEvidenceAt('tr-1')).resolves.toBe('2026-08-20T12:00:00.000Z')
+    expect(evidence.calls).toContainEqual(['eq', 'provider_ref', 'bt-9'])
+    expect(evidence.calls).toContainEqual(['eq', 'event_type', 'payment_processed'])
   })
 })

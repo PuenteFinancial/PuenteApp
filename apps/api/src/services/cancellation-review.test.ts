@@ -409,7 +409,9 @@ describe('denyCancellation', () => {
 
   it('refuses a cited deposit LATER than our evidence of it, writing nothing', async () => {
     pendingCancellationFor.mockResolvedValue(request({ within_window: false }))
-    q('transfers', reviewing())
+    // load; then the evidence bound's payout-ref read (slice 3 — evidence is
+    // scoped to the payout object so onramp events can never supply it)
+    q('transfers', reviewing(), { data: { provider_transfer_ref: 'bt-1' }, error: null })
     // Bridge told us at 09:30 — the deposit cannot have happened after that.
     q('payment_events', { data: [{ received_at: '2026-07-28T09:30:00.000Z' }], error: null })
 

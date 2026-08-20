@@ -298,6 +298,17 @@ export const envSchemaWithRules = envSchema.superRefine((value, ctx) => {
       }
     }
   }
+  // Manual funding auto-creates the Bridge onramp at confirm (slice 3), and the
+  // onramp's destination is the treasury wallet — a manual selection without it
+  // would accept confirms whose onramp job can never succeed. Same fail-at-boot
+  // posture as the stripe key trio.
+  if (value.FUNDING_PROCESSOR === 'manual' && !value.BRIDGE_TREASURY_WALLET_ID) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['BRIDGE_TREASURY_WALLET_ID'],
+      message: 'BRIDGE_TREASURY_WALLET_ID is required when FUNDING_PROCESSOR=manual',
+    })
+  }
 })
 
 const parsed = envSchemaWithRules.safeParse(process.env)

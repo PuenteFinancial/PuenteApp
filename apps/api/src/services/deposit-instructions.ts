@@ -39,12 +39,14 @@ export type AttachOutcome =
  * wrong onramp id, and storing it would point the sender's money at a deposit
  * Bridge will never match to this transfer. Re-attach overwrites (the operator
  * recreating an expired onramp must be able to swap coordinates); provenance
- * rides in attached_by, history in the audit log.
+ * rides in attached_by (null = attached by the system at confirm — slice 3's
+ * onramp-prepare job; a uuid = the human who vouched), history in the audit
+ * log.
  */
 export async function attachDepositInstructions(input: {
   transferId: string
   bridgeTransferId: string
-  operator: string
+  operator: string | null
 }): Promise<AttachOutcome> {
   const { data } = await supabaseAdmin
     .from('transfers')

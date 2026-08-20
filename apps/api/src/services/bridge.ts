@@ -352,6 +352,65 @@ export async function getKycLink(
   return { url: link.url }
 }
 
+// ── Onramp create (funding-ops slice 3) ─────────────────────────────────────
+
+export interface CreateBridgeOnrampInput {
+  /** Our transfer UUID — becomes client_reference_id AND keys the Bridge Idempotency-Key. */
+  transferId: string
+  /** Sender's bridge_customer_id. */
+  onBehalfOf: string
+  /** env.BRIDGE_TREASURY_WALLET_ID — where the deposit lands as USDC. */
+  treasuryWalletId: string
+  /** Transfer total (send + fee) as a 2dp decimal string, from minorToDecimal. */
+  amountUsd: string
+}
+
+// Same byte-identical-retry rule as buildPayoutBody: every field comes from
+// immutable transfer terms, fixed key order — a retry under the same
+// Idempotency-Key must serialize identically (Bridge 422s on same-key/
+// different-body). Key order matches the runbook §2 curl, the manual
+// convention this replaces.
+function buildOnrampBody(input: CreateBridgeOnrampInput): string {
+  return JSON.stringify({
+    amount: input.amountUsd,
+    on_behalf_of: input.onBehalfOf,
+    // Bridge documents developer_fee as required — always zero here.
+    developer_fee: '0',
+    // The sender funds Bridge's coordinates out of band; ach_push canonicalizes
+    // to 'ach' at attach time (DEPOSIT_RAIL_MAP below).
+    source: { payment_rail: 'ach_push', currency: 'usd' },
+    // destination payment_rail is the CHAIN name ('base'), not 'bridge_wallet'
+    // — learned live 2026-08-18 (runbook §2 gotchas).
+    destination: {
+      payment_rail: 'base',
+      currency: 'usdc',
+      bridge_wallet_id: input.treasuryWalletId,
+    },
+    client_reference_id: input.transferId,
+  })
+}
+
+/**
+ * USD onramp into the treasury wallet — the deposit target auto-created at
+ * confirm (funding.onramp_prepare job). Idempotency-Key `onramp-<transferId>`
+ * is the SAME convention the runbook curl uses, so a mixed manual/auto history
+ * can never double-create an onramp for one transfer: a byte-identical retry
+ * returns the existing onramp, and a curl-created onramp with a differently
+ * serialized body makes this 422 rather than mint a second deposit target
+ * (the slice-1 attach button is the recovery path).
+ */
+export async function createBridgeOnramp(
+  input: CreateBridgeOnrampInput,
+): Promise<{ bridgeTransferId: string; state: string }> {
+  const response = await bridgeFetch('/v0/transfers', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': `onramp-${input.transferId}` },
+    body: buildOnrampBody(input),
+  })
+  const { bridgeTransferId, state } = parseTransferResponse(response)
+  return { bridgeTransferId, state }
+}
+
 // ── Onramp deposit instructions (#199) ──────────────────────────────────────
 
 // Bridge's deposit rail names → Puente's canonical stored values. An explicit

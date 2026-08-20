@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   createBridgeCustomer,
+  createBridgeOnramp,
   createBridgePayout,
   createExternalAccount,
   createTosLink,
@@ -348,6 +349,71 @@ describe('createBridgePayout', () => {
   it('throws when the response has no transfer id', async () => {
     fetchMock.mockResolvedValue(jsonResponse(201, { state: 'awaiting_funds' }))
     await expect(createBridgePayout(input)).rejects.toBeInstanceOf(BridgeApiError)
+  })
+})
+
+describe('createBridgeOnramp', () => {
+  const input = {
+    transferId: '3f9a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8',
+    onBehalfOf: 'cust_sender',
+    treasuryWalletId: 'wallet_treasury',
+    amountUsd: '57.00',
+  }
+
+  const createdBody = {
+    id: 'onramp_1',
+    state: 'awaiting_funds',
+    client_reference_id: input.transferId,
+  }
+
+  it('POSTs the exact onramp body under the onramp-<transferId> idempotency key', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, createdBody))
+
+    const result = await createBridgeOnramp(input)
+
+    expect(result).toEqual({ bridgeTransferId: 'onramp_1', state: 'awaiting_funds' })
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.bridge.test/v0/transfers')
+    expect(init.method).toBe('POST')
+    // The runbook-curl convention — a mixed manual/auto history can never
+    // double-create an onramp for one transfer.
+    expect(init.headers['Idempotency-Key']).toBe(`onramp-${input.transferId}`)
+    expect(JSON.parse(init.body)).toEqual({
+      amount: '57.00',
+      on_behalf_of: 'cust_sender',
+      developer_fee: '0',
+      source: { payment_rail: 'ach_push', currency: 'usd' },
+      destination: {
+        payment_rail: 'base',
+        currency: 'usdc',
+        bridge_wallet_id: 'wallet_treasury',
+      },
+      client_reference_id: input.transferId,
+    })
+    // amount passes through as-is — no numeric round-trip
+    expect(init.body).toContain('"amount":"57.00"')
+  })
+
+  it('serializes a byte-identical body across calls with the same input', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, createdBody))
+    await createBridgeOnramp(input)
+    await createBridgeOnramp({ ...input })
+    const bodies = fetchMock.mock.calls.map(([, init]) => init.body)
+    expect(bodies[0]).toBe(bodies[1])
+  })
+
+  it('throws statusCode 422 on idempotency-key body mismatch (curl-created onramp)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(422, { code: 'idempotency_key_mismatch' }))
+
+    const err = await createBridgeOnramp(input).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(BridgeApiError)
+    expect((err as BridgeApiError).statusCode).toBe(422)
+  })
+
+  it('throws when the response has no transfer id', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, { state: 'awaiting_funds' }))
+    await expect(createBridgeOnramp(input)).rejects.toBeInstanceOf(BridgeApiError)
   })
 })
 

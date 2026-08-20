@@ -14,6 +14,7 @@ import { env } from '../config/env.js'
 
 export const JOB_PAYOUT_SUBMIT = 'payout.submit'
 export const JOB_PAYMENT_EVENT_PROCESS = 'payment-event.process'
+export const JOB_FUNDING_ONRAMP_PREPARE = 'funding.onramp_prepare'
 export const JOB_PAYOUT_SWEEP = 'payout.sweep'
 export const JOB_PAYOUT_POLL = 'payout.poll'
 export const JOB_RECONCILE_PENDING = 'transfer.reconcile-pending'
@@ -39,6 +40,10 @@ export interface PaymentEventProcessPayload {
   paymentEventId: string
 }
 
+export interface FundingOnrampPreparePayload {
+  transferId: string
+}
+
 // Retry policy per Contract A. Declared once and used both at queue creation
 // (the durable default) and per-send (wins even if the queue row predates a
 // policy change — createQueue never updates existing rows).
@@ -50,6 +55,9 @@ export interface PaymentEventProcessPayload {
 // jobs are idempotent replays, so extra runs are safe and lost ones are not.
 const PAYOUT_SUBMIT_RETRY = { retryLimit: 10, retryBackoff: true, retryDelay: 30 } as const
 const PAYMENT_EVENT_RETRY = { retryLimit: 8, retryBackoff: true, retryDelay: 15 } as const
+// Onramp creation rides out Bridge downtime on retries (confirm never fails on
+// it — the slice-1 attach button covers the tail where these exhaust).
+const ONRAMP_PREPARE_RETRY = { retryLimit: 10, retryBackoff: true, retryDelay: 30 } as const
 const SINGLETON_POLICY = { policy: 'stately' } as const
 // Cron jobs never retry — the next tick is the retry.
 const CRON_RETRY = { retryLimit: 0 } as const
@@ -106,6 +114,10 @@ export async function ensureQueues(role: 'api' | 'worker'): Promise<void> {
         ...SINGLETON_POLICY,
         ...PAYMENT_EVENT_RETRY,
       })
+      await boss.createQueue(JOB_FUNDING_ONRAMP_PREPARE, {
+        ...SINGLETON_POLICY,
+        ...ONRAMP_PREPARE_RETRY,
+      })
       await boss.createQueue(JOB_PAYOUT_SWEEP, CRON_RETRY)
       await boss.createQueue(JOB_PAYOUT_POLL, CRON_RETRY)
       await boss.createQueue(JOB_RECONCILE_PENDING, CRON_RETRY)
@@ -147,6 +159,20 @@ export async function enqueuePaymentEventProcess(
   const payload: PaymentEventProcessPayload = { paymentEventId }
   const options: SendOptions = { singletonKey: paymentEventId, ...PAYMENT_EVENT_RETRY }
   return boss.send(JOB_PAYMENT_EVENT_PROCESS, payload, options)
+}
+
+// singletonKey = transferId: a confirm-retry re-enqueue while a prepare job is
+// queued collapses to one; the job itself is an idempotent replay either way
+// (skips when instructions exist; the Bridge POST is idempotency-keyed).
+export async function enqueueFundingOnrampPrepare(
+  transferId: string,
+  role: 'api' | 'worker',
+): Promise<string | null> {
+  await ensureQueues(role)
+  const boss = await getBoss(role)
+  const payload: FundingOnrampPreparePayload = { transferId }
+  const options: SendOptions = { singletonKey: transferId, ...ONRAMP_PREPARE_RETRY }
+  return boss.send(JOB_FUNDING_ONRAMP_PREPARE, payload, options)
 }
 
 // Releases the pg-boss connection pool and clears the memos.
