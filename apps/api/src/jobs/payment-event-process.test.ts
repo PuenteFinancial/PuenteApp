@@ -107,6 +107,9 @@ const transfer = (state: string, over: Record<string, unknown> = {}) => ({
     id: 'tr-1',
     user_id: 'user-1',
     state,
+    // Matches event().provider_ref — a genuine payout event, so the slice-3
+    // onramp guard short-circuits without a deposit_instructions read.
+    provider_transfer_ref: 'bt-1',
     send_amount_minor: 19801,
     margin_minor: 0,
     // PR2 refund-tail fields (harmless for the pre-PR2 tests that ignore them)
@@ -124,6 +127,9 @@ const transfer = (state: string, over: Record<string, unknown> = {}) => ({
   error: null,
 })
 const stateRow = (state: string) => ({ data: { state }, error: null })
+// The evidence bound's payout-ref read (earliestDepositEvidenceAt, slice 3):
+// queued as a `transfers` row immediately before each evidence query.
+const payoutRefRow = () => ({ data: { provider_transfer_ref: 'bt-1' }, error: null })
 // The refund claim's guarded UPDATE (slice-7 PR6b-0) sits between the tail's
 // row re-read and the ref persist, so any drive that DISBURSES queues it.
 const claimWon = { data: [{ id: 'tr-1' }], error: null }
@@ -233,6 +239,7 @@ describe('processPaymentEvent — transitions', () => {
     q('payment_events', event({ event_type: 'payment_processed' }))
     q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
     queueReceipt()
+    q('transfers', payoutRefRow())
     q('payment_events', {
       data: [{ received_at: new Date(Date.now() - 30_000).toISOString() }],
       error: null,
@@ -267,6 +274,9 @@ describe('processPaymentEvent — transitions', () => {
     expect(evidenceFilters).toEqual([
       ['eq', 'transfer_id', 'tr-1'],
       ['eq', 'event_type', 'payment_processed'],
+      // Slice 3: bound to the PAYOUT object — the onramp's payment_processed
+      // (the sender's USD deposit) must never read as SPEI deposit evidence.
+      ['eq', 'provider_ref', 'bt-1'],
       ['order', 'received_at', { ascending: true }],
       ['limit', 1],
     ])
@@ -283,6 +293,7 @@ describe('processPaymentEvent — transitions', () => {
     q('payment_events', event({ event_type: 'payment_processed' }))
     q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
     queueReceipt()
+    q('transfers', payoutRefRow())
     q('payment_events', { data: [{ received_at: instant }], error: null })
     transition.mockResolvedValue({})
 
@@ -303,6 +314,7 @@ describe('processPaymentEvent — transitions', () => {
     q('payment_events', event({ event_type: 'payment_processed' }))
     q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
     queueReceipt()
+    q('transfers', payoutRefRow())
     q('payment_events', { data: [], error: null }) // nothing recorded
     transition.mockResolvedValue({})
 
@@ -324,6 +336,7 @@ describe('processPaymentEvent — transitions', () => {
     q('payment_events', event({ event_type: 'payment_processed' }))
     q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
     queueReceipt()
+    q('transfers', payoutRefRow())
     q('payment_events', {
       data: [{ received_at: new Date(Date.now() - 30_000).toISOString() }],
       error: null,
@@ -363,6 +376,7 @@ describe('processPaymentEvent — transitions', () => {
     q('payment_events', event({ event_type: 'payment_processed' }))
     q('transfers', transfer('IN_FLIGHT'), stateRow('IN_FLIGHT'), stateRow('IN_FLIGHT'))
     queueReceipt()
+    q('transfers', payoutRefRow())
     q('payment_events', {
       data: [{ received_at: new Date(Date.now() - 120_000).toISOString() }],
       error: null,
@@ -1048,5 +1062,72 @@ describe('funding-source events (PR-S2 refund tails)', () => {
 
     expect(markIgnored).toHaveBeenCalledWith('ev-1', 'unmapped funding event: mystery_event')
     expect(markProcessed).not.toHaveBeenCalled()
+  })
+})
+
+// ── funding-ops slice 3: the onramp-event guard ─────────────────────────────
+// Bridge ONRAMP events resolve to our transfer via client_reference_id exactly
+// like payout events. Without the guard, an onramp payment_processed drives a
+// false COMPLETED (+ ledger + receipt) and an onramp returned invokes the
+// payout refund tail. The guard matches the event's provider_ref against the
+// transfer's own deposit_instructions row and ignores on a POSITIVE match only.
+
+describe('processPaymentEvent — onramp-event guard (funding-ops slice 3)', () => {
+  const ONRAMP = 'onramp-bt-77'
+  // The payout ref is null before submission (PENDING_PAYMENT / FUNDED) and
+  // set after — the guard must hold in every forward state either way.
+  const stateRef: Array<[string, string | null]> = [
+    ['PENDING_PAYMENT', null],
+    ['FUNDED', null],
+    ['SUBMITTED', 'bt-1'],
+    ['IN_FLIGHT', 'bt-1'],
+    ['COMPLETED', 'bt-1'],
+  ]
+
+  for (const [state, payoutRef] of stateRef) {
+    for (const eventType of ['payment_processed', 'canceled', 'returned'] as const) {
+      it(`ignores onramp ${eventType} at ${state} — no drive, no fail, no refund, no page`, async () => {
+        envMock.AUTO_REFUND = true // even armed, the refund tail must not fire
+        q('payment_events', event({ event_type: eventType, provider_ref: ONRAMP }))
+        q('transfers', transfer(state, { provider_transfer_ref: payoutRef }))
+        q('deposit_instructions', { data: { bridge_transfer_ref: ONRAMP }, error: null })
+
+        await processPaymentEvent('ev-1')
+
+        expect(markIgnored).toHaveBeenCalledWith('ev-1', 'onramp lifecycle event')
+        expect(transition).not.toHaveBeenCalled()
+        expect(refund).not.toHaveBeenCalled()
+        expect(postLedger).not.toHaveBeenCalled()
+        // no false payout-success-after-terminal / fail-after-terminal pages
+        expect(captureMessage).not.toHaveBeenCalled()
+        expect(markProcessed).not.toHaveBeenCalled()
+      })
+    }
+  }
+
+  it('a payout webhook racing ahead of provider_transfer_ref persistence still drives', async () => {
+    // ref differs from the (null) payout ref but there is NO instructions
+    // match — that shape is a genuine payout event, not an onramp's.
+    q('payment_events', event({ event_type: 'payment_submitted', provider_ref: 'bt-1' }))
+    q('transfers', transfer('SUBMITTED', { provider_transfer_ref: null }), stateRow('SUBMITTED'))
+    q('deposit_instructions', { data: null, error: null })
+    transition.mockResolvedValue({})
+
+    await processPaymentEvent('ev-1')
+
+    expect(transition).toHaveBeenCalledTimes(1)
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
+
+  it('a failed deposit_instructions read rethrows and leaves the event received', async () => {
+    q('payment_events', event({ event_type: 'payment_processed', provider_ref: ONRAMP }))
+    q('transfers', transfer('IN_FLIGHT'))
+    q('deposit_instructions', { data: null, error: { message: 'db down' } })
+
+    await expect(processPaymentEvent('ev-1')).rejects.toThrow('deposit-instructions read failed')
+    // never guess on a failed read — the row stays 'received' for retry
+    expect(markIgnored).not.toHaveBeenCalled()
+    expect(markProcessed).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
   })
 })

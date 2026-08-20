@@ -30,6 +30,7 @@ import {
 } from '../../services/risk.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 import { getDepositInstructions } from '../../services/deposit-instructions.js'
+import { enqueueFundingOnrampPrepare } from '../../services/queue.js'
 
 const TRANSFER_COLUMNS =
   'id, user_id, payout_destination_id, quote_id, state, send_amount_minor, send_currency, ' +
@@ -571,6 +572,23 @@ export async function transfersRoute(server: FastifyInstance) {
           'funding ref persist failed',
         )
         return sendError(reply, 500, 'internal_error', 'Failed to confirm transfer')
+      }
+
+      // Slice 3: hand the manual rail's onramp creation to the worker AFTER the
+      // ref persists — confirm never fails on Bridge (or pg-boss) being down.
+      // The transfer is already PENDING_PAYMENT and the money moves out of
+      // band; a lost enqueue leaves the row visible on the ops board without
+      // instructions, and the attach button recovers it.
+      if (funding.provider === 'manual') {
+        try {
+          await enqueueFundingOnrampPrepare(transfer.id, 'api')
+        } catch (enqueueErr) {
+          server.log.warn(
+            { userId, transferId: transfer.id },
+            'onramp-prepare enqueue failed — attach instructions via the ops board',
+          )
+          Sentry.captureException(enqueueErr)
+        }
       }
 
       return {

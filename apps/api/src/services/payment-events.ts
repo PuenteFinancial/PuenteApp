@@ -152,13 +152,33 @@ export async function recordEvent(
  * Shared between payment-event-process (condition 2 of the §1005.34 routing)
  * and denyCancellation (plausibility bound on the operator's cited deposit
  * timestamp) so the two sides of the decision read the SAME evidence.
+ *
+ * Bounded to the PAYOUT object's events (provider_ref = the transfer's
+ * provider_transfer_ref — funding-ops slice 3): the manual rail's ONRAMP also
+ * emits payment_processed (the sender's USD deposit landing), recorded against
+ * the same transfer_id, and even guard-ignored rows would satisfy an unbounded
+ * query. Counting one as SPEI evidence skews both readers — an early onramp
+ * landing would misclassify a genuinely pre-deposit cancellation as
+ * post-deposit (against the sender) and refuse denials citing the real SPEI
+ * time. No payout ref yet ⇒ no payout ⇒ no deposit evidence, by construction.
  */
 export async function earliestDepositEvidenceAt(transferId: string): Promise<string | null> {
+  const { data: transferData, error: transferError } = await supabaseAdmin
+    .from('transfers')
+    .select('provider_transfer_ref')
+    .eq('id', transferId)
+    .maybeSingle()
+  if (transferError) throw new Error(`deposit-evidence transfer read failed: ${transferError.message}`)
+  const payoutRef =
+    (transferData as { provider_transfer_ref: string | null } | null)?.provider_transfer_ref ?? null
+  if (!payoutRef) return null
+
   const { data, error } = await supabaseAdmin
     .from('payment_events')
     .select('received_at')
     .eq('transfer_id', transferId)
     .eq('event_type', 'payment_processed')
+    .eq('provider_ref', payoutRef)
     .order('received_at', { ascending: true })
     .limit(1)
   if (error) throw new Error(`deposit-evidence query failed: ${error.message}`)

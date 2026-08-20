@@ -63,7 +63,11 @@ tunable policy.
    transaction with a note (fx_slippage vs provider_fees per ledger-rules).
 4. **Orphan external object → incident.** Something moved money outside the state machine.
    Figure out what created it before touching anything; if real money moved, that's a sev-1
-   design breach.
+   design breach. Manual-rail onramps are NOT orphans since funding-ops slice 3: auto-created
+   onramps always carry `client_reference_id` = the transfer id, so `bridge_orphans` resolves
+   them to their row (hand-created ones via the runbook curl do too). A persistent orphan is
+   once again a true anomaly — the only expected exceptions are direct treasury prefunds made
+   in the Bridge dashboard, which age out of the 7-day window.
 5. Every finding gets: a written note (what, cause, fix), the correcting ledger transaction if
    money is involved (new transaction, never an edit), and the Sentry issue resolved only when
    the underlying condition is actually gone.

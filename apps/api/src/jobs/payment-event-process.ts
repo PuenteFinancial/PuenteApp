@@ -37,6 +37,9 @@ interface TransferRow {
   id: string
   user_id: string
   state: string
+  // Slice-3 onramp-event guard: the payout's own Bridge id — the ref a genuine
+  // payout event carries. Null until the submit job persists it.
+  provider_transfer_ref: string | null
   send_amount_minor: number
   // slice-6 PR3 receipt: the remaining snapshot terms the receipt is built from.
   // (The refund tail's own inputs — refund_payment_ref, funding_payment_ref,
@@ -156,6 +159,21 @@ async function route(event: EventRow): Promise<void> {
     // Out-of-order / unknown reference — mark ignored, not failed: a retry
     // won't resolve it, and the poller re-synthesizes once the transfer exists.
     await markIgnored(event.id, 'no transfer for event')
+    return
+  }
+
+  // Funding-ops slice 3 guard. Bridge ONRAMP webhook events resolve to our
+  // transfer via client_reference_id exactly like payout events, but they
+  // describe the sender's DEPOSIT, not the payout: an onramp
+  // payment_processed driven through the payout machine would fake COMPLETED
+  // (ledger batch + receipt) for a payout that may never have delivered, and
+  // an onramp returned (ACH deposit return) would invoke the payout refund
+  // tail. Before slice 3 only timing masked this — deposits land days after
+  // payouts complete and drive() no-ops at COMPLETED; auto-created onramps
+  // universalize the exposure, so every actionable event is checked here.
+  // This ignore is the seam slice 5 upgrades to ACT on (auto-clear + top-up).
+  if (await isOnrampEvent(event, transfer)) {
+    await markIgnored(event.id, 'onramp lifecycle event')
     return
   }
 
@@ -316,6 +334,26 @@ async function driveRefund(transfer: TransferRow, event: EventRow): Promise<bool
   return true
 }
 
+// Is this event about the transfer's ONRAMP rather than its payout? Only a
+// POSITIVE match against the transfer's own deposit_instructions row answers
+// yes: an event whose provider_ref differs from provider_transfer_ref but has
+// no matching instructions row proceeds — that shape is a genuine payout
+// webhook racing ahead of the submit job persisting the ref, and ignoring it
+// would strand the transition until the poll re-synthesized it.
+async function isOnrampEvent(event: EventRow, transfer: TransferRow): Promise<boolean> {
+  if (!event.provider_ref) return false
+  if (event.provider_ref === transfer.provider_transfer_ref) return false
+  const { data, error } = await supabaseAdmin
+    .from('deposit_instructions')
+    .select('bridge_transfer_ref')
+    .eq('transfer_id', transfer.id)
+    .maybeSingle()
+  // A throw leaves the event 'received' for retry — never guess on a failed read.
+  if (error) throw new Error(`payment-event deposit-instructions read failed: ${error.message}`)
+  const ref = (data as { bridge_transfer_ref: string } | null)?.bridge_transfer_ref ?? null
+  return ref !== null && ref === event.provider_ref
+}
+
 // Resolve our transfer for the event: the ingest path usually set transfer_id;
 // otherwise fall back to the Bridge transfer id (provider_ref) against
 // provider_transfer_ref (the plan's client_reference_id → provider_ref chain).
@@ -324,8 +362,8 @@ async function resolveTransfer(event: EventRow): Promise<TransferRow | null> {
     const { data, error } = await supabaseAdmin
       .from('transfers')
       .select(
-        'id, user_id, state, send_amount_minor, fee_amount_minor, margin_minor, ' +
-          'receive_amount_minor, fx_rate, payout_destination_id',
+        'id, user_id, state, provider_transfer_ref, send_amount_minor, fee_amount_minor, ' +
+          'margin_minor, receive_amount_minor, fx_rate, payout_destination_id',
       )
       .eq(column, value)
       .maybeSingle()

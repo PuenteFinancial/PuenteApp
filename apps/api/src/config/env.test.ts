@@ -69,6 +69,30 @@ describe('FUNDING_PROCESSOR=stripe env refinement', () => {
   })
 })
 
+describe('FUNDING_PROCESSOR=manual env refinement (funding-ops slice 3)', () => {
+  it('refuses a manual selection without the treasury wallet the onramp job deposits to', () => {
+    const parsed = envSchemaWithRules.safeParse({ ...base, FUNDING_PROCESSOR: 'manual' })
+    expect(parsed.success).toBe(false)
+    const fields = parsed.success ? {} : parsed.error.flatten().fieldErrors
+    expect(fields).toHaveProperty('BRIDGE_TREASURY_WALLET_ID')
+  })
+
+  it('accepts a manual selection with the treasury wallet set', () => {
+    const parsed = envSchemaWithRules.safeParse({
+      ...base,
+      FUNDING_PROCESSOR: 'manual',
+      BRIDGE_TREASURY_WALLET_ID: 'wallet-treasury-1',
+    })
+    expect(parsed.success).toBe(true)
+  })
+
+  it('leaves mock and stripe selections free to omit the wallet (worker still asserts its own)', () => {
+    const parsed = envSchemaWithRules.safeParse(base)
+    expect(parsed.success).toBe(true)
+    expect(parsed.success && parsed.data.BRIDGE_TREASURY_WALLET_ID).toBeUndefined()
+  })
+})
+
 describe('OPS_ADMIN_USER_IDS allowlist (slice 8.5-v1)', () => {
   it('defaults to the empty set — fail closed, nobody is an ops admin', () => {
     const parsed = envSchemaWithRules.safeParse(base)
