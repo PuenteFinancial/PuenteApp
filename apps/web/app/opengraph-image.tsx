@@ -6,8 +6,15 @@ export const alt = 'Puente Financial — Send money home. Build U.S. credit doin
 export const size = { width: 1200, height: 630 }
 export const contentType = 'image/png'
 
+// turbopackIgnore keeps these REAL filesystem calls. Without it, Next 16's
+// turbopack interposes a whole-project asset trace over the dynamic read, and
+// which traced entry the lookup lands on shifts with the repo's file set —
+// PR #222's preview deterministically got an RSC flight payload back where
+// font bytes belonged ("Unsupported OpenType signature 0:{") after an
+// unrelated diff changed the file census, while the same code built green on
+// main minutes earlier. The fonts live in public/, which deploys regardless.
 function load(file: string) {
-  return fs.readFileSync(path.join(process.cwd(), file))
+  return fs.readFileSync(/*turbopackIgnore: true*/ path.join(/*turbopackIgnore: true*/ process.cwd(), file))
 }
 
 export default function Image() {
