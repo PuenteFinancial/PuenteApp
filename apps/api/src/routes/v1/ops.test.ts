@@ -46,11 +46,21 @@ vi.mock('../../services/deposit-instructions.js', () => ({
   getDepositInstructions: (...args: unknown[]) => getDepositInstructions(...args),
 }))
 
-// The float top-up ledger rules are pinned in payouts tests; deposit-landed
-// tests cover only gate + ordering (cleared first, top-up on BOTH outcomes).
+// The float top-up ledger rules are pinned in payouts tests — routes here
+// cover only gate + ordering. Serves both callers: deposit-landed (slice 1 —
+// cleared first, top-up on BOTH outcomes) and the ad-hoc treasury entry
+// (slice 2 — after-balance echo). The PayoutValidationError class shape is
+// mirrored so instanceof works in the slice-2 route's 400 branch.
 const recordFloatTopUp = vi.hoisted(() => vi.fn())
+class MockPayoutValidationError extends Error {}
 vi.mock('../../services/payouts.js', () => ({
   recordFloatTopUp: (...args: unknown[]) => recordFloatTopUp(...args),
+  PayoutValidationError: MockPayoutValidationError,
+}))
+
+const getAccountBalance = vi.hoisted(() => vi.fn())
+vi.mock('../../services/ledger.js', () => ({
+  getAccountBalance: (...args: unknown[]) => getAccountBalance(...args),
 }))
 
 // supabaseAdmin backs only the idempotency plugin here — claims always win.
@@ -129,6 +139,7 @@ beforeEach(() => {
   attachDepositInstructions.mockReset()
   getDepositInstructions.mockReset().mockResolvedValue(null)
   recordFloatTopUp.mockReset().mockResolvedValue({ idempotencyKey: 'float_topup:x' })
+  getAccountBalance.mockReset().mockResolvedValue({ amountMinor: 22_000, currency: 'USD' })
   from.mockReset().mockImplementation(() => chain({ data: { id: 'claim-1' } }))
 })
 
@@ -1080,6 +1091,173 @@ describe('POST /v1/ops/transfers/deposit-landed', () => {
       const res = await post(app, ADMIN).send(BODY)
       expect(res.status).toBe(500)
       expect(res.body.error.message).not.toContain('ledger down')
+      await app.close()
+    })
+  })
+})
+
+describe('POST /v1/ops/treasury/float-topup', () => {
+  const PATH = '/v1/ops/treasury/float-topup'
+  const BODY = { amountMinor: 10_000, currency: 'USD' as const }
+  const post = (app: Awaited<ReturnType<typeof buildApp>>, token: string, key = 'topup-key-1') =>
+    supertest(app.server).post(PATH).set('Authorization', `Bearer ${token}`).set('Idempotency-Key', key)
+
+  beforeEach(() => {
+    envMock.OPS_WRITE_ENABLED = true
+  })
+
+  describe('gate', () => {
+    it('is not registered at all when OPS_WRITE_ENABLED is false (router 404)', async () => {
+      envMock.OPS_WRITE_ENABLED = false
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(404)
+      expect(recordFloatTopUp).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('401s an unauthenticated request', async () => {
+      const app = await buildApp()
+      const res = await supertest(app.server).post(PATH).send(BODY)
+      expect(res.status).toBe(401)
+      await app.close()
+    })
+
+    it('404s a non-admin with a body identical to a genuinely missing route', async () => {
+      const app = await buildApp()
+      const gated = await post(app, NON_ADMIN).send(BODY)
+      const missing = await supertest(app.server)
+        .post('/v1/ops/nonexistent')
+        .set('Authorization', `Bearer ${NON_ADMIN}`)
+        .send(BODY)
+      expect(gated.status).toBe(404)
+      expect(gated.body.error.code).toBe(missing.body.error.code)
+      expect(gated.body.error.message).toBe(missing.body.error.message)
+      expect(Object.keys(gated.body.error).sort()).toEqual(Object.keys(missing.body.error).sort())
+      expect(recordFloatTopUp).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('404s a non-admin BEFORE validation and the idempotency plugin — a missing key or garbage body must not leak a 400', async () => {
+      const app = await buildApp()
+      const res = await supertest(app.server)
+        .post(PATH)
+        .set('Authorization', `Bearer ${NON_ADMIN}`)
+        .send({ nonsense: true })
+      expect(res.status).toBe(404)
+      expect(from).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('404s even an admin when the write flag drops after registration', async () => {
+      const app = await buildApp()
+      envMock.OPS_WRITE_ENABLED = false
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(404)
+      await app.close()
+    })
+  })
+
+  describe('validation', () => {
+    it('400s without an Idempotency-Key header (money-moving POST)', async () => {
+      const app = await buildApp()
+      const res = await supertest(app.server)
+        .post(PATH)
+        .set('Authorization', `Bearer ${ADMIN}`)
+        .send(BODY)
+      expect(res.status).toBe(400)
+      expect(res.body.error.code).toBe('validation_error')
+      expect(recordFloatTopUp).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('400s a missing amountMinor', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ currency: 'USD' })
+      expect(res.status).toBe(400)
+      await app.close()
+    })
+
+    it('400s a zero or negative amount', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, amountMinor: 0 })
+      expect(res.status).toBe(400)
+      await app.close()
+    })
+
+    it('400s a non-USD currency — the float ledger is USD-only', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, currency: 'MXN' })
+      expect(res.status).toBe(400)
+      await app.close()
+    })
+
+    it('strips an unknown field so it can never reach the service', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, transferId: 'not-a-thing' })
+      expect(res.status).toBe(200)
+      expect(recordFloatTopUp).toHaveBeenCalledWith({
+        amountMinor: 10_000,
+        externalRef: 'adhoc:topup-key-1',
+      })
+      await app.close()
+    })
+  })
+
+  describe('outcome mapping', () => {
+    it('books with the stated ref (trimmed) and echoes the after-balance', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, externalRef: '  bridge-tx-9  ' })
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({
+        amountMinor: 10_000,
+        externalRef: 'bridge-tx-9',
+        floatBalanceMinor: 22_000,
+      })
+      expect(recordFloatTopUp).toHaveBeenCalledWith({
+        amountMinor: 10_000,
+        externalRef: 'bridge-tx-9',
+      })
+      expect(getAccountBalance).toHaveBeenCalledWith('bridge_wallet_float')
+      await app.close()
+    })
+
+    it('derives adhoc:<Idempotency-Key> when the ref is absent — HTTP and ledger layers agree on identity', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN, 'phone-tap-42').send(BODY)
+      expect(res.status).toBe(200)
+      expect(res.body.externalRef).toBe('adhoc:phone-tap-42')
+      expect(recordFloatTopUp).toHaveBeenCalledWith({
+        amountMinor: 10_000,
+        externalRef: 'adhoc:phone-tap-42',
+      })
+      await app.close()
+    })
+
+    it('treats a whitespace-only ref as absent', async () => {
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, externalRef: '   ' })
+      expect(res.status).toBe(200)
+      expect(res.body.externalRef).toBe('adhoc:topup-key-1')
+      await app.close()
+    })
+
+    it('400s a PayoutValidationError with its message (field-and-amount text only)', async () => {
+      recordFloatTopUp.mockRejectedValue(new MockPayoutValidationError('amountMinor must be a positive integer, got 1e99'))
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(400)
+      expect(res.body.error.code).toBe('validation_error')
+      expect(res.body.error.message).toContain('amountMinor')
+      await app.close()
+    })
+
+    it('500s a thrown service error without leaking the message', async () => {
+      recordFloatTopUp.mockRejectedValue(new Error('pg down'))
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(500)
+      expect(res.body.error.message).not.toContain('pg down')
       await app.close()
     })
   })
