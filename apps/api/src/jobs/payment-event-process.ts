@@ -334,15 +334,27 @@ async function driveRefund(transfer: TransferRow, event: EventRow): Promise<bool
   return true
 }
 
-// Is this event about the transfer's ONRAMP rather than its payout? Only a
-// POSITIVE match against the transfer's own deposit_instructions row answers
-// yes: an event whose provider_ref differs from provider_transfer_ref but has
-// no matching instructions row proceeds — that shape is a genuine payout
-// webhook racing ahead of the submit job persisting the ref, and ignoring it
-// would strand the transition until the poll re-synthesized it.
+// Is this event about the transfer's ONRAMP rather than its payout?
+//
+// Once the payout ref is KNOWN, any event about a different Bridge object is
+// refused outright — matching only deposit_instructions.bridge_transfer_ref
+// would miss a SUPERSEDED onramp (re-attach overwrites the ref, and that is a
+// supported recovery flow), whose late canceled/returned/payment_processed
+// would then falsely fail, refund, or complete a live payout (Codex review,
+// 2026-08-20). The only objects that resolve to our transfer are its payout
+// and its onramps, so ≠-payout-ref ⇒ an onramp, current or superseded.
+//
+// Before the payout ref persists, a mismatch alone cannot distinguish "our
+// onramp" from "a genuine payout webhook racing ahead of the submit job's
+// ref persist" — there the POSITIVE deposit_instructions match decides, and
+// no-match proceeds (ignoring the race would strand the transition until the
+// poll re-synthesized it). Residual: a superseded onramp's event landing in
+// that pre-submission window proceeds — where every branch below refuses to
+// move a PENDING_PAYMENT/FUNDED row and pages instead (no state, no money).
 async function isOnrampEvent(event: EventRow, transfer: TransferRow): Promise<boolean> {
   if (!event.provider_ref) return false
   if (event.provider_ref === transfer.provider_transfer_ref) return false
+  if (transfer.provider_transfer_ref !== null) return true
   const { data, error } = await supabaseAdmin
     .from('deposit_instructions')
     .select('bridge_transfer_ref')

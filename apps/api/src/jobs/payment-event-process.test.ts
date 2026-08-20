@@ -1090,7 +1090,12 @@ describe('processPaymentEvent — onramp-event guard (funding-ops slice 3)', () 
         envMock.AUTO_REFUND = true // even armed, the refund tail must not fire
         q('payment_events', event({ event_type: eventType, provider_ref: ONRAMP }))
         q('transfers', transfer(state, { provider_transfer_ref: payoutRef }))
-        q('deposit_instructions', { data: { bridge_transfer_ref: ONRAMP }, error: null })
+        // With the payout ref KNOWN the guard needs no instructions read at
+        // all (the harness throws on an unqueued table); before it persists,
+        // the positive match decides.
+        if (payoutRef === null) {
+          q('deposit_instructions', { data: { bridge_transfer_ref: ONRAMP }, error: null })
+        }
 
         await processPaymentEvent('ev-1')
 
@@ -1104,6 +1109,44 @@ describe('processPaymentEvent — onramp-event guard (funding-ops slice 3)', () 
       })
     }
   }
+
+  // Re-attach overwrites deposit_instructions.bridge_transfer_ref (supported
+  // recovery flow), so a SUPERSEDED onramp's late event no longer matches the
+  // instructions row — with the payout ref known it must still be refused, or
+  // an old onramp's canceled/returned/payment_processed would falsely fail,
+  // refund, or complete a live payout (Codex review finding, 2026-08-20).
+  for (const state of ['SUBMITTED', 'IN_FLIGHT', 'COMPLETED']) {
+    it(`ignores a SUPERSEDED onramp's returned at ${state} — ref matches neither payout nor instructions`, async () => {
+      envMock.AUTO_REFUND = true
+      q('payment_events', event({ event_type: 'returned', provider_ref: 'onramp-OLD' }))
+      q('transfers', transfer(state, { provider_transfer_ref: 'bt-1' }))
+      // no deposit_instructions queued: the ≠-payout-ref refusal needs no read
+
+      await processPaymentEvent('ev-1')
+
+      expect(markIgnored).toHaveBeenCalledWith('ev-1', 'onramp lifecycle event')
+      expect(transition).not.toHaveBeenCalled()
+      expect(refund).not.toHaveBeenCalled()
+      expect(captureMessage).not.toHaveBeenCalled()
+    })
+  }
+
+  it('residual: a superseded onramp event PRE-submission proceeds but moves nothing (pages instead)', async () => {
+    // Payout ref still null and the instructions point at the replacement
+    // onramp — the guard cannot tell this from a racing payout webhook, so it
+    // proceeds; the state machine's non-forward guards then refuse to move a
+    // PENDING_PAYMENT row and page rather than transition.
+    q('payment_events', event({ event_type: 'payment_processed', provider_ref: 'onramp-OLD' }))
+    q('transfers', transfer('PENDING_PAYMENT', { provider_transfer_ref: null }), stateRow('PENDING_PAYMENT'))
+    q('deposit_instructions', { data: { bridge_transfer_ref: ONRAMP }, error: null })
+
+    await processPaymentEvent('ev-1')
+
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-success-after-terminal'])
+    expect(transition).not.toHaveBeenCalled()
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(markProcessed).toHaveBeenCalledWith('ev-1')
+  })
 
   it('a payout webhook racing ahead of provider_transfer_ref persistence still drives', async () => {
     // ref differs from the (null) payout ref but there is NO instructions
@@ -1120,8 +1163,9 @@ describe('processPaymentEvent — onramp-event guard (funding-ops slice 3)', () 
   })
 
   it('a failed deposit_instructions read rethrows and leaves the event received', async () => {
+    // pre-submission (null payout ref) — the only shape that needs the read
     q('payment_events', event({ event_type: 'payment_processed', provider_ref: ONRAMP }))
-    q('transfers', transfer('IN_FLIGHT'))
+    q('transfers', transfer('PENDING_PAYMENT', { provider_transfer_ref: null }))
     q('deposit_instructions', { data: null, error: { message: 'db down' } })
 
     await expect(processPaymentEvent('ev-1')).rejects.toThrow('deposit-instructions read failed')
