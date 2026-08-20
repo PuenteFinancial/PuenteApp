@@ -6,6 +6,20 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-08-19 · A sender's payment claim never releases the payout; release stays a human ops
+action (funding-ops-automation PRD).** The manual rail is getting a sender-facing "I've sent the
+payment" button, and the obvious automation — treat the claim as the release trigger — is
+permanently off the table. Releasing (`kind: funded`) draws roughly the transfer total from the
+treasury float immediately, with the sender's deposit reimbursing it days later; releasing on the
+sender's own assertion would let any signed-in user drain the float by lying, which is the same
+attack the manual funding processor's no-webhook design exists to prevent
+(`apps/api/src/services/funding/manual.ts`). The claim therefore writes a timestamp
+(`transfers.payment_claimed_at`), surfaces on the ops board, and nothing else; the release tap
+remains an allowlisted operator's judgment under the 2026-08-18 evidence-of-initiation policy.
+If a future rail makes releases safe to automate, it will be because the *evidence* became
+machine-verifiable (a bank-confirmed debit, a processor webhook) — never because the claimant
+said so. **Status: active**
+
 **2026-08-10 · pnpm's `minimumReleaseAge` is never waived to satisfy a tool; the tool takes the
 older version (#168).** `npx expo install` wanted expo 57.0.12 during the SDK 57 migration and
 silently appended a 14-entry `minimumReleaseAgeExclude` to `pnpm-workspace.yaml` to get it — the
