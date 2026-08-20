@@ -3,7 +3,8 @@ import { env } from '../../config/env.js'
 import { buildOpsOverview } from '../../services/ops-overview.js'
 import { refundCancellation, denyCancellation } from '../../services/cancellation-review.js'
 import { recordManualFunding } from '../../services/funding-apply.js'
-import { recordFloatTopUp } from '../../services/payouts.js'
+import { recordFloatTopUp, PayoutValidationError } from '../../services/payouts.js'
+import { getAccountBalance } from '../../services/ledger.js'
 import {
   attachDepositInstructions,
   getDepositInstructions,
@@ -240,6 +241,35 @@ const depositLandedResponseSchema = {
     // cleared_skipped still 200s — the receivable was already settled and the
     // top-up (idempotent on the ref) was still posted; a re-tap is a success.
     outcome: { type: 'string', enum: ['cleared', 'cleared_skipped'] },
+  },
+} as const
+
+// Ad-hoc treasury top-up (funding-ops-automation slice 2). No transferId at
+// all — this books out-of-band wallet funding (prefunds), not a transfer's
+// deposit. externalRef optional: with one, the ledger dedupes globally on
+// float_topup:<ref>; without one the handler derives adhoc:<Idempotency-Key>,
+// so the HTTP layer and the ledger layer agree on what "the same booking" is.
+const floatTopUpBodySchema = {
+  type: 'object',
+  required: ['amountMinor', 'currency'],
+  additionalProperties: false,
+  properties: {
+    amountMinor: { type: 'integer', minimum: 1 },
+    currency: { type: 'string', enum: ['USD'] },
+    externalRef: { type: 'string', maxLength: 200 },
+  },
+} as const
+
+const floatTopUpResponseSchema = {
+  type: 'object',
+  properties: {
+    amountMinor: { type: 'number' },
+    // Echoed so the operator's record shows the ref that actually keyed the
+    // ledger post — including a derived adhoc:<key> one.
+    externalRef: { type: 'string' },
+    // The balance AFTER the post (an idempotency replay serves the balance as
+    // of the original execution — informational, not a live read).
+    floatBalanceMinor: { type: 'number' },
   },
 } as const
 
@@ -749,6 +779,69 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
         request.log.error(
           { route: 'ops/transfers/deposit-landed' },
           `ops deposit-landed failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+        return sendError(reply, 500, 'internal_error', 'Something went wrong')
+      }
+    },
+  )
+
+  // POST /v1/ops/treasury/float-topup (funding-ops-automation slice 2) — the
+  // "I sent 100 into the wallet" entry: books DR bridge_wallet_float /
+  // CR cash_clearing via recordFloatTopUp, the same service the break-glass
+  // CLI (record-float-topup.ts) calls. Run AFTER the deposit actually landed —
+  // the ledger records what is true, and the UI copy restates it.
+  //
+  // Double-tap safety, both layers: the required Idempotency-Key replays a
+  // stored 2xx, and the ledger no-ops on a repeated float_topup:<ref>. With a
+  // blank ref the derived adhoc:<Idempotency-Key> keeps the two layers
+  // aligned — a held key is the SAME booking at both layers, a fresh key is
+  // legitimately a new one.
+  server.post<{ Body: { amountMinor: number; currency: 'USD'; externalRef?: string } }>(
+    '/ops/treasury/float-topup',
+    {
+      config: { idempotency: true },
+      onRequest: async (request, reply) => {
+        if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
+          return sendError(reply, 404, 'not_found', 'Route not found')
+        }
+      },
+      schema: {
+        body: floatTopUpBodySchema,
+        response: {
+          200: floatTopUpResponseSchema,
+          400: errorResponseSchema,
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          500: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
+        return sendError(reply, 404, 'not_found', 'Route not found')
+      }
+
+      const { amountMinor } = request.body
+      // The idempotency preHandler already validated the header exists.
+      const stated = request.body.externalRef?.trim() ?? ''
+      const externalRef =
+        stated.length > 0
+          ? stated
+          : `adhoc:${request.headers['idempotency-key'] as string}`
+
+      try {
+        await recordFloatTopUp({ amountMinor, externalRef })
+        const balance = await getAccountBalance('bridge_wallet_float')
+        return { amountMinor, externalRef, floatBalanceMinor: balance.amountMinor }
+      } catch (err) {
+        if (err instanceof PayoutValidationError) {
+          // Input the schema could not catch (its messages carry amounts and
+          // field names only — safe for this admin wire).
+          return sendError(reply, 400, 'validation_error', err.message)
+        }
+        request.log.error(
+          { route: 'ops/treasury/float-topup' },
+          `ops float top-up failed: ${err instanceof Error ? err.message : String(err)}`,
         )
         return sendError(reply, 500, 'internal_error', 'Something went wrong')
       }

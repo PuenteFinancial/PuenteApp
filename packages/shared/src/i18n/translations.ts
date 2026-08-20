@@ -400,6 +400,18 @@ export type Translations = {
         }
       }
     }
+    // funding-ops-automation slice 2: the ad-hoc treasury top-up card.
+    // Operator jargon, same posture as actions.*.
+    topUp: {
+      title: string
+      amountLabel: string
+      amountInvalid: string
+      refLabel: string
+      refHint: string
+      prefundNote: string
+      confirm: string
+      booked: (balance: string) => string
+    }
   }
   // Native-app-only copy. The web equivalents of these states are handled by
   // Next's error boundaries and server-side redirects, so there is nothing on
@@ -919,6 +931,18 @@ const en: Translations = {
         },
       },
     },
+    topUp: {
+      title: 'Record a float top-up',
+      amountLabel: 'Amount added to the treasury wallet (USD)',
+      amountInvalid: 'Enter dollars like 100 or 100.00.',
+      refLabel: 'Reference (optional — the Bridge transaction id if you have one)',
+      refHint:
+        'Same reference = recorded once, ever; re-submitting is a no-op. Left blank, this booking gets its own one-off reference.',
+      prefundNote:
+        'For out-of-band wallet funding (prefunds), AFTER the balance actually moved — the ledger records arrival, not intent. If this deposit belongs to a transfer, use Deposit landed on its row instead; recording it here too would overstate the float.',
+      confirm: 'Confirm top-up',
+      booked: (balance: string) => `Booked — bridge_wallet_float is now ${balance}.`,
+    },
     refundMoving: 'refund in motion',
     openTransfers: 'Open transfers',
     openTransfersEmpty: 'No open transfers.',
@@ -1435,6 +1459,18 @@ const es: Translations = {
             'Instrucciones adjuntadas \u2014 el paso de pago del remitente ya muestra las coordenadas.',
         },
       },
+    },
+    topUp: {
+      title: 'Registrar reposici\u00f3n de float',
+      amountLabel: 'Monto agregado a la billetera de tesorer\u00eda (USD)',
+      amountInvalid: 'Ingresa d\u00f3lares como 100 o 100.00.',
+      refLabel: 'Referencia (opcional \u2014 el id de la transacci\u00f3n de Bridge si lo tienes)',
+      refHint:
+        'Misma referencia = se registra una sola vez; reenviar es un no-op. En blanco, este registro recibe su propia referencia \u00fanica.',
+      prefundNote:
+        'Para fondeo out-of-band de la billetera (prefondos), DESPU\u00c9S de que el saldo realmente cambi\u00f3 \u2014 el libro registra llegada, no intenci\u00f3n. Si este dep\u00f3sito pertenece a una transferencia, usa Dep\u00f3sito recibido en su fila; registrarlo aqu\u00ed tambi\u00e9n sobreestimar\u00eda el float.',
+      confirm: 'Confirmar reposici\u00f3n',
+      booked: (balance: string) => `Registrado \u2014 bridge_wallet_float ahora es ${balance}.`,
     },
     refundMoving: 'reembolso en curso',
     openTransfers: 'Transferencias abiertas',

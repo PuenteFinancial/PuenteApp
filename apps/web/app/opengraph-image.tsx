@@ -6,13 +6,27 @@ export const alt = 'Puente Financial — Send money home. Build U.S. credit doin
 export const size = { width: 1200, height: 630 }
 export const contentType = 'image/png'
 
-function load(file: string) {
-  return fs.readFileSync(path.join(process.cwd(), file))
+// Two traps live in this loader, both learned from PR #222's preview builds:
+//
+// 1. turbopackIgnore keeps these REAL filesystem calls — without it, Next 16's
+//    turbopack traces the whole project over the dynamic read and warns on
+//    every build.
+// 2. The returned ArrayBuffer must be sliced to THIS view's bytes. A Buffer is
+//    a window into a possibly-shared ArrayBuffer, and bare `.buffer` hands
+//    satori the whole slab from byte 0. Vercel prerenders all 38 pages in ONE
+//    worker, so by the time this route renders, the slab can begin with an
+//    earlier page's RSC flight payload — satori then dies with "Unsupported
+//    OpenType signature 0:{" (the first bytes of RSC serialization). Local
+//    builds use many workers and won the layout lottery, which is why this
+//    only ever failed on Vercel.
+function load(file: string): ArrayBuffer {
+  const buf = fs.readFileSync(/*turbopackIgnore: true*/ path.join(/*turbopackIgnore: true*/ process.cwd(), file))
+  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer
 }
 
 export default function Image() {
-  const displayData = load('public/fonts/BricolageGrotesque-Bold.ttf').buffer as ArrayBuffer
-  const monoData = load('public/fonts/SpaceMono-Bold.ttf').buffer as ArrayBuffer
+  const displayData = load('public/fonts/BricolageGrotesque-Bold.ttf')
+  const monoData = load('public/fonts/SpaceMono-Bold.ttf')
 
   return new ImageResponse(
     (

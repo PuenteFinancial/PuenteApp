@@ -11,6 +11,7 @@ import {
   isOpsTransferFundingSuccessShape,
   isOpsAttachSuccessShape,
   transferActions,
+  isOpsFloatTopUpSuccessShape,
   resolveErrorKind,
   firstDetailIssue,
   workerHeartbeatAlarm,
@@ -284,5 +285,20 @@ describe('transfer action success shapes', () => {
     expect(
       isOpsAttachSuccessShape({ transferId: 't-1', outcome: 'funded', depositMessage: 'BRGABC' }),
     ).toBe(false)
+  })
+})
+
+describe('isOpsFloatTopUpSuccessShape (slice 2)', () => {
+  it('accepts the booked shape', () => {
+    expect(
+      isOpsFloatTopUpSuccessShape({ amountMinor: 10_000, externalRef: 'adhoc:k', floatBalanceMinor: 22_000 }),
+    ).toBe(true)
+  })
+
+  it('rejects partial or non-record shapes', () => {
+    expect(isOpsFloatTopUpSuccessShape({ amountMinor: 10_000, externalRef: 'x' })).toBe(false)
+    expect(isOpsFloatTopUpSuccessShape({ amountMinor: '100', externalRef: 'x', floatBalanceMinor: 1 })).toBe(false)
+    expect(isOpsFloatTopUpSuccessShape(null)).toBe(false)
+    expect(isOpsFloatTopUpSuccessShape('booked')).toBe(false)
   })
 })

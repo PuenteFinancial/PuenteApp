@@ -234,6 +234,21 @@ export function transferActions(tr: OpsOpenTransfer): OpsTransferAction[] {
   return tr.fundingCleared ? [] : ['depositLanded']
 }
 
+// ── Treasury float top-up (funding-ops-automation slice 2) ───────────────────
+
+export interface OpsFloatTopUpSuccess {
+  amountMinor: number
+  externalRef: string
+  floatBalanceMinor: number
+}
+
+export function isOpsFloatTopUpSuccessShape(v: unknown): v is OpsFloatTopUpSuccess {
+  if (!isRecord(v)) return false
+  if (typeof v.amountMinor !== 'number') return false
+  if (typeof v.externalRef !== 'string') return false
+  return typeof v.floatBalanceMinor === 'number'
+}
+
 // ── Derivations (the API ships two lists; the page shows five panels) ────────
 
 export function heldTransfers(overview: OpsOverview): OpsOpenTransfer[] {

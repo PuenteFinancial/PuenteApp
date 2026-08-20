@@ -10,6 +10,7 @@
 import { useLanguage } from '@/components/LanguageProvider'
 import CancellationActions from '@/components/ops/CancellationActions'
 import TransferActions from '@/components/ops/TransferActions'
+import FloatTopUpCard from '@/components/ops/FloatTopUpCard'
 import { badgeTone, type TransferState } from '@/lib/transferState'
 import type { BadgeTone } from '@/lib/transferState'
 import { formatUsd, formatDate } from '@/lib/sendFormat'
@@ -345,6 +346,10 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
             </Card>
           </>
         )}
+        {/* Slice 2: the ad-hoc top-up rides the balances panel it moves.
+            Rendered regardless of snapshot presence — a fresh environment with
+            no recon runs yet is exactly where a prefund gets recorded. */}
+        {overview.actionsEnabled === true && <FloatTopUpCard />}
       </Section>
 
       <Section title={s.reconRuns}>
