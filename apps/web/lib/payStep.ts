@@ -103,6 +103,20 @@ export function payAffordanceFor(session: FundingSession, canSimulate: boolean):
 }
 
 /**
+ * Whether PayStep should keep refetching the funding session. True only for a
+ * manual-rail session still missing (or carrying malformed) deposit
+ * coordinates: the auto-onramp attaches them seconds AFTER confirm, so the
+ * mount-time fetch races the worker and can lose (seen live 2026-08-21 — the
+ * sender's pay step never showed the auto-attached coordinates without a full
+ * reload). Never true for stripe: refetching there risks remounting a live
+ * Payment Element, which is exactly what the one-shot fetch protects against.
+ */
+export function shouldRefetchSession(session: FundingSession | null): boolean {
+  if (!session || session.provider !== 'manual') return false
+  return !isDepositInstructionsShape(session.depositInstructions)
+}
+
+/**
  * How to surface a stripe.confirmPayment error. Stripe authors (and localizes,
  * per the Element's `locale`) the user-actionable messages — bank refusals,
  * incomplete forms — so those render inline and the Element stays mounted for

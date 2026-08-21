@@ -4,6 +4,7 @@ import {
   classifyConfirmPaymentError,
   isFundingSessionShape,
   payAffordanceFor,
+  shouldRefetchSession,
 } from './payStep'
 
 describe('isFundingSessionShape', () => {
@@ -143,5 +144,44 @@ describe('isDepositInstructionsShape', () => {
     expect(
       isFundingSessionShape({ provider: 'manual', depositInstructions: { broken: true } }),
     ).toBe(true)
+  })
+})
+
+describe('shouldRefetchSession', () => {
+  const INSTRUCTIONS = {
+    amountMinor: 10000,
+    currency: 'USD',
+    paymentRail: 'ach',
+    bankName: 'Lead Bank',
+    bankRoutingNumber: '101019644',
+    bankAccountNumber: '215268129123',
+    depositMessage: 'BRGABCD1234',
+  }
+
+  it('polls a manual session whose coordinates have not attached yet', () => {
+    expect(shouldRefetchSession({ provider: 'manual' })).toBe(true)
+  })
+
+  it('polls when the attached object is malformed (renders as fallback copy)', () => {
+    expect(shouldRefetchSession({ provider: 'manual', depositInstructions: { broken: true } })).toBe(
+      true,
+    )
+  })
+
+  it('stops once valid coordinates are attached', () => {
+    expect(
+      shouldRefetchSession({ provider: 'manual', depositInstructions: INSTRUCTIONS }),
+    ).toBe(false)
+  })
+
+  it('never refetches stripe (a refetch risks remounting a live Payment Element)', () => {
+    expect(
+      shouldRefetchSession({ provider: 'stripe', clientSecret: 'cs', publishableKey: 'pk' }),
+    ).toBe(false)
+  })
+
+  it('never refetches mock or a missing session', () => {
+    expect(shouldRefetchSession({ provider: 'mock' })).toBe(false)
+    expect(shouldRefetchSession(null)).toBe(false)
   })
 })
