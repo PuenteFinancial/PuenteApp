@@ -13,6 +13,7 @@ import {
   isDepositInstructionsShape,
   isFundingSessionShape,
   payAffordanceFor,
+  shouldRefetchSession,
   type FundingSession,
 } from '@/lib/payStep'
 import { getStripe } from '@/lib/stripe'
@@ -65,10 +66,13 @@ export default function PayStep({
 
   const fetching = useRef(false)
 
-  const loadSession = useCallback(async () => {
+  // `quiet` = a background refetch (the pending-instructions poll below): a
+  // transient failure must leave the current panel alone — flipping visible
+  // content to the error card because one poll blipped would read as a crash.
+  const loadSession = useCallback(async (quiet = false) => {
     if (fetching.current) return
     fetching.current = true
-    setSessionError(false)
+    if (!quiet) setSessionError(false)
     try {
       const res = await fetch(`/api/transfers/${transferId}/funding-session`, {
         cache: 'no-store',
@@ -79,7 +83,7 @@ export default function PayStep({
       }
       const body: unknown = await res.json().catch(() => null)
       if (!res.ok || !isFundingSessionShape(body)) {
-        setSessionError(true)
+        if (!quiet) setSessionError(true)
         return
       }
       if (body.provider === 'stripe' && body.clientSecret && body.publishableKey) {
@@ -101,7 +105,7 @@ export default function PayStep({
       }
       setSession(body)
     } catch {
-      setSessionError(true)
+      if (!quiet) setSessionError(true)
     } finally {
       fetching.current = false
     }
@@ -110,6 +114,17 @@ export default function PayStep({
   useEffect(() => {
     void loadSession()
   }, [loadSession])
+
+  // Manual rail: the auto-onramp attaches coordinates seconds AFTER confirm,
+  // so the mount-time fetch races the worker and can lose — without this the
+  // sender never sees the coordinates short of a full reload (found live
+  // 2026-08-21). Poll quietly until they attach; shouldRefetchSession is
+  // false for stripe, so a live Payment Element is never refetched.
+  useEffect(() => {
+    if (!shouldRefetchSession(session)) return
+    const timer = setInterval(() => void loadSession(true), 5000)
+    return () => clearInterval(timer)
+  }, [session, loadSession])
 
   // Moved verbatim from TransferTracker (PR-S3) — the dev-only mock advance.
   const handleSimulate = async () => {
