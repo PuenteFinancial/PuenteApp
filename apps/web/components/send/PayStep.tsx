@@ -34,6 +34,7 @@ export default function PayStep({
   transferId,
   totalAmountMinor,
   canSimulate,
+  paymentClaimedAt,
   onAdvanced,
 }: {
   transferId: string
@@ -41,6 +42,8 @@ export default function PayStep({
   totalAmountMinor: number
   /** Non-production only — same prop the simulate button always keyed on. */
   canSimulate: boolean
+  /** Set once the sender claimed they paid (slice 4) — swaps the claim button for the claimed copy. */
+  paymentClaimedAt: string | null
   /** The tracker's refresh — called after any action that may advance state. */
   onAdvanced: () => Promise<void>
 }) {
@@ -54,6 +57,11 @@ export default function PayStep({
   const [submitted, setSubmitted] = useState(false)
   const [simulating, setSimulating] = useState(false)
   const [simulateError, setSimulateError] = useState('')
+  const [claiming, setClaiming] = useState(false)
+  // Local mirror of the prop: the claimed copy must swap in the instant the
+  // POST lands, not a poll later — same reason `submitted` exists.
+  const [claimed, setClaimed] = useState(false)
+  const [claimError, setClaimError] = useState('')
 
   const fetching = useRef(false)
 
@@ -125,6 +133,35 @@ export default function PayStep({
       setSimulateError(t.send.errors.generic)
     } finally {
       setSimulating(false)
+    }
+  }
+
+  // Sender payment claim (funding-ops slice 4) — simulate-arm mechanics: busy
+  // state, POST, capture, then hold on the tracker's refresh. A set-once
+  // signal; the API replays the original timestamp on a double tap.
+  const handleClaim = async () => {
+    setClaiming(true)
+    setClaimError('')
+    try {
+      const res = await fetch(`/api/transfers/${transferId}/payment-claim`, {
+        method: 'POST',
+      })
+      if (!res.ok) {
+        // A 409 means the transfer moved on — the tracker's refresh replaces
+        // this panel anyway; every failure renders the same retryable line.
+        setClaimError(s.pay.claim.error)
+        void onAdvanced()
+        return
+      }
+      posthog.capture('send_payment_claimed', { transfer_id: transferId })
+      setClaimed(true)
+      // Await so the button stays busy until the tracker adopts the claimed
+      // transfer — mirrors handleSimulate's reasoning.
+      await onAdvanced()
+    } catch {
+      setClaimError(s.pay.claim.error)
+    } finally {
+      setClaiming(false)
     }
   }
 
@@ -235,6 +272,35 @@ export default function PayStep({
           <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0, lineHeight: 1.5 }}>
             {s.pay.offlineBody}
           </p>
+        )}
+        {/* Sender payment claim (slice 4): once claimed — this mount or any
+            prior one — the confirmation copy replaces the button. The copy
+            deliberately promises verification, never release timing. */}
+        {claimed || paymentClaimedAt != null ? (
+          <div style={{ marginTop: 12 }}>
+            <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)', margin: '0 0 4px' }}>
+              {s.pay.claim.claimedTitle}
+            </p>
+            <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0, lineHeight: 1.5 }}>
+              {s.pay.claim.claimedBody}
+            </p>
+          </div>
+        ) : (
+          <div style={{ marginTop: 12 }}>
+            <button
+              type="button"
+              className="btn btn--accent btn--sm"
+              disabled={claiming}
+              onClick={handleClaim}
+            >
+              {claiming ? s.pay.claim.claiming : s.pay.claim.button}
+            </button>
+            {claimError && (
+              <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '8px 0 0' }}>
+                {claimError}
+              </p>
+            )}
+          </div>
         )}
       </div>
     )

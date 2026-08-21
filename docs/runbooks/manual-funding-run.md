@@ -68,6 +68,13 @@ carries the settlement risk (payout draws YOUR float; the deposit reimburses it)
 bounded by the uncleared-exposure cap. An initiated ACH can still fail — that tail
 is `FUNDING_REVERSED` territory and it lands on Puente.
 
+**The sender's claim (slice 4).** When the sender taps "I've sent the payment" on the
+pay step, the board row grows a *"sender says payment sent — verify & release"*
+annotation and one Sentry info event fires (fingerprint `payment-claim`,`<transfer id>`)
+as the phone ping. The claim is a SIGNAL, never evidence: verify the deposit at Bridge
+(onramp activity for the row's ref) before releasing. A claim with no matching Bridge
+activity after a day is a conversation with the sender, not a release.
+
 ---
 
 ## 4. Release the payout

@@ -45,6 +45,12 @@ export interface TrackedTransfer {
    * older cached responses, simply do not carry it.
    */
   cancellationRequestedAt?: string | null
+  /**
+   * Set-once when the sender tapped "I've sent the payment" (funding-ops
+   * slice 4). Optional for the same reason as cancellationRequestedAt: older
+   * cached responses simply do not carry it.
+   */
+  paymentClaimedAt?: string | null
   completedAt: string | null
   createdAt: string
 }

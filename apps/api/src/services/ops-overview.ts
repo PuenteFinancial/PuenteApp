@@ -62,6 +62,10 @@ export interface OpsOpenTransfer {
   // the deposit-landed ref and marks PENDING_PAYMENT rows that still need the
   // attach step. Provider id, not PII (refundPaymentRef precedent).
   onrampRef: string | null
+  // When the sender tapped "I've sent the payment" (slice 4). A claimed
+  // PENDING_PAYMENT row is the "your move" signal — verify the deposit, then
+  // release. Timestamp, not PII.
+  paymentClaimedAt: string | null
 }
 
 export interface OpsFloatCeiling {
@@ -126,6 +130,7 @@ interface OpenRow {
   cancellation_requested_at: string | null
   created_at: string
   funding_payment_ref: string | null
+  payment_claimed_at: string | null
 }
 
 // PENDING_PAYMENT precedes every lifecycle stamp coarseAnchor folds in, so its
@@ -148,7 +153,7 @@ async function readOpenTransfers(nowMs: number): Promise<OpsOpenTransfer[]> {
   const { data, error } = await supabaseAdmin
     .from('transfers')
     .select(
-      'id, user_id, state, send_amount_minor, fee_amount_minor, funding_cleared, payout_hold_reason, disclosure_accepted_at, payment_at, submit_attempted_at, cancellation_requested_at, created_at, funding_payment_ref',
+      'id, user_id, state, send_amount_minor, fee_amount_minor, funding_cleared, payout_hold_reason, disclosure_accepted_at, payment_at, submit_attempted_at, cancellation_requested_at, created_at, funding_payment_ref, payment_claimed_at',
     )
     .in('state', [...OVERVIEW_STATES])
     .limit(ROW_BOUND)
@@ -207,6 +212,7 @@ async function readOpenTransfers(nowMs: number): Promise<OpsOpenTransfer[]> {
         cancellationRequested: row.cancellation_requested_at != null,
         fundingInitiated: row.funding_payment_ref != null,
         onrampRef: onrampRefs.get(row.id) ?? null,
+        paymentClaimedAt: row.payment_claimed_at,
       }
     })
     .sort((a, b) => b.dwellMinutes - a.dwellMinutes)

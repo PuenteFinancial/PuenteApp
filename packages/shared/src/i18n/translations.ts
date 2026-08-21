@@ -223,6 +223,17 @@ export type Translations = {
           amount: string
           referenceWarning: string
         }
+        // Sender payment claim (funding-ops slice 4): a set-once signal to
+        // ops, never a release. The claimed copy must NOT promise instant (or
+        // any automatic) release — release happens only after an operator
+        // confirms the payment is on its way.
+        claim: {
+          button: string
+          claiming: string
+          claimedTitle: string
+          claimedBody: string
+          error: string
+        }
       }
       loadError: string
       retry: string
@@ -314,6 +325,10 @@ export type Translations = {
     waitUncleared: string
     waitCancelRequested: string
     waitNoInstructions: string
+    // Slice 4: the sender tapped "I've sent the payment" — verify the deposit
+    // at the provider, then release. The strongest "your move" on a
+    // PENDING_PAYMENT row once instructions are attached.
+    waitSenderClaimed: string
     floatCeiling: string
     floatNotConfigured: string
     floatTripped: string
@@ -750,6 +765,14 @@ const en: Translations = {
           referenceWarning:
             'Include the reference code with your payment — without it, we can’t match your deposit to this transfer.',
         },
+        claim: {
+          button: 'I’ve sent the payment',
+          claiming: 'Recording…',
+          claimedTitle: 'Thanks — we’ve noted your payment',
+          claimedBody:
+            'We’ll release your transfer once we confirm the payment is on its way. This page will update when it moves.',
+          error: 'We couldn’t record that just now. Please try again.',
+        },
       },
       loadError: 'We couldn’t load this transfer. Try again.',
       retry: 'Retry',
@@ -960,6 +983,7 @@ const en: Translations = {
     waitUncleared: 'awaiting ACH clearing',
     waitCancelRequested: 'cancellation requested',
     waitNoInstructions: 'no deposit instructions attached',
+    waitSenderClaimed: 'sender says payment sent — verify & release',
     floatCeiling: 'Float ceiling',
     floatNotConfigured: 'Float ceiling not configured in this environment.',
     floatTripped: 'Float ceiling tripped \u2014 payout submission paused',
@@ -1297,6 +1321,14 @@ const es: Translations = {
           referenceWarning:
             'Incluye el código de referencia con tu pago — sin él, no podemos vincular tu depósito con esta transferencia.',
         },
+        claim: {
+          button: 'Ya envié el pago',
+          claiming: 'Registrando…',
+          claimedTitle: 'Gracias — tomamos nota de tu pago',
+          claimedBody:
+            'Liberaremos tu transferencia en cuanto confirmemos que el pago va en camino. Esta página se actualizará cuando avance.',
+          error: 'No pudimos registrarlo en este momento. Inténtalo de nuevo.',
+        },
       },
       loadError: 'No pudimos cargar esta transferencia. Inténtalo de nuevo.',
       retry: 'Reintentar',
@@ -1489,6 +1521,7 @@ const es: Translations = {
     waitUncleared: 'esperando liquidaci\u00f3n ACH',
     waitCancelRequested: 'cancelaci\u00f3n solicitada',
     waitNoInstructions: 'sin instrucciones de dep\u00f3sito adjuntas',
+    waitSenderClaimed: 'el remitente dice que envi\u00f3 el pago \u2014 verifica y libera',
     floatCeiling: 'Techo de flotaci\u00f3n',
     floatNotConfigured: 'El techo de flotaci\u00f3n no est\u00e1 configurado en este entorno.',
     floatTripped: 'Techo de flotaci\u00f3n alcanzado \u2014 env\u00edo de pagos en pausa',

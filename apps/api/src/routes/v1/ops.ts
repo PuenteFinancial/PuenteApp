@@ -92,6 +92,7 @@ const overviewResponseSchema = {
           cancellationRequested: { type: 'boolean' },
           fundingInitiated: { type: 'boolean' },
           onrampRef: { type: ['string', 'null'] },
+          paymentClaimedAt: { type: ['string', 'null'] },
         },
       },
     },
