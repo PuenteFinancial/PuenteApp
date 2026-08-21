@@ -50,7 +50,23 @@ const RUNBOOK = 'docs/runbooks/reconciliation.md'
 // Constants, not env: these encode process reality (auto-fail clocks, SPEI
 // settle-in-seconds, ACH T+4), not tunable policy. Business-day-blind on
 // purpose — at daily cadence a weekend false-positive costs one glance.
-const PENDING_PAYMENT_STALE_MS = 40 * 60_000 // 30-min auto-fail + grace: reconcile-pending is broken if these exist
+// (PENDING_PAYMENT is the one rail-aware bound: it mirrors whatever clock
+// reconcile-pending itself runs on, which IS env under the manual rail.)
+const PENDING_PAYMENT_STALE_WEBHOOK_MS = 40 * 60_000 // 30-min auto-fail + grace
+// The reaper sweeps on a minutes-scale cron; hours of grace means a hit is
+// the reaper being broken, never the reaper being between runs.
+const PENDING_PAYMENT_REAPER_GRACE_MS = 6 * 60 * 60_000
+
+// Rail-aware bound for the pending-payment-autofail-dead bucket (#216, the
+// #205 fix mirrored): under the manual rail a sender legitimately holds
+// deposit instructions for hours-to-days, and reconcile-pending waits
+// MANUAL_PENDING_MAX_AGE_DAYS before reaping — so only past THAT clock (plus
+// grace) does a PENDING_PAYMENT row mean the reaper is dead. Webhook rails
+// keep the 40-minute bound.
+function pendingPaymentStaleMs(): number {
+  if (env.FUNDING_PROCESSOR !== 'manual') return PENDING_PAYMENT_STALE_WEBHOOK_MS
+  return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60_000 + PENDING_PAYMENT_REAPER_GRACE_MS
+}
 const FUNDED_UNHELD_STALE_MS = 2 * 60 * 60_000 // sweep enqueues every minute; hours stuck = pipeline down
 const SUBMITTED_STALE_MS = 24 * 60 * 60_000 // SPEI settles in seconds; a day in transit is stuck
 const PAYOUT_FAILED_UNREFUNDED_STALE_MS = 24 * 60 * 60_000 // sender owed, nothing in motion
@@ -246,7 +262,7 @@ export function agingFindings(rows: AgingRow[], nowMs: number): CheckFinding[] {
     const fundedAge = nowMs - new Date(funded).getTime()
     switch (row.state) {
       case 'PENDING_PAYMENT':
-        if (nowMs - new Date(row.created_at).getTime() > PENDING_PAYMENT_STALE_MS)
+        if (nowMs - new Date(row.created_at).getTime() > pendingPaymentStaleMs())
           flag('pending-payment-autofail-dead', row, row.created_at)
         break
       case 'FUNDED':

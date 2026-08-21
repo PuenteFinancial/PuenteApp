@@ -17,6 +17,8 @@ vi.mock('./supabase.js', () => ({
 
 const envMock = vi.hoisted(() => ({
   BRIDGE_TREASURY_WALLET_ID: 'wallet-1' as string | undefined,
+  FUNDING_PROCESSOR: 'mock' as string,
+  MANUAL_PENDING_MAX_AGE_DAYS: 7,
 }))
 vi.mock('../config/env.js', () => ({ env: envMock }))
 
@@ -77,6 +79,8 @@ beforeEach(() => {
   getFundingProcessor.mockReset()
   pollPayouts.mockReset()
   envMock.BRIDGE_TREASURY_WALLET_ID = 'wallet-1'
+  envMock.FUNDING_PROCESSOR = 'mock'
+  envMock.MANUAL_PENDING_MAX_AGE_DAYS = 7
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(NOW)
 })
@@ -130,6 +134,46 @@ describe('agingFindings', () => {
       key: 'aging:pending-payment-autofail-dead:t-2',
       detail: { transferId: 't-2', state: 'PENDING_PAYMENT', ageHours: 1 },
     })
+  })
+
+  // #216: the manual rail's PENDING_PAYMENT clock is days (a sender mid-wire
+  // is NORMAL), so the aging bound must follow the reaper's own window — the
+  // 40-minute webhook bound would page every real out-of-band sender.
+  it('manual rail: leaves a days-old PENDING_PAYMENT alone inside the reaper window', () => {
+    envMock.FUNDING_PROCESSOR = 'manual'
+    const midWire = row({ state: 'PENDING_PAYMENT', created_at: hoursAgo(48), payment_at: null })
+    expect(agingFindings([midWire], nowMs)).toHaveLength(0)
+  })
+
+  it('manual rail: flags PENDING_PAYMENT past the reaper window + grace (reaper is dead)', () => {
+    envMock.FUNDING_PROCESSOR = 'manual'
+    const reaperDead = row({
+      id: 't-dead',
+      state: 'PENDING_PAYMENT',
+      created_at: hoursAgo(7 * 24 + 7), // 7-day window + 6h grace, exceeded
+      payment_at: null,
+    })
+    const keys = agingFindings([reaperDead], nowMs).map((f) => f.key)
+    expect(keys).toEqual(['aging:pending-payment-autofail-dead:t-dead'])
+  })
+
+  it('manual rail: the bound tracks MANUAL_PENDING_MAX_AGE_DAYS', () => {
+    envMock.FUNDING_PROCESSOR = 'manual'
+    envMock.MANUAL_PENDING_MAX_AGE_DAYS = 2
+    const pastSmallerWindow = row({
+      id: 't-2d',
+      state: 'PENDING_PAYMENT',
+      created_at: hoursAgo(2 * 24 + 7),
+      payment_at: null,
+    })
+    const insideSmallerWindow = row({
+      id: 't-ok',
+      state: 'PENDING_PAYMENT',
+      created_at: hoursAgo(2 * 24 + 1), // past 2d but inside the 6h grace
+      payment_at: null,
+    })
+    const keys = agingFindings([pastSmallerWindow, insideSmallerWindow], nowMs).map((f) => f.key)
+    expect(keys).toEqual(['aging:pending-payment-autofail-dead:t-2d'])
   })
 
   it('flags unheld FUNDED past 2h but leaves held FUNDED alone until the clearing window', () => {
