@@ -40,6 +40,9 @@ export interface OpsOpenTransfer {
   feeAmountMinor?: number
   fundingInitiated?: boolean
   onrampRef?: string | null
+  // Slice 4 — same optional deploy-skew semantics: an older API omits it and
+  // the row simply shows no claim annotation.
+  paymentClaimedAt?: string | null
 }
 
 export interface OpsFloatCeiling {

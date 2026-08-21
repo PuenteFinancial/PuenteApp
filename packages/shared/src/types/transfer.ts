@@ -54,6 +54,12 @@ export interface Transfer {
   fundingSourceType: 'ach'
   fundingCleared: boolean
   disclosureAcceptedAt: string | null
+  /**
+   * Set-once when the sender taps "I've sent the payment" (funding-ops
+   * slice 4). A signal to ops, never a state change — release stays a
+   * separate operator decision.
+   */
+  paymentClaimedAt: string | null
   /** Set at FUNDED — starts the Reg E cancellation clock. */
   paymentAt: string | null
   cancelableUntil: string | null

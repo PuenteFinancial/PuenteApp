@@ -64,6 +64,7 @@ const transferRow = {
   payout_held_at: null,
   submit_attempted_at: null,
   cancellation_requested_at: null,
+  payment_claimed_at: null,
   completed_at: null,
   created_at: '2026-07-17T20:00:00.000Z',
 }

@@ -75,6 +75,7 @@ const openRow = (over: Record<string, unknown> = {}) => ({
   cancellation_requested_at: null,
   created_at: minutesAgo(95),
   funding_payment_ref: 'manualpay_ref-1',
+  payment_claimed_at: null,
   ...over,
 })
 
@@ -192,6 +193,7 @@ describe('buildOpsOverview', () => {
       cancellationRequested: true,
       fundingInitiated: true,
       onrampRef: null,
+      paymentClaimedAt: null,
     })
     expect(overview.openTransfers[2]).toMatchObject({
       transferId: 't-2',
@@ -275,6 +277,28 @@ describe('buildOpsOverview', () => {
       fundingInitiated: true,
     })
     expect(byId.get('t-bare')).toMatchObject({ onrampRef: null, fundingInitiated: false })
+  })
+
+  it('carries the sender payment claim timestamp through to the row (slice 4)', async () => {
+    const claimedAt = minutesAgo(30)
+    transfersResult = {
+      data: [
+        openRow({
+          id: 't-claimed',
+          state: 'PENDING_PAYMENT',
+          payment_at: null,
+          payment_claimed_at: claimedAt,
+        }),
+        openRow({ id: 't-unclaimed', state: 'PENDING_PAYMENT', payment_at: null }),
+      ],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+    const byId = new Map(overview.openTransfers.map((t) => [t.transferId, t]))
+
+    expect(byId.get('t-claimed')).toMatchObject({ paymentClaimedAt: claimedAt })
+    expect(byId.get('t-unclaimed')).toMatchObject({ paymentClaimedAt: null })
   })
 
   it('fails closed when the deposit_instructions lookup breaks', async () => {

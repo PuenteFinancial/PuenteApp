@@ -38,7 +38,7 @@ const TRANSFER_COLUMNS =
   'funding_source_type, funding_cleared, disclosure_accepted_at, payment_at, ' +
   'cancelable_until, idempotency_key, funding_payment_ref, provider_transfer_ref, ' +
   'refund_payment_ref, refunded_at, submit_attempted_at, cancellation_requested_at, ' +
-  'completed_at, created_at'
+  'payment_claimed_at, completed_at, created_at'
 
 const moneySchema = (currency: string) =>
   ({
@@ -77,6 +77,7 @@ const transferResponseSchema = {
     paymentAt: { type: ['string', 'null'] },
     cancelableUntil: { type: ['string', 'null'] },
     cancellationRequestedAt: { type: ['string', 'null'] },
+    paymentClaimedAt: { type: ['string', 'null'] },
     providerTransferRef: { type: ['string', 'null'] },
     completedAt: { type: ['string', 'null'] },
     createdAt: { type: 'string' },
@@ -861,6 +862,125 @@ export async function transfersRoute(server: FastifyInstance) {
       })
 
       return reply.status(200).send(toApiTransfer(refunded))
+    },
+  )
+
+  // POST /transfers/:id/payment-claim — "I've sent the payment" (funding-ops
+  // slice 4). A set-once signal to ops, NEVER a state change or a release: the
+  // release decision stays with the operator (claim ≠ release,
+  // docs/decisions.md 2026-08-19 — a claim that released money would be a
+  // treasury-drain lever). No Idempotency-Key: the flag is monotone and carries
+  // no money, so a replay simply returns the existing timestamp — there is no
+  // keyed claim to collide (the body-vs-path-param trap needs a keyed body).
+  server.post<{ Params: { id: string } }>(
+    '/transfers/:id/payment-claim',
+    {
+      schema: {
+        params: {
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string', format: 'uuid' } },
+        },
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              transferId: { type: 'string' },
+              paymentClaimedAt: { type: 'string' },
+            },
+          },
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          500: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      const userId = request.user!.id
+
+      // Owner check first — 404, never 403, same as every transfer read.
+      const { data } = await supabaseAdmin
+        .from('transfers')
+        .select('id, state, funding_payment_ref, payment_claimed_at')
+        .eq('id', request.params.id)
+        .eq('user_id', userId)
+        .single()
+      if (!data) {
+        return sendError(reply, 404, 'not_found', 'Transfer not found')
+      }
+      const transfer = data as {
+        id: string
+        state: string
+        funding_payment_ref: string | null
+        payment_claimed_at: string | null
+      }
+
+      // Replay before the state gate: a claim recorded while PENDING_PAYMENT
+      // stays answerable after the transfer advances — the double tap and the
+      // stale second tab both get the original timestamp, not a 409.
+      if (transfer.payment_claimed_at) {
+        return { transferId: transfer.id, paymentClaimedAt: transfer.payment_claimed_at }
+      }
+
+      if (transfer.state !== 'PENDING_PAYMENT') {
+        return sendError(reply, 409, 'conflict', 'Transfer is no longer awaiting payment')
+      }
+      // Unconfirmed (no funding ref) — there are no coordinates the sender
+      // could have paid against yet.
+      if (!transfer.funding_payment_ref) {
+        return sendError(reply, 409, 'conflict', 'Payment has not been set up for this transfer')
+      }
+
+      // Set-once under race: the conditional update is the lock. The loser of
+      // a double tap matches 0 rows, re-reads, and returns the winner's stamp.
+      const claimedAt = new Date().toISOString()
+      const { data: updated, error: updateError } = await supabaseAdmin
+        .from('transfers')
+        .update({ payment_claimed_at: claimedAt })
+        .eq('id', transfer.id)
+        .eq('state', 'PENDING_PAYMENT')
+        .is('payment_claimed_at', null)
+        .select('payment_claimed_at')
+        .maybeSingle()
+      if (updateError) {
+        request.log.error(
+          { route: 'transfers/payment-claim' },
+          `payment claim update failed: ${updateError.message}`,
+        )
+        return sendError(reply, 500, 'internal_error', 'Something went wrong')
+      }
+
+      if (!updated) {
+        // Lost a race: either a concurrent claim landed (return it) or the
+        // state advanced under us (the 409 the sender would have gotten a
+        // moment later).
+        const { data: current } = await supabaseAdmin
+          .from('transfers')
+          .select('payment_claimed_at')
+          .eq('id', transfer.id)
+          .single()
+        const existing = (current as { payment_claimed_at: string | null } | null)
+          ?.payment_claimed_at
+        if (existing) {
+          return { transferId: transfer.id, paymentClaimedAt: existing }
+        }
+        return sendError(reply, 409, 'conflict', 'Transfer is no longer awaiting payment')
+      }
+
+      // The zero-new-infra phone ping (PRD §6): one fingerprinted info event
+      // per claim — first stamp only, so replays never re-page. Transfer id
+      // only, never sender PII. Acknowledged smell (business event in the
+      // alert channel); revisit when real notification infra exists.
+      Sentry.withScope((scope) => {
+        scope.setFingerprint(['payment-claim', transfer.id])
+        scope.setContext('payment_claim', { transferId: transfer.id, claimedAt })
+        Sentry.captureMessage('Sender claimed payment — verify and release on the ops board', 'info')
+      })
+
+      return {
+        transferId: transfer.id,
+        paymentClaimedAt: (updated as { payment_claimed_at: string }).payment_claimed_at,
+      }
     },
   )
 

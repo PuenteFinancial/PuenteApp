@@ -109,6 +109,11 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
     // this is the loudest "your move" on a PENDING_PAYMENT row).
     if (tr.state === 'PENDING_PAYMENT' && tr.fundingInitiated === true && tr.onrampRef == null)
       notes.push(s.waitNoInstructions)
+    // Slice 4: the sender claims they paid — verify the deposit at the
+    // provider, then release. Only meaningful while the row still waits on
+    // funding; later states carry the fact in the audit trail instead.
+    if (tr.state === 'PENDING_PAYMENT' && tr.paymentClaimedAt != null)
+      notes.push(s.waitSenderClaimed)
     return notes
   }
 

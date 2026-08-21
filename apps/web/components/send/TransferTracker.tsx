@@ -425,6 +425,7 @@ export default function TransferTracker({
           transferId={transferId}
           totalAmountMinor={transfer.totalAmount.amountMinor}
           canSimulate={canSimulate}
+          paymentClaimedAt={transfer.paymentClaimedAt ?? null}
           onAdvanced={refresh}
         />
       )}

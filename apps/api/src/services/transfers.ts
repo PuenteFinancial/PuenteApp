@@ -67,6 +67,10 @@ export interface TransferRow {
   // (slice-7 PR6b). A FLAG ORTHOGONAL TO STATE, not a state: the payout keeps
   // advancing while a request is pending, and the request resolves separately.
   cancellation_requested_at: string | null
+  // Set-once when the sender taps "I've sent the payment" on the pay step
+  // (funding-ops slice 4). Same orthogonal-flag posture as the cancellation
+  // request: a signal to ops, never a state change or a release.
+  payment_claimed_at: string | null
   completed_at: string | null
   created_at: string
 }
@@ -473,6 +477,7 @@ export function toApiTransfer(row: TransferRow) {
     paymentAt: row.payment_at,
     cancelableUntil: row.cancelable_until,
     cancellationRequestedAt: row.cancellation_requested_at,
+    paymentClaimedAt: row.payment_claimed_at,
     providerTransferRef: row.provider_transfer_ref,
     completedAt: row.completed_at,
     createdAt: row.created_at,

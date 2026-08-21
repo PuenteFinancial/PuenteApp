@@ -112,6 +112,7 @@ function chain(result: { data?: unknown; error?: unknown }) {
     b[m] = vi.fn(() => b)
   }
   b['single'] = vi.fn(async () => resolved)
+  b['maybeSingle'] = vi.fn(async () => resolved)
   b.then = (resolve) => resolve(resolved)
   return b
 }
@@ -1303,6 +1304,165 @@ describe('GET /v1/transfers/:id/disclosure', () => {
     const app = await buildApp()
     const res = await supertest(app.server).get(`/v1/transfers/${TRANSFER_ID}/disclosure`)
     expect(res.status).toBe(401)
+    await app.close()
+  })
+})
+
+describe('POST /v1/transfers/:id/payment-claim', () => {
+  const CLAIMED_AT = '2026-08-21T15:00:00.000Z'
+
+  const claimRow = (over: Record<string, unknown> = {}) => ({
+    id: TRANSFER_ID,
+    state: 'PENDING_PAYMENT',
+    funding_payment_ref: 'manualpay_1',
+    payment_claimed_at: null,
+    ...over,
+  })
+
+  // The route may hit `transfers` up to three times (read, conditional update,
+  // race re-read) — queue one chain per call, in order.
+  const queueTransfers = (...chains: ReturnType<typeof chain>[]) => {
+    const remaining = [...chains]
+    from.mockImplementation((table: unknown) => {
+      if (table !== 'transfers') throw new Error(`unexpected from('${String(table)}')`)
+      const next = remaining.shift()
+      if (!next) throw new Error('transfers queried more times than the test queued')
+      return next
+    })
+    return remaining
+  }
+
+  const post = (app: Awaited<ReturnType<typeof buildApp>>) =>
+    supertest(app.server)
+      .post(`/v1/transfers/${TRANSFER_ID}/payment-claim`)
+      .set('Authorization', 'Bearer token')
+      .send({})
+
+  it('401s without auth', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server)
+      .post(`/v1/transfers/${TRANSFER_ID}/payment-claim`)
+      .send({})
+    expect(res.status).toBe(401)
+    await app.close()
+  })
+
+  it("404s a missing or non-owner transfer", async () => {
+    queueTransfers(chain({ data: null }))
+    const app = await buildApp()
+    const res = await post(app)
+    expect(res.status).toBe(404)
+    await app.close()
+  })
+
+  it('scopes the read to the authenticated owner', async () => {
+    const read = chain({ data: claimRow() })
+    const update = chain({ data: { payment_claimed_at: CLAIMED_AT } })
+    queueTransfers(read, update)
+    const app = await buildApp()
+    await post(app)
+    expect(read.eq).toHaveBeenCalledWith('user_id', USER_ID)
+    await app.close()
+  })
+
+  it('stamps the claim once and pages Sentry with a per-transfer fingerprint', async () => {
+    const read = chain({ data: claimRow() })
+    const update = chain({ data: { payment_claimed_at: CLAIMED_AT } })
+    queueTransfers(read, update)
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ transferId: TRANSFER_ID, paymentClaimedAt: CLAIMED_AT })
+    // Never a state change: the write touches payment_claimed_at and nothing
+    // else, and no transition runs.
+    expect(update.update).toHaveBeenCalledWith({ payment_claimed_at: expect.any(String) })
+    expect(update.is).toHaveBeenCalledWith('payment_claimed_at', null)
+    expect(update.eq).toHaveBeenCalledWith('state', 'PENDING_PAYMENT')
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(setFingerprint).toHaveBeenCalledWith(['payment-claim', TRANSFER_ID])
+    expect(captureMessage).toHaveBeenCalledTimes(1)
+    expect(captureMessage).toHaveBeenCalledWith(expect.any(String), 'info')
+    await app.close()
+  })
+
+  it('replays the original timestamp on a second tap without writing or re-paging', async () => {
+    queueTransfers(chain({ data: claimRow({ payment_claimed_at: CLAIMED_AT }) }))
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ transferId: TRANSFER_ID, paymentClaimedAt: CLAIMED_AT })
+    expect(captureMessage).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('still replays a recorded claim after the transfer advances past PENDING_PAYMENT', async () => {
+    queueTransfers(
+      chain({ data: claimRow({ state: 'COMPLETED', payment_claimed_at: CLAIMED_AT }) }),
+    )
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ transferId: TRANSFER_ID, paymentClaimedAt: CLAIMED_AT })
+    await app.close()
+  })
+
+  it('409s an unclaimed transfer that is no longer awaiting payment', async () => {
+    const remaining = queueTransfers(chain({ data: claimRow({ state: 'FUNDED' }) }))
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(409)
+    expect(remaining).toHaveLength(0) // no update, no re-read
+    expect(captureMessage).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('409s an unconfirmed transfer (no funding ref — nothing to have paid against)', async () => {
+    queueTransfers(chain({ data: claimRow({ funding_payment_ref: null }) }))
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(409)
+    await app.close()
+  })
+
+  it("returns the winner's stamp when it loses the double-tap race", async () => {
+    queueTransfers(
+      chain({ data: claimRow() }),
+      chain({ data: null }), // conditional update matched 0 rows
+      chain({ data: { payment_claimed_at: CLAIMED_AT } }), // winner's stamp on re-read
+    )
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ transferId: TRANSFER_ID, paymentClaimedAt: CLAIMED_AT })
+    // The loser must not page — only the write that actually stamped does.
+    expect(captureMessage).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('409s when the update lost because the state advanced, not because of a claim', async () => {
+    queueTransfers(
+      chain({ data: claimRow() }),
+      chain({ data: null }), // update matched 0 rows
+      chain({ data: { payment_claimed_at: null } }), // no claim landed either
+    )
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(409)
+    expect(captureMessage).not.toHaveBeenCalled()
     await app.close()
   })
 })
