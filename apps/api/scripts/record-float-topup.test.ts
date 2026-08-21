@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { floatTopUpLedgerEntries, PayoutValidationError } from '../src/services/payouts.js'
-import { parseUsdToMinor, parseArgs } from './record-float-topup.js'
+import { parseUsdToMinor, parseArgs, wasFreshPosting } from './record-float-topup.js'
 
 // The float top-up CLI. Two classes of guarantee: the arg parsing (the only
 // user input on a path that writes to the ledger, so every way a mistyped
@@ -85,5 +85,20 @@ describe('parseArgs', () => {
 
   it('rejects a --ref that swallowed the next flag', () => {
     expect(() => parseArgs(['--ref', '--confirm', '--amount', '100'])).toThrow(/--ref is required/)
+  })
+})
+
+describe('wasFreshPosting (#214)', () => {
+  it('full delta = the posting landed this run', () => {
+    expect(wasFreshPosting(0, 10000, 10000)).toBe(true)
+    expect(wasFreshPosting(9595, 9695, 100)).toBe(true)
+  })
+
+  it('unchanged balance = the ledger deduped the re-run', () => {
+    expect(wasFreshPosting(10000, 10000, 10000)).toBe(false)
+  })
+
+  it('partial delta (concurrent activity) is not reported as a clean fresh post', () => {
+    expect(wasFreshPosting(10000, 10050, 10000)).toBe(false)
   })
 })

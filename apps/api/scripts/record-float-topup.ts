@@ -52,6 +52,20 @@ export function parseUsdToMinor(input: string): number {
   return Number(minor)
 }
 
+// A re-run dedupes inside the ledger (idempotency key), and the old
+// unconditional "Posted" then read as a possible double-post mid-incident
+// (#214). The before/after delta the script already fetches is the truth:
+// full delta = fresh posting; anything else = the ledger deduped this run.
+// Messaging only — concurrent postings could skew the delta, but this is a
+// single-operator CLI and the balance lines are printed either way.
+export function wasFreshPosting(
+  beforeMinor: number,
+  afterMinor: number,
+  amountMinor: number,
+): boolean {
+  return afterMinor - beforeMinor === amountMinor
+}
+
 export function parseArgs(argv: string[]): {
   amountMinor: number
   ref: string
@@ -91,7 +105,13 @@ async function main(): Promise<void> {
 
   const { idempotencyKey } = await recordFloatTopUp({ amountMinor, externalRef: ref })
   const after = await getAccountBalance('bridge_wallet_float')
-  console.log(`\nPosted ${formatMoney(money)} (${idempotencyKey}).`)
+  if (wasFreshPosting(before.amountMinor, after.amountMinor, amountMinor)) {
+    console.log(`\nPosted ${formatMoney(money)} (${idempotencyKey}).`)
+  } else {
+    console.log(
+      `\nAlready recorded (${idempotencyKey}) — the ledger deduped this re-run; no new posting.`,
+    )
+  }
   console.log(`bridge_wallet_float after: ${formatMoney(after)}`)
 }
 
