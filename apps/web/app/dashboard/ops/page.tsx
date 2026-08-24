@@ -6,7 +6,7 @@ import OpsOverviewView from '@/components/ops/OpsOverviewView'
 import OpsLoadFailed from '@/components/ops/OpsLoadFailed'
 
 export const metadata: Metadata = {
-  title: 'Operations — Puente Financial',
+  title: 'Operations | Puente Financial',
   robots: { index: false },
 }
 

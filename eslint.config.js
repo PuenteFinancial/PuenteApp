@@ -32,6 +32,34 @@ export default [
     },
   },
   {
+    // Customer-facing copy carries no em dashes. They read as an "AI tell",
+    // and since new copy here is often AI-drafted, the ban needs a guard
+    // rather than a habit. Scoped to the copy tables ONLY: comments, docs,
+    // and server/log strings elsewhere are untouched by this rule.
+    //
+    // The `ops` namespaces inside translations.ts are operator jargon, not
+    // consumer copy, and are fenced off with eslint-disable in the file.
+    files: [
+      'packages/shared/src/i18n/translations.ts',
+      'apps/web/components/legal/content.ts',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'Literal[value=/\\u2014/]',
+          message:
+            'No em dashes in customer-facing copy. Use a period when both halves are full sentences, a comma for a trailing qualifier, or parentheses around a list.',
+        },
+        {
+          selector: 'TemplateElement[value.raw=/\\u2014/]',
+          message:
+            'No em dashes in customer-facing copy. Use a period when both halves are full sentences, a comma for a trailing qualifier, or parentheses around a list.',
+        },
+      ],
+    },
+  },
+  {
     ignores: ['dist/', 'node_modules/', '.expo/'],
   },
 ]

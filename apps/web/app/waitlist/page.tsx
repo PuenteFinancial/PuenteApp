@@ -4,7 +4,7 @@ import SignupFlow from '@/components/SignupFlow'
 import LanguageToggle from '@/components/LanguageToggle'
 
 export const metadata: Metadata = {
-  title: 'Join the Waitlist — Puente Financial',
+  title: 'Join the Waitlist | Puente Financial',
   description: 'Join the Puente waitlist. Send money home and build your U.S. credit history.',
 }
 

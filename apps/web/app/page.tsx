@@ -1,4 +1,3 @@
-import AnnounceBanner from '@/components/AnnounceBanner'
 import Nav from '@/components/Nav'
 import Hero from '@/components/Hero'
 import ValueStrip from '@/components/ValueStrip'
@@ -11,7 +10,6 @@ export default function Page() {
   return (
     <main>
       <div className="darktop">
-        <AnnounceBanner />
         <Nav />
         <Hero />
       </div>

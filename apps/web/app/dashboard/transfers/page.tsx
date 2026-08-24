@@ -5,7 +5,7 @@ import { isTransferShape } from '@/lib/transferState'
 import TransferHistory from '@/components/send/TransferHistory'
 
 export const metadata: Metadata = {
-  title: 'Transfer history — Puente Financial',
+  title: 'Transfer history | Puente Financial',
   description: 'Your past transfers.',
   robots: { index: false },
 }

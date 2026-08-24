@@ -117,10 +117,6 @@ export default function Calculator() {
         </span>
       </div>
 
-      <div className="calc-note">
-        <span className="calc-note-icon">🎉</span>{c.note}
-      </div>
-
       <a className="btn btn--accent" href="/waitlist">{c.cta}</a>
     </div>
   )

@@ -5,7 +5,7 @@ import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import RejectedCard from '@/components/onboarding/RejectedCard'
 
 export const metadata: Metadata = {
-  title: 'Identity Verification — Puente Financial',
+  title: 'Identity Verification | Puente Financial',
   description: 'Your identity verification needs another attempt.',
   robots: { index: false },
 }

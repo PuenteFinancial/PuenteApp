@@ -7,7 +7,7 @@ import ReceiptView from '@/components/send/ReceiptView'
 import TransferLoadError from '@/components/send/TransferLoadError'
 
 export const metadata: Metadata = {
-  title: 'Transfer receipt — Puente Financial',
+  title: 'Transfer receipt | Puente Financial',
   description: 'Your transfer receipt.',
   robots: { index: false },
 }

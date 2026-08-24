@@ -5,7 +5,7 @@ import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import KycStart from '@/components/onboarding/KycStart'
 
 export const metadata: Metadata = {
-  title: 'Verify Your Identity — Puente Financial',
+  title: 'Verify Your Identity | Puente Financial',
   description: 'Verify your identity to start sending money with Puente.',
   robots: { index: false },
 }

@@ -1,7 +1,6 @@
 export type Lang = 'en' | 'es'
 
 export type Translations = {
-  announce: { pre: string; link: string }
   nav: { remit: string; how: string; cta: string; signIn: string }
   hero: {
     eyebrow: string
@@ -29,7 +28,7 @@ export type Translations = {
       to: string
       you: string; they: string
       rate: string
-      note: string; cta: string
+      cta: string
     }
   }
   how: {
@@ -46,8 +45,6 @@ export type Translations = {
   wl: {
     eyebrow: string
     h2: string
-    sub: [string, string, string]
-    subFine: string
     cta: string
     points: string[]
     f: { name: string; phone: string; country: string; referralSource: string; referralSourceOther: string }
@@ -439,7 +436,6 @@ export type Translations = {
 }
 
 const en: Translations = {
-  announce: { pre: 'Join before August 31 - no transfer fees for your first 6 months.', link: 'join the waitlist' },
   nav: { remit: 'Remittances', how: 'How it works', cta: 'Join the Waitlist', signIn: 'Sign in' },
   hero: {
     eyebrow: 'Remittances + credit building',
@@ -467,7 +463,6 @@ const en: Translations = {
       to: 'Sending to',
       you: 'You send', they: 'They receive',
       rate: '1 USD = 17.20 MXN',
-      note: 'Claim no transfer fees for your first 6 months',
       cta: 'Sign Up',
     },
   },
@@ -489,8 +484,6 @@ const en: Translations = {
   wl: {
     eyebrow: 'Get started',
     h2: 'Sign up today',
-    sub: ['Join the waitlist today, and lock in ', 'no transfer fees for your first 6 months', ' on a Puente credit building account.'],
-    subFine: 'Offer ends August 31, 2026',
     cta: 'Join the Waitlist',
     points: ['Get more out of your remittances', 'Start building U.S. credit from your first transfer', 'Build a better financial future'],
     f: { name: 'Name', phone: 'Phone number or WhatsApp', country: 'Where do you send money?', referralSource: 'How did you hear about us?', referralSourceOther: 'Please specify' },
@@ -506,7 +499,7 @@ const en: Translations = {
       refLabel: 'Share your invite link and skip ahead',
       copy: 'Copy', copied: 'Copied!',
       wa: 'Share on WhatsApp',
-      waText: 'I just joined the Puente waitlist — send money home and build credit. Join me:',
+      waText: 'I just joined the Puente waitlist. Send money home and build credit. Join me:',
     },
     steps: [
       { h: 'Tell us about yourself' },
@@ -526,7 +519,7 @@ const en: Translations = {
     disclaimer: ['Puente Financial, Inc. ("Puente") is a financial technology company, not a bank. Money remittance, payment, and banking services are provided by our partner U.S.-licensed financial institutions. Puente is an authorized agent of Bridge Building Inc (NMLS # 2450917). For US state licensing information, please see: ', '.'],
     disclaimer2: 'In the United States, Puente is registered with the U.S. Department of the Treasury Financial Crimes Enforcement Network (FinCEN) as a Money Services Business (BSA ID: 31000334222151).',
     rights: '© 2026 Puente Financial, Inc. All rights reserved.',
-    note: 'Concept in validation — not yet available.',
+    note: 'Concept in validation, not yet available.',
   },
   onboarding: {
     signup: {
@@ -550,7 +543,7 @@ const en: Translations = {
       // marketing-consent construct, and it contradicted the checkbox, which is
       // `required` on the form.
       smsConsent:
-        'I agree to receive automated one-time verification codes by text message from Puente Financial at this number. Codes are sent only when you request one — we send no marketing or promotional messages. Message and data rates may apply. Reply STOP to opt out or HELP for help.',
+        'I agree to receive automated one-time verification codes by text message from Puente Financial at this number. Codes are sent only when you request one. We send no marketing or promotional messages. Message and data rates may apply. Reply STOP to opt out or HELP for help.',
       // CTIA web opt-in: the privacy policy and terms must be reachable from the
       // point of consent. The site-wide Footer renders only on the homepage, so
       // /signup carried no legal links at all until these were added.
@@ -582,11 +575,11 @@ const en: Translations = {
     },
     profile: {
       title: 'Tell us about you',
-      sub: 'Use your legal name — it must match your ID for identity verification.',
+      sub: 'Use your legal name. It must match your ID for identity verification.',
       firstName: 'First name',
       lastName: 'Last name',
       email: 'Email',
-      emailNote: 'We’ll send you a verification email — you can keep going in the meantime.',
+      emailNote: 'We’ll send you a verification email. You can keep going in the meantime.',
       cta: 'Continue',
       saving: 'Saving…',
       error: 'We couldn’t save your info. Please try again.',
@@ -594,10 +587,10 @@ const en: Translations = {
     // NEEDS LEGAL REVIEW (ES): identity-verification requirement wording
     kyc: {
       title: 'Verify your identity',
-      body: 'Federal law requires us to verify your identity before you can send money. Our secure partner Bridge handles this — it takes about 2 minutes. Have your ID handy.',
+      body: 'Federal law requires us to verify your identity before you can send money. Our secure partner Bridge handles this. It takes about 2 minutes. Have your ID handy.',
       // NEEDS LEGAL REVIEW (EN + ES): GLBA data-sharing disclosure
       dataNotice:
-        'When you continue, we’ll share your name and email with Bridge (bridge.xyz), a licensed money transmitter that verifies your identity and processes transfers. Bridge will collect the rest — date of birth, address, SSN or ITIN, and an ID photo — directly from you.',
+        'When you continue, we’ll share your name and email with Bridge (bridge.xyz), a licensed money transmitter that verifies your identity and processes transfers. Bridge will collect the rest (date of birth, address, SSN or ITIN, and an ID photo) directly from you.',
       cta: 'Verify my identity',
       starting: 'Starting…',
       error: 'We couldn’t start verification. Please try again.',
@@ -605,7 +598,7 @@ const en: Translations = {
     pending: {
       title: 'Your identity is being verified',
       body: 'This usually takes a few minutes but can take up to 1 business day.',
-      autoNote: 'This page updates automatically — no need to refresh.',
+      autoNote: 'This page updates automatically, no need to refresh.',
     },
     // NEEDS LEGAL REVIEW (EN + ES): identity-verification outcome wording.
     // Must never read as a credit or account denial (no adverse-action
@@ -613,7 +606,7 @@ const en: Translations = {
     // reasonLabel prefixes Bridge's reason strings, which arrive in English.
     rejected: {
       title: 'We couldn’t verify your identity',
-      body: 'Some of the information or documents you provided couldn’t be confirmed. You can try again — it only takes a few minutes.',
+      body: 'Some of the information or documents you provided couldn’t be confirmed. You can try again. It only takes a few minutes.',
       reasonLabel: 'What happened:',
       retryCta: 'Try again',
       retrying: 'Starting…',
@@ -657,15 +650,15 @@ const en: Translations = {
     labelPh: 'BBVA account',
     clabe: 'CLABE (18 digits)',
     clabeConfirm: 'Confirm CLABE',
-    clabeNote: 'Ask your recipient for their 18-digit CLABE — money sent to a wrong but valid account number can’t be recovered.',
+    clabeNote: 'Ask your recipient for their 18-digit CLABE. Money sent to a wrong but valid account number can’t be recovered.',
     clabeMismatch: 'The CLABE numbers don’t match.',
     accountEnding: '····{last4}',
     archive: 'Archive',
     confirmArchive: 'Tap again to confirm',
     archived: 'Archived',
-    archiveFailed: "Couldn't archive — try again",
+    archiveFailed: "Couldn't archive. Try again",
     errors: {
-      invalidClabe: 'That CLABE doesn’t look right — check the 18-digit number.',
+      invalidClabe: 'That CLABE doesn’t look right. Check the 18-digit number.',
       bankRejected: 'The bank rejected this account. Verify the CLABE with your recipient.',
       alreadySaved: 'This account is already saved.',
       providerDown: 'We couldn’t reach our payout provider. Try again in a moment.',
@@ -676,7 +669,7 @@ const en: Translations = {
     cta: 'Send money',
     title: 'Send money',
     sub: 'Choose who to pay and how much. We’ll show you the rate before anything is sent.',
-    dashboardReady: 'Send money to your recipients — or manage who you send to.',
+    dashboardReady: 'Send money to your recipients, or manage who you send to.',
     recipient: 'Recipient',
     recipientPh: 'Choose a recipient',
     account: 'Account',
@@ -727,13 +720,13 @@ const en: Translations = {
       // exists and the exact misstatement §4.1 corrects. This states the
       // MECHANISM (self-service ends when sending starts), not the legal rule.
       cancelWindowNote:
-        'Once we start sending it, cancelling isn’t automatic — contact us and we’ll take it from there.',
+        'Once we start sending it, cancelling isn’t automatic. Contact us and we’ll take it from there.',
       cancel: 'Cancel transfer',
       cancelConfirm: 'Tap again to cancel',
       canceling: 'Canceling…',
       simulate: 'Simulate payment',
       simulating: 'Simulating…',
-      simulateNote: 'Test environment only — stands in for card and bank payment.',
+      simulateNote: 'Test environment only, stands in for card and bank payment.',
       pay: {
         payTitle: 'Pay with your bank',
         payNow: 'Pay {amount}',
@@ -743,7 +736,7 @@ const en: Translations = {
         submittedBody: 'We are confirming your payment with your bank. This usually takes a moment.',
         sessionError: 'We could not load the payment form. Please try again.',
         bankNote:
-          "If you don't see your bank, we can't accept payments from it yet — you haven't been charged.",
+          "If you don't see your bank, we can't accept payments from it yet. You haven't been charged.",
         paymentError: 'Something went wrong with your payment. Please try again.',
         offlineTitle: 'Waiting for your deposit',
         // The deposit instructions live with the ops team, not in the app —
@@ -763,12 +756,12 @@ const en: Translations = {
           reference: 'Reference code',
           amount: 'Amount to send',
           referenceWarning:
-            'Include the reference code with your payment — without it, we can’t match your deposit to this transfer.',
+            'Include the reference code with your payment. Without it, we can’t match your deposit to this transfer.',
         },
         claim: {
           button: 'I’ve sent the payment',
           claiming: 'Recording…',
-          claimedTitle: 'Thanks — we’ve noted your payment',
+          claimedTitle: 'Thanks, we’ve noted your payment',
           claimedBody:
             'We’ll release your transfer once we confirm the payment is on its way. This page will update when it moves.',
           error: 'We couldn’t record that just now. Please try again.',
@@ -781,7 +774,7 @@ const en: Translations = {
       supportCta: 'Contact support',
       cancellationRequested: {
         title: 'Cancellation requested',
-        body: 'We got your request to cancel this transfer. It was already on its way, so we’re working through it — this page will update when it’s resolved.',
+        body: 'We got your request to cancel this transfer. It was already on its way, so we’re working through it. This page will update when it’s resolved.',
       },
       outcomes: {
         completed: {
@@ -796,7 +789,7 @@ const en: Translations = {
           // where issuance is asserted; this state only promises it is coming.
           // ("Issued", not "back", remains the rule there: a real ACH refund
           // posts days later and asserting arrival is unverifiable — PR7.)
-          body: 'This transfer was canceled. Your full refund, including the fee, is on its way — depending on your bank, it can take a few business days to appear.',
+          body: 'This transfer was canceled. Your full refund, including the fee, is on its way. Depending on your bank, it can take a few business days to appear.',
         },
         refunded: {
           title: 'Refunded',
@@ -816,7 +809,7 @@ const en: Translations = {
           // fee) without asserting execution status — AUTO_REFUND is off by
           // prod default, so issuance may await an operator. The page flips to
           // the refunded outcome when it actually issues.
-          body: 'Your recipient’s bank couldn’t accept this transfer, so nothing was delivered. You’ll receive a full refund, including the fee — this page will update when it’s been issued. Contact support if you have questions.',
+          body: 'Your recipient’s bank couldn’t accept this transfer, so nothing was delivered. You’ll receive a full refund, including the fee. This page will update when it’s been issued. Contact support if you have questions.',
         },
         fundingReversed: {
           title: 'Payment reversed',
@@ -835,7 +828,7 @@ const en: Translations = {
           // EVIDENCE but Bridge's authoritative timestamp can still show the
           // deposit came first — so "your refund" would pre-promise the very
           // question the review decides.
-          body: 'Your transfer was delivered, and you asked to cancel it. We’re reviewing your request — this page will update when it’s resolved.',
+          body: 'Your transfer was delivered, and you asked to cancel it. We’re reviewing your request. This page will update when it’s resolved.',
         },
       },
     },
@@ -859,7 +852,7 @@ const en: Translations = {
       kyc_required: 'You’ll need to verify your identity before sending money.',
       limit_exceeded: 'This goes over your sending limit right now. Try a smaller amount or come back later.',
       transfer_in_progress:
-        'You already have a transfer in progress. You can send again once it clears — usually within a few business days.',
+        'You already have a transfer in progress. You can send again once it clears, usually within a few business days.',
       quote_expired: 'This rate expired. Get a new quote to continue.',
       transfer_not_cancelable: 'This transfer can no longer be canceled.',
       conflict: 'This can’t be updated right now. Refresh and try again.',
@@ -874,6 +867,7 @@ const en: Translations = {
       generic: 'Something went wrong. Please try again.',
     },
   },
+  /* eslint-disable no-restricted-syntax -- operator jargon, not consumer copy; the em dash ban covers customer-facing strings only. */
   ops: {
     title: 'Operations overview',
     generatedAt: 'Generated',
@@ -1010,6 +1004,7 @@ const en: Translations = {
     heartbeatStale: 'no beat in 15+ min',
     heartbeatDead: 'Worker heartbeat stopped — scheduled jobs are probably not running',
   },
+  /* eslint-enable no-restricted-syntax */
   mobile: {
     connection: {
       // Deliberately not "signed out" or "session expired": a failed request
@@ -1023,7 +1018,6 @@ const en: Translations = {
 }
 
 const es: Translations = {
-  announce: { pre: 'Únete antes del 31 de agosto - sin comisiones de transferencia durante tus primeros 6 meses.', link: 'únete a la lista de espera' },
   nav: { remit: 'Remesas', how: 'Cómo funciona', cta: 'Únete a la Lista de Espera', signIn: 'Iniciar sesión' },
   hero: {
     eyebrow: 'Remesas + historial de crédito',
@@ -1051,7 +1045,6 @@ const es: Translations = {
       to: 'Enviar a',
       you: 'Tú envías', they: 'Ellos reciben',
       rate: '1 USD = 17.20 MXN',
-      note: 'Reclama 6 meses sin comisión de transferencia',
       cta: 'Regístrate',
     },
   },
@@ -1073,8 +1066,6 @@ const es: Translations = {
   wl: {
     eyebrow: 'Empieza ya',
     h2: 'Regístrate hoy',
-    sub: ['Únete a la lista de espera hoy y asegura ', '6 meses sin comisión de transferencia', ' en tu cuenta de construcción de crédito de Puente.'],
-    subFine: 'La oferta termina el 31 de agosto de 2026',
     cta: 'Únete a la Lista de Espera',
     points: ['Aprovecha más tus remesas', 'Empieza a crear crédito desde tu primera transferencia', 'Construye un mejor futuro financiero'],
     f: { name: 'Nombre', phone: 'Teléfono o WhatsApp', country: '¿A dónde envías dinero?', referralSource: '¿Cómo te enteraste de nosotros?', referralSourceOther: 'Por favor especifica' },
@@ -1090,7 +1081,7 @@ const es: Translations = {
       refLabel: 'Comparte tu enlace de invitación y avanza',
       copy: 'Copiar', copied: '¡Copiado!',
       wa: 'Compartir por WhatsApp',
-      waText: 'Me uní a la lista de Puente — envía dinero a casa y crea crédito. Únete:',
+      waText: 'Me uní a la lista de Puente. Envía dinero a casa y crea crédito. Únete:',
     },
     steps: [
       { h: 'Cuéntanos sobre ti' },
@@ -1110,7 +1101,7 @@ const es: Translations = {
     disclaimer: ['Puente Financial, Inc. ("Puente") es una empresa de tecnología financiera, no un banco. Los servicios de remesas, pagos y banca son proporcionados por instituciones financieras con licencia en EE. UU. asociadas a Puente. Puente es un agente autorizado de Bridge Building Inc (NMLS # 2450917). Para información sobre licencias estatales en EE. UU., consulte: ', '.'],
     disclaimer2: 'En los Estados Unidos, Puente está registrada ante la Red de Control de Delitos Financieros del Departamento del Tesoro de EE. UU. (FinCEN) como un Negocio de Servicios Monetarios (BSA ID: 31000334222151).',
     rights: '© 2026 Puente Financial, Inc. Todos los derechos reservados.',
-    note: 'Concepto en validación — aún no disponible.',
+    note: 'Concepto en validación, aún no disponible.',
   },
   onboarding: {
     signup: {
@@ -1149,11 +1140,11 @@ const es: Translations = {
     },
     profile: {
       title: 'Cuéntanos sobre ti',
-      sub: 'Usa tu nombre legal — debe coincidir con tu identificación para la verificación de identidad.',
+      sub: 'Usa tu nombre legal. Debe coincidir con tu identificación para la verificación de identidad.',
       firstName: 'Nombre',
       lastName: 'Apellido',
       email: 'Correo electrónico',
-      emailNote: 'Te enviaremos un correo de verificación — puedes continuar mientras tanto.',
+      emailNote: 'Te enviaremos un correo de verificación. Puedes continuar mientras tanto.',
       cta: 'Continuar',
       saving: 'Guardando…',
       error: 'No pudimos guardar tu información. Inténtalo de nuevo.',
@@ -1161,10 +1152,10 @@ const es: Translations = {
     // NEEDS LEGAL REVIEW (ES): texto sobre el requisito de verificación de identidad
     kyc: {
       title: 'Verifica tu identidad',
-      body: 'La ley federal nos exige verificar tu identidad antes de que puedas enviar dinero. Nuestro socio seguro Bridge se encarga de esto — toma unos 2 minutos. Ten tu identificación a la mano.',
+      body: 'La ley federal nos exige verificar tu identidad antes de que puedas enviar dinero. Nuestro socio seguro Bridge se encarga de esto. Toma unos 2 minutos. Ten tu identificación a la mano.',
       // NEEDS LEGAL REVIEW (EN + ES): aviso de compartición de datos (GLBA)
       dataNotice:
-        'Al continuar, compartiremos tu nombre y correo electrónico con Bridge (bridge.xyz), un transmisor de dinero con licencia que verifica tu identidad y procesa las transferencias. Bridge te pedirá el resto — fecha de nacimiento, dirección, SSN o ITIN y una foto de tu identificación — directamente a ti.',
+        'Al continuar, compartiremos tu nombre y correo electrónico con Bridge (bridge.xyz), un transmisor de dinero con licencia que verifica tu identidad y procesa las transferencias. Bridge te pedirá el resto (fecha de nacimiento, dirección, SSN o ITIN y una foto de tu identificación) directamente a ti.',
       cta: 'Verificar mi identidad',
       starting: 'Iniciando…',
       error: 'No pudimos iniciar la verificación. Inténtalo de nuevo.',
@@ -1172,7 +1163,7 @@ const es: Translations = {
     pending: {
       title: 'Estamos verificando tu identidad',
       body: 'Normalmente toma unos minutos, pero puede tardar hasta 1 día hábil.',
-      autoNote: 'Esta página se actualiza automáticamente — no necesitas recargarla.',
+      autoNote: 'Esta página se actualiza automáticamente, no necesitas recargarla.',
     },
     // NEEDS LEGAL REVIEW (EN + ES): resultado de verificación de identidad.
     // Nunca debe leerse como una denegación de crédito o de cuenta — trata
@@ -1180,7 +1171,7 @@ const es: Translations = {
     // Las razones de Bridge llegan en inglés y se muestran tal cual.
     rejected: {
       title: 'No pudimos verificar tu identidad',
-      body: 'Parte de la información o los documentos que proporcionaste no se pudieron confirmar. Puedes intentarlo de nuevo — solo toma unos minutos.',
+      body: 'Parte de la información o los documentos que proporcionaste no se pudieron confirmar. Puedes intentarlo de nuevo. Solo toma unos minutos.',
       reasonLabel: 'Qué pasó (detalle del proveedor de verificación, en inglés):',
       retryCta: 'Intentar de nuevo',
       retrying: 'Iniciando…',
@@ -1221,15 +1212,15 @@ const es: Translations = {
     labelPh: 'Cuenta BBVA',
     clabe: 'CLABE (18 dígitos)',
     clabeConfirm: 'Confirma la CLABE',
-    clabeNote: 'Pídele a tu destinatario su CLABE de 18 dígitos — el dinero enviado a una cuenta equivocada pero válida no se puede recuperar.',
+    clabeNote: 'Pídele a tu destinatario su CLABE de 18 dígitos. El dinero enviado a una cuenta equivocada pero válida no se puede recuperar.',
     clabeMismatch: 'Las CLABE no coinciden.',
     accountEnding: '····{last4}',
     archive: 'Archivar',
     confirmArchive: 'Toca de nuevo para confirmar',
     archived: 'Archivado',
-    archiveFailed: 'No se pudo archivar — intenta de nuevo',
+    archiveFailed: 'No se pudo archivar. Intenta de nuevo',
     errors: {
-      invalidClabe: 'Esa CLABE no parece correcta — revisa el número de 18 dígitos.',
+      invalidClabe: 'Esa CLABE no parece correcta. Revisa el número de 18 dígitos.',
       bankRejected: 'El banco rechazó esta cuenta. Verifica la CLABE con tu destinatario.',
       alreadySaved: 'Esta cuenta ya está guardada.',
       providerDown: 'No pudimos conectar con nuestro proveedor de pagos. Inténtalo en un momento.',
@@ -1240,7 +1231,7 @@ const es: Translations = {
     cta: 'Enviar dinero',
     title: 'Enviar dinero',
     sub: 'Elige a quién pagar y cuánto. Te mostramos el tipo de cambio antes de enviar nada.',
-    dashboardReady: 'Envía dinero a tus destinatarios — o administra a quién le envías.',
+    dashboardReady: 'Envía dinero a tus destinatarios, o administra a quién le envías.',
     recipient: 'Destinatario',
     recipientPh: 'Elige un destinatario',
     account: 'Cuenta',
@@ -1288,13 +1279,13 @@ const es: Translations = {
       cancelWindow: 'Te quedan {time} para cancelar esta transferencia.',
       // NEEDS LEGAL REVIEW (ES) — PR7, mirrors en.
       cancelWindowNote:
-        'Una vez que comenzamos a enviarla, la cancelación no es automática — comunícate con nosotros y lo resolvemos.',
+        'Una vez que comenzamos a enviarla, la cancelación no es automática. Comunícate con nosotros y lo resolvemos.',
       cancel: 'Cancelar transferencia',
       cancelConfirm: 'Toca de nuevo para cancelar',
       canceling: 'Cancelando…',
       simulate: 'Simular pago',
       simulating: 'Simulando…',
-      simulateNote: 'Solo en el entorno de pruebas — sustituye el pago con tarjeta o banco.',
+      simulateNote: 'Solo en el entorno de pruebas, sustituye el pago con tarjeta o banco.',
       // NEEDS LEGAL REVIEW (ES)
       pay: {
         payTitle: 'Paga con tu banco',
@@ -1305,7 +1296,7 @@ const es: Translations = {
         submittedBody: 'Estamos confirmando tu pago con tu banco. Esto suele tomar un momento.',
         sessionError: 'No pudimos cargar el formulario de pago. Inténtalo de nuevo.',
         bankNote:
-          'Si no ves tu banco, aún no podemos aceptar pagos desde ese banco — no se te ha cobrado.',
+          'Si no ves tu banco, aún no podemos aceptar pagos desde ese banco. No se te ha cobrado.',
         paymentError: 'Algo salió mal con tu pago. Inténtalo de nuevo.',
         offlineTitle: 'Esperando tu depósito',
         offlineBody:
@@ -1319,12 +1310,12 @@ const es: Translations = {
           reference: 'Código de referencia',
           amount: 'Monto a enviar',
           referenceWarning:
-            'Incluye el código de referencia con tu pago — sin él, no podemos vincular tu depósito con esta transferencia.',
+            'Incluye el código de referencia con tu pago. Sin él, no podemos vincular tu depósito con esta transferencia.',
         },
         claim: {
           button: 'Ya envié el pago',
           claiming: 'Registrando…',
-          claimedTitle: 'Gracias — tomamos nota de tu pago',
+          claimedTitle: 'Gracias, tomamos nota de tu pago',
           claimedBody:
             'Liberaremos tu transferencia en cuanto confirmemos que el pago va en camino. Esta página se actualizará cuando avance.',
           error: 'No pudimos registrarlo en este momento. Inténtalo de nuevo.',
@@ -1396,7 +1387,7 @@ const es: Translations = {
       kyc_required: 'Necesitas verificar tu identidad antes de enviar dinero.',
       limit_exceeded: 'Esto supera tu límite de envío por ahora. Prueba con un monto menor o vuelve más tarde.',
       transfer_in_progress:
-        'Ya tienes una transferencia en curso. Podrás enviar otra cuando se procese tu pago — normalmente en unos días hábiles.',
+        'Ya tienes una transferencia en curso. Podrás enviar otra cuando se procese tu pago, normalmente en unos días hábiles.',
       quote_expired: 'Este tipo de cambio expiró. Obtén una nueva cotización para continuar.',
       transfer_not_cancelable: 'Esta transferencia ya no se puede cancelar.',
       conflict: 'Esto no se puede actualizar ahora. Actualiza e inténtalo de nuevo.',
@@ -1411,6 +1402,7 @@ const es: Translations = {
       generic: 'Algo salió mal. Inténtalo de nuevo.',
     },
   },
+  /* eslint-disable no-restricted-syntax -- operator jargon, not consumer copy; the em dash ban covers customer-facing strings only. */
   ops: {
     title: 'Panel de operaciones',
     generatedAt: 'Generado',
@@ -1549,6 +1541,7 @@ const es: Translations = {
     heartbeatDead:
       'El latido del worker se detuvo \u2014 es probable que los trabajos programados no se est\u00e9n ejecutando',
   },
+  /* eslint-enable no-restricted-syntax */
   mobile: {
     connection: {
       error: 'No pudimos conectar con Puente. Revisa tu conexi\u00f3n e int\u00e9ntalo de nuevo.',

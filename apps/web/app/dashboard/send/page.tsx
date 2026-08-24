@@ -6,7 +6,7 @@ import SendFlow from '@/components/send/SendFlow'
 import { type SendRecipient } from '@/components/send/QuoteScreen'
 
 export const metadata: Metadata = {
-  title: 'Send money — Puente Financial',
+  title: 'Send money | Puente Financial',
   description: 'Send money to your recipients.',
   robots: { index: false },
 }
