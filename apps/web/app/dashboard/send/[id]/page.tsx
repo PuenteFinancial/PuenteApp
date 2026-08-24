@@ -7,7 +7,7 @@ import TransferTracker from '@/components/send/TransferTracker'
 import TransferLoadError from '@/components/send/TransferLoadError'
 
 export const metadata: Metadata = {
-  title: 'Your transfer — Puente Financial',
+  title: 'Your transfer | Puente Financial',
   description: 'Track your transfer.',
   robots: { index: false },
 }

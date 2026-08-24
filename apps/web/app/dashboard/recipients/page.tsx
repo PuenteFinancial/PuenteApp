@@ -6,7 +6,7 @@ import RecipientsManager, {
 } from '@/components/recipients/RecipientsManager'
 
 export const metadata: Metadata = {
-  title: 'Recipients — Puente Financial',
+  title: 'Recipients | Puente Financial',
   description: 'Manage the people you send money to.',
   robots: { index: false },
 }

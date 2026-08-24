@@ -2,7 +2,7 @@ import { ImageResponse } from 'next/og'
 import fs from 'fs'
 import path from 'path'
 
-export const alt = 'Puente Financial — Send money home. Build U.S. credit doing it.'
+export const alt = 'Puente Financial | Send money home. Build U.S. credit doing it.'
 export const size = { width: 1200, height: 630 }
 export const contentType = 'image/png'
 
@@ -93,7 +93,7 @@ export default function Image() {
             fontWeight: 400,
             display: 'flex', maxWidth: 720,
           }}>
-            Send money home at the real exchange rate — and build your U.S. credit history with every payment.
+            Send money home at the real exchange rate, and build your U.S. credit history with every payment.
           </div>
         </div>
 

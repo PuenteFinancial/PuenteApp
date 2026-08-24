@@ -5,7 +5,7 @@ import { isSendMoneyEnabled } from '@/lib/flags'
 import StatusCard from '@/components/onboarding/StatusCard'
 
 export const metadata: Metadata = {
-  title: 'Dashboard — Puente Financial',
+  title: 'Dashboard | Puente Financial',
   description: 'Your Puente account.',
   robots: { index: false },
 }

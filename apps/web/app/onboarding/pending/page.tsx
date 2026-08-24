@@ -6,7 +6,7 @@ import StatusCard from '@/components/onboarding/StatusCard'
 import PendingPoller from '@/components/onboarding/PendingPoller'
 
 export const metadata: Metadata = {
-  title: 'Verification In Progress — Puente Financial',
+  title: 'Verification In Progress | Puente Financial',
   description: 'Your identity verification is under review.',
   robots: { index: false },
 }

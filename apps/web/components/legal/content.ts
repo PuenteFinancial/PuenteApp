@@ -48,7 +48,7 @@ export const privacyCopy: Record<Lang, PrivacyCopy> = {
     s2: {
       h: '2. How We Use Your Information',
       body:
-        'We use the information you provide to operate Puente Financial, to communicate with you about product updates and launch announcements, and to verify your identity and secure your account — including sending one-time verification codes by SMS. We will not sell or share your personal information with third parties for marketing purposes.',
+        'We use the information you provide to operate Puente Financial, to communicate with you about product updates and launch announcements, and to verify your identity and secure your account, including sending one-time verification codes by SMS. We will not sell or share your personal information with third parties for marketing purposes.',
     },
     s3: {
       h: '3. SMS / Text Messaging',

@@ -3,7 +3,7 @@ import OnboardingShell from '@/components/onboarding/OnboardingShell'
 import OtpForm from '@/components/onboarding/OtpForm'
 
 export const metadata: Metadata = {
-  title: 'Verify Your Phone — Puente Financial',
+  title: 'Verify Your Phone | Puente Financial',
   description: 'Enter the verification code we sent to your phone.',
   robots: { index: false },
 }

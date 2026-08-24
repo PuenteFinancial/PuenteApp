@@ -20,10 +20,6 @@ export default function WaitlistSection() {
           ))}
         </ul>
         <a className="btn btn--accent btn--lg" href="/waitlist">{s.cta}</a>
-        <div className="wl-highlight">
-          <p className="lede">🎉 {s.sub[0]}<b>{s.sub[1]}</b>{s.sub[2]}</p>
-          <p className="wl-highlight-fine">{s.subFine}</p>
-        </div>
       </div>
     </section>
   )
