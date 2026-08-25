@@ -60,27 +60,45 @@ export class StripeOnrampApiError extends Error {
   // Raw Stripe error body — readable for code branching, but NON-ENUMERABLE
   // (BridgeApiError precedent) so console.error / util.inspect / JSON never
   // print it: onramp error bodies can echo request params (names, emails).
+  //
+  // The MESSAGE carries `code` and `param` when present — machine enums and
+  // parameter paths, never request values — so Sentry names the actual
+  // refusal. Added after the 2026-08-25 staging smoke, where a bare
+  // "status 400" forced a dashboard log dive to learn the refused param;
+  // `error.message` stays excluded (Stripe interpolates request values into
+  // it, e.g. an email in a format complaint).
   declare readonly body: unknown
 
   constructor(
     public readonly status: number,
     body: unknown,
   ) {
-    super(`Stripe onramp API request failed with status ${status}`)
+    const code = stripeErrorCode(body)
+    const param = stripeErrorParam(body)
+    const detail = code === null ? '' : ` (${code}${param === null ? '' : `: ${param}`})`
+    super(`Stripe onramp API request failed with status ${status}${detail}`)
     this.name = 'StripeOnrampApiError'
     Object.defineProperty(this, 'body', { value: body, enumerable: false })
   }
 }
 
-// The error code inside a Stripe error envelope, or null. Duck-typed off the
-// body shape ({ error: { code } }) — the documented contract is the code
-// string, same rationale as isNotCancelable in stripe.ts.
-function stripeErrorCode(body: unknown): string | null {
+// The error code / param inside a Stripe error envelope, or null. Duck-typed
+// off the body shape ({ error: { code, param } }) — the documented contract is
+// the code string, same rationale as isNotCancelable in stripe.ts.
+function stripeErrorField(body: unknown, field: 'code' | 'param'): string | null {
   if (typeof body !== 'object' || body === null) return null
   const error = (body as { error?: unknown }).error
   if (typeof error !== 'object' || error === null) return null
-  const code = (error as { code?: unknown }).code
-  return typeof code === 'string' ? code : null
+  const value = (error as Record<string, unknown>)[field]
+  return typeof value === 'string' ? value : null
+}
+
+function stripeErrorCode(body: unknown): string | null {
+  return stripeErrorField(body, 'code')
+}
+
+function stripeErrorParam(body: unknown): string | null {
+  return stripeErrorField(body, 'param')
 }
 
 interface OnrampSessionPayload {
@@ -169,6 +187,15 @@ export class StripeOnrampFundingProcessor implements FundingProcessor {
     // singular fields alone are just defaults), delivery hard-wired to the
     // treasury's Base address. metadata.transfer_id is the routing echo —
     // same contract as the PI rail's, no user id, no PII.
+    //
+    // `wallet_address` is SINGULAR, deliberately: the docs' per-network
+    // `wallet_addresses[<network>]` object does not accept `base` as a key
+    // (sandbox-verified 2026-08-25 — `parameter_unknown`; the accepted keys
+    // stop at bitcoin/ethereum/polygon/solana/stellar, and an ethereum-keyed
+    // address fails the base-only network lock with
+    // wallet_addresses_not_all_networks_supported). The singular form pairs
+    // with the locked destination_network and is what the live API applies —
+    // preview drift the docs haven't caught up to.
     const params = new URLSearchParams({
       source_currency: 'usd',
       destination_currency: 'usdc',
@@ -176,7 +203,7 @@ export class StripeOnrampFundingProcessor implements FundingProcessor {
       'destination_currencies[]': 'usdc',
       'destination_networks[]': 'base',
       destination_amount: (input.totalAmountMinor / 100).toFixed(2),
-      'wallet_addresses[base]': destinationAddress,
+      wallet_address: destinationAddress,
       lock_wallet_address: 'true',
       'metadata[transfer_id]': input.transferId,
     })

@@ -146,7 +146,10 @@ describe('onramp initiateFunding', () => {
     // the singular fields alone are just widget defaults
     expect(params.get('destination_currencies[]')).toBe('usdc')
     expect(params.get('destination_networks[]')).toBe('base')
-    expect(params.get('wallet_addresses[base]')).toBe(DEST_ADDRESS)
+    // Singular on purpose — wallet_addresses[base] is parameter_unknown on
+    // the live API (sandbox-verified 2026-08-25); see the adapter comment.
+    expect(params.get('wallet_address')).toBe(DEST_ADDRESS)
+    expect(params.has('wallet_addresses[base]')).toBe(false)
     expect(params.get('lock_wallet_address')).toBe('true')
     expect(params.get('metadata[transfer_id]')).toBe(TRANSFER_ID)
     expect(params.get('customer_ip_address')).toBe('203.0.113.7')
@@ -213,6 +216,24 @@ describe('onramp initiateFunding', () => {
     // branching but never enumerable — inspect/JSON output stays status-only.
     expect(JSON.stringify(err)).not.toContain('Ana')
     expect((err as Error).message).not.toContain('Ana')
+  })
+
+  it('names the error code and param in the message — enums only, never error.message', async () => {
+    // The 2026-08-25 staging smoke: a bare "status 400" forced a dashboard
+    // log dive to learn WHICH param Stripe refused. code + param are machine
+    // strings and safe; error.message can interpolate request values.
+    fetchResponds(400, {
+      error: {
+        code: 'parameter_unknown',
+        param: 'wallet_addresses[base]',
+        message: 'Received unknown parameter: wallet_addresses[base]',
+        type: 'invalid_request_error',
+      },
+    })
+    const err = await processor.initiateFunding(input).catch((e: unknown) => e)
+    expect((err as Error).message).toBe(
+      'Stripe onramp API request failed with status 400 (parameter_unknown: wallet_addresses[base])',
+    )
   })
 })
 
