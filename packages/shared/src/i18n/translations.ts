@@ -35,6 +35,7 @@ export type Translations = {
     eyebrow: string
     h2: [string, string][]
     sub: string
+    heroAlt: string
     steps: { t: string; d: string }[]
     privacyTitle: string
     privacy: string
@@ -63,7 +64,19 @@ export type Translations = {
     back: string
     errors: { generic: string; validation: string }
   }
-  footer: { tagline: string; privacyLink: string; termsLink: string; disclaimer: [string, string]; disclaimer2: string; rights: string; note: string }
+  footer: {
+    tagline: string; privacyLink: string; termsLink: string
+    // NEEDS LEGAL REVIEW (EN + ES) — regulatory disclosures, legally operative
+    // in both languages. `entity` is split around the two licensing links.
+    disclosures: {
+      entity: [string, string, string]
+      fincen: string
+      fdic: string
+      creditRepair: string
+      results: string
+    }
+    rights: string
+  }
   onboarding: {
     signup: { title: string; sub: string; phone: string; phonePh: string; smsConsent: string; legal: { pre: string; privacyLink: string; and: string; termsLink: string; post: string }; cta: string; sending: string; error: string }
     verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resendIn: (seconds: number) => string; resent: string; error: string }
@@ -470,6 +483,7 @@ const en: Translations = {
     eyebrow: 'How it works',
     h2: [['Build credit ', 'without thinking about it.']],
     sub: 'Send money and watch your credit score grow. For only $5/month, each payment builds your U.S. credit history, automatically. No credit card required.',
+    heroAlt: 'The Puente app on a desktop screen, showing a send-money form next to a credit score of 712 rising over time.',
     steps: [
       { t: 'Send money home', d: 'Send like you always do. Transparent pricing. International transfers in minutes.' },
       { t: 'We report your on-time payments', d: 'Puente reports payments on your account to the 3 major U.S. credit bureaus.' },
@@ -516,10 +530,18 @@ const en: Translations = {
     tagline: 'Send money.\nBuild credit.',
     privacyLink: 'Privacy Policy',
     termsLink: 'Terms of Service',
-    disclaimer: ['Puente Financial, Inc. ("Puente") is a financial technology company, not a bank. Money remittance, payment, and banking services are provided by our partner U.S.-licensed financial institutions. Puente is an authorized agent of Bridge Building Inc (NMLS # 2450917). For US state licensing information, please see: ', '.'],
-    disclaimer2: 'In the United States, Puente is registered with the U.S. Department of the Treasury Financial Crimes Enforcement Network (FinCEN) as a Money Services Business (BSA ID: 31000334222151).',
+    disclosures: {
+      entity: [
+        'Puente Financial, Inc. ("Puente") is a financial technology company, not a bank. Money transmission and payment services are provided by our U.S.-licensed partners. Money transmission is provided by Bridge Building Inc.; payment and funds-transfer services are provided by Stripe. Puente is an authorized agent of Bridge Building Inc. For partner state licensing information, see ',
+        ' (Bridge, NMLS #2450917) and ',
+        ' (Stripe).',
+      ],
+      fincen: 'In the United States, Puente is registered with the U.S. Department of the Treasury Financial Crimes Enforcement Network (FinCEN) as a Money Services Business (BSA ID: 31000334222151).',
+      fdic: 'Funds transferred through the Service are not deposits and are not insured by the FDIC.',
+      creditRepair: 'Puente is not a credit repair organization. Puente does not remove negative or inaccurate information from credit reports.',
+      results: 'Building credit takes time, and results are not guaranteed. Any credit scores, ranges, or improvements shown on this page are illustrative examples only. They do not reflect the actual experience of any specific customer and are not a promise, estimate, or guarantee of the results you will achieve. Individual results vary and depend on many factors, including your overall credit activity with Puente and with other creditors.',
+    },
     rights: '© 2026 Puente Financial, Inc. All rights reserved.',
-    note: 'Concept in validation, not yet available.',
   },
   onboarding: {
     signup: {
@@ -1052,6 +1074,7 @@ const es: Translations = {
     eyebrow: 'Cómo funciona',
     h2: [['Crea crédito ', 'sin siquiera pensarlo.']],
     sub: 'Envía dinero y mira crecer tu puntaje de crédito. Por solo $5/mes, cada pago construye tu historial crediticio en EE. UU., automáticamente. No requiere tarjeta de crédito.',
+    heroAlt: 'La app de Puente en una pantalla de escritorio, con el formulario para enviar dinero junto a un puntaje de crédito de 712 que sube con el tiempo.',
     steps: [
       { t: 'Envía dinero a casa', d: 'Envía como siempre. Precios transparentes. Transferencias internacionales en minutos.' },
       { t: 'Reportamos tus pagos a tiempo', d: 'Puente reporta los pagos de tu cuenta a los 3 principales burós de crédito de EE. UU.' },
@@ -1098,10 +1121,18 @@ const es: Translations = {
     tagline: 'Envía dinero.\nCrea crédito.',
     privacyLink: 'Política de Privacidad',
     termsLink: 'Términos de Servicio',
-    disclaimer: ['Puente Financial, Inc. ("Puente") es una empresa de tecnología financiera, no un banco. Los servicios de remesas, pagos y banca son proporcionados por instituciones financieras con licencia en EE. UU. asociadas a Puente. Puente es un agente autorizado de Bridge Building Inc (NMLS # 2450917). Para información sobre licencias estatales en EE. UU., consulte: ', '.'],
-    disclaimer2: 'En los Estados Unidos, Puente está registrada ante la Red de Control de Delitos Financieros del Departamento del Tesoro de EE. UU. (FinCEN) como un Negocio de Servicios Monetarios (BSA ID: 31000334222151).',
+    disclosures: {
+      entity: [
+        'Puente Financial, Inc. ("Puente") es una empresa de tecnología financiera, no un banco. Los servicios de transmisión de dinero y de pagos son proporcionados por nuestros socios con licencia en EE. UU. La transmisión de dinero es proporcionada por Bridge Building Inc.; los servicios de pago y de transferencia de fondos son proporcionados por Stripe. Puente es un agente autorizado de Bridge Building Inc. Para información sobre las licencias estatales de nuestros socios, consulte ',
+        ' (Bridge, NMLS #2450917) y ',
+        ' (Stripe).',
+      ],
+      fincen: 'En los Estados Unidos, Puente está registrada ante la Red de Control de Delitos Financieros del Departamento del Tesoro de EE. UU. (FinCEN) como un Negocio de Servicios Monetarios (BSA ID: 31000334222151).',
+      fdic: 'Los fondos transferidos a través del Servicio no son depósitos y no están asegurados por la FDIC.',
+      creditRepair: 'Puente no es una organización de reparación de crédito. Puente no elimina información negativa o inexacta de los reportes de crédito.',
+      results: 'Construir crédito toma tiempo y los resultados no están garantizados. Los puntajes, rangos o mejoras de crédito que se muestran en esta página son únicamente ejemplos ilustrativos. No reflejan la experiencia real de ningún cliente en particular y no son una promesa, estimación ni garantía de los resultados que usted obtendrá. Los resultados individuales varían y dependen de muchos factores, incluida su actividad crediticia general con Puente y con otros acreedores.',
+    },
     rights: '© 2026 Puente Financial, Inc. Todos los derechos reservados.',
-    note: 'Concepto en validación, aún no disponible.',
   },
   onboarding: {
     signup: {

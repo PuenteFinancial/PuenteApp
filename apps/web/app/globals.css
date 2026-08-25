@@ -253,6 +253,9 @@ a{color:inherit;text-decoration:none;}
 /* how it works */
 .how-head{ max-width:660px; display:flex; flex-direction:column; gap:16px; margin-bottom:50px; }
 .how-head .h2 .accent{ color:var(--accent-2); }
+/* product shot between the section lede and the numbered steps */
+.how-hero{ margin:0 auto 48px; max-width:600px; }
+.how-hero-img{ display:block; width:100%; height:auto; }
 .how-steps{ display:grid; grid-template-columns:repeat(3,1fr); gap:22px; }
 .how-step{ position:relative; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-card); padding:30px 28px 32px; display:flex; flex-direction:column; gap:12px; box-shadow:var(--shadow-sm); }
 .how-step .h3{ margin-top:6px; }
@@ -374,6 +377,7 @@ a{color:inherit;text-decoration:none;}
   .hero-visual--desktop{ display:none; }
   .hero-visual--mobile{ display:flex; width:100%; margin-top:0; }
   .hero-cta{ flex-direction:column; align-items:stretch; gap:6px; }
+  .how-hero{ margin-bottom:32px; }
   .how-steps{ grid-template-columns:1fr; }
   .how-foot{ grid-template-columns:1fr; }
   .nav-links{ display:none; }

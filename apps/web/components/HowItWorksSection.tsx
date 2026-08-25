@@ -22,6 +22,17 @@ export default function HowItWorksSection() {
           <p className="lede">{h.sub}</p>
         </div>
 
+        <figure className="how-hero">
+          <img
+            src="/how-it-works-hero.png"
+            alt={h.heroAlt}
+            className="how-hero-img"
+            width={1600}
+            height={1020}
+            loading="lazy"
+          />
+        </figure>
+
         <div className="how-steps">
           {h.steps.map((step, i) => (
             <div className="how-step" key={i}>
