@@ -96,7 +96,7 @@ const envSchema = z.object({
   // operator asserts it landed, so its gate is OPS_ADMIN_USER_IDS (checked by
   // ManualFundingProcessor.isConfigured) rather than a key. Prod stays 'mock'
   // (and therefore inert — see the mock secret note) until Joshua flips Doppler.
-  FUNDING_PROCESSOR: z.enum(['mock', 'stripe', 'manual']).default('mock'),
+  FUNDING_PROCESSOR: z.enum(['mock', 'stripe', 'manual', 'stripe_onramp']).default('mock'),
   // How long a CONFIRMED transfer may sit in PENDING_PAYMENT under the manual
   // processor before the reconcile sweep declares it abandoned. Webhook-driven
   // processors keep the 30-minute rule (payment either happened or it didn't);
@@ -104,6 +104,26 @@ const envSchema = z.object({
   // gets a days-scale window. The stale-quote FX gate at submit still protects
   // the economics of a late-funded transfer.
   MANUAL_PENDING_MAX_AGE_DAYS: z.coerce.number().int().min(1).max(30).default(7),
+  // Stripe crypto onramp (#213): the treasury wallet's BASE USDC DEPOSIT
+  // ADDRESS — where Stripe delivers the sender's USDC. NOT the
+  // BRIDGE_TREASURY_WALLET_ID UUID (that names the wallet at Bridge's API;
+  // this is the on-chain address, read off the Bridge dashboard and verified
+  // by a small manual send before any env flip). 0x-regex so a pasted UUID
+  // or a truncated address refuses to boot rather than minting sessions that
+  // deliver nowhere; the address is locked into every onramp session
+  // (lock_wallet_address), making a typo here unrecoverable per session.
+  ONRAMP_DESTINATION_ADDRESS: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{40}$/, 'must be a 0x-prefixed 40-hex-digit EVM address')
+    .optional(),
+  // How long a CONFIRMED transfer may sit in PENDING_PAYMENT under the onramp
+  // processor before the reconcile sweep declares it abandoned. Hours, not the
+  // webhook default's 30 minutes: the widget walks a first-time sender through
+  // Link OTP + identity + SSN, and a sweep racing a slow KYC pass would put
+  // real money against a PAYMENT_FAILED row. Not manual's days either — an
+  // abandoned widget session has no deposit instructions in someone's bank
+  // app to honor. (#227's transfer_aging follows this same window.)
+  ONRAMP_PENDING_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(48).default(4),
   // Webhook HMAC secret for the mock processor. ABSENT IN PRODUCTION on
   // purpose — its absence 503s the funding webhook and confirm, which is the
   // production lock against mock funding. Doppler sets it dev/staging only.
@@ -294,6 +314,27 @@ export const envSchemaWithRules = envSchema.superRefine((value, ctx) => {
           code: z.ZodIssueCode.custom,
           path: [key],
           message: `${key} is required when FUNDING_PROCESSOR=stripe`,
+        })
+      }
+    }
+  }
+  // The onramp rail needs the Stripe trio (sessions are minted and verified
+  // with the same keys as the PI rail) plus the on-chain delivery address —
+  // a selection missing any of them would accept confirms whose sessions can
+  // never be created or would deliver to nowhere. Same fail-at-boot posture
+  // as the stripe selection above.
+  if (value.FUNDING_PROCESSOR === 'stripe_onramp') {
+    for (const key of [
+      'STRIPE_SECRET_KEY',
+      'STRIPE_WEBHOOK_SECRET',
+      'STRIPE_PUBLISHABLE_KEY',
+      'ONRAMP_DESTINATION_ADDRESS',
+    ] as const) {
+      if (!value[key]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is required when FUNDING_PROCESSOR=stripe_onramp`,
         })
       }
     }

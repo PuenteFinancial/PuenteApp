@@ -57,10 +57,17 @@ export const recipientResponseSchema = {
 export async function requireApprovedUser(
   userId: string,
   reply: FastifyReply,
-): Promise<{ bridgeCustomerId: string | null } | null> {
+): Promise<{
+  bridgeCustomerId: string | null
+  // Name/email ride along for the onramp KYC prefill at confirm (#213) —
+  // already read here, so confirm doesn't pay a second users select.
+  firstName: string | null
+  lastName: string | null
+  email: string | null
+} | null> {
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select('kyc_status, bridge_customer_id')
+    .select('kyc_status, bridge_customer_id, first_name, last_name, email')
     .eq('id', userId)
     .single()
 
@@ -68,12 +75,23 @@ export async function requireApprovedUser(
     await sendError(reply, 404, 'not_found', 'User not found')
     return null
   }
-  const user = data as { kyc_status: string; bridge_customer_id: string | null }
+  const user = data as {
+    kyc_status: string
+    bridge_customer_id: string | null
+    first_name: string | null
+    last_name: string | null
+    email: string | null
+  }
   if (user.kyc_status !== 'approved') {
     await sendError(reply, 403, 'kyc_required', 'Complete identity verification first')
     return null
   }
-  return { bridgeCustomerId: user.bridge_customer_id }
+  return {
+    bridgeCustomerId: user.bridge_customer_id,
+    firstName: user.first_name,
+    lastName: user.last_name,
+    email: user.email,
+  }
 }
 
 interface CreateRecipientBody {

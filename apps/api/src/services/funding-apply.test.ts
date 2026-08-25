@@ -30,7 +30,9 @@ vi.mock('./funding/index.js', async (importOriginal) => {
   return { ...actual, getFundingProcessor: () => getFundingProcessor() }
 })
 
-const { recordManualFunding, applyFundingSucceeded } = await import('./funding-apply.js')
+const { recordManualFunding, applyFundingSucceeded, applyOnrampSettlement } = await import(
+  './funding-apply.js'
+)
 const { TransferRpcError } = await import('./transfers.js')
 
 const TRANSFER_ID = 'cccccccc-1111-4222-8333-444444444444'
@@ -215,6 +217,151 @@ describe('recordManualFunding — cleared', () => {
   it('does not require PENDING_PAYMENT — clearing happens days after funding', async () => {
     stubTransfer({ ...PENDING, state: 'COMPLETED', refund_payment_ref: null })
     expect(await call({ kind: 'cleared' })).toMatchObject({ outcome: 'cleared' })
+  })
+})
+
+describe('applyOnrampSettlement (#213)', () => {
+  const SESSION_REF = 'cos_settle_1'
+
+  // Live row the stub reads on EVERY select, so a transition mid-call is
+  // visible to the next read — the out-of-order catch-up depends on exactly
+  // that (FUNDED must be observable by the cleared leg's own load).
+  let row: Record<string, unknown>
+
+  function stubLiveTransfer() {
+    from.mockImplementation(() => {
+      const b: Record<string, unknown> = {}
+      for (const m of ['select', 'eq', 'update']) b[m] = () => b
+      b['maybeSingle'] = async () => ({ data: { ...row }, error: null })
+      b['single'] = async () => ({ data: { ...row }, error: null })
+      return b
+    })
+  }
+
+  function settle() {
+    return applyOnrampSettlement({
+      transferId: TRANSFER_ID,
+      paymentRef: SESSION_REF,
+      eventId: 'evt_complete_1',
+    })
+  }
+
+  beforeEach(() => {
+    row = { ...PENDING, state: 'FUNDED', refund_payment_ref: null }
+    stubLiveTransfer()
+  })
+
+  it('normal order: posts the cash leg then the float top-up, no transition', async () => {
+    const result = await settle()
+
+    expect(result.caughtUp).toBe(false)
+    expect(result.cleared).toEqual({ outcome: 'applied' })
+    expect(result.floatTopUpKey).toBe(`float_topup:${SESSION_REF}`)
+    expect(transitionTransfer).not.toHaveBeenCalled()
+
+    expect(postLedgerTransaction).toHaveBeenCalledTimes(2)
+    const cashLeg = postLedgerTransaction.mock.calls[0]![0] as Record<string, unknown>
+    expect(cashLeg['transition']).toBe('funding_cleared')
+    const topUp = postLedgerTransaction.mock.calls[1]![0] as {
+      idempotencyKey: string
+      entries: { accountCode: string; direction: string; money: { amountMinor: number } }[]
+    }
+    // Keyed on the session id: a redelivered fulfillment_complete re-derives
+    // the SAME key, so the DB uniqueness makes the replay a no-op.
+    expect(topUp.idempotencyKey).toBe(`float_topup:${SESSION_REF}`)
+    // send+fee — the session's destination_amount at USDC≈USD par
+    expect(topUp.entries).toEqual([
+      expect.objectContaining({
+        accountCode: 'bridge_wallet_float',
+        direction: 'debit',
+        money: { amountMinor: 5100, currency: 'USD' },
+      }),
+      expect.objectContaining({
+        accountCode: 'cash_clearing',
+        direction: 'credit',
+        money: { amountMinor: 5100, currency: 'USD' },
+      }),
+    ])
+  })
+
+  it('out-of-order: catches up PENDING_PAYMENT → FUNDED before the cash leg', async () => {
+    row = { ...PENDING, refund_payment_ref: null } // still PENDING_PAYMENT
+    transitionTransfer.mockImplementation(async () => {
+      row['state'] = 'FUNDED'
+      return { id: TRANSFER_ID }
+    })
+
+    const result = await settle()
+
+    expect(result.caughtUp).toBe(true)
+    expect(result.cleared).toEqual({ outcome: 'applied' })
+    expect(result.floatTopUpKey).toBe(`float_topup:${SESSION_REF}`)
+
+    // FUNDED first (with its ledger batch inside the transition), THEN the
+    // cash leg, THEN the top-up — applyFundingCleared alone would have read
+    // PENDING_PAYMENT as receivable-never-opened and stranded it.
+    expect(transitionTransfer).toHaveBeenCalledTimes(1)
+    const transition = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+    expect(transition['fromState']).toBe('PENDING_PAYMENT')
+    expect(transition['toState']).toBe('FUNDED')
+    expect(transition['fundingPaymentRef']).toBe(SESSION_REF)
+    expect(postLedgerTransaction).toHaveBeenCalledTimes(2)
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID, 'api')
+  })
+
+  it.each(['CANCELED', 'PAYMENT_FAILED'])(
+    'suppresses the top-up when the cash leg skips (%s) — a closed receivable books nothing',
+    async (state) => {
+      row = { ...PENDING, state, refund_payment_ref: null }
+      const result = await settle()
+      expect(result.cleared).toEqual({ outcome: 'skipped', state })
+      expect(result.floatTopUpKey).toBeNull()
+      expect(postLedgerTransaction).not.toHaveBeenCalled()
+    },
+  )
+
+  it('lost catch-up race falls through to the cleared leg rather than failing', async () => {
+    row = { ...PENDING, refund_payment_ref: null }
+    // Another actor (the late processing webhook) wins between read and RPC —
+    // but the row IS funded now, so the cash leg must still post.
+    transitionTransfer.mockImplementation(async () => {
+      row['state'] = 'FUNDED'
+      throw new TransferRpcError('transition_conflict')
+    })
+
+    const result = await settle()
+    expect(result.caughtUp).toBe(false)
+    expect(result.cleared).toEqual({ outcome: 'applied' })
+    expect(result.floatTopUpKey).toBe(`float_topup:${SESSION_REF}`)
+  })
+
+  it('unknown transfer: skips everything without throwing', async () => {
+    stubTransfer(null)
+    const result = await settle()
+    expect(result).toEqual({
+      caughtUp: false,
+      cleared: { outcome: 'skipped', state: 'unknown' },
+      floatTopUpKey: null,
+    })
+    expect(postLedgerTransaction).not.toHaveBeenCalled()
+  })
+
+  it('replay: identical keys on every leg, so the DB uniqueness absorbs it', async () => {
+    await settle()
+    await settle()
+    // Four posts across two runs — but only two DISTINCT identities: the
+    // (transfer, funding_cleared) transition and float_topup:<session>.
+    const keys = postLedgerTransaction.mock.calls.map((c) => {
+      const arg = c[0] as { transition?: string; idempotencyKey?: string }
+      return arg.transition ?? arg.idempotencyKey
+    })
+    expect(keys).toEqual([
+      'funding_cleared',
+      `float_topup:${SESSION_REF}`,
+      'funding_cleared',
+      `float_topup:${SESSION_REF}`,
+    ])
+    expect(transitionTransfer).not.toHaveBeenCalled()
   })
 })
 

@@ -11,10 +11,21 @@ const STALE_AFTER_MS = 30 * 60 * 1000
 // schedule, so "no funding yet" is the NORMAL state for hours-to-days. The
 // sweep killed exactly such a transfer on the 2026-08-18 staging dry run.
 // Days-scale window instead (MANUAL_PENDING_MAX_AGE_DAYS, default 7).
+//
+// The onramp rail (#213) sits between the two: the widget walks a first-time
+// sender through Link OTP + identity + SSN, so 30 minutes would race a slow
+// KYC pass — and a sweep-then-pay race puts real money against a
+// PAYMENT_FAILED row. Hours-scale window (ONRAMP_PENDING_MAX_AGE_HOURS,
+// default 4); not days — an abandoned widget has no deposit instructions
+// sitting in anyone's bank app. (#227's transfer_aging follows this branch.)
 function staleAfterMs(): number {
-  return env.FUNDING_PROCESSOR === 'manual'
-    ? env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60 * 1000
-    : STALE_AFTER_MS
+  if (env.FUNDING_PROCESSOR === 'manual') {
+    return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60 * 1000
+  }
+  if (env.FUNDING_PROCESSOR === 'stripe_onramp') {
+    return env.ONRAMP_PENDING_MAX_AGE_HOURS * 60 * 60 * 1000
+  }
+  return STALE_AFTER_MS
 }
 
 // Codes that mean another actor moved the row between our select and the
@@ -47,7 +58,9 @@ export async function reconcilePendingTransfers(): Promise<number> {
         reason:
           env.FUNDING_PROCESSOR === 'manual'
             ? `funding_not_received_within_${env.MANUAL_PENDING_MAX_AGE_DAYS}_days`
-            : 'funding_not_received_within_30_minutes',
+            : env.FUNDING_PROCESSOR === 'stripe_onramp'
+              ? `funding_not_received_within_${env.ONRAMP_PENDING_MAX_AGE_HOURS}_hours`
+              : 'funding_not_received_within_30_minutes',
       })
       transitioned++
     } catch (err) {

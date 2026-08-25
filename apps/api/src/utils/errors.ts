@@ -23,6 +23,10 @@ export type ApiErrorCode =
   | 'refund_owed'
   | 'claim_abandoned'
   | 'deposit_evidence_conflict'
+  // Onramp supportability refusal (#213): the funding processor can't serve
+  // this sender's location/profile. 403 at confirm; permanent for the sender
+  // from this network location, not retryable-later like not_configured.
+  | 'funding_unsupported'
   | 'rate_limited'
   | 'rate_unavailable'
   | 'provider_rejected'
