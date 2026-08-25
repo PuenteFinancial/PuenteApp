@@ -6,6 +6,7 @@ import LanguageToggle from '@/components/LanguageToggle'
 
 export default function Footer() {
   const { t, lang } = useLanguage()
+  const d = t.footer.disclosures
 
   return (
     <footer className="footer">
@@ -23,13 +24,18 @@ export default function Footer() {
         </div>
       </div>
       <p className="footer-disclaimer">
-        {t.footer.disclaimer[0]}
+        {d.entity[0]}
         <a href="https://www.nmlsconsumeraccess.org" target="_blank" rel="noopener noreferrer">www.nmlsconsumeraccess.org</a>
-        {t.footer.disclaimer[1]}
+        {d.entity[1]}
+        <a href="https://stripe.com/spc/licenses" target="_blank" rel="noopener noreferrer">stripe.com/spc/licenses</a>
+        {d.entity[2]}
       </p>
-      <p className="footer-disclaimer">{t.footer.disclaimer2}</p>
+      <p className="footer-disclaimer">{d.fincen}</p>
+      <p className="footer-disclaimer">{d.fdic}</p>
+      <p className="footer-disclaimer">{d.creditRepair}</p>
+      <p className="footer-disclaimer">{d.results}</p>
       <div className="footer-bottom">
-        <span>{t.footer.rights} · {t.footer.note}</span>
+        <span>{t.footer.rights}</span>
         <span>{lang === 'es' ? 'Español' : 'English'}</span>
       </div>
     </footer>
