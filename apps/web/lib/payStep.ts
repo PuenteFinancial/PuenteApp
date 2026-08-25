@@ -72,13 +72,27 @@ const PAYABLE_PI_STATUSES = new Set([
   'requires_action',
 ])
 
+// Onramp session statuses where the sender already completed payment inside
+// Stripe's widget — a reload/second tab must show "submitted", not remount a
+// widget for a session past requires_payment (the transfer stays
+// PENDING_PAYMENT until the fulfillment_processing webhook lands, so transfer
+// state can't make this call — the PI rail's PAYABLE_PI_STATUSES reasoning).
+const ONRAMP_PAID_STATUSES = new Set(['fulfillment_processing', 'fulfillment_complete'])
+
 /**
  * Which affordance the pay step renders. 'none' is a REAL state (prod mock =
  * deliberately inert, today's behavior), so anything unexpected must be
  * 'error' instead — silently rendering nothing on a live stripe send would
  * strand the sender with no way to pay.
  */
-export type PayAffordance = 'stripe' | 'simulate' | 'offline' | 'submitted' | 'none' | 'error'
+export type PayAffordance =
+  | 'stripe'
+  | 'onramp'
+  | 'simulate'
+  | 'offline'
+  | 'submitted'
+  | 'none'
+  | 'error'
 
 export function payAffordanceFor(session: FundingSession, canSimulate: boolean): PayAffordance {
   // Out-of-band funding: the sender pays by a rail we don't operate, so there
@@ -95,6 +109,21 @@ export function payAffordanceFor(session: FundingSession, canSimulate: boolean):
     if (session.status === undefined || PAYABLE_PI_STATUSES.has(session.status)) return 'stripe'
     if (session.status === 'processing' || session.status === 'succeeded') return 'submitted'
     return 'error'
+  }
+  if (session.provider === 'stripe_onramp') {
+    if (!session.clientSecret || !session.publishableKey) return 'error'
+    if (session.status !== undefined && ONRAMP_PAID_STATUSES.has(session.status)) {
+      return 'submitted'
+    }
+    // rejected = a dead session (KYC/sanctions/fraud refusal): the webhook is
+    // driving the transfer to PAYMENT_FAILED, so never remount a widget for
+    // it — the error card holds until the tracker's banner takes over.
+    if (session.status === 'rejected') return 'error'
+    // initialized / requires_payment / anything this preview API grows later:
+    // mount the widget — unlike a PI (where an unknown status means a dead
+    // form), the widget renders the session's own live state, so showing it
+    // is safe and stranding the sender behind an error card is not.
+    return 'onramp'
   }
   if (session.provider === 'mock') {
     return canSimulate ? 'simulate' : 'none'

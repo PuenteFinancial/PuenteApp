@@ -94,6 +94,53 @@ describe('payAffordanceFor', () => {
   })
 })
 
+describe('payAffordanceFor — stripe_onramp (#213)', () => {
+  const onrampSession = {
+    provider: 'stripe_onramp',
+    clientSecret: 'cos_1_secret_x',
+    publishableKey: 'pk_test_z',
+  }
+
+  it('mounts the widget for a fresh or in-progress session regardless of canSimulate', () => {
+    expect(payAffordanceFor(onrampSession, true)).toBe('onramp')
+    expect(payAffordanceFor(onrampSession, false)).toBe('onramp')
+    expect(payAffordanceFor({ ...onrampSession, status: 'initialized' }, false)).toBe('onramp')
+    expect(payAffordanceFor({ ...onrampSession, status: 'requires_payment' }, false)).toBe('onramp')
+  })
+
+  it('a session past payment renders submitted, not the widget — the reload-after-pay case', () => {
+    expect(payAffordanceFor({ ...onrampSession, status: 'fulfillment_processing' }, false)).toBe(
+      'submitted',
+    )
+    expect(payAffordanceFor({ ...onrampSession, status: 'fulfillment_complete' }, false)).toBe(
+      'submitted',
+    )
+  })
+
+  it('a rejected session is an error — never remount a widget for a dead session', () => {
+    expect(payAffordanceFor({ ...onrampSession, status: 'rejected' }, false)).toBe('error')
+  })
+
+  it('an unknown future status mounts the widget — it renders its own live state', () => {
+    // Deliberately the OPPOSITE of the PI rail's unknown→error: this preview
+    // API can grow statuses, and the widget showing the session's truth is
+    // safe where a dead PI form is not.
+    expect(payAffordanceFor({ ...onrampSession, status: 'some_future_status' }, false)).toBe(
+      'onramp',
+    )
+  })
+
+  it('a session missing either client field is an error, not a hung widget mount', () => {
+    expect(payAffordanceFor({ provider: 'stripe_onramp' }, false)).toBe('error')
+    expect(
+      payAffordanceFor({ provider: 'stripe_onramp', clientSecret: 'cos_1_secret_x' }, false),
+    ).toBe('error')
+    expect(
+      payAffordanceFor({ provider: 'stripe_onramp', publishableKey: 'pk_test_z' }, false),
+    ).toBe('error')
+  })
+})
+
 describe('classifyConfirmPaymentError', () => {
   it('keeps Stripe-authored user errors inline — the Element stays mounted', () => {
     expect(classifyConfirmPaymentError({ type: 'card_error', message: 'Bank refused' })).toBe(
@@ -183,5 +230,15 @@ describe('shouldRefetchSession', () => {
   it('never refetches mock or a missing session', () => {
     expect(shouldRefetchSession({ provider: 'mock' })).toBe(false)
     expect(shouldRefetchSession(null)).toBe(false)
+  })
+
+  it('never refetches stripe_onramp (#213 pin — a refetch risks remounting a live widget mid-KYC)', () => {
+    expect(
+      shouldRefetchSession({
+        provider: 'stripe_onramp',
+        clientSecret: 'cos_1_secret_x',
+        publishableKey: 'pk_test_z',
+      }),
+    ).toBe(false)
   })
 })

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import posthog from 'posthog-js'
 import type { Stripe } from '@stripe/stripe-js'
+import type { StripeOnramp } from '@stripe/crypto'
 import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js'
 import { useLanguage } from '@/components/LanguageProvider'
 import { parseApiError, errorMessage } from '@/lib/apiError'
@@ -17,6 +18,7 @@ import {
   type FundingSession,
 } from '@/lib/payStep'
 import { getStripe } from '@/lib/stripe'
+import { getStripeOnramp } from '@/lib/stripeOnramp'
 
 // The whole PENDING_PAYMENT affordance: fetches the funding session once, then
 // renders the Payment Element (stripe), the dev simulate button (mock, non-prod),
@@ -55,6 +57,11 @@ export default function PayStep({
   const [session, setSession] = useState<FundingSession | null>(null)
   const [sessionError, setSessionError] = useState(false)
   const [stripe, setStripe] = useState<Stripe | null>(null)
+  const [onramp, setOnramp] = useState<StripeOnramp | null>(null)
+  // The onramp widget reported `rejected` (#213): the session is dead and the
+  // webhook is driving PAYMENT_FAILED — hold an error line until the
+  // tracker's banner takes over. Local for the same reason `submitted` is.
+  const [onrampRejected, setOnrampRejected] = useState(false)
   const [submitted, setSubmitted] = useState(false)
   const [simulating, setSimulating] = useState(false)
   const [simulateError, setSimulateError] = useState('')
@@ -101,6 +108,23 @@ export default function PayStep({
           return
         }
         setStripe(loaded)
+        posthog.capture('send_payment_opened', { transfer_id: transferId })
+      }
+      if (body.provider === 'stripe_onramp' && body.clientSecret && body.publishableKey) {
+        // Same loader-first contract for the onramp SDK: a blocked
+        // crypto-js.stripe.com load is the retryable error card, never a
+        // widget container that hangs empty.
+        let loaded: StripeOnramp | null = null
+        try {
+          loaded = await getStripeOnramp(body.publishableKey)
+        } catch {
+          loaded = null
+        }
+        if (!loaded) {
+          setSessionError(true)
+          return
+        }
+        setOnramp(loaded)
         posthog.capture('send_payment_opened', { transfer_id: transferId })
       }
       setSession(body)
@@ -338,6 +362,57 @@ export default function PayStep({
     )
   }
 
+  // Onramp widget (#213): Stripe's embedded UI owns identity + payment; our
+  // chrome is just the heading and expectation-setting copy (fees + ID check).
+  // The widget mounts once per (onramp, clientSecret) — the tracker's 5 s
+  // poll re-renders this component and must never remount a live widget
+  // mid-KYC, so OnrampWidget keeps its handlers in a ref instead of effect
+  // deps. A rejected session renders the error line until the tracker's
+  // PAYMENT_FAILED banner takes over (the webhook is already driving it).
+  if (affordance === 'onramp') {
+    return (
+      <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
+        <p style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--ink)', margin: '0 0 4px' }}>
+          {s.pay.onrampTitle}
+        </p>
+        <p style={{ fontSize: 13, color: 'var(--muted)', margin: '0 0 10px', lineHeight: 1.5 }}>
+          {s.pay.onrampBody}
+        </p>
+        {onrampRejected ? (
+          <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: 0 }}>
+            {s.pay.paymentError}
+          </p>
+        ) : (
+          onramp && (
+            <OnrampWidget
+              onramp={onramp}
+              clientSecret={session.clientSecret!}
+              onPaid={() => {
+                // ≥ fulfillment_processing: the sender completed payment in
+                // the widget. Same contract as confirmPayment resolving —
+                // "submitted", never "paid"; the webhook drives FUNDED.
+                posthog.capture('send_payment_submitted', { transfer_id: transferId })
+                setSubmitted(true)
+                void onAdvanced()
+              }}
+              onRejected={() => {
+                // Code only, never a message — rejection detail stays with
+                // Stripe (KYC/sanctions), and our transfer is headed to
+                // PAYMENT_FAILED via the webhook.
+                posthog.capture('send_payment_failed', {
+                  transfer_id: transferId,
+                  code: 'onramp_rejected',
+                })
+                setOnrampRejected(true)
+                void onAdvanced()
+              }}
+            />
+          )
+        )}
+      </div>
+    )
+  }
+
   if (affordance === 'simulate') {
     return (
       <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
@@ -377,6 +452,59 @@ export default function PayStep({
       </Elements>
     </div>
   )
+}
+
+// Mounts Stripe's onramp widget exactly once per (onramp, clientSecret) and
+// translates its session-updated events into the parent's two outcomes. The
+// handlers live in a ref, NOT effect deps: the parent re-renders on every
+// tracker poll with fresh closures, and remounting would wipe the sender's
+// in-widget progress (identity form, half-entered card). `settled` gates the
+// callbacks — a session emits fulfillment_processing then _complete, and the
+// parent must hear exactly one outcome.
+function OnrampWidget({
+  onramp,
+  clientSecret,
+  onPaid,
+  onRejected,
+}: {
+  onramp: StripeOnramp
+  clientSecret: string
+  onPaid: () => void
+  onRejected: () => void
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const handlersRef = useRef({ onPaid, onRejected })
+  handlersRef.current = { onPaid, onRejected }
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    let settled = false
+    container.innerHTML = ''
+    onramp
+      .createSession({ clientSecret })
+      .addEventListener('onramp_session_updated', (event) => {
+        if (settled) return
+        const status = event.payload.status
+        if (status === 'fulfillment_processing' || status === 'fulfillment_complete') {
+          settled = true
+          handlersRef.current.onPaid()
+        } else if (status === 'rejected') {
+          settled = true
+          handlersRef.current.onRejected()
+        }
+        // initialized / requires_payment / front-end 'error': the widget
+        // renders its own state — nothing for the parent to do.
+      })
+      .mount(container)
+    return () => {
+      // Clearing the container tears down the widget iframe; the session
+      // object and its listener go with it.
+      container.innerHTML = ''
+    }
+  }, [onramp, clientSecret])
+
+  return <div ref={containerRef} />
 }
 
 function PayForm({

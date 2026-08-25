@@ -217,6 +217,13 @@ export type Translations = {
         // take the payment at all — no microdeposit fallback at pilot.
         bankNote: string
         paymentError: string
+        // Stripe crypto onramp widget (#213): rendered above Stripe's embedded
+        // UI. The body must set expectations for the in-widget flow — Stripe
+        // verifies the sender's identity and charges its own processing fee on
+        // top — and must never claim anything was paid (the widget owns the
+        // payment; our state advances only on the webhook).
+        onrampTitle: string
+        onrampBody: string
         // Out-of-band funding (FUNDING_PROCESSOR=manual): the sender pays by a
         // rail Puente does not operate, so there is nothing to click here. The
         // copy must set the expectation without implying we received anything
@@ -764,6 +771,9 @@ const en: Translations = {
         bankNote:
           "If you don't see your bank, we can't accept payments from it yet. You haven't been charged.",
         paymentError: 'Something went wrong with your payment. Please try again.',
+        onrampTitle: 'Pay with card or bank',
+        onrampBody:
+          'Complete your payment securely with Stripe. Stripe will verify your identity and show you its processing fee before you confirm.',
         offlineTitle: 'Waiting for your deposit',
         // The deposit instructions live with the ops team, not in the app —
         // nothing in the schema stores them, so this copy must not promise
@@ -1335,6 +1345,9 @@ const es: Translations = {
         bankNote:
           'Si no ves tu banco, aún no podemos aceptar pagos desde ese banco. No se te ha cobrado.',
         paymentError: 'Algo salió mal con tu pago. Inténtalo de nuevo.',
+        onrampTitle: 'Paga con tarjeta o banco',
+        onrampBody:
+          'Completa tu pago de forma segura con Stripe. Stripe verificará tu identidad y te mostrará su comisión de procesamiento antes de confirmar.',
         offlineTitle: 'Esperando tu depósito',
         offlineBody:
           'Envía tu pago con las instrucciones de depósito que te compartió nuestro equipo, incluyendo el código de referencia. Esta transferencia avanza en cuanto confirmemos que el dinero llegó.',
