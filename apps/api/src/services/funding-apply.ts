@@ -218,6 +218,69 @@ export async function applyFundingCleared(input: {
   return { outcome: 'applied' }
 }
 
+// ── Onramp amount guard (#213) ──────────────────────────────────────────────
+// The widget's amount field is user-EDITABLE and the preview API offers no
+// lock, so a fulfillment event's word alone must never release a payout: a
+// sender who edits the amount down would otherwise buy a full MXN delivery
+// with pocket change (the PI rail never needed this — its amount is
+// server-fixed — and the manual rail has the operator's to-the-cent check).
+// USDC micro-units (6 dp) vs the transfer's send+fee in cents; exact match or
+// refuse. An ABSENT amount also refuses (fail closed): if a future preview
+// version stops carrying it, the rail holds transfers loudly rather than
+// paying out unverified.
+const ONRAMP_MICRO_PER_MINOR = 10_000
+
+export type OnrampAmountMismatch = {
+  outcome: 'amount_mismatch'
+  expectedMinor: number
+  /** null = the event carried no parseable amount. */
+  deliveredAmountMicro: number | null
+}
+
+function onrampAmountMismatch(
+  transfer: FundingTransferRow,
+  deliveredAmountMicro: number | undefined,
+): OnrampAmountMismatch | null {
+  const expectedMinor = transfer.send_amount_minor + transfer.fee_amount_minor
+  if (deliveredAmountMicro === expectedMinor * ONRAMP_MICRO_PER_MINOR) return null
+  return {
+    outcome: 'amount_mismatch',
+    expectedMinor,
+    deliveredAmountMicro: deliveredAmountMicro ?? null,
+  }
+}
+
+/**
+ * Onramp fulfillment_processing → FUNDED, with the amount guard in front:
+ * verifies the session's delivered amount against send+fee before delegating
+ * to the shared applyFundingSucceeded. A mismatch changes NOTHING — the row
+ * stays PENDING_PAYMENT (real money may be arriving at the treasury, so this
+ * is an ops review case, never an auto-fail; the reconcile sweep is the
+ * eventual backstop) — and the caller pages. Replays short-circuit BEFORE the
+ * guard: an already-FUNDED row passed verification once, and a late
+ * mismatched redelivery must not page over settled history.
+ */
+export async function applyOnrampFunded(input: {
+  transferId: string
+  paymentRef: string
+  eventId: string
+  deliveredAmountMicro?: number
+}): Promise<ApplyFundingOutcome | OnrampAmountMismatch> {
+  const transfer = await loadFundingTransfer(input.transferId)
+  if (!transfer) return { outcome: 'unknown_transfer' }
+  if (transfer.state === 'FUNDED') return { outcome: 'replayed' }
+
+  const mismatch = onrampAmountMismatch(transfer, input.deliveredAmountMicro)
+  if (mismatch) return mismatch
+
+  return applyFundingSucceeded({
+    transferId: input.transferId,
+    paymentRef: input.paymentRef,
+    eventId: input.eventId,
+    actor: 'webhook:funding',
+  })
+}
+
 export interface ApplyOnrampSettlementResult {
   /** True when THIS call drove PENDING_PAYMENT → FUNDED (the out-of-order
    *  catch-up ran, or the processing webhook simply hadn't landed yet). */
@@ -255,8 +318,19 @@ export async function applyOnrampSettlement(input: {
   transferId: string
   paymentRef: string
   eventId: string
-}): Promise<ApplyOnrampSettlementResult> {
+  deliveredAmountMicro?: number
+}): Promise<ApplyOnrampSettlementResult | OnrampAmountMismatch> {
   const transfer = await loadFundingTransfer(input.transferId)
+
+  // Amount guard (#213) ahead of EVERY leg — the catch-up drives FUNDED and
+  // the top-up books send+fee, so a mismatched fulfillment_complete must
+  // touch nothing. Checked even on an already-FUNDED row: the cash leg and
+  // top-up are still pending here, and contradictory amounts between the two
+  // fulfillment events are review-case data, not something to book over.
+  if (transfer) {
+    const mismatch = onrampAmountMismatch(transfer, input.deliveredAmountMicro)
+    if (mismatch) return mismatch
+  }
 
   let caughtUp = false
   if (transfer && transfer.state === 'PENDING_PAYMENT') {

@@ -6,7 +6,11 @@ import {
   undoModeForRef,
   undoRequiresManualDisbursement,
 } from './index.js'
-import { StripeOnrampFundingProcessor, StripeOnrampApiError } from './stripe-onramp.js'
+import {
+  StripeOnrampFundingProcessor,
+  StripeOnrampApiError,
+  usdcMicroFromDecimal,
+} from './stripe-onramp.js'
 
 // setup.ts provides STRIPE_WEBHOOK_SECRET (and deliberately NOT
 // STRIPE_SECRET_KEY — the construction/isConfigured tests rely on that split).
@@ -152,6 +156,10 @@ describe('onramp initiateFunding', () => {
     expect(params.has('wallet_addresses[base]')).toBe(false)
     expect(params.get('lock_wallet_address')).toBe('true')
     expect(params.get('metadata[transfer_id]')).toBe(TRANSFER_ID)
+    // Deliberately NOT sent: skip_quote_screen would hide the screen where
+    // Stripe itemizes its fee to the sender (see the adapter comment). Pinned
+    // so it can't slip back in without that conversation happening again.
+    expect(params.has('skip_quote_screen')).toBe(false)
     expect(params.get('customer_ip_address')).toBe('203.0.113.7')
     expect(params.get('customer_information[first_name]')).toBe('Ana')
     expect(params.get('customer_information[last_name]')).toBe('García')
@@ -346,6 +354,78 @@ describe('onramp parseEvent', () => {
     ['session without a status', sessionEventBody('fulfillment_complete', { status: null })],
   ])('classifies %s as malformed without throwing', (_label, body) => {
     expect(processor.parseEvent(body)).toEqual({ outcome: 'malformed' })
+  })
+})
+
+describe('usdcMicroFromDecimal', () => {
+  it.each([
+    ['10.41', 10_410_000],
+    ['10.410000', 10_410_000],
+    ['10', 10_000_000],
+    ['0.000001', 1],
+    ['1500.00', 1_500_000_000],
+  ])('parses %s exactly to %i micro-units', (value, expected) => {
+    expect(usdcMicroFromDecimal(value)).toBe(expected)
+  })
+
+  it.each([
+    ['seven decimals (over USDC precision)', '10.4100000'],
+    ['eight integer digits (past the safe-integer bound)', '10000000.00'],
+    ['non-numeric', 'abc'],
+    ['empty', ''],
+    ['negative', '-10.41'],
+    ['plus-signed', '+10.41'],
+    ['scientific notation', '1e2'],
+    ['whitespace-padded', ' 10.41'],
+    ['non-string', 10.41],
+    ['absent', undefined],
+  ])('returns undefined for %s — the guard fails closed on it', (_label, value) => {
+    expect(usdcMicroFromDecimal(value)).toBeUndefined()
+  })
+})
+
+describe('onramp parseEvent — delivered amount (#213 guard)', () => {
+  it('carries the session amount in micro-units on the money-bearing events', () => {
+    for (const status of ['fulfillment_processing', 'fulfillment_complete']) {
+      const result = processor.parseEvent(
+        sessionEventBody(status, {
+          transaction_details: { destination_amount: '10.410000' },
+        }),
+      )
+      expect(result).toMatchObject({
+        outcome: 'event',
+        event: { deliveredAmountMicro: 10_410_000 },
+      })
+    }
+  })
+
+  it('omits the field when the payload has no parseable amount — appliers fail closed', () => {
+    const missing = processor.parseEvent(sessionEventBody('fulfillment_complete'))
+    expect(missing.outcome).toBe('event')
+    if (missing.outcome === 'event') {
+      expect('deliveredAmountMicro' in missing.event).toBe(false)
+    }
+    const garbage = processor.parseEvent(
+      sessionEventBody('fulfillment_complete', {
+        transaction_details: { destination_amount: 'abc' },
+      }),
+    )
+    if (garbage.outcome === 'event') {
+      expect('deliveredAmountMicro' in garbage.event).toBe(false)
+    }
+  })
+
+  it('never attaches an amount to a rejection — no money moved', () => {
+    const result = processor.parseEvent(
+      sessionEventBody('rejected', {
+        transaction_details: { destination_amount: '10.410000' },
+      }),
+    )
+    expect(result.outcome).toBe('event')
+    if (result.outcome === 'event') {
+      expect(result.event.type).toBe('funding_failed')
+      expect('deliveredAmountMicro' in result.event).toBe(false)
+    }
   })
 })
 

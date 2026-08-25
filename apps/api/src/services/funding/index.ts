@@ -37,6 +37,15 @@ export interface FundingEvent {
    * so the page/audit trail names the exact disbursement that bounced.
    */
   undoRef?: string
+  /**
+   * The amount the processor says was (or is being) delivered, in USDC
+   * MICRO-units (6 dp — USDC's native precision), onramp only (#213 guard): the
+   * widget's amount field is user-EDITABLE (no API lock exists), so FUNDED
+   * must never release on the event's say-so alone — the appliers verify this
+   * against the transfer's send+fee to the cent. Absent on processors whose
+   * amounts are server-fixed (PI, mock) and on events that carry no delivery.
+   */
+  deliveredAmountMicro?: number
   /** Failure / ACH return code on funding_failed | funding_reversed | refund_failed. */
   reason?: string
 }

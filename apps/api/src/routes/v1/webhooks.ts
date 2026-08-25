@@ -12,8 +12,10 @@ import {
   applyFundingCleared,
   applyFundingFailed,
   applyFundingSucceeded,
+  applyOnrampFunded,
   applyOnrampSettlement,
   type ApplyFundingOutcome,
+  type OnrampAmountMismatch,
 } from '../../services/funding-apply.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
@@ -318,6 +320,35 @@ export async function webhooksRoute(server: FastifyInstance) {
         return sendError(reply, 503, 'not_configured', 'Webhook not configured')
       }
 
+      // Amount-guard refusal (#213): the widget's amount is user-editable, so
+      // a fulfillment event whose delivered amount doesn't match send+fee
+      // applies NOTHING — no FUNDED, no payout, no ledger. Ack 200 (Stripe
+      // redelivering identical data can't fix it) and page: real money may be
+      // arriving at the treasury for a transfer we refused to fund — an ops
+      // review case. Amounts are money values, not PII.
+      const pageOnrampAmountMismatch = (
+        mismatchTransferId: string,
+        eventId: string,
+        mismatch: OnrampAmountMismatch,
+      ) => {
+        server.log.error(
+          {
+            audit: true,
+            webhook: 'funding',
+            transferId: mismatchTransferId,
+            eventId,
+            expectedMinor: mismatch.expectedMinor,
+            deliveredAmountMicro: mismatch.deliveredAmountMicro,
+          },
+          'onramp amount mismatch — nothing applied, payout NOT released',
+        )
+        Sentry.captureMessage('onramp funding amount mismatch', {
+          level: 'error',
+          fingerprint: ['onramp-amount-mismatch', mismatchTransferId],
+          tags: { transferId: mismatchTransferId },
+        })
+      }
+
       const signature = request.headers[processor.signatureHeader]
       const rawBody = request.body as Buffer
       if (
@@ -398,7 +429,14 @@ export async function webhooksRoute(server: FastifyInstance) {
               transferId,
               paymentRef: event.paymentRef,
               eventId: event.eventId,
+              ...(event.deliveredAmountMicro !== undefined && {
+                deliveredAmountMicro: event.deliveredAmountMicro,
+              }),
             })
+            if ('outcome' in settled) {
+              pageOnrampAmountMismatch(transferId, event.eventId, settled)
+              return { received: true }
+            }
             server.log.info(
               {
                 webhook: 'funding',
@@ -503,24 +541,43 @@ export async function webhooksRoute(server: FastifyInstance) {
       // funding_succeeded | funding_failed → state transition.
       // Both appliers live in services/transfers.ts and are shared with the ops
       // manual-funding action, so "a transfer became funded" has exactly one
-      // implementation regardless of what triggered it.
+      // implementation regardless of what triggered it. The onramp rail routes
+      // funding_succeeded through the amount guard first (#213): its widget
+      // amount is user-editable, so FUNDED must never release on the event's
+      // say-so alone.
       let result: ApplyFundingOutcome
       try {
-        result =
-          event.type === 'funding_succeeded'
-            ? await applyFundingSucceeded({
-                transferId,
-                paymentRef: event.paymentRef,
-                eventId: event.eventId,
-                actor: 'webhook:funding',
-              })
-            : await applyFundingFailed({
-                transferId,
-                paymentRef: event.paymentRef,
-                eventId: event.eventId,
-                actor: 'webhook:funding',
-                ...(event.reason !== undefined && { reason: event.reason }),
-              })
+        if (event.type === 'funding_succeeded' && processor.provider === 'stripe_onramp') {
+          const funded = await applyOnrampFunded({
+            transferId,
+            paymentRef: event.paymentRef,
+            eventId: event.eventId,
+            ...(event.deliveredAmountMicro !== undefined && {
+              deliveredAmountMicro: event.deliveredAmountMicro,
+            }),
+          })
+          if (funded.outcome === 'amount_mismatch') {
+            pageOnrampAmountMismatch(transferId, event.eventId, funded)
+            return { received: true }
+          }
+          result = funded
+        } else {
+          result =
+            event.type === 'funding_succeeded'
+              ? await applyFundingSucceeded({
+                  transferId,
+                  paymentRef: event.paymentRef,
+                  eventId: event.eventId,
+                  actor: 'webhook:funding',
+                })
+              : await applyFundingFailed({
+                  transferId,
+                  paymentRef: event.paymentRef,
+                  eventId: event.eventId,
+                  actor: 'webhook:funding',
+                  ...(event.reason !== undefined && { reason: event.reason }),
+                })
+        }
       } catch {
         server.log.error(
           { webhook: 'funding', transferId, eventId: event.eventId },

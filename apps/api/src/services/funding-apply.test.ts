@@ -30,9 +30,8 @@ vi.mock('./funding/index.js', async (importOriginal) => {
   return { ...actual, getFundingProcessor: () => getFundingProcessor() }
 })
 
-const { recordManualFunding, applyFundingSucceeded, applyOnrampSettlement } = await import(
-  './funding-apply.js'
-)
+const { recordManualFunding, applyFundingSucceeded, applyOnrampFunded, applyOnrampSettlement } =
+  await import('./funding-apply.js')
 const { TransferRpcError } = await import('./transfers.js')
 
 const TRANSFER_ID = 'cccccccc-1111-4222-8333-444444444444'
@@ -220,6 +219,73 @@ describe('recordManualFunding — cleared', () => {
   })
 })
 
+describe('applyOnrampFunded — the amount guard (#213)', () => {
+  // PENDING's send+fee = 5100 cents = 51_000_000 USDC micro-units.
+  const MATCHING = 51_000_000
+
+  function funded(deliveredAmountMicro?: number) {
+    return applyOnrampFunded({
+      transferId: TRANSFER_ID,
+      paymentRef: 'cos_guard_1',
+      eventId: 'evt_guard_1',
+      ...(deliveredAmountMicro !== undefined && { deliveredAmountMicro }),
+    })
+  }
+
+  it('a to-the-cent match delegates to the shared FUNDED applier', async () => {
+    const result = await funded(MATCHING)
+    expect(result).toEqual({ outcome: 'applied', enqueueFailed: false })
+    const transition = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+    expect(transition['toState']).toBe('FUNDED')
+    expect(transition['fundingPaymentRef']).toBe('cos_guard_1')
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID, 'api')
+  })
+
+  it('THE DRILL: an underpaid session funds nothing and releases no payout', async () => {
+    // The widget's amount field is user-editable — a sender who edits $51
+    // down to $1.04 must not buy a full MXN delivery.
+    const result = await funded(1_040_000)
+    expect(result).toEqual({
+      outcome: 'amount_mismatch',
+      expectedMinor: 5100,
+      deliveredAmountMicro: 1_040_000,
+    })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
+    expect(postLedgerTransaction).not.toHaveBeenCalled()
+  })
+
+  it('an overpaid session is refused the same way — unbooked treasury money is a review case', async () => {
+    const result = await funded(60_000_000)
+    expect(result).toMatchObject({ outcome: 'amount_mismatch', expectedMinor: 5100 })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+  })
+
+  it('an event with NO parseable amount refuses — fail closed, never fund unverified', async () => {
+    const result = await funded(undefined)
+    expect(result).toEqual({
+      outcome: 'amount_mismatch',
+      expectedMinor: 5100,
+      deliveredAmountMicro: null,
+    })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+  })
+
+  it('a sub-cent discrepancy is a mismatch — exact or nothing', async () => {
+    expect(await funded(MATCHING - 1)).toMatchObject({ outcome: 'amount_mismatch' })
+  })
+
+  it('replays short-circuit BEFORE the guard — settled history never pages', async () => {
+    stubTransfer({ ...PENDING, state: 'FUNDED' })
+    expect(await funded(1)).toEqual({ outcome: 'replayed' })
+  })
+
+  it('unknown transfers stay the ack-and-log path', async () => {
+    stubTransfer(null)
+    expect(await funded(MATCHING)).toEqual({ outcome: 'unknown_transfer' })
+  })
+})
+
 describe('applyOnrampSettlement (#213)', () => {
   const SESSION_REF = 'cos_settle_1'
 
@@ -238,11 +304,23 @@ describe('applyOnrampSettlement (#213)', () => {
     })
   }
 
-  function settle() {
+  // PENDING's send+fee = 5100 cents → 51_000_000 USDC micro-units. The guard
+  // demands the match on every call, so the helper passes it by default and
+  // the mismatch tests override it.
+  const MATCHING_MICRO = 51_000_000
+
+  /** Narrows away the mismatch arm for tests asserting the settled shape. */
+  function settled(result: Awaited<ReturnType<typeof settle>>) {
+    if ('outcome' in result) throw new Error(`unexpected amount mismatch: ${JSON.stringify(result)}`)
+    return result
+  }
+
+  function settle(deliveredAmountMicro: number | 'absent' = MATCHING_MICRO) {
     return applyOnrampSettlement({
       transferId: TRANSFER_ID,
       paymentRef: SESSION_REF,
       eventId: 'evt_complete_1',
+      ...(deliveredAmountMicro !== 'absent' && { deliveredAmountMicro }),
     })
   }
 
@@ -252,7 +330,7 @@ describe('applyOnrampSettlement (#213)', () => {
   })
 
   it('normal order: posts the cash leg then the float top-up, no transition', async () => {
-    const result = await settle()
+    const result = settled(await settle())
 
     expect(result.caughtUp).toBe(false)
     expect(result.cleared).toEqual({ outcome: 'applied' })
@@ -291,7 +369,7 @@ describe('applyOnrampSettlement (#213)', () => {
       return { id: TRANSFER_ID }
     })
 
-    const result = await settle()
+    const result = settled(await settle())
 
     expect(result.caughtUp).toBe(true)
     expect(result.cleared).toEqual({ outcome: 'applied' })
@@ -313,7 +391,7 @@ describe('applyOnrampSettlement (#213)', () => {
     'suppresses the top-up when the cash leg skips (%s) — a closed receivable books nothing',
     async (state) => {
       row = { ...PENDING, state, refund_payment_ref: null }
-      const result = await settle()
+      const result = settled(await settle())
       expect(result.cleared).toEqual({ outcome: 'skipped', state })
       expect(result.floatTopUpKey).toBeNull()
       expect(postLedgerTransaction).not.toHaveBeenCalled()
@@ -329,7 +407,7 @@ describe('applyOnrampSettlement (#213)', () => {
       throw new TransferRpcError('transition_conflict')
     })
 
-    const result = await settle()
+    const result = settled(await settle())
     expect(result.caughtUp).toBe(false)
     expect(result.cleared).toEqual({ outcome: 'applied' })
     expect(result.floatTopUpKey).toBe(`float_topup:${SESSION_REF}`)
@@ -337,13 +415,38 @@ describe('applyOnrampSettlement (#213)', () => {
 
   it('unknown transfer: skips everything without throwing', async () => {
     stubTransfer(null)
-    const result = await settle()
+    const result = settled(await settle())
     expect(result).toEqual({
       caughtUp: false,
       cleared: { outcome: 'skipped', state: 'unknown' },
       floatTopUpKey: null,
     })
     expect(postLedgerTransaction).not.toHaveBeenCalled()
+  })
+
+  it('refuses every leg on an underpaid fulfillment_complete', async () => {
+    const result = await settle(1_040_000)
+    expect(result).toEqual({
+      outcome: 'amount_mismatch',
+      expectedMinor: 5100,
+      deliveredAmountMicro: 1_040_000,
+    })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(postLedgerTransaction).not.toHaveBeenCalled()
+  })
+
+  it('refuses when the event carries no amount — fail closed even at settlement', async () => {
+    const result = await settle('absent')
+    expect(result).toMatchObject({ outcome: 'amount_mismatch', deliveredAmountMicro: null })
+    expect(postLedgerTransaction).not.toHaveBeenCalled()
+  })
+
+  it('the guard also fronts the out-of-order catch-up — an underpaid complete never drives FUNDED', async () => {
+    row = { ...PENDING, refund_payment_ref: null } // still PENDING_PAYMENT
+    const result = await settle(1_040_000)
+    expect(result).toMatchObject({ outcome: 'amount_mismatch' })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
   })
 
   it('replay: identical keys on every leg, so the DB uniqueness absorbs it', async () => {
