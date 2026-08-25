@@ -740,6 +740,173 @@ describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
   })
 })
 
+// ── funding webhook, onramp-shaped processor (#213) ─────────────────────────
+// The onramp lifecycle drives THREE distinct route behaviors: processing →
+// the ordinary FUNDED transition, complete → applyOnrampSettlement (cash leg
+// + float top-up + out-of-order catch-up), rejected → PAYMENT_FAILED. The
+// provider gate on the cleared branch is what routes complete differently
+// from every other processor — these tests pin it through the public seam.
+
+function fakeOnrampProcessor(
+  eventType: 'funding_succeeded' | 'funding_cleared' | 'funding_failed' | 'unhandled',
+) {
+  return fakeStripeProcessor({
+    provider: 'stripe_onramp',
+    parseEvent: vi.fn(() =>
+      eventType === 'unhandled'
+        ? { outcome: 'unhandled', eventId: 'evt_o1', eventType: 'crypto.onramp_session.updated' }
+        : {
+            outcome: 'event',
+            event: {
+              eventId: 'evt_o1',
+              type: eventType,
+              transferRef: TRANSFER_ID,
+              paymentRef: 'cos_1',
+            },
+          },
+    ),
+  })
+}
+
+const postOnramp = (app: Awaited<ReturnType<typeof buildApp>>) =>
+  supertest(app.server)
+    .post('/v1/webhooks/funding')
+    .set('Content-Type', 'application/json')
+    .set('Stripe-Signature', 'sig_v1')
+    .send('{}')
+
+describe('POST /v1/webhooks/funding — onramp settlement (#213)', () => {
+  beforeEach(() => {
+    transitionTransfer.mockReset()
+    enqueuePayoutSubmit.mockReset().mockResolvedValue(undefined)
+  })
+
+  it('fulfillment_complete posts the cash leg AND the float top-up', async () => {
+    processorOverride.current = fakeOnrampProcessor('funding_cleared')
+    const funded = { ...transferRow, state: 'FUNDED', refund_payment_ref: null }
+    // applyOnrampSettlement reads: catch-up load, cleared load, flag update
+    from
+      .mockReturnValueOnce(selectChain({ data: funded }))
+      .mockReturnValueOnce(selectChain({ data: funded }))
+      .mockReturnValueOnce(selectChain({ data: null }))
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(200)
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(postLedgerTransaction).toHaveBeenCalledTimes(2)
+    const cashLeg = postLedgerTransaction.mock.calls[0]![0] as Record<string, unknown>
+    expect(cashLeg['transition']).toBe('funding_cleared')
+    const topUp = postLedgerTransaction.mock.calls[1]![0] as Record<string, unknown>
+    // Keyed on the session id → dashboard redelivery re-derives the same key
+    expect(topUp['idempotencyKey']).toBe('float_topup:cos_1')
+    await app.close()
+  })
+
+  it('fulfillment_complete before processing catches up to FUNDED first', async () => {
+    processorOverride.current = fakeOnrampProcessor('funding_cleared')
+    const pending = { ...transferRow, refund_payment_ref: null }
+    const funded = { ...pending, state: 'FUNDED' }
+    transitionTransfer.mockResolvedValue({ id: TRANSFER_ID })
+    from
+      .mockReturnValueOnce(selectChain({ data: pending })) // settlement load
+      .mockReturnValueOnce(selectChain({ data: pending })) // catch-up load
+      .mockReturnValueOnce(selectChain({ data: funded })) // cleared load (post-transition)
+      .mockReturnValueOnce(selectChain({ data: null })) // flag update
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(200)
+    const transition = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+    expect(transition['fromState']).toBe('PENDING_PAYMENT')
+    expect(transition['toState']).toBe('FUNDED')
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID, 'api')
+    expect(postLedgerTransaction).toHaveBeenCalledTimes(2)
+    await app.close()
+  })
+
+  it('suppresses the top-up when the receivable is closed (CANCELED)', async () => {
+    processorOverride.current = fakeOnrampProcessor('funding_cleared')
+    const canceled = { ...transferRow, state: 'CANCELED', refund_payment_ref: null }
+    from
+      .mockReturnValueOnce(selectChain({ data: canceled }))
+      .mockReturnValueOnce(selectChain({ data: canceled }))
+      .mockReturnValueOnce(selectChain({ data: null }))
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(200)
+    expect(postLedgerTransaction).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('500s when the top-up fails to post so Stripe redelivers', async () => {
+    processorOverride.current = fakeOnrampProcessor('funding_cleared')
+    const funded = { ...transferRow, state: 'FUNDED', refund_payment_ref: null }
+    from
+      .mockReturnValueOnce(selectChain({ data: funded }))
+      .mockReturnValueOnce(selectChain({ data: funded }))
+      .mockReturnValueOnce(selectChain({ data: null }))
+    postLedgerTransaction
+      .mockResolvedValueOnce(undefined) // cash leg
+      .mockRejectedValueOnce(new Error('ledger rpc down')) // top-up
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(500)
+    await app.close()
+  })
+
+  it('fulfillment_processing drives the ordinary FUNDED transition + payout', async () => {
+    processorOverride.current = fakeOnrampProcessor('funding_succeeded')
+    from.mockReturnValueOnce(selectChain({ data: transferRow }))
+    transitionTransfer.mockResolvedValue({ ...transferRow, state: 'FUNDED' })
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(200)
+    const call = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+    expect(call['toState']).toBe('FUNDED')
+    expect(call['fundingPaymentRef']).toBe('cos_1')
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID, 'api')
+    await app.close()
+  })
+
+  it('rejected drives PAYMENT_FAILED with no ledger batch', async () => {
+    processorOverride.current = fakeOnrampProcessor('funding_failed')
+    from.mockReturnValueOnce(selectChain({ data: transferRow }))
+    transitionTransfer.mockResolvedValue({ ...transferRow, state: 'PAYMENT_FAILED' })
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(200)
+    const call = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+    expect(call['toState']).toBe('PAYMENT_FAILED')
+    expect(call['ledgerEntries']).toBeUndefined()
+    expect(postLedgerTransaction).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('pre-payment churn (initialized / requires_payment) acks without touching state', async () => {
+    processorOverride.current = fakeOnrampProcessor('unhandled')
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ received: true })
+    expect(from).not.toHaveBeenCalled()
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
+})
+
 // ── funding refund tails (PR-S2) ─────────────────────────────────────────────
 
 describe('POST /v1/webhooks/funding — refund tails (PR-S2)', () => {

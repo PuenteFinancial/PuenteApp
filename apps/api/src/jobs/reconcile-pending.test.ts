@@ -14,6 +14,7 @@ vi.mock('../services/supabase.js', () => ({
 const envMock = vi.hoisted(() => ({
   FUNDING_PROCESSOR: 'mock' as string,
   MANUAL_PENDING_MAX_AGE_DAYS: 7,
+  ONRAMP_PENDING_MAX_AGE_HOURS: 4,
 }))
 vi.mock('../config/env.js', () => ({ env: envMock }))
 
@@ -43,6 +44,7 @@ beforeEach(() => {
   transition.mockReset()
   envMock.FUNDING_PROCESSOR = 'mock'
   envMock.MANUAL_PENDING_MAX_AGE_DAYS = 7
+  envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 4
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(new Date('2026-07-20T12:00:00.000Z'))
 })
@@ -70,6 +72,29 @@ describe('reconcilePendingTransfers', () => {
 
     const [input] = transition.mock.calls[0] as [Record<string, unknown>]
     expect(input.reason).toBe('funding_not_received_within_5_days')
+  })
+
+  it('onramp processor: the window is hours-scale — widget KYC outlives 30 minutes (#213)', async () => {
+    envMock.FUNDING_PROCESSOR = 'stripe_onramp'
+    const { lt } = mockStaleSelect({ data: [], error: null })
+
+    await reconcilePendingTransfers()
+
+    // 4 hours before the frozen clock — a sender mid-KYC is NOT abandoned,
+    // and a sweep-then-pay race would put real money on a PAYMENT_FAILED row.
+    expect(lt).toHaveBeenCalledWith('created_at', '2026-07-20T08:00:00.000Z')
+  })
+
+  it('onramp processor: the abandonment reason names the hours window', async () => {
+    envMock.FUNDING_PROCESSOR = 'stripe_onramp'
+    envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 6
+    mockStaleSelect({ data: [{ id: 'tr-old' }], error: null })
+    transition.mockResolvedValue({})
+
+    await reconcilePendingTransfers()
+
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input.reason).toBe('funding_not_received_within_6_hours')
   })
 
   it('selects PENDING_PAYMENT older than 30 minutes and returns 0 when none', async () => {

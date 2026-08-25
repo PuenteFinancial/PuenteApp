@@ -55,6 +55,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 403 | `kyc_required` | Sender KYC not `approved` |
 | 403 | `limit_exceeded` | Per-user transaction limit hit (per-transaction / day / month / 6 months / sends per day) |
 | 403 | `transfer_in_progress` | Uncleared-exposure cap: the sender already has a committed send awaiting ACH settlement |
+| 403 | `funding_unsupported` | Onramp rail (#213): the funding processor can't serve this sender's location/profile (Stripe supportability pre-check at confirm) |
 | 404 | `not_found` | Unknown resource |
 | 409 | `conflict` | Illegal state transition |
 | 409 | `idempotency_conflict` | Idempotency-Key reused with different body |

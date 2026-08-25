@@ -90,6 +90,7 @@ vi.mock('../../services/risk.js', () => ({
 }))
 
 const { transfersRoute } = await import('./transfers.js')
+const { FundingInitiationError } = await import('../../services/funding/index.js')
 const { idempotencyPlugin } = await import('../../plugins/idempotency.js')
 const { TransferRpcError } = await import('../../services/transfers.js')
 
@@ -127,6 +128,9 @@ const approvedUser = {
   kyc_status: 'approved',
   bridge_customer_id: 'cust_1',
   preferred_language: 'es',
+  first_name: 'Ana',
+  last_name: 'García',
+  email: 'ana@example.com',
 }
 
 const quoteRow = {
@@ -434,6 +438,87 @@ describe('POST /v1/transfers/:id/confirm', () => {
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ id: TRANSFER_ID, state: 'PENDING_PAYMENT' })
     expect(captureException).toHaveBeenCalled()
+    await app.close()
+  })
+
+  // ── #213: onramp initiation context + refusal mapping ──
+  it('forwards the proxied client IP and the KYC prefill to initiateFunding', async () => {
+    routeTables()
+    const app = await buildApp()
+
+    const res = await confirm(app).set('X-Client-Ip', '203.0.113.9')
+
+    expect(res.status).toBe(200)
+    const arg = initiateFunding.mock.calls[0]![0] as Record<string, unknown>
+    expect(arg['clientIp']).toBe('203.0.113.9')
+    expect(arg['customer']).toEqual({
+      firstName: 'Ana',
+      lastName: 'García',
+      email: 'ana@example.com',
+    })
+    await app.close()
+  })
+
+  it('falls back to request.ip for direct callers (no proxy header)', async () => {
+    routeTables()
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(200)
+    const arg = initiateFunding.mock.calls[0]![0] as Record<string, unknown>
+    expect(typeof arg['clientIp']).toBe('string')
+    expect(arg['clientIp']).not.toBe('')
+    await app.close()
+  })
+
+  it('omits absent prefill fields rather than passing nulls to the processor', async () => {
+    routeTables({
+      users: () =>
+        chain({ data: { ...approvedUser, first_name: null, last_name: null, email: null } }),
+    })
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(200)
+    const arg = initiateFunding.mock.calls[0]![0] as Record<string, unknown>
+    expect(arg['customer']).toEqual({})
+    await app.close()
+  })
+
+  it('403s funding_unsupported when the processor refuses this sender', async () => {
+    routeTables()
+    initiateFunding.mockRejectedValue(new FundingInitiationError('unsupported'))
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('funding_unsupported')
+    await app.close()
+  })
+
+  it('503s not_configured on the processor-wide kill switch', async () => {
+    routeTables()
+    initiateFunding.mockRejectedValue(new FundingInitiationError('disabled'))
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(503)
+    expect(res.body.error.code).toBe('not_configured')
+    await app.close()
+  })
+
+  it('still 500s a non-initiation processor fault (nothing swallowed)', async () => {
+    routeTables()
+    initiateFunding.mockRejectedValue(new Error('stripe unreachable'))
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(500)
     await app.close()
   })
 

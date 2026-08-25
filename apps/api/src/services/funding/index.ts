@@ -2,6 +2,7 @@ import { env } from '../../config/env.js'
 import { MockFundingProcessor } from './mock.js'
 import { StripeFundingProcessor } from './stripe.js'
 import { ManualFundingProcessor } from './manual.js'
+import { StripeOnrampFundingProcessor } from './stripe-onramp.js'
 
 export type FundingEventType =
   | 'funding_succeeded'
@@ -52,11 +53,34 @@ export type FundingParseResult =
 
 export interface FundingInitiation {
   provider: string
-  method: 'ach'
+  /** How the sender pays: 'ach' pulls USD; 'onramp' is a Stripe crypto onramp
+   *  widget session (card / Apple Pay / ACH inside Stripe's UI, USDC delivered
+   *  to the treasury). */
+  method: 'ach' | 'onramp'
   /** Persisted to transfers.funding_payment_ref. */
   paymentRef: string
   /** Processor-specific fields the client needs (Stripe: client_secret). */
   clientFields: Record<string, string>
+}
+
+/**
+ * A processor refused to START funding for reasons the sender needs to hear
+ * about (#213) — not a transport fault, not a config bug on our side:
+ *   unsupported — Stripe judged this customer un-onrampable (geo/profile via
+ *                 customer_ip_address pre-check). Confirm maps it to a 403
+ *                 with the stable code `funding_unsupported`.
+ *   disabled    — Stripe's fraud kill switch shut session creation off
+ *                 account-wide. Confirm maps it to the existing 503
+ *                 `not_configured` (same sender experience as an unconfigured
+ *                 processor: nothing they did, try later).
+ * Seam-level so confirm can branch without importing processor internals;
+ * adapters throw it ONLY from initiateFunding.
+ */
+export class FundingInitiationError extends Error {
+  constructor(public readonly code: 'unsupported' | 'disabled') {
+    super(`funding initiation refused: ${code}`)
+    this.name = 'FundingInitiationError'
+  }
 }
 
 // What the browser needs to bootstrap the pay step (PR-S3). Served on demand
@@ -148,9 +172,14 @@ export function undoModeForRef(ref: string): 'voided' | 'refunded' {
  *
  * Unknown prefixes return false — the pre-existing behavior for every processor
  * that can actually disburse, so this narrows nothing that already worked.
+ *
+ * `onramprefund_` (#213) is here for the same reason as `manualrefund_`:
+ * Stripe's onramp has no refund API — confirmed transactions are irreversible
+ * on their side and the USDC is already in the treasury — so making the sender
+ * whole is always a human moving money by hand.
  */
 export function undoRequiresManualDisbursement(ref: string): boolean {
-  return ref.startsWith('manualrefund_')
+  return ref.startsWith('manualrefund_') || ref.startsWith('onramprefund_')
 }
 
 // The funding seam: initiation on confirm, plus the webhook-side verify +
@@ -186,6 +215,12 @@ export interface FundingProcessor {
     userId: string
     totalAmountMinor: number
     currency: 'USD'
+    /** Real client IP forwarded by the web proxy (#213) — the onramp adapter
+     *  passes it to Stripe's supportability pre-check; others ignore it. */
+    clientIp?: string
+    /** KYC prefill for the onramp widget (#213) — name/email only, never SSN.
+     *  Optional fields because users rows predate profile completion. */
+    customer?: { firstName?: string; lastName?: string; email?: string }
   }): Promise<FundingInitiation>
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean
   parseEvent(rawBody: Buffer): FundingParseResult
@@ -239,6 +274,7 @@ const processors: Record<typeof env.FUNDING_PROCESSOR, () => FundingProcessor> =
   mock: () => new MockFundingProcessor(),
   stripe: () => new StripeFundingProcessor(),
   manual: () => new ManualFundingProcessor(),
+  stripe_onramp: () => new StripeOnrampFundingProcessor(),
 }
 
 let instance: FundingProcessor | undefined

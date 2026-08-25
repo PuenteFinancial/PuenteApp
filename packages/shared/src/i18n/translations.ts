@@ -301,6 +301,10 @@ export type Translations = {
       conflict: string
       idempotency_conflict: string
       not_configured: string
+      // Stripe onramp supportability refusal (#213): the payment provider
+      // can't serve this sender's location/profile. Mentions that payment
+      // couldn't START; must never claim anything was paid.
+      funding_unsupported: string
       rate_limited: string
       rate_unavailable: string
       provider_rejected: string
@@ -880,6 +884,8 @@ const en: Translations = {
       conflict: 'This can’t be updated right now. Refresh and try again.',
       idempotency_conflict: 'We’re still processing your last request. Give it a moment before trying again.',
       not_configured: 'Sending money isn’t available yet. We’ll let you know the moment it’s live.',
+      funding_unsupported:
+        'Our payment provider can’t accept payments from your location right now, so this transfer can’t be completed. You haven’t been charged.',
       rate_limited: 'Too many attempts. Please wait a moment and try again.',
       rate_unavailable: 'We couldn’t get an exchange rate right now. Try again in a moment.',
       provider_rejected: 'Our payout partner couldn’t accept this. Check the recipient’s account details.',
@@ -1424,6 +1430,8 @@ const es: Translations = {
       conflict: 'Esto no se puede actualizar ahora. Actualiza e inténtalo de nuevo.',
       idempotency_conflict: 'Todavía estamos procesando tu solicitud anterior. Espera un momento antes de intentar de nuevo.',
       not_configured: 'Enviar dinero aún no está disponible. Te avisaremos en cuanto esté listo.',
+      funding_unsupported:
+        'Nuestro proveedor de pagos no puede aceptar pagos desde tu ubicación por ahora, así que esta transferencia no se puede completar. No se te ha cobrado.',
       rate_limited: 'Demasiados intentos. Espera un momento e inténtalo de nuevo.',
       rate_unavailable: 'No pudimos obtener el tipo de cambio ahora. Inténtalo en un momento.',
       provider_rejected: 'Nuestro socio de pagos no pudo aceptar esto. Revisa los datos de la cuenta del destinatario.',

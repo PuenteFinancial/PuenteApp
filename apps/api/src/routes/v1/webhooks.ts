@@ -12,6 +12,7 @@ import {
   applyFundingCleared,
   applyFundingFailed,
   applyFundingSucceeded,
+  applyOnrampSettlement,
   type ApplyFundingOutcome,
 } from '../../services/funding-apply.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
@@ -387,14 +388,35 @@ export async function webhooksRoute(server: FastifyInstance) {
       if (event.type === 'funding_cleared') {
         // A flag, not a state: recorded for the WAIT_FOR_CLEARING policy, plus
         // the ACH CLEARS cash leg. Both live in applyFundingCleared, shared with
-        // the ops manual-funding action.
+        // the ops manual-funding action. The onramp rail (#213) routes through
+        // applyOnrampSettlement instead — same cash leg, plus the out-of-order
+        // catch-up (fulfillment_complete can beat fulfillment_processing) and
+        // the float top-up for the USDC Stripe just delivered to the treasury.
         try {
-          const cleared = await applyFundingCleared({ transferId })
-          if (cleared.outcome === 'skipped') {
+          if (processor.provider === 'stripe_onramp') {
+            const settled = await applyOnrampSettlement({
+              transferId,
+              paymentRef: event.paymentRef,
+              eventId: event.eventId,
+            })
             server.log.info(
-              { webhook: 'funding', transferId, state: cleared.state },
-              'funding_cleared: receivable already closed, no cash leg posted',
+              {
+                webhook: 'funding',
+                transferId,
+                caughtUp: settled.caughtUp,
+                cleared: settled.cleared.outcome,
+                floatTopUp: settled.floatTopUpKey !== null,
+              },
+              'onramp settlement applied',
             )
+          } else {
+            const cleared = await applyFundingCleared({ transferId })
+            if (cleared.outcome === 'skipped') {
+              server.log.info(
+                { webhook: 'funding', transferId, state: cleared.state },
+                'funding_cleared: receivable already closed, no cash leg posted',
+              )
+            }
           }
         } catch (err) {
           // Never replay-safe to fail silently: the flag is already set, so a

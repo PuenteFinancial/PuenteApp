@@ -93,6 +93,73 @@ describe('FUNDING_PROCESSOR=manual env refinement (funding-ops slice 3)', () => 
   })
 })
 
+describe('FUNDING_PROCESSOR=stripe_onramp env refinement (#213)', () => {
+  const DEST_ADDRESS = '0x00b5D64Db67dE9E1BdDc61cf1D0Cd704e0B9970A'
+  const trio = {
+    STRIPE_SECRET_KEY: 'sk_test_x',
+    STRIPE_WEBHOOK_SECRET: 'whsec_x',
+    STRIPE_PUBLISHABLE_KEY: 'pk_test_x',
+  }
+
+  it('refuses an onramp selection missing the trio AND the address, naming each one', () => {
+    const parsed = envSchemaWithRules.safeParse({ ...base, FUNDING_PROCESSOR: 'stripe_onramp' })
+    expect(parsed.success).toBe(false)
+    const fields = parsed.success ? {} : parsed.error.flatten().fieldErrors
+    expect(fields).toHaveProperty('STRIPE_SECRET_KEY')
+    expect(fields).toHaveProperty('STRIPE_WEBHOOK_SECRET')
+    expect(fields).toHaveProperty('STRIPE_PUBLISHABLE_KEY')
+    expect(fields).toHaveProperty('ONRAMP_DESTINATION_ADDRESS')
+  })
+
+  it('refuses the trio without the delivery address — sessions would deliver nowhere', () => {
+    const parsed = envSchemaWithRules.safeParse({
+      ...base,
+      ...trio,
+      FUNDING_PROCESSOR: 'stripe_onramp',
+    })
+    expect(parsed.success).toBe(false)
+    const fields = parsed.success ? {} : parsed.error.flatten().fieldErrors
+    expect(fields).toHaveProperty('ONRAMP_DESTINATION_ADDRESS')
+    expect(fields).not.toHaveProperty('STRIPE_SECRET_KEY')
+  })
+
+  it('refuses a non-EVM address shape — a pasted wallet UUID must not boot', () => {
+    const parsed = envSchemaWithRules.safeParse({
+      ...base,
+      ...trio,
+      FUNDING_PROCESSOR: 'stripe_onramp',
+      ONRAMP_DESTINATION_ADDRESS: 'b1946ac9-2f01-4a2f-8b6a-2f01b1946ac9',
+    })
+    expect(parsed.success).toBe(false)
+  })
+
+  it('accepts a full onramp selection and applies the pending-window default + bounds', () => {
+    const ok = envSchemaWithRules.safeParse({
+      ...base,
+      ...trio,
+      FUNDING_PROCESSOR: 'stripe_onramp',
+      ONRAMP_DESTINATION_ADDRESS: DEST_ADDRESS,
+    })
+    expect(ok.success).toBe(true)
+    expect(ok.success && ok.data.ONRAMP_PENDING_MAX_AGE_HOURS).toBe(4)
+
+    const outOfBounds = envSchemaWithRules.safeParse({
+      ...base,
+      ...trio,
+      FUNDING_PROCESSOR: 'stripe_onramp',
+      ONRAMP_DESTINATION_ADDRESS: DEST_ADDRESS,
+      ONRAMP_PENDING_MAX_AGE_HOURS: '72',
+    })
+    expect(outOfBounds.success).toBe(false)
+  })
+
+  it('leaves other selections free to omit the onramp address', () => {
+    const parsed = envSchemaWithRules.safeParse(base)
+    expect(parsed.success).toBe(true)
+    expect(parsed.success && parsed.data.ONRAMP_DESTINATION_ADDRESS).toBeUndefined()
+  })
+})
+
 describe('OPS_ADMIN_USER_IDS allowlist (slice 8.5-v1)', () => {
   it('defaults to the empty set — fail closed, nobody is an ops admin', () => {
     const parsed = envSchemaWithRules.safeParse(base)

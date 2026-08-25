@@ -3,6 +3,7 @@ import { env } from '../config/env.js'
 import { supabaseAdmin } from './supabase.js'
 import { postLedgerTransaction } from './ledger.js'
 import { enqueuePayoutSubmit } from './queue.js'
+import { recordFloatTopUp } from './payouts.js'
 import { getFundingProcessor, undoModeForRef } from './funding/index.js'
 import {
   fundedLedgerEntries,
@@ -215,6 +216,78 @@ export async function applyFundingCleared(input: {
     })),
   })
   return { outcome: 'applied' }
+}
+
+export interface ApplyOnrampSettlementResult {
+  /** True when THIS call drove PENDING_PAYMENT → FUNDED (the out-of-order
+   *  catch-up ran, or the processing webhook simply hadn't landed yet). */
+  caughtUp: boolean
+  cleared: ApplyFundingClearedOutcome
+  /** The float top-up's ledger idempotency key, or null when the cash leg was
+   *  skipped and no top-up may be booked. */
+  floatTopUpKey: string | null
+}
+
+/**
+ * Onramp fulfillment_complete (#213): Stripe delivered the sender's USDC to
+ * the treasury. Three legs, in order:
+ *
+ * 1. CATCH-UP — Stripe does not guarantee webhook order, so
+ *    fulfillment_complete can arrive while the transfer still sits in
+ *    PENDING_PAYMENT (fulfillment_processing lost the race or the delivery).
+ *    applyFundingCleared alone would read PENDING_PAYMENT as
+ *    "receivable never opened" and skip the cash leg — stranding a receivable
+ *    that the late processing webhook then opens with nothing to ever close
+ *    it. So: if the row is still PENDING_PAYMENT, drive FUNDED first.
+ * 2. The ACH-clears cash leg via applyFundingCleared, exactly as the manual
+ *    rail's cleared assertion.
+ * 3. IFF the cash leg posted (not skipped — a canceled/refunded row's
+ *    receivable is already closed and must not be topped up), book the float
+ *    top-up: real USDC just landed in the treasury wallet, which is the same
+ *    physical event the ops board's manual top-up records. amountMinor is
+ *    send+fee — the session's destination_amount at USDC≈USD par.
+ *
+ * Every leg replays clean on its existing key: the FUNDED transition on the
+ * state guard, the cash leg on the ledger's (transfer_id, transition)
+ * uniqueness, the top-up on float_topup:<sessionId>.
+ */
+export async function applyOnrampSettlement(input: {
+  transferId: string
+  paymentRef: string
+  eventId: string
+}): Promise<ApplyOnrampSettlementResult> {
+  const transfer = await loadFundingTransfer(input.transferId)
+
+  let caughtUp = false
+  if (transfer && transfer.state === 'PENDING_PAYMENT') {
+    const applied = await applyFundingSucceeded({
+      transferId: input.transferId,
+      paymentRef: input.paymentRef,
+      eventId: input.eventId,
+      actor: 'webhook:funding',
+      reason: 'onramp fulfillment_complete before processing — catch-up',
+    })
+    // 'stale' means another actor moved the row mid-flight (canceled, or the
+    // processing webhook landed between our read and the RPC) — fall through:
+    // applyFundingCleared re-reads and judges the receivable itself.
+    caughtUp = applied.outcome === 'applied'
+  }
+
+  const cleared = await applyFundingCleared({ transferId: input.transferId })
+  if (cleared.outcome !== 'applied') {
+    return { caughtUp, cleared, floatTopUpKey: null }
+  }
+
+  if (!transfer) {
+    // Unreachable: a cleared cash leg proves the row existed. Guarded so a
+    // future reorder can't book a top-up with no amount to trust.
+    throw new Error(`onramp settlement: cleared posted for unknown transfer ${input.transferId}`)
+  }
+  const topUp = await recordFloatTopUp({
+    amountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,
+    externalRef: input.paymentRef,
+  })
+  return { caughtUp, cleared, floatTopUpKey: topUp.idempotencyKey }
 }
 
 // ── Operator-asserted funding ───────────────────────────────────────────────

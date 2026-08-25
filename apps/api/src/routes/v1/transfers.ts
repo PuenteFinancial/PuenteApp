@@ -4,8 +4,10 @@ import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { buildPrepaymentDisclosure } from '../../services/disclosures.js'
 import {
+  FundingInitiationError,
   getFundingProcessor,
   undoRequiresManualDisbursement,
+  type FundingInitiation,
 } from '../../services/funding/index.js'
 import {
   cancelTransfer,
@@ -438,7 +440,8 @@ export async function transfersRoute(server: FastifyInstance) {
     async (request, reply) => {
       const userId = request.user!.id
 
-      if (!(await requireApprovedUser(userId, reply))) return
+      const approvedUser = await requireApprovedUser(userId, reply)
+      if (!approvedUser) return
 
       if (!fundingConfigured()) {
         return sendError(reply, 503, 'not_configured', 'Funding is not available yet')
@@ -555,12 +558,46 @@ export async function transfersRoute(server: FastifyInstance) {
         }
       }
 
-      const funding = await getFundingProcessor().initiateFunding({
-        transferId: transfer.id,
-        userId,
-        totalAmountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,
-        currency: 'USD',
-      })
+      // Real client IP for the onramp supportability pre-check (#213):
+      // browser traffic arrives via the Next.js proxy, so the true address
+      // rides in x-client-ip (auth.ts precedent); request.ip is the fallback
+      // for direct callers. An authenticated caller spoofing the header only
+      // mislabels their own geo check. Name/email are the KYC prefill —
+      // never SSN, and never logged.
+      const forwardedIp = request.headers['x-client-ip']
+      const clientIp = (typeof forwardedIp === 'string' ? forwardedIp : request.ip) || undefined
+
+      let funding: FundingInitiation
+      try {
+        funding = await getFundingProcessor().initiateFunding({
+          transferId: transfer.id,
+          userId,
+          totalAmountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,
+          currency: 'USD',
+          ...(clientIp && { clientIp }),
+          customer: {
+            ...(approvedUser.firstName && { firstName: approvedUser.firstName }),
+            ...(approvedUser.lastName && { lastName: approvedUser.lastName }),
+            ...(approvedUser.email && { email: approvedUser.email }),
+          },
+        })
+      } catch (err) {
+        if (err instanceof FundingInitiationError) {
+          // Known wart, accepted at pilot volume: acceptance was already
+          // recorded above, so an 'unsupported' sender holds an uncleared-cap
+          // slot until the reconcile sweep fails the row.
+          if (err.code === 'unsupported') {
+            return sendError(
+              reply,
+              403,
+              'funding_unsupported',
+              'Payments are not supported from your location',
+            )
+          }
+          return sendError(reply, 503, 'not_configured', 'Funding is not available yet')
+        }
+        throw err
+      }
 
       const { error: refError } = await supabaseAdmin
         .from('transfers')
