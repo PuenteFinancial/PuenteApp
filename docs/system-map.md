@@ -7,12 +7,20 @@ and what the alternative was. If someone technical challenges a decision, the an
 
 ## 1. What actually happens when someone sends $200
 
-1. **Quote.** We ask Bridge for the live USD→MXN rate, add our margin, and freeze *our* number for
-   15 minutes. Bridge offers **no rate lock** — their rate is indicative and moves every ~30 s.
+1. **Quote.** We ask Bridge for the live USD→MXN rate, fold our margin **into the displayed rate**
+   (one number, no separate fee line — since #193 the customer pays exactly what they typed and the
+   take is recorded as `margin_minor`), and freeze *our* number for 15 minutes. Bridge offers
+   **no rate lock** — their rate is indicative and moves every ~30 s.
 2. **Transfer + disclosure.** We create the transfer and generate the federally-required
    pre-payment disclosure from our own quote. The customer must actively accept it; we record that.
-3. **Payment.** Today a mock; Stripe later. When it succeeds the transfer becomes `FUNDED` and the
-   **first accounting entries are written**.
+3. **Payment.** One of four rails, selected by `FUNDING_PROCESSOR`: **mock** (dev/demo only — the
+   missing webhook secret is the production lock), **manual** (out-of-band: the sender wires/ACHes
+   to Puente's own coordinates, auto-attached from a Bridge onramp at confirm; an operator verifies
+   the deposit and asserts `FUNDED` — this is how the first real prod transfers moved), **stripe**
+   (Payment Element ACH debit), and **stripe onramp** (Stripe's crypto widget delivers USDC
+   straight to the treasury wallet; a delivered-amount guard verifies the exact amount before
+   `FUNDED`, because the widget's amount field is user-editable). Whichever door fires, the
+   transfer becomes `FUNDED` and the **first accounting entries are written**.
 4. **Payout.** A background worker picks it up, calls Bridge, and buys MXN. Bridge sends it over
    SPEI, Mexico's instant rail — seconds, not days.
 5. **Delivery.** Bridge tells us it landed; the transfer completes and a receipt becomes available.
@@ -101,6 +109,12 @@ Three controls bound that exposure:
 **The switch exists:** a single flag turns fronting off and makes us wait for clearing — so this is
 a priced business decision, not a hard-coded assumption.
 
+**Replenishing the float is now a first-class operation** (funding-ops, 2026-08-20/21): the
+treasury wallet is topped up by an ops-board action (or break-glass CLI) posting
+`DR bridge_wallet_float / CR cash_clearing`, idempotent on a global `float_topup:<ref>` ledger
+key; on the onramp rail the top-up happens **automatically** when Stripe's settlement webhook
+lands, keyed to the session id.
+
 ---
 
 ## 6. Cancellation — the hardest rule in the system
@@ -153,6 +167,16 @@ never 403**, byte-identical to a missing route, so it never confirms it exists t
 
 **Why 404:** a 403 tells an attacker there is something there worth attacking.
 
+Since funding-ops slices 1–4 (2026-08-20/21) the board also **acts**: per-transfer buttons
+(attach deposit instructions — prefilled from the auto-created onramp so the operator confirms
+rather than transcribes; release funding; deposit-landed = cleared + float top-up in one tap,
+with a ref-typo guard because the top-up's ledger key is global), an ad-hoc float top-up card,
+and cancellation refund/deny actions. Every money button is a two-step confirm restating the
+amount, holds a browser-minted idempotency key across retries, and every refusal is a non-2xx
+(a 200-refusal would freeze into the idempotency replay). The sender's side got one new signal:
+an "I've sent the payment" claim — set-once, **never a release** (a claim that released money
+would be a treasury-drain lever); ops hears about it as a fingerprinted Sentry info event.
+
 ---
 
 ## 9. Environments
@@ -160,9 +184,16 @@ never 403**, byte-identical to a missing route, so it never confirms it exists t
 `main` deploys to staging automatically. Production moves only through an approval-gated promote
 workflow that applies database migrations first, then fast-forwards. Two separate databases.
 
-**Production is deliberately inert today.** The mock-payment secret is absent there on purpose —
-its absence makes the payment path return an error. There are no Stripe keys. **No transfer can be
-funded in production right now**, and that is a safety property, not an oversight.
+**Production moves real money now** (first live transfer 2026-08-18, $5). What made that safe to
+say is the shape of the locks, which changed rather than disappeared:
+
+- The **mock rail is still dead in prod** — its webhook secret is absent, so simulated funding
+  cannot exist there. That lock never came off.
+- The doors that ARE open are deliberately human-gated: the **manual rail** requires an
+  allowlisted operator to assert every `FUNDED` (an empty allowlist means nothing can leave
+  `PENDING_PAYMENT`), and the **onramp rail** requires the delivered-amount guard to pass to the
+  cent before any payout releases.
+- `AUTO_REFUND` ships **off** in prod: a failed payout parks and pages rather than auto-disbursing.
 
 ---
 
@@ -170,13 +201,19 @@ funded in production right now**, and that is a safety property, not an oversigh
 
 | Gap | Status |
 |---|---|
-| **Stripe has never made a real API call** | Adapter written and unit-tested against a dummy client. Creating a payment, refunding, and the payment form are all unproven. Blocked on sandbox keys. |
-| **SMS: A2P approved, provider config outstanding** | The A2P 10DLC campaign was approved 2026-08-05 (2FA use case). Real sign-in still doesn't work until the Twilio credentials are entered in **Supabase Auth → Providers → Phone**, per project — the API holds no Twilio config. See "Turning SMS on" below. |
+| **Payment Element rail unproven live** | The onramp rail has made real prod API calls (live sessions, real money). The **Payment Element (ACH debit) rail has not** — adapter written and unit-tested; creating a live payment, refunding, and the payment form under real keys are unproven. |
+| **`FUNDING_REVERSED` has no writer** | An ACH return / chargeback event is logged and acked — nothing transitions the state or books the loss. Today a real reversal is a Sentry page and a human. |
+| **Onramp reconciliation is `skipped`, not `pass`** | The recon stripe-legs gate on the Payment Element provider; the onramp rail deliberately implements no recon reads yet (fast-follow). Interim nets: redelivery window + the uncleared-transfer check + the amount guard's page. |
+| **`AUTO_REFUND` is off in prod** | A failed payout parks at `PAYOUT_FAILED` and pages; a human disburses via runbook. Deliberate posture, but it means refund latency is human latency. |
 | **Reg E disclosure wording** | Drafted; counsel sign-off outstanding, plus a native-Spanish review. |
 | **Support mailbox** | The disclosure tells customers to contact an address that doesn't receive mail yet. |
 | **Delivery confirmation in sandbox** | Bridge sandbox parks payouts and never delivers; we drive the final step with a signed test webhook. |
 
-None of these block the demo. All of them block real customers.
+*(Resolved since the last edition: SMS — the A2P campaign was approved 2026-08-05 AND the Twilio
+provider is configured in Supabase Auth, so real sign-in works; the "Turning SMS on" section below
+stays as the reference for how it's wired and the spend controls that must stay on.)*
+
+None of these block the demo. The counsel and mailbox rows still block scaling past trusted users.
 
 ### Turning SMS on
 
@@ -221,4 +258,6 @@ and Twilio usage triggers — Twilio has no hard spend stop, so those are alerts
    flag turns it off.
 4. A cancellation that met both legal conditions is owed a refund even if the recipient keeps the
    money, and no operator can override that.
-5. Production cannot move money today, on purpose.
+5. Production moves real money now — through human-gated doors only: an operator asserts every
+   manual `FUNDED`, the onramp amount guard verifies to the cent, the mock rail stays locked out,
+   and refunds are hand-disbursed.

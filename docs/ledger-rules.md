@@ -1,8 +1,8 @@
 # Double-Entry Ledger Rules — USD → MXN Remittance
 
-**Date:** 2026-06-26
-**Status:** Documents shipped, test-pinned behavior through slice 7 + PR-S2's mode-aware undo
-postings (2026-07-30)
+**Date:** 2026-06-26 · **Updated:** 2026-08-26 (float top-up writers + the manual/onramp rail note)
+**Status:** Documents shipped, test-pinned behavior through funding-ops slices 1–4 + the onramp
+rail's settlement legs
 **Pairs with:** `transfer-state-machine.md` (every money-moving transition posts here)
 
 ## Principles
@@ -79,9 +79,18 @@ SUBMITTED  (payout drawn from the pre-funded treasury wallet; obligation stays o
   DR fx_slippage              0.08  ← D = A − S > 0 (unfavorable: actual draw exceeded the quote)
   CR bridge_wallet_float     98.08  ← actual USDC draw A Bridge reported at execution
 
-WALLET REPLENISHMENT  (independent batch event, not per-transfer — top up the treasury wallet)
+WALLET REPLENISHMENT / FLOAT TOP-UP  (independent event, not a state transition — top up the
+  treasury wallet)
   DR bridge_wallet_float    500
   CR cash_clearing          500
+  (Since funding-ops slices 1–2 + the onramp rail, this posting has four writers, all through
+   recordFloatTopUp and all idempotent on the GLOBAL ledger key `float_topup:<ref>`:
+   the ops deposit-landed action (runs after the cleared leg, and on cleared_skipped too),
+   the ad-hoc ops top-up card (no ref → derived key `adhoc:<Idempotency-Key>`),
+   the record-float-topup.ts CLI, and — automatically — the onramp rail's settlement webhook
+   (ref = the onramp session id). The key being global is why the ops action guards the ref
+   against the transfer's attached bridge_transfer_ref: a cross-transfer typo would silently
+   consume another transfer's top-up.)
 
 COMPLETED  (Bridge confirms delivery)
   DR transfer_payable        98     ← obligation discharged
@@ -211,6 +220,15 @@ UNDER_REVIEW → REFUNDED  (undo mode VOIDED — PR-S2. The LIKELY correction ca
   or the correction posting above (payout delivered). Nothing about a cancellation posts to
   the ledger before the payout resolves — an open request is evidence, not a movement.
 ```
+
+### Rail note — manual and onramp funding post the SAME batches (2026-08-26)
+
+The manual rail's operator-asserted `FUNDED` and the onramp rail's guard-verified `FUNDED` post
+the standard FUNDED batch above; their cleared assertions post the standard ACH CLEARS leg. What
+differs per rail is the **trigger and its verification** (operator to-the-cent check vs the
+delivered-amount guard), never the accounting. The onramp settlement webhook additionally chains
+the automatic float top-up (previous section) after its cash leg — three legs, each idempotent on
+its own key, so out-of-order and redelivered webhooks replay clean.
 
 ## Invariants (must always hold)
 
