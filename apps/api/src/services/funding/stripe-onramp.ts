@@ -106,6 +106,21 @@ interface OnrampSessionPayload {
   client_secret?: unknown
   status?: unknown
   metadata?: unknown
+  transaction_details?: { destination_amount?: unknown }
+}
+
+// USDC decimal string → integer MICRO-units (6 dp, USDC's native precision).
+// Exact or nothing: an unparseable or over-precise value returns undefined and
+// the appliers treat "unknown amount" as a mismatch (fail closed) — we never
+// round our way into releasing a payout. Integer bound of 7 digits keeps the
+// result comfortably inside Number.MAX_SAFE_INTEGER (9,999,999.999999 USDC →
+// ~1e13 ≪ 2^53) so no attacker-shaped string can ride float imprecision into
+// an equality it didn't earn — $9.9M is already three orders of magnitude
+// past the per-transaction cap, so nothing legitimate is refused.
+export function usdcMicroFromDecimal(value: unknown): number | undefined {
+  if (typeof value !== 'string' || !/^\d{1,7}(\.\d{1,6})?$/.test(value)) return undefined
+  const [int = '0', frac = ''] = value.split('.')
+  return Number(int) * 1_000_000 + Number(frac.padEnd(6, '0'))
 }
 
 export class StripeOnrampFundingProcessor implements FundingProcessor {
@@ -205,6 +220,14 @@ export class StripeOnrampFundingProcessor implements FundingProcessor {
       destination_amount: (input.totalAmountMinor / 100).toFixed(2),
       wallet_address: destinationAddress,
       lock_wallet_address: 'true',
+      // NOT sent: skip_quote_screen (undocumented preview param, sandbox-
+      // accepted 2026-08-25). It would remove the user-editable amount field,
+      // but the quote screen is also where Stripe itemizes its fee — the
+      // disclosure our own pay-step copy promises the sender sees before
+      // confirming (Joshua, 2026-08-25). The webhook-side amount guard makes
+      // the editable field financially harmless; hiding the fee screen to
+      // smooth UX is the wrong trade. Revisit only with visual verification
+      // of where fees surface without it, plus a compliance pass.
       'metadata[transfer_id]': input.transferId,
     })
     if (input.clientIp) params.set('customer_ip_address', input.clientIp)
@@ -342,6 +365,15 @@ export class StripeOnrampFundingProcessor implements FundingProcessor {
     const eventType = SESSION_STATUS_MAP.get(session.status)
     if (!eventType) return unhandled
 
+    // The delivery amount rides along on the money-bearing events (#213
+    // guard): the widget's amount is user-editable, so the appliers verify
+    // this against the transfer before FUNDED ever releases a payout. An
+    // absent/unparseable amount stays undefined — the appliers fail closed.
+    const deliveredAmountMicro =
+      eventType === 'funding_failed'
+        ? undefined
+        : usdcMicroFromDecimal(session.transaction_details?.destination_amount)
+
     return {
       outcome: 'event',
       event: {
@@ -349,6 +381,7 @@ export class StripeOnrampFundingProcessor implements FundingProcessor {
         type: eventType,
         transferRef,
         paymentRef: session.id,
+        ...(deliveredAmountMicro !== undefined && { deliveredAmountMicro }),
         // No reason field: the session payload carries no machine-readable
         // rejection cause (KYC/sanctions detail stays on Stripe's side).
       },

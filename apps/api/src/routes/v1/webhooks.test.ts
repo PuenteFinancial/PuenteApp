@@ -50,6 +50,13 @@ vi.mock('../../services/refunds.js', () => ({
   actOnRefundTailEvent: (...args: unknown[]) => actOnRefundTailEvent(...args),
 }))
 
+const captureMessage = vi.hoisted(() => vi.fn())
+const captureException = vi.hoisted(() => vi.fn())
+vi.mock('@sentry/node', () => ({
+  captureMessage: (...args: unknown[]) => captureMessage(...args),
+  captureException: (...args: unknown[]) => captureException(...args),
+}))
+
 // Overridable funding processor: null → the real mock processor; tests set
 // `current` to a stripe-shaped fake to exercise processor-declared headers,
 // configured-checks, and the null-transferRef resolution path.
@@ -90,6 +97,8 @@ async function buildApp() {
 beforeEach(() => {
   from.mockReset()
   postLedgerTransaction.mockReset().mockResolvedValue(undefined)
+  captureMessage.mockReset()
+  captureException.mockReset()
   processorOverride.current = null
 })
 
@@ -747,8 +756,14 @@ describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
 // provider gate on the cleared branch is what routes complete differently
 // from every other processor — these tests pin it through the public seam.
 
+// transferRow's send+fee = 20000 cents = 200_000_000 USDC micro-units. The
+// amount guard (#213) demands the match on every money-bearing event, so the
+// fake carries it by default; the mismatch drills override it.
+const ONRAMP_MATCHING_MICRO = 200_000_000
+
 function fakeOnrampProcessor(
   eventType: 'funding_succeeded' | 'funding_cleared' | 'funding_failed' | 'unhandled',
+  deliveredAmountMicro: number | 'absent' = ONRAMP_MATCHING_MICRO,
 ) {
   return fakeStripeProcessor({
     provider: 'stripe_onramp',
@@ -762,6 +777,8 @@ function fakeOnrampProcessor(
               type: eventType,
               transferRef: TRANSFER_ID,
               paymentRef: 'cos_1',
+              ...(eventType !== 'funding_failed' &&
+                deliveredAmountMicro !== 'absent' && { deliveredAmountMicro }),
             },
           },
     ),
@@ -863,7 +880,10 @@ describe('POST /v1/webhooks/funding — onramp settlement (#213)', () => {
 
   it('fulfillment_processing drives the ordinary FUNDED transition + payout', async () => {
     processorOverride.current = fakeOnrampProcessor('funding_succeeded')
-    from.mockReturnValueOnce(selectChain({ data: transferRow }))
+    // Two loads: the amount guard's, then the shared applier's own.
+    from
+      .mockReturnValueOnce(selectChain({ data: transferRow }))
+      .mockReturnValueOnce(selectChain({ data: transferRow }))
     transitionTransfer.mockResolvedValue({ ...transferRow, state: 'FUNDED' })
     const app = await buildApp()
 
@@ -890,6 +910,53 @@ describe('POST /v1/webhooks/funding — onramp settlement (#213)', () => {
     expect(call['toState']).toBe('PAYMENT_FAILED')
     expect(call['ledgerEntries']).toBeUndefined()
     expect(postLedgerTransaction).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('THE DRILL: an underpaid fulfillment_processing funds nothing, pays out nothing', async () => {
+    // The widget's amount is user-editable — a $10 session edited down to $1
+    // must not release a $200-worth MXN payout.
+    processorOverride.current = fakeOnrampProcessor('funding_succeeded', 10_000_000)
+    from.mockReturnValueOnce(selectChain({ data: transferRow }))
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(200) // ack — redelivering identical data can't fix it
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
+    expect(postLedgerTransaction).not.toHaveBeenCalled()
+    expect(captureMessage).toHaveBeenCalledWith(
+      'onramp funding amount mismatch',
+      expect.objectContaining({ level: 'error' }),
+    )
+    await app.close()
+  })
+
+  it('an amount-less fulfillment event refuses the same way — fail closed', async () => {
+    processorOverride.current = fakeOnrampProcessor('funding_succeeded', 'absent')
+    from.mockReturnValueOnce(selectChain({ data: transferRow }))
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(200)
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(captureMessage).toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('an underpaid fulfillment_complete books no cash leg and no top-up', async () => {
+    processorOverride.current = fakeOnrampProcessor('funding_cleared', 10_000_000)
+    const funded = { ...transferRow, state: 'FUNDED', refund_payment_ref: null }
+    from.mockReturnValueOnce(selectChain({ data: funded }))
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(200)
+    expect(postLedgerTransaction).not.toHaveBeenCalled()
+    expect(captureMessage).toHaveBeenCalled()
     await app.close()
   })
 
