@@ -1,7 +1,9 @@
 # Transfer State Machine — USD → MXN Remittance
 
-**Date:** 2026-06-25 · **Updated:** 2026-07-28 (slice 7 PR6b — post-submission cancellation record + both resolution tails; PR6b-0 refund claim)
-**Status:** v2 — matches the slice-5 implementation
+**Date:** 2026-06-25 · **Updated:** 2026-08-26 (de-stale pass: the four funding rails + five doors
+into `FUNDED`, rail-aware pending-payment clocks, `CANCELED` as a resting state on human-disbursement
+rails, payment claim, the onramp amount guard, and the honest `FUNDING_REVERSED` status)
+**Status:** v3 — matches the implementation through funding-ops slices 1–4 + the onramp rail
 
 The lifecycle of a single remittance transfer, from an accepted quote to delivery (or refund).
 This is the spine of the system — the queue drives these transitions, the ledger posts on them,
@@ -15,23 +17,36 @@ user confirms a quote, entering the machine at `PENDING_PAYMENT`.
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING_PAYMENT: user confirms quote
-    PENDING_PAYMENT --> FUNDED: Stripe payment captured / initiated
-    PENDING_PAYMENT --> PAYMENT_FAILED: charge fails
+    PENDING_PAYMENT --> FUNDED: funding rail confirms (five doors — see Funding rails)
+    PENDING_PAYMENT --> PAYMENT_FAILED: rail rejects / rail-aware staleness reaper
     FUNDED --> SUBMITTED: submit job claims + creates Bridge payout
     FUNDED --> CANCELED: user cancels (pre-claim only — slice 6)
     SUBMITTED --> IN_FLIGHT: Bridge accepts payout
     SUBMITTED --> PAYOUT_FAILED: Bridge rejects
     IN_FLIGHT --> COMPLETED: SPEI delivered to recipient
     IN_FLIGHT --> PAYOUT_FAILED: delivery fails
-    CANCELED --> REFUNDED
+    CANCELED --> REFUNDED: void settles (mock/stripe only — manual/onramp rest at CANCELED)
     PAYOUT_FAILED --> REFUNDED
-    COMPLETED --> FUNDING_REVERSED: ACH return / chargeback (post-payout)
+    COMPLETED --> FUNDING_REVERSED: designed — NO writer in code yet (see below)
     COMPLETED --> UNDER_REVIEW: timely cancellation (PR6b) / Reg E dispute (future)
     PAYMENT_FAILED --> [*]
     REFUNDED --> [*]
     COMPLETED --> [*]
     FUNDING_REVERSED --> [*]
 ```
+
+**Honesty notes on the diagram (2026-08-26):**
+- **`FUNDING_REVERSED` has no writer in code.** The webhook route receives `funding_reversed`
+  (Stripe `charge.dispute.created`, mock), logs "handling deferred", and acks. The state exists in
+  the enum and is *read* (settled-states, risk unwinding) but nothing transitions into it — a real
+  ACH return today is a Sentry page and a human, not a state change.
+- **`CANCELED → REFUNDED` is synchronous only on mock/stripe.** On the manual and onramp rails the
+  undo ref (`manualrefund_…` / `onramprefund_…`) is `pending` and requires a human disbursement
+  (manual-refund runbook), so the transfer **rests at `CANCELED`** with the ref recorded until
+  someone pays.
+- **There is no transition table in the DB.** `transition_transfer` guards only
+  `state = from_state`; legality of each (from, to) pair lives in the call sites. "Illegal
+  transitions unrepresentable" is a code-review property, not a schema property.
 
 `UNDER_REVIEW` (Reg E error resolution) can also be opened from `FUNDED`, `SUBMITTED`, and
 `IN_FLIGHT`, not just `COMPLETED`; shown once above for diagram clarity.
@@ -74,17 +89,51 @@ payment* (new debit against Puente), not a reversal of the original entries. The
 
 | State | Meaning | Terminal? |
 |---|---|---|
-| `PENDING_PAYMENT` | Transfer created from an accepted quote; collecting funds via Stripe. Reconciliation job marks `PAYMENT_FAILED` if no Stripe webhook arrives within 30 min. | no |
-| `FUNDED` | Stripe payment captured (card) or initiated (ACH). `funding_cleared` flag tracked here. May carry a `payout_hold_reason` (see Payout holds) — a held transfer stays `FUNDED` until ops releases it. | no |
+| `PENDING_PAYMENT` | Transfer created from an accepted quote; collecting funds via the configured rail. The `transfer.reconcile-pending` cron marks stale rows `PAYMENT_FAILED` on a **rail-aware clock**: 30 min (mock/stripe — a webhook should have arrived), `ONRAMP_PENDING_MAX_AGE_HOURS` = 4h (onramp — the sender is walking through a widget), `MANUAL_PENDING_MAX_AGE_DAYS` = 7d (manual — a real bank transfer takes days, #205 made the state livable). May carry `payment_claimed_at` (sender says "I've sent it" — a signal to ops, never a transition) and a `deposit_instructions` row (manual rail coordinates). | no |
+| `FUNDED` | The funding rail confirmed collection (see **Funding rails** below — five doors). `funding_cleared` flag tracked here. May carry a `payout_hold_reason` (see Payout holds) — a held transfer stays `FUNDED` until ops releases it. | no |
 | `SUBMITTED` | Payout request sent to Bridge with an idempotency key. | no |
 | `IN_FLIGHT` | Bridge is executing the FX + SPEI payout. | no |
 | `COMPLETED` | Recipient credited at their CLABE. | ✅ success |
-| `PAYMENT_FAILED` | Stripe charge failed; no funds collected. Terminal — no retry against this transfer. User returns to the quote screen; a new quote + new transfer is required. | ✅ |
-| `CANCELED` | User canceled while still pre-delivery; triggers refund. | → REFUNDED |
+| `PAYMENT_FAILED` | The rail rejected collection (Stripe decline, onramp `rejected`) or the staleness reaper fired; no funds collected. Terminal — no retry against this transfer. User returns to the quote screen; a new quote + new transfer is required. | ✅ |
+| `CANCELED` | User canceled while still pre-delivery; triggers the void/refund. On mock/stripe the undo settles synchronously → `REFUNDED`. On manual/onramp the undo needs a human disbursement, so this is a **resting state** until the runbook runs. | → REFUNDED |
 | `PAYOUT_FAILED` | Bridge could not deliver (bad CLABE, bank reject); triggers refund. | → REFUNDED |
 | `REFUNDED` | Funds returned to sender (from CANCELED, PAYOUT_FAILED, or UNDER_REVIEW). | ✅ |
-| `FUNDING_REVERSED` | ACH return / card chargeback **after** payout — our loss/recovery path. | ✅ (ops) |
+| `FUNDING_REVERSED` | ACH return / card chargeback **after** payout — our loss/recovery path. **Designed, not wired:** no code writes this state today (the webhook acks and defers). | ✅ (ops) |
 | `UNDER_REVIEW` | Reg E error-resolution / dispute open; exits to `REFUNDED` or `COMPLETED` only. | no |
+
+## Funding rails — the five doors into `FUNDED` (2026-08-26)
+
+`PENDING_PAYMENT → FUNDED` has ONE implementation — `applyFundingSucceeded` in
+`services/funding-apply.ts` (ledger batch + `payment_at`/`cancelable_until` + enqueue
+`payout.submit`) — and five callers, selected by `FUNDING_PROCESSOR` (`mock | stripe | manual |
+stripe_onramp`):
+
+| Door | Rail | Trigger |
+|---|---|---|
+| Funding webhook | stripe | `payment_intent.processing` → `funding_succeeded` (instant-front; `payment_intent.succeeded` later sets `funding_cleared`) |
+| Funding webhook | mock | signed `funding_succeeded` (the missing webhook secret is the **production lock**) |
+| Onramp webhook | stripe_onramp | session `fulfillment_processing` → FUNDED, **after the amount guard**; `fulfillment_complete` → cleared + float top-up (with an out-of-order catch-up: complete-before-processing drives FUNDED first) |
+| Ops assertion | manual | `POST /v1/ops/transfers/funding` (allowlisted operator, or the `record-manual-funding.ts` break-glass CLI) — the webhook path is **permanently shut** on this rail (`verifySignature` returns false unconditionally); `recordManualFunding` refuses unless the live processor IS `manual` and the amount matches send+fee to the cent |
+| Dev simulate | mock, non-prod | `POST /v1/dev/transfers/:id/simulate-funding` injects into the real webhook route |
+
+**The onramp amount guard (#213/#241).** The onramp widget's amount field is user-editable
+(`skip_quote_screen` is deliberately not sent — Stripe's quote screen is where its fee is
+itemized, a disclosure our pay-step copy promises). So a fulfillment event's word alone never
+releases a payout: the event's `deliveredAmountMicro` must equal `(send + fee) × 10,000` exactly
+— an absent amount also refuses (fail closed). On mismatch **nothing** is applied — the row stays
+`PENDING_PAYMENT` (real money may be arriving; ops review case, never auto-fail), the route acks
+200 (redelivery can't fix it) and pages `onramp-amount-mismatch`. Replay of an already-`FUNDED`
+row short-circuits *before* the guard so a late mismatched redelivery can't page over settled
+history — except in the settlement path, where the guard runs even on a FUNDED row because the
+cash leg and float top-up are still pending.
+
+**The manual rail's supporting cast** (funding-ops slices 1–4): confirm enqueues
+`funding.onramp_prepare`, which auto-creates a Bridge onramp and attaches `deposit_instructions`
+(system-attributed, `attached_by` null); the pay step polls every 5s until coordinates arrive;
+the sender can tap "I've sent the payment" (`payment_claimed_at` — a set-once **signal**, never a
+release: a claim that released money would be a treasury-drain lever); the operator verifies the
+deposit and presses the funding buttons on the ops board (or `deposit-landed` for cleared + float
+top-up in one action).
 
 ## The `funding_cleared` gate (the key MVP decision)
 
@@ -116,8 +165,9 @@ This is a config flag, not an architecture. Same philosophy as the funding-sourc
 ## Immediate submission & the claim contract (slice 5)
 
 **We submit to Bridge as soon as a transfer is `FUNDED`.** There is no 30-minute hold and no
-cancel-window submission gate: the funding webhook enqueues `payout.submit(transferId)` on the
-`PENDING_PAYMENT → FUNDED` transition, and the 1-min `payout.sweep` cron heals any lost enqueue.
+cancel-window submission gate: `applyFundingSucceeded` enqueues `payout.submit(transferId)` on the
+`PENDING_PAYMENT → FUNDED` transition (whichever of the five doors drove it), and the 1-min
+`payout.sweep` cron heals any lost enqueue.
 `cancelable_until` stays recorded on the transfer, but as **disclosure metadata only** — it gates
 nothing. (Why this is Reg E-sound is covered under Cancellation below and in
 [decisions.md](decisions.md), 2026-07-20.)
@@ -210,6 +260,7 @@ cron, which synthesizes the same event shape from `GET` responses. Both paths in
 | `undeliverable` / `error` / `canceled` / `returned` / `refunded` / `refund_in_flight` | → `PAYOUT_FAILED` (refund postings are slice 6) |
 | `refund_failed` | → `PAYOUT_FAILED` + **ops Sentry alert** — principal stuck at Bridge (stuck-transfer runbook) |
 | `in_review` | no state change — poller alerts if >1h; a cancel request here is an ops runbook case |
+| **onramp deposit event** (provider_ref ≠ the payout's `provider_transfer_ref`) | **`ignored`** — the onramp-event guard (funding-ops slice 3): a Bridge event about the *sender's deposit* must never drive the payout machine, or an onramp `payment_processed` could fake `COMPLETED` and an onramp `returned` could invoke the payout refund tail. Deposit evidence lookups are bounded to the payout's own ref for the same reason |
 
 Replays are RPC no-ops; out-of-order events are marked `ignored`.
 

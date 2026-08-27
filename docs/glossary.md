@@ -1,7 +1,7 @@
 # Glossary
 
-**Date:** 2026-07-13 · One sentence per term, linking to the doc that owns it. Read once early;
-refer back as needed.
+**Date:** 2026-07-13 · **Updated:** 2026-08-26 (funding-rail + funding-ops vocabulary) · One
+sentence per term, linking to the doc that owns it. Read once early; refer back as needed.
 
 ## Regulation & compliance
 
@@ -100,6 +100,59 @@ refer back as needed.
   un-settled ACH exposure (ERD `user_limits.daily_max_minor` et al.); still deferred, since
   `funding_receivable` doesn't drain today — the O3 *count* cap above is the pilot control.
   See [erd.md](erd.md).
+
+## Funding rails & funding-ops (2026-08 vocabulary)
+
+- **Funding rail / processor** — the pluggable `FundingProcessor` implementation selected by
+  `FUNDING_PROCESSOR`: `mock` (dev; the missing webhook secret is the prod lock), `manual`
+  (out-of-band), `stripe` (Payment Element), `stripe_onramp` (crypto onramp). One
+  `applyFundingSucceeded` implementation, five doors — see the state machine doc's
+  **Funding rails** section.
+- **Margin (`margin_minor`)** — Puente's take folded INTO the displayed FX rate (#193,
+  2026-08-17): the customer pays exactly what they typed, sees ONE rate, `fee_amount_minor` is 0
+  on new rows, and the take is recorded as `margin_minor` on quote + transfer. Ledger identities:
+  `revenue = fee + margin`, `principal = send − margin`. Kept separate from `QUOTE_FX_BUFFER_BPS`
+  (drift cover) — blending them would make `fx_slippage` unreadable. See
+  [ledger-rules.md](ledger-rules.md).
+- **Out-of-band funding** — the manual rail: the sender pushes money to Puente's own
+  receiving-bank coordinates; an **allowlisted operator asserts** `FUNDED` after verifying the
+  deposit (the webhook door is permanently shut on this rail). How the first real prod transfers
+  moved. See [runbooks/manual-funding-run.md](runbooks/manual-funding-run.md).
+- **Deposit instructions** — Puente's receiving-bank coordinates for one transfer, PULLED off a
+  Bridge onramp (never hand-typed) and stored 1:1 with the transfer; `attached_by` null = the
+  system attached them at confirm, a uuid = an operator vouched. The `deposit_message` reference
+  code is load-bearing for Bridge to match the deposit. See [erd.md](erd.md).
+- **Auto-onramp (`funding.onramp_prepare`)** — the confirm-time job on the manual rail that
+  creates the Bridge onramp and auto-attaches deposit instructions; deterministic dead ends retire
+  with a fingerprinted Sentry page, transient ones retry. The pay step polls every 5s until the
+  coordinates arrive.
+- **Payment claim (`payment_claimed_at`)** — the sender's set-once "I've sent the payment" tap
+  (funding-ops slice 4). A **signal to ops, never a state change or a release** — a claim that
+  released money would be a treasury-drain lever. Surfaces as a Sentry info event + an ops-board
+  column.
+- **Deposit-landed** — the one-tap ops action recording an out-of-band deposit's arrival: the
+  cleared cash leg FIRST, then the float top-up (which also runs on `cleared_skipped`, so a re-tap
+  after a mid-action crash heals). Guarded against ref typos because the top-up's ledger key is
+  global.
+- **Float top-up** — a treasury-wallet replenishment posting `DR bridge_wallet_float /
+  CR cash_clearing`, idempotent on the global ledger key `float_topup:<ref>`; fired by
+  deposit-landed, the ad-hoc ops card, the CLI, or **automatically** by the onramp rail's
+  settlement webhook. See [ledger-rules.md](ledger-rules.md).
+- **Onramp rail** — Stripe's embedded crypto onramp: the sender pays inside Stripe's widget
+  (card/Apple Pay/ACH; Stripe is merchant of record) and Stripe delivers USDC on Base straight to
+  the treasury wallet locked at session creation. Undo is always a `pending` manual disbursement —
+  confirmed onramp transactions are irreversible.
+- **Onramp amount guard (#213)** — the widget's amount field is user-editable, so before `FUNDED`
+  (and again before settlement's legs) the event's delivered amount must equal
+  `(send + fee) × 10,000` micro-USDC **exactly**; absent also refuses (fail closed). Mismatch =
+  nothing applied, row stays `PENDING_PAYMENT`, fingerprinted Sentry page — an ops review case,
+  never an auto-fail.
+- **Onramp-event guard** — a Bridge event whose `provider_ref` isn't the payout's own ref is the
+  sender's DEPOSIT, and is marked `ignored` — otherwise an onramp `payment_processed` could fake
+  `COMPLETED` and an onramp `returned` could invoke the payout refund tail.
+- **Rail-aware pending clock** — the `PENDING_PAYMENT` staleness reaper is per-rail: 30 min
+  (mock/stripe), 4h (onramp), 7 days (manual — #205 made the state livable while a real bank
+  transfer travels).
 
 ## Puente & Bridge mechanics
 

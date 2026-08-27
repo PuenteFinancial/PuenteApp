@@ -1,20 +1,21 @@
 # Flow / Sequence Diagrams — USD → MXN Remittance
 
-**Date:** 2026-07-10 · **Updated:** 2026-07-21 (slice 5 — payout lifecycle)
-**Status:** slice-5-current
+**Date:** 2026-07-10 · **Updated:** 2026-08-26 (de-stale pass: merged-rate quote, the four funding
+rails as first-class flows, onramp guard, funding-cleared cash leg, AUTO_REFUND gate, ops actions)
+**Status:** current through funding-ops slices 1–4 + the Stripe onramp rail
 **Pairs with:** `transfer-state-machine.md` (states), `ledger-rules.md` (postings),
 `api-contract.md` (routes), `architecture.md` (components)
 
-The four flows the pre-implementation checklist calls for: send-money happy path, payout webhook,
-error resolution, cancel/refund. States in `CAPS` are transfer states; ledger postings are named,
-not restated (ledger-rules.md is authoritative).
+The flows: send-money happy path (per funding rail), payout webhook, error resolution,
+cancel/refund. States in `CAPS` are transfer states; ledger postings are named, not restated
+(ledger-rules.md is authoritative).
 
-## 1. Send money — happy path
+## 1. Send money — happy path (stripe Payment Element rail)
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor S as Sender (mobile)
+    actor S as Sender (web)
     participant API as Fastify API
     participant DB as Postgres
     participant W as Worker
@@ -22,33 +23,88 @@ sequenceDiagram
     participant BR as Bridge
 
     S->>API: POST /v1/quotes {destination, total_amount}
-    API->>BR: GET /v0/exchange_rates (indicative)
-    API->>DB: insert quote (our firm rate = source − buffer, expires_at)
-    API-->>S: quote {send/fee/receive amounts, fx_rate}
+    API->>BR: GET /v0/exchange_rates (indicative buy_rate)
+    API->>DB: insert quote (margin folded INTO the displayed rate — #193; fee = 0, take = margin_minor)
+    API-->>S: quote {send amount, ONE fx_rate, receive amount}
 
     S->>API: POST /v1/transfers {quote_id} (Idempotency-Key)
     API->>DB: insert transfer PENDING_PAYMENT + prepayment disclosure
     API-->>S: transfer + disclosure
 
     S->>API: POST /v1/transfers/:id/confirm {disclosure_id, accepted} (Idempotency-Key)
-    API->>DB: set disclosure_accepted_at
-    API->>ST: create payment (ACH debit)
-    API-->>S: funding details (client completes via Stripe SDK)
+    API->>DB: set disclosure_accepted_at (uncleared-cap + velocity checks first)
+    API->>ST: create PaymentIntent (ACH debit, instant verification)
+    API->>DB: persist funding_payment_ref
+    S->>API: GET /v1/transfers/:id/funding-session (pay-step mount — live read, secret never persisted)
+    S->>ST: Payment Element: bank picker + Stripe-hosted mandate
 
-    ST-->>API: webhook: payment initiated/captured
+    ST-->>API: webhook: payment_intent.processing
     API->>DB: PENDING_PAYMENT → FUNDED (+ FUNDED ledger post, payment_at/cancelable_until set)
     Note over API,DB: dedupe = transition guard + ledger (transfer_id, transition) uniqueness — funding path never touches payment_events
     API->>DB: enqueue payout.submit (after commit) — 200 fast
-    W->>DB: gate: payability + float ceiling + FX backstop, then atomic claim
+    W->>DB: gates: holds/clearing policy, payability, float ceiling, uncleared cap, velocity, FX backstop — then atomic claim
     W->>BR: POST /v0/transfers (idempotency key = transfer)
     W->>DB: FUNDED → SUBMITTED (+ SUBMITTED ledger post)
 
     BR-->>API: webhook: state transitioned (see §2)
-    Note over W,DB: … IN_FLIGHT → COMPLETED (+ COMPLETED ledger post)
-    W-->>S: push notification + receipt available
-    ST-->>API: webhook: ACH settled (days later)
-    API->>DB: funding_cleared = true (flag only — no ledger post)
+    Note over W,DB: … IN_FLIGHT → COMPLETED (+ COMPLETED ledger post + receipt)
+    ST-->>API: webhook: payment_intent.succeeded (days later)
+    API->>DB: funding_cleared = true + ACH CLEARS cash leg (funding_receivable → cash_clearing, #145)
 ```
+
+## 1b. Send money — manual (out-of-band) rail — how real prod transfers move today
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor S as Sender (web)
+    participant API as Fastify API
+    participant W as Worker
+    participant BR as Bridge
+    actor OPS as Operator (ops board)
+
+    S->>API: confirm (as §1) — funding_payment_ref = manualpay_…
+    API->>W: enqueue funding.onramp_prepare
+    W->>BR: create onramp (idempotency key onramp-{transferId})
+    W->>API: attach deposit_instructions (system-attributed, attached_by = null)
+    S->>API: pay step polls funding-session every 5s until coordinates arrive
+    S-->>S: sender wires/ACHes to Puente's coordinates (with the Bridge deposit_message)
+    S->>API: POST /v1/transfers/:id/payment-claim ("I've sent it" — a SIGNAL, never a release)
+    Note over OPS: verifies the deposit against Bridge / bank evidence
+    OPS->>API: POST /v1/ops/transfers/funding {kind: funded} — PENDING_PAYMENT → FUNDED
+    Note over API: recordManualFunding refuses unless processor IS manual and amount matches to the cent
+    Note over W: payout proceeds exactly as §1 from FUNDED
+    OPS->>API: POST /v1/ops/transfers/deposit-landed (later) — cleared + float top-up, one action
+```
+
+Key differences from §1: the webhook door is **permanently shut** on this rail
+(`verifySignature` returns false unconditionally) — the allowlisted ops route is the only path to
+`FUNDED`; `PENDING_PAYMENT` is **livable** (7-day reaper, not 30 minutes — #205); and the sender's
+claim never moves money.
+
+## 1c. Send money — Stripe crypto onramp rail
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor S as Sender (web)
+    participant API as Fastify API
+    participant DB as Postgres
+    participant ST as Stripe Onramp
+
+    S->>API: confirm (as §1)
+    API->>ST: create onramp session (usd→usdc on Base, wallet locked to treasury, metadata.transfer_id)
+    S->>ST: embedded widget: card / Apple Pay / ACH (Stripe is merchant of record)
+    ST-->>API: webhook: crypto.onramp_session.updated {fulfillment_processing}
+    Note over API,DB: THE AMOUNT GUARD (#213): deliveredAmountMicro must equal (send+fee)×10,000 exactly — absent also refuses. Mismatch = nothing applied, row stays PENDING_PAYMENT, Sentry page.
+    API->>DB: PENDING_PAYMENT → FUNDED (payout releases against float, as §1)
+    ST-->>API: webhook: {fulfillment_complete}
+    API->>DB: guard again, then: catch-up FUNDED if events arrived out of order → funding_cleared cash leg → float top-up (key float_topup:{sessionId})
+```
+
+The widget's amount field is user-editable (`skip_quote_screen` deliberately not sent — Stripe's
+quote screen is where its fee disclosure lives), which is why the guard exists and is load-bearing.
+Reaper clock on this rail: 4 hours (`ONRAMP_PENDING_MAX_AGE_HOURS`).
 
 Key properties: jobs are enqueued after the state change commits and are idempotent replays — a
 lost enqueue is healed by the 1-min sweep, never a correctness problem (enqueue-after-commit, not a
@@ -92,6 +148,7 @@ payment_processed`, with failure states off to the side.
 | `returned`, `refunded`, `refund_in_flight` | `PAYOUT_FAILED` path — Bridge returning principal (ledger deferred — slice 6) |
 | `refund_failed` | `PAYOUT_FAILED` + **ops alert** — principal stuck at Bridge (stuck-transfer runbook) |
 | `in_review` | **no state change**; transfer stays `SUBMITTED`/`IN_FLIGHT`. Observed in sandbox (2026-07-13) as a routine *transient initial state* on payout creation, resolving to `funds_received` in seconds — so alert only when it **persists** (> 1h), which indicates a real Bridge-side review/AML hold |
+| *event about the sender's DEPOSIT, not the payout* (provider_ref ≠ the payout's ref) | **`ignored`** — the onramp-event guard (funding-ops slice 3): without it, an onramp `payment_processed` could fake `COMPLETED` and an onramp `returned` could invoke the payout refund tail |
 | *unmapped / unknown state* | **no-op** — the processor marks the event `ignored` and never crashes on a never-before-seen Bridge state |
 
 Missed webhooks are backstopped by reconciliation (cron polls `GET /v0/transfers` for
@@ -101,7 +158,12 @@ non-terminal transfers — see reconciliation runbook).
 pre-funded treasury wallet — authoritative write-up in the **Bridge wallet id** note in
 [`erd.md`](erd.md).
 
-## 3. Error resolution (Reg E §1005.33) — dispute
+## 3. Error resolution (Reg E §1005.33) — dispute  *(DESIGN, not code)*
+
+**Nothing in this section is implemented.** There is no `POST /:id/disputes` route; the `disputes`
+table exists in the schema but has zero code references, and the only writer of `UNDER_REVIEW`
+today is the cancellation routing on a delivered transfer (see the state machine doc). This flow
+is the future §1005.33 shape, kept so the cancellation path is never bent into a dispute path.
 
 ```mermaid
 sequenceDiagram
@@ -149,14 +211,16 @@ sequenceDiagram
     S->>API: POST /v1/transfers/:id/cancel (Idempotency-Key)
     API->>DB: SELECT ... FOR UPDATE (row lock on transfer)
     alt state = FUNDED and submit_attempted_at is null
-        API->>DB: FUNDED → CANCELED (commits only if still FUNDED and unclaimed — TOCTOU guard)
-        API-->>S: 200 canceled
-        W->>DB: CANCELED ledger post (ACH in flight vs not — two variants)
-        W->>ST: refund / release payment
-        W->>DB: CANCELED → REFUNDED (+ refund paid post)
-        W-->>S: push: refunded (full amount incl. fee, within 3 business days)
+        API->>DB: FUNDED → CANCELED (commits only if still FUNDED, unclaimed, AND in-window — TOCTOU guard)
+        API->>ST: voidFunding (settlement-aware: cancels the still-processing pull, falls back to a refund if settled)
+        alt undo settles synchronously (mock / stripe)
+            API->>DB: CANCELED → REFUNDED (no extra ledger — the CANCELED reversal zeroed the books)
+            API-->>S: 200 canceled + refunded
+        else undo needs a human (manual / onramp — ref manualrefund_/onramprefund_ is `pending`)
+            API-->>S: 200 canceled — transfer RESTS at CANCELED until an operator disburses (manual-refund runbook)
+        end
     else already claimed / SUBMITTED / IN_FLIGHT
-        API-->>S: state-keyed refund path (timely Reg E cancel → full refund; see below)
+        API-->>S: 202 — cancellation request RECORDED (state-keyed refund path; timely Reg E cancel → full refund; see below)
     end
 ```
 
@@ -166,5 +230,9 @@ row — cancel and payout can never both win. A timely §1005.34 cancel that arr
 NOT a 409: the right survives until pickup/deposit, so it is honored as a full refund once the
 payout resolves (state-keyed refund rule, slice 6 — see transfer-state-machine.md).
 
-`PAYOUT_FAILED → REFUNDED` (Bridge can't deliver) follows the same refund tail: Bridge returns
+`PAYOUT_FAILED → REFUNDED` (Bridge can't deliver) follows the refund tail: Bridge returns
 principal → recognize `refunds_payable` (full amount incl. fee) → pay refund → notify sender.
+**The automatic drive of this tail is gated by `AUTO_REFUND`, which ships OFF in prod** — a failed
+payout parks at `PAYOUT_FAILED` and pages, and an operator disburses via `trigger-refund.ts`
+(runbooks/manual-refund.md). The refund claim (guarded UPDATE, 10-min staleness, never
+machine-retaken) serializes whichever path runs.
