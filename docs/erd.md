@@ -78,6 +78,12 @@ App-level user record; `auth.users` (Supabase-managed) holds the auth identity. 
 - `kyc_status` TEXT — `not_started` | `pending` | `approved` | `rejected` | `manual_review` (CHECK; set by the Bridge webhook `customer.*` branch; `kyc_records` is deferred)
 - `kyc_retry_count` INT — CHECK ≥ 0; the 3-retry ceiling is enforced in the API, not the DB
 - `bridge_customer_id` TEXT UNIQUE — Bridge customer id; set after KYC approval; used as `on_behalf_of` on transfers. Nullable until created.
+- `address_line1` / `address_line2` / `address_city` / `address_state` / `address_postal_code`
+  TEXT *(PII — K2)* — sender's US home address, collected at the profile step. Nullable (pre-K2
+  rows; the router bounces them to the profile form). Loose shape CHECKs in the DB; membership
+  (50 states + DC) enforced in the API against `US_STATES` in packages/shared. Stored per the
+  ratified custody posture: address is the one piece of KYC PII we hold — DOB+ never lands here.
+- `address_country` TEXT NOT NULL default `'US'` (CHECK `'US'` — widening is a deliberate migration)
 - **RLS:** owner reads/updates own row.
 - *`risk_tier` is NOT a column yet* — earlier versions listed it; it arrives with the risk engine.
 

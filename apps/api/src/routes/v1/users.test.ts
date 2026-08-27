@@ -54,6 +54,31 @@ const userRow = {
   email: 'test@example.com',
   kyc_status: 'not_started',
   bridge_customer_id: null,
+  address_line1: null,
+  address_line2: null,
+  address_city: null,
+  address_state: null,
+  address_postal_code: null,
+}
+
+// A post-K2 profile: name + email + full address → profileComplete.
+const userRowWithAddress = {
+  ...userRow,
+  address_line1: '123 Main St',
+  address_line2: null,
+  address_city: 'Austin',
+  address_state: 'TX',
+  address_postal_code: '78701',
+}
+
+const fullAddressBody = {
+  firstName: 'Test',
+  lastName: 'User',
+  email: 'test@example.com',
+  addressLine1: '123 Main St',
+  addressCity: 'Austin',
+  addressState: 'TX',
+  addressPostalCode: '78701',
 }
 
 function selectResult(result: { data: unknown; error: unknown }) {
@@ -417,8 +442,31 @@ describe('GET /v1/users/me', () => {
       email: 'test@example.com',
       kycStatus: 'not_started',
       bridgeCustomerId: null,
+      addressLine1: null,
+      addressLine2: null,
+      addressCity: null,
+      addressState: null,
+      addressPostalCode: null,
+      profileComplete: false,
       consentsCurrent: false,
     })
+    await app.close()
+  })
+
+  it('reports profileComplete only once the address is on file (K2)', async () => {
+    fromByTable({
+      users: selectResult({ data: userRowWithAddress, error: null }),
+      consents: consentsSelect([]),
+    })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/users/me')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(res.body.profileComplete).toBe(true)
+    expect(res.body.addressState).toBe('TX')
     await app.close()
   })
 
@@ -495,6 +543,84 @@ describe('PATCH /v1/users/me', () => {
     expect(res.status).toBe(200)
     expect(res.body.firstName).toBe('Ana')
     expect(updateUserById).toHaveBeenCalledWith('user-123', { email: 'test@example.com' })
+    await app.close()
+  })
+
+  it('stores the full address group in snake_case (K2)', async () => {
+    const table = updateReturningResult({ data: userRowWithAddress, error: null })
+    from.mockReturnValue(table)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .patch('/v1/users/me')
+      .set('Authorization', 'Bearer test-token')
+      .send({ ...fullAddressBody, addressLine2: 'Unit 4' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.profileComplete).toBe(true)
+    expect(table.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address_line1: '123 Main St',
+        address_line2: 'Unit 4',
+        address_city: 'Austin',
+        address_state: 'TX',
+        address_postal_code: '78701',
+      }),
+    )
+    await app.close()
+  })
+
+  it('a name-only PATCH never touches stored address columns (frozen mobile compat)', async () => {
+    const table = updateReturningResult({ data: userRowWithAddress, error: null })
+    from.mockReturnValue(table)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .patch('/v1/users/me')
+      .set('Authorization', 'Bearer test-token')
+      .send({ firstName: 'Ana', lastName: 'User', email: 'test@example.com' })
+
+    expect(res.status).toBe(200)
+    const updateArg = (table.update as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Record<string, unknown>
+    expect(Object.keys(updateArg)).toEqual(['first_name', 'last_name', 'email'])
+    await app.close()
+  })
+
+  it('refuses a partial address — all four fields or none', async () => {
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .patch('/v1/users/me')
+      .set('Authorization', 'Bearer test-token')
+      .send({ firstName: 'Ana', lastName: 'User', email: 'test@example.com', addressLine1: '123 Main St' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('validation_error')
+    expect(from).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('refuses a state outside the shared US list', async () => {
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .patch('/v1/users/me')
+      .set('Authorization', 'Bearer test-token')
+      .send({ ...fullAddressBody, addressState: 'XX' })
+
+    expect(res.status).toBe(400)
+    await app.close()
+  })
+
+  it('refuses a malformed ZIP', async () => {
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .patch('/v1/users/me')
+      .set('Authorization', 'Bearer test-token')
+      .send({ ...fullAddressBody, addressPostalCode: '787' })
+
+    expect(res.status).toBe(400)
     await app.close()
   })
 

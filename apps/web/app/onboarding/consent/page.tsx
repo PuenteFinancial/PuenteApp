@@ -21,14 +21,13 @@ export default async function ConsentPage() {
   if (res.status === 404) redirect('/onboarding/profile')
   if (!res.ok) redirect('/signup')
 
-  const { firstName, lastName, email, consentsCurrent } = (await res.json()) as {
-    firstName: string | null
-    lastName: string | null
-    email: string | null
+  const { consentsCurrent, profileComplete } = (await res.json()) as {
     consentsCurrent: boolean
+    profileComplete: boolean
   }
 
-  if (!firstName || !lastName || !email) redirect('/onboarding/profile')
+  // K2 widened profile completeness to include the address.
+  if (!profileComplete) redirect('/onboarding/profile')
   // Already consented to everything current — nothing to show here.
   // /continue only sends users here when consents are NOT current, so this
   // cannot loop.

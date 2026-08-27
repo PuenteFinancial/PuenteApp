@@ -80,7 +80,12 @@ export type Translations = {
   onboarding: {
     signup: { title: string; sub: string; phone: string; phonePh: string; smsConsent: string; legal: { pre: string; privacyLink: string; and: string; termsLink: string; post: string }; cta: string; sending: string; error: string }
     verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resendIn: (seconds: number) => string; resent: string; error: string }
-    profile: { title: string; sub: string; firstName: string; lastName: string; email: string; emailNote: string; cta: string; saving: string; error: string }
+    profile: {
+      title: string; sub: string; firstName: string; lastName: string; email: string; emailNote: string
+      // K2 address section (US-only sender)
+      address: { heading: string; note: string; line1: string; line2: string; city: string; state: string; statePh: string; zip: string }
+      cta: string; saving: string; error: string
+    }
     // K1 consent page: two checkboxes (E-SIGN, TOS+Privacy) + provider
     // disclosure links. Checkbox labels are legally operative in BOTH
     // languages — see NEEDS LEGAL REVIEW markers at the values.
@@ -623,6 +628,16 @@ const en: Translations = {
       lastName: 'Last name',
       email: 'Email',
       emailNote: 'We’ll send you a verification email. You can keep going in the meantime.',
+      address: {
+        heading: 'Your U.S. home address',
+        note: 'Use the address where you live. It must match your ID for identity verification.',
+        line1: 'Street address',
+        line2: 'Apt, suite, unit (optional)',
+        city: 'City',
+        state: 'State',
+        statePh: 'Select state',
+        zip: 'ZIP code',
+      },
       cta: 'Continue',
       saving: 'Saving…',
       error: 'We couldn’t save your info. Please try again.',
@@ -1232,6 +1247,16 @@ const es: Translations = {
       lastName: 'Apellido',
       email: 'Correo electrónico',
       emailNote: 'Te enviaremos un correo de verificación. Puedes continuar mientras tanto.',
+      address: {
+        heading: 'Tu dirección en EE. UU.',
+        note: 'Usa la dirección donde vives. Debe coincidir con tu identificación para la verificación de identidad.',
+        line1: 'Dirección',
+        line2: 'Apto, suite, unidad (opcional)',
+        city: 'Ciudad',
+        state: 'Estado',
+        statePh: 'Selecciona el estado',
+        zip: 'Código postal (ZIP)',
+      },
       cta: 'Continuar',
       saving: 'Guardando…',
       error: 'No pudimos guardar tu información. Inténtalo de nuevo.',

@@ -26,11 +26,23 @@ export async function PATCH(req: NextRequest) {
   }
 
   try {
-    const { firstName, lastName, email } = await req.json()
+    const { firstName, lastName, email, addressLine1, addressLine2, addressCity, addressState, addressPostalCode } =
+      await req.json()
 
     const apiRes = await apiFetch('/v1/users/me', token, {
       method: 'PATCH',
-      body: JSON.stringify({ firstName, lastName, email }),
+      // Address group is optional (the frozen mobile app PATCHes name-only);
+      // JSON.stringify drops undefined keys, so absent stays absent.
+      body: JSON.stringify({
+        firstName,
+        lastName,
+        email,
+        addressLine1,
+        addressLine2,
+        addressCity,
+        addressState,
+        addressPostalCode,
+      }),
     })
 
     const body = await apiRes.json().catch(() => ({}))
