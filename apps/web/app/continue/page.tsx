@@ -19,14 +19,21 @@ export default async function ContinuePage() {
   if (res.status === 404) redirect('/onboarding/profile')
   if (!res.ok) redirect('/signup')
 
-  const { firstName, lastName, email, kycStatus } = (await res.json()) as {
+  const { firstName, lastName, email, kycStatus, consentsCurrent } = (await res.json()) as {
     firstName: string | null
     lastName: string | null
     email: string | null
     kycStatus: string
+    consentsCurrent: boolean
   }
 
   if (!firstName || !lastName || !email) redirect('/onboarding/profile')
+
+  // K1 consent gate: every required consent at its CURRENT version, before
+  // anything else. Also catches existing users after a document version bump
+  // (K7 swaps in counsel-reviewed docs by bumping versions) — they re-consent
+  // on their next visit.
+  if (!consentsCurrent) redirect('/onboarding/consent')
 
   switch (kycStatus) {
     case 'not_started':

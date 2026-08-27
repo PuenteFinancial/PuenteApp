@@ -6,6 +6,38 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-08-27 · KYC moves from onboarding to first send (KYC rehaul, K-lane).** Identity
+verification leaves onboarding entirely: onboarding collects information and consents only, and
+ALL KYC happens at first send, in our own UI, via Stripe embedded components (private preview) —
+Stripe verifies, Bridge accepts the verification via KYC sharing. Persona/Bridge-hosted KYC is
+retained **as a fallback only** (relocated to first send) so the prod flip is not hostage to
+Bridge's sharing timeline. Supersedes 2026-07-13 "shipped KYC is Bridge-hosted"; the Bridge
+webhook + `kyc_status` machinery survives to serve the fallback. Canonical plan:
+`~/.claude/plans/rehaul-kyc-and-onboarding-stripe-first-sunrise.md` (ratified after Q1–Q8 grill).
+**Status: active** — K1 (consent foundation) is the first merged slice.
+
+**2026-08-27 · Unified consent page + append-only `consents` table; E-SIGN scope expanded to all
+electronic records (K1).** Two checkboxes (E-SIGN; Puente TOS+Privacy) with Stripe/Bridge terms
+as disclosure links — assent to provider terms happens on their own surfaces at first send. The
+E-SIGN consent scope is a **knowing expansion** from the 2026-08-19 receipt-only scope to all
+electronic records, because the rehauled flow delivers agreements, disclosures, and statements
+electronically end-to-end. Consent versions are code (`REQUIRED_CONSENTS` in packages/shared);
+a version bump forces app-wide re-consent via the `/continue` router. Placeholder documents are
+acceptable until the K7 prod flip, which gates on counsel-reviewed text (one-time paid review
+agreed). **Status: active.**
+
+**2026-08-27 · Stripe markup permanently unconfigured; all margin via Bridge
+`developer_fee_percent`.** Stripe's onramp markup is account-level and sticky ("difficult to
+change" per their SA); Bridge's developer fee is per-transfer and freely changeable. So the
+Stripe knob stays at 0 forever and every future basis point of take lives on the Bridge leg.
+Pricing itself is deferred to Stripe's fee-schedule follow-up + the #197 spread probe.
+**Status: active.**
+
+**2026-08-27 · Mobile lane frozen until K8.** The entire mobile lane — not just its KYC screens —
+freezes while the rehaul lands on web (K1–K7). Old mobile KYC screens stay dead behind the flag;
+new-flow demos are web-only until K8 brings the mobile arm (seamless sign-in is mobile-only and
+needs app attestation prerequisites). **Status: active.**
+
 **2026-08-19 · A sender's payment claim never releases the payout; release stays a human ops
 action (funding-ops-automation PRD).** The manual rail is getting a sender-facing "I've sent the
 payment" button, and the obvious automation — treat the claim as the release trigger — is

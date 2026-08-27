@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import supertest from 'supertest'
 import Fastify from 'fastify'
 import fp from 'fastify-plugin'
+import { REQUIRED_CONSENTS } from '@puente/shared'
 
 const from = vi.fn()
 const updateUserById = vi.fn(async (..._args: unknown[]) => ({ data: {}, error: null }))
@@ -386,9 +387,22 @@ describe('GET /v1/kyc/return', () => {
   })
 })
 
+// GET /users/me reads two tables (users, then consents for the K1 gate) —
+// dispatch the from() mock by table name.
+function consentsSelect(rows: unknown[], error: unknown = null) {
+  return { select: vi.fn(() => ({ eq: vi.fn(async () => ({ data: rows, error })) })) }
+}
+
+function fromByTable(tables: Record<string, unknown>) {
+  from.mockImplementation((table: string) => tables[table])
+}
+
 describe('GET /v1/users/me', () => {
   it('returns the current user in camelCase', async () => {
-    from.mockReturnValue(selectResult({ data: userRow, error: null }))
+    fromByTable({
+      users: selectResult({ data: userRow, error: null }),
+      consents: consentsSelect([]),
+    })
     const app = await buildApp()
 
     const res = await supertest(app.server)
@@ -403,7 +417,46 @@ describe('GET /v1/users/me', () => {
       email: 'test@example.com',
       kycStatus: 'not_started',
       bridgeCustomerId: null,
+      consentsCurrent: false,
     })
+    await app.close()
+  })
+
+  it('reports consentsCurrent once every required consent version is granted', async () => {
+    fromByTable({
+      users: selectResult({ data: userRow, error: null }),
+      consents: consentsSelect(
+        REQUIRED_CONSENTS.map((req) => ({
+          type: req.type,
+          version: req.version,
+          locale: 'en',
+          consented_at: '2026-08-27T12:00:00Z',
+        })),
+      ),
+    })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/users/me')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(res.body.consentsCurrent).toBe(true)
+    await app.close()
+  })
+
+  it('returns 500 when the consents read fails — never a guessed gate value', async () => {
+    fromByTable({
+      users: selectResult({ data: userRow, error: null }),
+      consents: consentsSelect([], { code: 'XX000' }),
+    })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/users/me')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(500)
     await app.close()
   })
 

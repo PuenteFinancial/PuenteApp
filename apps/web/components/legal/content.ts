@@ -222,3 +222,104 @@ export const termsCopy: Record<Lang, TermsCopy> = {
     },
   },
 }
+
+// ── E-SIGN Consent to Electronic Records (K1, KYC rehaul) ──────────────────
+//
+// NEEDS LEGAL REVIEW (EN + ES) — placeholder pending the K7 counsel pass.
+// Legally operative in both languages. The document's "Last updated" date IS
+// its consent version: it must match the `esign` entry in REQUIRED_CONSENTS
+// (packages/shared/src/types/consent.ts). Changing this text means bumping
+// both, which forces app-wide re-consent — that is the designed behavior,
+// not a bug.
+//
+// Scope note: this consent covers ALL electronic records (deliberately
+// expanded 2026-08-27 from the earlier receipt-only scope — a knowing,
+// ratified change; see docs/decisions.md).
+
+export type EsignCopy = {
+  backHome: string
+  title: string
+  updated: string
+  intro: string
+  s1: { h: string; body: string }
+  s2: { h: string; body: string }
+  s3: { h: string; body: string }
+  s4: { h: string; body: string }
+  s5: { h: string; body: string }
+  s6: { h: string; pre: string }
+}
+
+export const esignCopy: Record<Lang, EsignCopy> = {
+  en: {
+    backHome: '← Back',
+    title: 'Consent to Electronic Records (E-SIGN)',
+    updated: 'Last updated: August 27, 2026',
+    intro:
+      'This consent applies to all records related to your Puente Financial account. By agreeing, you consent to receive and sign everything electronically instead of on paper.',
+    s1: {
+      h: '1. What This Consent Covers',
+      body:
+        'All agreements, authorizations, disclosures, receipts, statements, notices, and other records we are required to provide you or that you sign in connection with your Puente account and transfers — including remittance transfer disclosures and receipts — will be provided or completed electronically.',
+    },
+    s2: {
+      h: '2. Hardware and Software Requirements',
+      body:
+        'To receive and keep electronic records you need: a device with internet access; a current web browser; a valid email address; a phone number that can receive SMS; and the ability to view and save or print PDF and web-page documents. If these requirements change in a way that creates a material risk you cannot access your records, we will notify you.',
+    },
+    s3: {
+      h: '3. Paper Copies',
+      body:
+        'You can request a free paper copy of any record we provided electronically by contacting us at the address below. We will mail it to the address you provide, at no charge, within 10 business days of your request. Requesting a paper copy does not withdraw your consent to electronic records.',
+    },
+    s4: {
+      h: '4. Withdrawing Your Consent',
+      body:
+        'You may withdraw this consent at any time by contacting us at the address below. Because Puente is an electronic service, withdrawing consent means you will no longer be able to use Puente to send money. Withdrawal takes effect after we have had a reasonable time to process it and does not affect records already provided electronically.',
+    },
+    s5: {
+      h: '5. Keeping Your Contact Information Current',
+      body:
+        'You are responsible for keeping a current email address and phone number on file with us. You can update them in your account settings or by contacting us.',
+    },
+    s6: {
+      h: '6. Contact',
+      pre: 'Questions about this consent, paper copies, or withdrawal:',
+    },
+  },
+  es: {
+    backHome: '← Volver',
+    title: 'Consentimiento para Documentos Electrónicos (E-SIGN)',
+    updated: 'Última actualización: 27 de agosto de 2026',
+    intro:
+      'Este consentimiento aplica a todos los documentos relacionados con tu cuenta de Puente Financial. Al aceptar, consientes recibir y firmar todo electrónicamente en lugar de en papel.',
+    s1: {
+      h: '1. Qué Cubre Este Consentimiento',
+      body:
+        'Todos los acuerdos, autorizaciones, avisos, recibos, estados de cuenta, notificaciones y demás documentos que debamos entregarte o que firmes en relación con tu cuenta de Puente y tus transferencias — incluidas las divulgaciones y recibos de transferencias de remesas — se entregarán o completarán electrónicamente.',
+    },
+    s2: {
+      h: '2. Requisitos de Hardware y Software',
+      body:
+        'Para recibir y conservar documentos electrónicos necesitas: un dispositivo con acceso a internet; un navegador web actualizado; una dirección de correo electrónico válida; un número de teléfono que pueda recibir SMS; y la capacidad de ver y guardar o imprimir documentos PDF y páginas web. Si estos requisitos cambian de forma que cree un riesgo material de que no puedas acceder a tus documentos, te lo notificaremos.',
+    },
+    s3: {
+      h: '3. Copias en Papel',
+      body:
+        'Puedes solicitar una copia en papel gratuita de cualquier documento que te hayamos entregado electrónicamente contactándonos en la dirección indicada abajo. La enviaremos por correo postal a la dirección que nos proporciones, sin costo, dentro de los 10 días hábiles siguientes a tu solicitud. Solicitar una copia en papel no retira tu consentimiento para documentos electrónicos.',
+    },
+    s4: {
+      h: '4. Retirar Tu Consentimiento',
+      body:
+        'Puedes retirar este consentimiento en cualquier momento contactándonos en la dirección indicada abajo. Como Puente es un servicio electrónico, retirar el consentimiento significa que ya no podrás usar Puente para enviar dinero. El retiro surte efecto después de que hayamos tenido un tiempo razonable para procesarlo y no afecta los documentos ya entregados electrónicamente.',
+    },
+    s5: {
+      h: '5. Mantener Tu Información de Contacto Actualizada',
+      body:
+        'Eres responsable de mantener un correo electrónico y un número de teléfono vigentes en tu cuenta. Puedes actualizarlos en la configuración de tu cuenta o contactándonos.',
+    },
+    s6: {
+      h: '6. Contacto',
+      pre: 'Preguntas sobre este consentimiento, copias en papel o retiro:',
+    },
+  },
+}
