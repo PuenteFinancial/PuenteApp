@@ -9,8 +9,8 @@ vi.mock('../services/supabase.js', () => ({
 }))
 
 // Mutable so tests can flip the processor: the sweep window is 30 minutes for
-// webhook-driven processors and days-scale under manual (out-of-band senders
-// wire on their own schedule).
+// webhook-driven processors, days-scale under manual (out-of-band senders wire
+// on their own schedule), and hours-scale under the onramp (widget KYC).
 const envMock = vi.hoisted(() => ({
   FUNDING_PROCESSOR: 'mock' as string,
   MANUAL_PENDING_MAX_AGE_DAYS: 7,
@@ -28,113 +28,114 @@ vi.mock('../services/transfers.js', async (importOriginal) => {
   }
 })
 
+// The rejected-session poll (#213) goes through the processor seam; the real
+// registry would construct adapters that demand secrets, so the sweep's view
+// of the processor is a controllable fake.
+const getPaymentStatus = vi.hoisted(() => vi.fn())
+const processorMock = vi.hoisted(() => ({
+  current: { provider: 'mock' } as { provider: string; getPaymentStatus?: unknown },
+}))
+vi.mock('../services/funding/index.js', () => ({
+  getFundingProcessor: () => processorMock.current,
+}))
+
 const { reconcilePendingTransfers } = await import('./reconcile-pending.js')
 const { TransferRpcError } = await import('../services/transfers.js')
 
-function mockStaleSelect(result: { data: unknown; error: unknown }) {
-  const lt = vi.fn().mockResolvedValue(result)
-  const eq = vi.fn().mockReturnValue({ lt })
+// The sweep now loads ALL pending rows once (the poll pass needs every age)
+// and applies the staleness window in JS.
+function mockPendingSelect(rows: unknown, error: unknown = null) {
+  const eq = vi.fn().mockResolvedValue({ data: rows, error })
   const select = vi.fn().mockReturnValue({ eq })
   from.mockReturnValue({ select })
-  return { select, eq, lt }
+  return { select, eq }
+}
+
+// Frozen clock: 2026-07-20T12:00Z. Ages expressed relative to it.
+const NOW = new Date('2026-07-20T12:00:00.000Z').getTime()
+const ago = (ms: number) => new Date(NOW - ms).toISOString()
+const MINUTES = 60 * 1000
+const HOURS = 60 * MINUTES
+const DAYS = 24 * HOURS
+
+function row(id: string, ageMs: number, ref: string | null = null) {
+  return { id, funding_payment_ref: ref, created_at: ago(ageMs) }
 }
 
 beforeEach(() => {
   from.mockReset()
-  transition.mockReset()
+  transition.mockReset().mockResolvedValue({})
+  getPaymentStatus.mockReset()
   envMock.FUNDING_PROCESSOR = 'mock'
   envMock.MANUAL_PENDING_MAX_AGE_DAYS = 7
   envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 4
+  processorMock.current = { provider: 'mock' }
   vi.useFakeTimers({ toFake: ['Date'] })
-  vi.setSystemTime(new Date('2026-07-20T12:00:00.000Z'))
+  vi.setSystemTime(new Date(NOW))
 })
 
 afterEach(() => vi.useRealTimers())
 
-describe('reconcilePendingTransfers', () => {
-  it('manual processor: the window is days-scale, not 30 minutes', async () => {
-    envMock.FUNDING_PROCESSOR = 'manual'
-    const { lt } = mockStaleSelect({ data: [], error: null })
-
-    await reconcilePendingTransfers()
-
-    // 7 days before the frozen clock — a sender mid-wire is NOT abandoned.
-    expect(lt).toHaveBeenCalledWith('created_at', '2026-07-13T12:00:00.000Z')
-  })
-
-  it('manual processor: the abandonment reason names the days window', async () => {
-    envMock.FUNDING_PROCESSOR = 'manual'
-    envMock.MANUAL_PENDING_MAX_AGE_DAYS = 5
-    mockStaleSelect({ data: [{ id: 'tr-old' }], error: null })
-    transition.mockResolvedValue({})
-
-    await reconcilePendingTransfers()
-
-    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
-    expect(input.reason).toBe('funding_not_received_within_5_days')
-  })
-
-  it('onramp processor: the window is hours-scale — widget KYC outlives 30 minutes (#213)', async () => {
-    envMock.FUNDING_PROCESSOR = 'stripe_onramp'
-    const { lt } = mockStaleSelect({ data: [], error: null })
-
-    await reconcilePendingTransfers()
-
-    // 4 hours before the frozen clock — a sender mid-KYC is NOT abandoned,
-    // and a sweep-then-pay race would put real money on a PAYMENT_FAILED row.
-    expect(lt).toHaveBeenCalledWith('created_at', '2026-07-20T08:00:00.000Z')
-  })
-
-  it('onramp processor: the abandonment reason names the hours window', async () => {
-    envMock.FUNDING_PROCESSOR = 'stripe_onramp'
-    envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 6
-    mockStaleSelect({ data: [{ id: 'tr-old' }], error: null })
-    transition.mockResolvedValue({})
-
-    await reconcilePendingTransfers()
-
-    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
-    expect(input.reason).toBe('funding_not_received_within_6_hours')
-  })
-
-  it('selects PENDING_PAYMENT older than 30 minutes and returns 0 when none', async () => {
-    const { select, eq, lt } = mockStaleSelect({ data: [], error: null })
+describe('reconcilePendingTransfers — staleness windows', () => {
+  it('webhook default: fails rows older than 30 minutes, leaves younger ones', async () => {
+    mockPendingSelect([row('tr-old', 31 * MINUTES), row('tr-young', 29 * MINUTES)])
 
     const count = await reconcilePendingTransfers()
 
-    expect(count).toBe(0)
-    expect(transition).not.toHaveBeenCalled()
-    expect(from).toHaveBeenCalledWith('transfers')
-    expect(select).toHaveBeenCalledWith('id')
-    expect(eq).toHaveBeenCalledWith('state', 'PENDING_PAYMENT')
-    expect(lt).toHaveBeenCalledWith('created_at', '2026-07-20T11:30:00.000Z')
+    expect(count).toBe(1)
+    expect(transition).toHaveBeenCalledTimes(1)
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input).toEqual({
+      transferId: 'tr-old',
+      fromState: 'PENDING_PAYMENT',
+      toState: 'PAYMENT_FAILED',
+      actor: 'worker:reconcile-pending',
+      reason: 'funding_not_received_within_30_minutes',
+    })
+    expect('ledgerEntries' in input).toBe(false)
   })
 
-  it('transitions each stale row to PAYMENT_FAILED with no ledger entries', async () => {
-    mockStaleSelect({ data: [{ id: 'tr-1' }, { id: 'tr-2' }, { id: 'tr-3' }], error: null })
-    transition.mockResolvedValue({})
+  it('manual processor: the window is days-scale, not 30 minutes', async () => {
+    envMock.FUNDING_PROCESSOR = 'manual'
+    envMock.MANUAL_PENDING_MAX_AGE_DAYS = 5
+    // A sender mid-wire is NOT abandoned at 30 minutes — or even 4 days.
+    mockPendingSelect([row('tr-old', 6 * DAYS), row('tr-midwire', 4 * DAYS)])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input.transferId).toBe('tr-old')
+    expect(input.reason).toBe('funding_not_received_within_5_days')
+  })
+
+  it('onramp processor: hours-scale — widget KYC outlives 30 minutes (#213)', async () => {
+    envMock.FUNDING_PROCESSOR = 'stripe_onramp'
+    processorMock.current = { provider: 'stripe_onramp', getPaymentStatus }
+    // Refs deliberately null: these rows exercise the AGE arm, not the poll.
+    mockPendingSelect([row('tr-old', 5 * HOURS), row('tr-midkyc', 3 * HOURS)])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input.transferId).toBe('tr-old')
+    expect(input.reason).toBe('funding_not_received_within_4_hours')
+  })
+
+  it('transitions every stale row and returns the count', async () => {
+    mockPendingSelect([row('tr-1', 1 * HOURS), row('tr-2', 2 * HOURS), row('tr-3', 3 * HOURS)])
 
     const count = await reconcilePendingTransfers()
 
     expect(count).toBe(3)
     expect(transition).toHaveBeenCalledTimes(3)
-    for (const [i, id] of ['tr-1', 'tr-2', 'tr-3'].entries()) {
-      const [input] = transition.mock.calls[i] as [Record<string, unknown>]
-      expect(input).toEqual({
-        transferId: id,
-        fromState: 'PENDING_PAYMENT',
-        toState: 'PAYMENT_FAILED',
-        actor: 'worker:reconcile-pending',
-        reason: 'funding_not_received_within_30_minutes',
-      })
-      expect('ledgerEntries' in input).toBe(false)
-    }
   })
 
   it.each(['transition_conflict', 'transfer_not_found'] as const)(
     'skips a row lost to a concurrent actor (%s) without failing the batch',
     async (code) => {
-      mockStaleSelect({ data: [{ id: 'tr-1' }, { id: 'tr-2' }, { id: 'tr-3' }], error: null })
+      mockPendingSelect([row('tr-1', 1 * HOURS), row('tr-2', 2 * HOURS), row('tr-3', 3 * HOURS)])
       transition
         .mockResolvedValueOnce({})
         .mockRejectedValueOnce(new TransferRpcError(code))
@@ -148,7 +149,7 @@ describe('reconcilePendingTransfers', () => {
   )
 
   it('attempts every remaining row before throwing on an unexpected error', async () => {
-    mockStaleSelect({ data: [{ id: 'tr-1' }, { id: 'tr-2' }, { id: 'tr-3' }], error: null })
+    mockPendingSelect([row('tr-1', 1 * HOURS), row('tr-2', 2 * HOURS), row('tr-3', 3 * HOURS)])
     transition
       .mockRejectedValueOnce(new Error('connection reset'))
       .mockResolvedValueOnce({})
@@ -158,10 +159,111 @@ describe('reconcilePendingTransfers', () => {
     expect(transition).toHaveBeenCalledTimes(3)
   })
 
-  it('throws when the stale-row select fails', async () => {
-    mockStaleSelect({ data: null, error: { message: 'boom' } })
+  it('throws when the pending select fails', async () => {
+    mockPendingSelect(null, { message: 'boom' })
 
     await expect(reconcilePendingTransfers()).rejects.toThrow(/select failed: boom/)
     expect(transition).not.toHaveBeenCalled()
+  })
+})
+
+describe('reconcilePendingTransfers — rejected-session poll (#213)', () => {
+  beforeEach(() => {
+    envMock.FUNDING_PROCESSOR = 'stripe_onramp'
+    processorMock.current = { provider: 'stripe_onramp', getPaymentStatus }
+  })
+
+  it('fails a rejected session IMMEDIATELY — no webhook exists for rejection', async () => {
+    // 2 minutes old: far inside the 4-hour window. The poll is what fails it.
+    mockPendingSelect([row('tr-rejected', 2 * MINUTES, 'cos_rej1')])
+    getPaymentStatus.mockResolvedValue({
+      paymentRef: 'cos_rej1',
+      status: 'rejected',
+      lastError: 'kyc_verification_failed',
+    })
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    expect(getPaymentStatus).toHaveBeenCalledWith({ paymentRef: 'cos_rej1' })
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input).toMatchObject({
+      transferId: 'tr-rejected',
+      fromState: 'PENDING_PAYMENT',
+      toState: 'PAYMENT_FAILED',
+      actor: 'worker:reconcile-pending',
+      // The session's own machine-readable cause, not the window boilerplate.
+      reason: 'kyc_verification_failed',
+    })
+  })
+
+  it('falls back to a generic reason when the session carries no last_error', async () => {
+    mockPendingSelect([row('tr-rejected', 2 * MINUTES, 'cos_rej2')])
+    getPaymentStatus.mockResolvedValue({ paymentRef: 'cos_rej2', status: 'rejected' })
+
+    await reconcilePendingTransfers()
+
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input.reason).toBe('onramp_session_rejected')
+  })
+
+  it('leaves non-rejected sessions to the age window', async () => {
+    mockPendingSelect([row('tr-kyc-in-progress', 2 * HOURS, 'cos_live1')])
+    getPaymentStatus.mockResolvedValue({ paymentRef: 'cos_live1', status: 'requires_payment' })
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(0)
+    expect(transition).not.toHaveBeenCalled()
+  })
+
+  it('a rejected row past the window fails ONCE, by the poll, with the real reason', async () => {
+    mockPendingSelect([row('tr-both', 5 * HOURS, 'cos_rej3')])
+    getPaymentStatus.mockResolvedValue({
+      paymentRef: 'cos_rej3',
+      status: 'rejected',
+      lastError: 'kyc_verification_failed',
+    })
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    expect(transition).toHaveBeenCalledTimes(1)
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input.reason).toBe('kyc_verification_failed')
+  })
+
+  it('a poll failure never blocks the sweep — the age window still backstops', async () => {
+    mockPendingSelect([
+      row('tr-poll-broke-young', 2 * MINUTES, 'cos_err1'),
+      row('tr-poll-broke-old', 5 * HOURS, 'cos_err2'),
+    ])
+    getPaymentStatus.mockRejectedValue(new Error('stripe unreachable'))
+
+    const count = await reconcilePendingTransfers()
+
+    // Young row untouched; old row failed by the AGE arm despite the dead poll.
+    expect(count).toBe(1)
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input.transferId).toBe('tr-poll-broke-old')
+    expect(input.reason).toBe('funding_not_received_within_4_hours')
+  })
+
+  it('never polls non-cos_ refs — pre-flip rows are not Stripe sessions', async () => {
+    mockPendingSelect([row('tr-manual-era', 2 * HOURS, 'manualpay_abc')])
+
+    await reconcilePendingTransfers()
+
+    expect(getPaymentStatus).not.toHaveBeenCalled()
+  })
+
+  it('never polls under a non-onramp processor, whatever the refs look like', async () => {
+    envMock.FUNDING_PROCESSOR = 'mock'
+    processorMock.current = { provider: 'mock' }
+    mockPendingSelect([row('tr-x', 2 * MINUTES, 'cos_weird')])
+
+    await reconcilePendingTransfers()
+
+    expect(getPaymentStatus).not.toHaveBeenCalled()
   })
 })

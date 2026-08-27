@@ -7,6 +7,7 @@ import {
   type FundingEventType,
   type FundingInitiation,
   type FundingParseResult,
+  type FundingPaymentStatus,
   type FundingProcessor,
   type FundingUndo,
 } from './index.js'
@@ -303,12 +304,30 @@ export class StripeOnrampFundingProcessor implements FundingProcessor {
     }
   }
 
-  // No getPaymentStatus / listRecentPayments in v1 — deliberately. The recon
-  // stripe-legs gate on provider 'stripe' and would skip this provider anyway;
-  // implementing the reads without re-plumbing recon would be mock theater.
-  // Honest `skipped` findings until the onramp recon fast-follow (#227
-  // family). The redelivery window + the uncleared-transfer check are the
-  // interim nets.
+  /**
+   * Live session status — the poll the KYC-reject drill proved necessary
+   * (2026-08-26): Stripe emits NO webhook when a session is rejected at
+   * verify (contradicting their docs' "every status change" claim; confirmed
+   * against the account event stream), so the reconcile sweep polls pending
+   * sessions through this read and fails rejected ones immediately instead
+   * of waiting out the abandonment window. Also serves the recon seam's
+   * getPaymentStatus contract. listRecentPayments stays unimplemented —
+   * orphan detection remains an honest `skipped` until the recon fast-follow.
+   */
+  async getPaymentStatus(input: { paymentRef: string }): Promise<FundingPaymentStatus> {
+    const session = (await this.onrampFetch(
+      `/v1/crypto/onramp_sessions/${encodeURIComponent(input.paymentRef)}`,
+    )) as OnrampSessionPayload & { transaction_details?: { last_error?: unknown } }
+    if (typeof session.status !== 'string') {
+      throw new Error('Stripe onramp session retrieved without a status')
+    }
+    const lastError = session.transaction_details?.last_error
+    return {
+      paymentRef: input.paymentRef,
+      status: session.status,
+      ...(typeof lastError === 'string' && lastError !== '' && { lastError }),
+    }
+  }
 
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean {
     const secret = env.STRIPE_WEBHOOK_SECRET
