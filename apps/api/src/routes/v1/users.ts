@@ -8,10 +8,14 @@ import {
   getKycLink,
   BridgeApiError,
 } from '../../services/bridge.js'
+import { US_STATES } from '@puente/shared'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 import { fetchGrantedConsents, missingConsents } from './consents.js'
 
-const USER_COLUMNS = 'id, first_name, last_name, email, kyc_status, bridge_customer_id'
+// One literal on purpose: supabase-js parses the column list at the type
+// level, and a concatenated string widens to `string`, which its types treat
+// as an error shape — poisoning every row cast.
+const USER_COLUMNS = 'id, first_name, last_name, email, kyc_status, bridge_customer_id, address_line1, address_line2, address_city, address_state, address_postal_code'
 
 const KYC_MAX_RETRIES = 3
 const KYC_RETRY_COLUMNS = 'kyc_status, bridge_customer_id, kyc_retry_count'
@@ -29,6 +33,27 @@ interface UserRow {
   email: string | null
   kyc_status: string
   bridge_customer_id: string | null
+  address_line1: string | null
+  address_line2: string | null
+  address_city: string | null
+  address_state: string | null
+  address_postal_code: string | null
+}
+
+// Profile completeness now includes the address (K2): the router bounces
+// incomplete profiles — including pre-K2 users with no address — back to the
+// profile form. Address values are PII: returned to their owner here and
+// nowhere else (never logged, never in URLs).
+function isProfileComplete(row: UserRow): boolean {
+  return Boolean(
+    row.first_name &&
+      row.last_name &&
+      row.email &&
+      row.address_line1 &&
+      row.address_city &&
+      row.address_state &&
+      row.address_postal_code,
+  )
 }
 
 function toApiUser(row: UserRow) {
@@ -39,6 +64,12 @@ function toApiUser(row: UserRow) {
     email: row.email,
     kycStatus: row.kyc_status,
     bridgeCustomerId: row.bridge_customer_id,
+    addressLine1: row.address_line1,
+    addressLine2: row.address_line2,
+    addressCity: row.address_city,
+    addressState: row.address_state,
+    addressPostalCode: row.address_postal_code,
+    profileComplete: isProfileComplete(row),
   }
 }
 
@@ -51,6 +82,13 @@ const userResponseSchema = {
     email: { type: ['string', 'null'] },
     kycStatus: { type: 'string' },
     bridgeCustomerId: { type: ['string', 'null'] },
+    addressLine1: { type: ['string', 'null'] },
+    addressLine2: { type: ['string', 'null'] },
+    addressCity: { type: ['string', 'null'] },
+    addressState: { type: ['string', 'null'] },
+    addressPostalCode: { type: ['string', 'null'] },
+    // Name + email + address all present — the router's profile gate (K2).
+    profileComplete: { type: 'boolean' },
     // GET only (PATCH omits it): whether every REQUIRED_CONSENTS pair is
     // granted. The /continue router gates on this (K1).
     consentsCurrent: { type: 'boolean' },
@@ -61,6 +99,11 @@ interface UpdateMeBody {
   firstName: string
   lastName: string
   email: string
+  addressLine1?: string
+  addressLine2?: string
+  addressCity?: string
+  addressState?: string
+  addressPostalCode?: string
 }
 
 interface TosLinkBody {
@@ -180,15 +223,48 @@ export async function usersRoute(server: FastifyInstance) {
             firstName: { type: 'string', minLength: 1, maxLength: 100 },
             lastName: { type: 'string', minLength: 1, maxLength: 100 },
             email: { type: 'string', format: 'email' },
+            // Address group (K2) — optional so the frozen mobile app's
+            // name-only PATCH keeps working, but all-or-none when present
+            // (enforced in the handler; line2 is genuinely optional).
+            // DB checks are the loose backstop; the state enum here is the
+            // real membership check (50 states + DC, shared constant).
+            addressLine1: { type: 'string', minLength: 1, maxLength: 200 },
+            addressLine2: { type: 'string', maxLength: 200 },
+            addressCity: { type: 'string', minLength: 1, maxLength: 100 },
+            addressState: { type: 'string', enum: US_STATES.map((s) => s.code) },
+            addressPostalCode: { type: 'string', pattern: '^[0-9]{5}(-[0-9]{4})?$' },
           },
           additionalProperties: false,
         },
-        response: { 200: userResponseSchema },
+        response: { 200: userResponseSchema, 400: errorResponseSchema },
       },
     },
     async (request, reply) => {
       const userId = request.user!.id
-      const { firstName, lastName, email } = request.body
+      const { firstName, lastName, email, addressLine1, addressLine2, addressCity, addressState, addressPostalCode } =
+        request.body
+
+      // All-or-none: a partial address would satisfy the schema field-by-field
+      // but leave profileComplete permanently false with no visible reason.
+      const addressFields: Record<string, string | undefined> = {
+        addressLine1,
+        addressCity,
+        addressState,
+        addressPostalCode,
+      }
+      const provided = Object.entries(addressFields).filter(([, v]) => v !== undefined)
+      if (provided.length > 0 && provided.length < 4) {
+        return sendError(
+          reply,
+          400,
+          'validation_error',
+          'Provide the full address or none of it',
+          Object.entries(addressFields)
+            .filter(([, v]) => v === undefined)
+            .map(([k]) => ({ path: k, issue: 'required when any address field is present' })),
+        )
+      }
+      const hasAddress = provided.length === 4
 
       const { data, error } = await supabaseAdmin
         .from('users')
@@ -196,6 +272,15 @@ export async function usersRoute(server: FastifyInstance) {
           first_name: firstName.trim(),
           last_name: lastName.trim(),
           email: email.trim(),
+          // Only touch address columns when the group is sent — a name-only
+          // PATCH must never null out a stored address.
+          ...(hasAddress && {
+            address_line1: addressLine1!.trim(),
+            address_line2: addressLine2?.trim() || null,
+            address_city: addressCity!.trim(),
+            address_state: addressState!,
+            address_postal_code: addressPostalCode!,
+          }),
         })
         .eq('id', userId)
         .select(USER_COLUMNS)

@@ -1,5 +1,18 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { resolveSendMoneyFlag, appEnv, isProductionEnv } from './flags'
+import { resolveSendMoneyFlag, resolveKycAtFirstSendFlag, appEnv, isProductionEnv } from './flags'
+
+describe('resolveKycAtFirstSendFlag', () => {
+  it('is on only for an explicit PostHog true', () => {
+    expect(resolveKycAtFirstSendFlag(true)).toBe(true)
+    expect(resolveKycAtFirstSendFlag(false)).toBe(false)
+  })
+
+  it('fails OFF when PostHog can’t answer — in every environment', () => {
+    // Opposite of send-money: this flag removes the only KYC path while the
+    // replacement flow doesn't exist yet, so the fallback must never be on.
+    expect(resolveKycAtFirstSendFlag(undefined)).toBe(false)
+  })
+})
 
 describe('resolveSendMoneyFlag', () => {
   it('honors PostHog’s explicit boolean regardless of environment', () => {

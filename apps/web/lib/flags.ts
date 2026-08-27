@@ -45,6 +45,41 @@ export function isProductionEnv(): boolean {
   return appEnv() === 'production'
 }
 
+// K2 (KYC rehaul): drops the onboarding KYC branch — /continue stops routing
+// to /onboarding/kyc|pending|rejected and the dashboard stops requiring
+// kyc_status=approved; identity verification moves to first send (K5).
+export const KYC_AT_FIRST_SEND_FLAG = 'web-kyc-at-first-send'
+
+// Fail-safe direction is the OPPOSITE of send-money: when PostHog can't
+// answer, this flag is OFF in EVERY environment. Send-money falls back to
+// visible-outside-prod because the flow behind it is complete; this flag
+// removes the only KYC path while its replacement (K3–K5) doesn't exist yet,
+// so an accidental ON strands new users at a dashboard that cannot send.
+// The deliberate flips: PostHog targeting for staging tests, K7 for prod.
+export function resolveKycAtFirstSendFlag(phValue: boolean | undefined): boolean {
+  return phValue === true
+}
+
+// Is KYC-at-first-send routing on for this user?
+// KYC_AT_FIRST_SEND=1 (server env, never committed) is the local-dev escape
+// hatch: local runs have no PostHog token, and K3–K5 development needs the
+// new-flow routing without a dashboard round-trip.
+export async function isKycAtFirstSendEnabled(distinctId: string): Promise<boolean> {
+  if (process.env.KYC_AT_FIRST_SEND === '1') return true
+  if (!process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN) {
+    return resolveKycAtFirstSendFlag(undefined)
+  }
+  try {
+    const value = await getPostHogClient().isFeatureEnabled(KYC_AT_FIRST_SEND_FLAG, distinctId, {
+      personProperties: { app_env: appEnv() },
+    })
+    return resolveKycAtFirstSendFlag(value)
+  } catch (err) {
+    console.error('kyc-at-first-send flag lookup failed:', err instanceof Error ? err.message : 'unknown')
+    return resolveKycAtFirstSendFlag(undefined)
+  }
+}
+
 // Is the send-money flow enabled for this user? distinctId should be the stable
 // user id (from /v1/users/me) so a percentage rollout assigns consistently.
 export async function isSendMoneyEnabled(distinctId: string): Promise<boolean> {

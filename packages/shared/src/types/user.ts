@@ -16,6 +16,13 @@ export interface User {
   bridgeCustomerId: string | null
   kycStatus: KycStatus
   emailVerifiedAt: string | null
+  // K2 sender address (US-only MVP) — null until the profile step collects it.
+  // PII: never logged, never in URL params.
+  addressLine1: string | null
+  addressLine2: string | null
+  addressCity: string | null
+  addressState: string | null
+  addressPostalCode: string | null
   createdAt: string
   updatedAt: string
 }

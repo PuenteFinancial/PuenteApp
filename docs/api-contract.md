@@ -84,8 +84,8 @@ input + response schema validation; authenticated routes write an audit-log entr
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| GET | `/v1/users/me` | ✓ | Current profile: `firstName`, `lastName`, `email`, `kycStatus`, `bridgeCustomerId`, `consentsCurrent` (K1 — GET only; the web `/continue` router gates on it). |
-| PATCH | `/v1/users/me` | ✓ | Update `firstName`, `lastName`, `email` (all required). |
+| GET | `/v1/users/me` | ✓ | Current profile: `firstName`, `lastName`, `email`, `kycStatus`, `bridgeCustomerId`, address fields (K2), `profileComplete` (name+email+address — the router's profile gate), `consentsCurrent` (K1 — GET only; the web `/continue` router gates on both). |
+| PATCH | `/v1/users/me` | ✓ | Update `firstName`, `lastName`, `email` (all required) + optional address group `addressLine1/2`, `addressCity`, `addressState`, `addressPostalCode` (K2 — all-or-none when present, `line2` optional; state validated against shared `US_STATES`; absent group never nulls a stored address, so the frozen mobile app's name-only PATCH is unaffected). |
 | GET | `/v1/users/me/consents` | ✓ | `{ required, granted, missing }` against `REQUIRED_CONSENTS` (packages/shared). |
 | POST | `/v1/users/me/consents` | ✓ | Body `{ consents: [{type, version}], locale }`. Only pairs the server **currently requires** are accepted (stale client → 400 `validation_error`); `bridge_tos` is refused here (first-send paths write it server-side with `signed_agreement_id` evidence). Idempotent: re-grant of an existing (user, type, version) is a no-op that keeps the original evidence. |
 
