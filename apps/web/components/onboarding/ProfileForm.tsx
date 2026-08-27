@@ -34,7 +34,9 @@ export default function ProfileForm({
       })
       if (!res.ok) throw new Error('Failed')
 
-      router.push('/onboarding/kyc')
+      // Next onboarding step (K1). The consent page bounces to /continue on
+      // its own when the user has already consented to everything current.
+      router.push('/onboarding/consent')
     } catch {
       setStatus('error')
     }

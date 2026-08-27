@@ -81,11 +81,24 @@ App-level user record; `auth.users` (Supabase-managed) holds the auth identity. 
 - **RLS:** owner reads/updates own row.
 - *`risk_tier` is NOT a column yet* — earlier versions listed it; it arrives with the risk engine.
 
-### consents  *(deferred — not built)*
-There is no `consents` table. Consent today is **timestamp columns on `users`**
-(`fcra_consent_at`, `sms_consent_at`) plus the immutable `disclosures` rows per transfer. A
-dedicated append-only table (type, doc_version, grant/revoke rows, ip/user-agent evidence) remains
-the future shape if consent versioning outgrows the stamps.
+### consents  *(append-only — built 2026-08-27, K1)*
+Versioned-document consent (E-SIGN, Puente TOS/Privacy, Bridge TOS). The `users` timestamp
+columns (`fcra_consent_at`, `sms_consent_at`) stay for their single-document consents; this
+table is for documents whose versions change. Revocation is NOT an update — rows are immutable
+evidence; a future withdrawal flow appends its own record.
+- `user_id` FK → users (RESTRICT — consent evidence for a user with financial history survives)
+- `type` TEXT — `esign` | `puente_tos` | `puente_privacy` | `bridge_tos` (CHECK)
+- `version` TEXT — exact document version presented (the doc's "Last updated" date). Required
+  versions live in code (`REQUIRED_CONSENTS`, packages/shared) — bumping one forces app-wide
+  re-consent via the web `/continue` router
+- `locale` TEXT — `en` | `es`, which language was presented (mirrors `disclosures`)
+- `evidence` JSONB — ip/user-agent (no extra PII); `bridge_tos` rows (written server-side at
+  first send) carry `signed_agreement_id`
+- `consented_at` timestamptz
+- UNIQUE (user_id, type, version) — re-granting the same version is an idempotent no-op that
+  keeps the original evidence
+- `forbid_mutation` trigger — no UPDATE/DELETE, same guard as `disclosures`
+- **RLS:** owner reads own; no client-write policy (API service role only).
 
 ### sign_in_events  *(append-only by convention)*
 - `user_id` FK → users (CASCADE)

@@ -9,6 +9,7 @@ import {
   BridgeApiError,
 } from '../../services/bridge.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
+import { fetchGrantedConsents, missingConsents } from './consents.js'
 
 const USER_COLUMNS = 'id, first_name, last_name, email, kyc_status, bridge_customer_id'
 
@@ -50,6 +51,9 @@ const userResponseSchema = {
     email: { type: ['string', 'null'] },
     kycStatus: { type: 'string' },
     bridgeCustomerId: { type: ['string', 'null'] },
+    // GET only (PATCH omits it): whether every REQUIRED_CONSENTS pair is
+    // granted. The /continue router gates on this (K1).
+    consentsCurrent: { type: 'boolean' },
   },
 } as const
 
@@ -135,6 +139,7 @@ export async function usersRoute(server: FastifyInstance) {
         response: {
           200: userResponseSchema,
           404: errorResponseSchema,
+          500: errorResponseSchema,
         },
       },
     },
@@ -150,7 +155,17 @@ export async function usersRoute(server: FastifyInstance) {
         return sendError(reply, 404, 'not_found', 'User not found')
       }
 
-      return toApiUser(data as UserRow)
+      // 500 rather than a guessed value on failure: false would bounce the
+      // user into re-consenting, true would skip a legally required gate.
+      const granted = await fetchGrantedConsents(userId)
+      if (granted === null) {
+        return sendError(reply, 500, 'internal_error', 'Failed to load consents')
+      }
+
+      return {
+        ...toApiUser(data as UserRow),
+        consentsCurrent: missingConsents(granted).length === 0,
+      }
     },
   )
 

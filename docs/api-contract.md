@@ -84,12 +84,17 @@ input + response schema validation; authenticated routes write an audit-log entr
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| GET | `/v1/users/me` | ✓ | Current profile: `firstName`, `lastName`, `email`, `kycStatus`, `bridgeCustomerId`. |
+| GET | `/v1/users/me` | ✓ | Current profile: `firstName`, `lastName`, `email`, `kycStatus`, `bridgeCustomerId`, `consentsCurrent` (K1 — GET only; the web `/continue` router gates on it). |
 | PATCH | `/v1/users/me` | ✓ | Update `firstName`, `lastName`, `email` (all required). |
+| GET | `/v1/users/me/consents` | ✓ | `{ required, granted, missing }` against `REQUIRED_CONSENTS` (packages/shared). |
+| POST | `/v1/users/me/consents` | ✓ | Body `{ consents: [{type, version}], locale }`. Only pairs the server **currently requires** are accepted (stale client → 400 `validation_error`); `bridge_tos` is refused here (first-send paths write it server-side with `signed_agreement_id` evidence). Idempotent: re-grant of an existing (user, type, version) is a no-op that keeps the original evidence. |
 
-**Consents** are not a separate API surface yet: consent timestamps are captured on `users` during
-onboarding. The append-only `/v1/consents` endpoints + `consents` table are **deferred** until a
-consent needs versioning we don't have (see erd.md, PRD "Where reality diverges").
+**Consents** (K1, 2026-08-27): the append-only `consents` table is live — one row per
+(user, type, version), immutability-triggered like `disclosures`, evidence jsonb (ip,
+user-agent), locale recorded. Required versions are code (`REQUIRED_CONSENTS`); bumping a
+version there forces app-wide re-consent via the `/continue` router. This supersedes the
+earlier "deferred until a consent needs versioning" note — the KYC rehaul's consent page
+(E-SIGN scope expanded to all e-records + Puente TOS/Privacy) is that need.
 
 ## KYC (Bridge-hosted, behind `IdentityVerifier`)
 

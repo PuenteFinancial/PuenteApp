@@ -81,6 +81,16 @@ export type Translations = {
     signup: { title: string; sub: string; phone: string; phonePh: string; smsConsent: string; legal: { pre: string; privacyLink: string; and: string; termsLink: string; post: string }; cta: string; sending: string; error: string }
     verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resendIn: (seconds: number) => string; resent: string; error: string }
     profile: { title: string; sub: string; firstName: string; lastName: string; email: string; emailNote: string; cta: string; saving: string; error: string }
+    // K1 consent page: two checkboxes (E-SIGN, TOS+Privacy) + provider
+    // disclosure links. Checkbox labels are legally operative in BOTH
+    // languages — see NEEDS LEGAL REVIEW markers at the values.
+    consent: {
+      title: string; sub: string
+      esign: { pre: string; link: string; post: string }
+      policies: { pre: string; termsLink: string; and: string; privacyLink: string; post: string }
+      providers: { intro: string; stripeLink: string; bridgeLink: string }
+      cta: string; saving: string; error: string; stale: string
+    }
     kyc: { title: string; body: string; dataNotice: string; cta: string; starting: string; error: string }
     pending: { title: string; body: string; autoNote: string }
     rejected: {
@@ -616,6 +626,36 @@ const en: Translations = {
       cta: 'Continue',
       saving: 'Saving…',
       error: 'We couldn’t save your info. Please try again.',
+    },
+    // NEEDS LEGAL REVIEW (EN + ES): consent-page copy. The two checkbox
+    // sentences are the operative assent language for E-SIGN and for the
+    // TOS/Privacy contract — placeholder until the K7 counsel pass, which
+    // reviews these strings together with the documents they reference.
+    consent: {
+      title: 'Review and agree',
+      sub: 'Before you continue, please review and accept the following.',
+      esign: {
+        pre: 'I agree to receive all agreements, disclosures, receipts, and other records from Puente electronically, as described in the ',
+        link: 'Consent to Electronic Records (E-SIGN)',
+        post: '.',
+      },
+      policies: {
+        pre: 'I have read and agree to Puente’s ',
+        termsLink: 'Terms of Service',
+        and: ' and ',
+        privacyLink: 'Privacy Policy',
+        post: '.',
+      },
+      providers: {
+        intro:
+          'Puente works with licensed partners to move your money: Stripe (payments) and Bridge (money transmission). Their terms apply when you use those services and are presented on their own screens.',
+        stripeLink: 'Stripe legal terms',
+        bridgeLink: 'Bridge legal terms',
+      },
+      cta: 'Agree and continue',
+      saving: 'Saving…',
+      error: 'We couldn’t save your agreement. Please try again.',
+      stale: 'This page is out of date. Please reload it and try again.',
     },
     // NEEDS LEGAL REVIEW (ES): identity-verification requirement wording
     kyc: {
@@ -1195,6 +1235,36 @@ const es: Translations = {
       cta: 'Continuar',
       saving: 'Guardando…',
       error: 'No pudimos guardar tu información. Inténtalo de nuevo.',
+    },
+    // NEEDS LEGAL REVIEW (EN + ES): texto de la página de consentimiento —
+    // las dos casillas son lenguaje de asentimiento legalmente operativo
+    // (E-SIGN y contrato TOS/Privacidad); provisional hasta la revisión de
+    // abogados en K7, junto con los documentos que referencia.
+    consent: {
+      title: 'Revisa y acepta',
+      sub: 'Antes de continuar, revisa y acepta lo siguiente.',
+      esign: {
+        pre: 'Acepto recibir electrónicamente todos los acuerdos, avisos, recibos y demás documentos de Puente, como se describe en el ',
+        link: 'Consentimiento para Documentos Electrónicos (E-SIGN)',
+        post: '.',
+      },
+      policies: {
+        pre: 'He leído y acepto los ',
+        termsLink: 'Términos de Servicio',
+        and: ' y el ',
+        privacyLink: 'Aviso de Privacidad',
+        post: ' de Puente.',
+      },
+      providers: {
+        intro:
+          'Puente trabaja con socios con licencia para mover tu dinero: Stripe (pagos) y Bridge (transmisión de dinero). Sus términos aplican cuando usas esos servicios y se presentan en sus propias pantallas.',
+        stripeLink: 'Términos legales de Stripe',
+        bridgeLink: 'Términos legales de Bridge',
+      },
+      cta: 'Aceptar y continuar',
+      saving: 'Guardando…',
+      error: 'No pudimos guardar tu aceptación. Inténtalo de nuevo.',
+      stale: 'Esta página no está actualizada. Recárgala e inténtalo de nuevo.',
     },
     // NEEDS LEGAL REVIEW (ES): texto sobre el requisito de verificación de identidad
     kyc: {
