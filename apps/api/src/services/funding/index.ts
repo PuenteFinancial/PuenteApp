@@ -111,8 +111,14 @@ export interface FundingClientSession {
 
 export interface FundingPaymentStatus {
   paymentRef: string
-  /** Raw processor status (Stripe PI: requires_*, processing, succeeded, canceled…). */
+  /** Raw processor status (Stripe PI: requires_*, processing, succeeded,
+   *  canceled…; onramp session: initialized, requires_payment, rejected,
+   *  fulfillment_*). */
   status: string
+  /** Machine-readable failure detail when the processor exposes one (onramp:
+   *  transaction_details.last_error, e.g. kyc_verification_failed). Optional —
+   *  the PI adapter has no equivalent field. */
+  lastError?: string
 }
 
 export interface FundingPaymentListItem {

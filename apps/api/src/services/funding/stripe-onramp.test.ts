@@ -276,6 +276,36 @@ describe('onramp getClientSession', () => {
   })
 })
 
+describe('onramp getPaymentStatus (rejected-session poll, #213)', () => {
+  it('reads the live session status and surfaces last_error', async () => {
+    fetchResponds(200, {
+      ...SESSION,
+      status: 'rejected',
+      transaction_details: { last_error: 'kyc_verification_failed' },
+    })
+    const status = await processor.getPaymentStatus({ paymentRef: 'cos_1' })
+    const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit]
+    expect(url).toBe('https://api.stripe.com/v1/crypto/onramp_sessions/cos_1')
+    expect(init.method).toBe('GET')
+    expect(status).toEqual({
+      paymentRef: 'cos_1',
+      status: 'rejected',
+      lastError: 'kyc_verification_failed',
+    })
+  })
+
+  it('omits lastError when the session carries none', async () => {
+    fetchResponds(200, { ...SESSION, status: 'requires_payment' })
+    const status = await processor.getPaymentStatus({ paymentRef: 'cos_1' })
+    expect(status).toEqual({ paymentRef: 'cos_1', status: 'requires_payment' })
+  })
+
+  it('fails loudly on a session without a status — the poll must never guess', async () => {
+    fetchResponds(200, { ...SESSION, status: null })
+    await expect(processor.getPaymentStatus({ paymentRef: 'cos_1' })).rejects.toThrow(/status/)
+  })
+})
+
 describe('onramp verifySignature (real SDK vectors)', () => {
   const body = sessionEventBody()
 
