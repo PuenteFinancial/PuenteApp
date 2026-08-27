@@ -16,3 +16,8 @@ process.env.MOCK_FUNDING_WEBHOOK_SECRET ??= 'mock_funding_secret_test'
 // Webhook signing secret only — no STRIPE_SECRET_KEY, so tests prove the
 // stripe adapter's signature path without ever looking API-key-configured.
 process.env.STRIPE_WEBHOOK_SECRET ??= 'whsec_stripe_secret_test'
+// Stripe crypto onramp (K3): test hosts so no test can ever reach a real
+// endpoint; the OAuth pair and platform key are set per-file by the suites
+// that exercise the crypto client (mirrors the STRIPE_SECRET_KEY approach).
+process.env.STRIPE_API_BASE ??= 'https://api.stripe.test'
+process.env.LINK_OAUTH_API_BASE ??= 'https://login.link.test'

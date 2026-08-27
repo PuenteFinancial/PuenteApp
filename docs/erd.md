@@ -106,6 +106,21 @@ evidence; a future withdrawal flow appends its own record.
 - `forbid_mutation` trigger — no UPDATE/DELETE, same guard as `disclosures`
 - **RLS:** owner reads own; no client-write policy (API service role only).
 
+### stripe_link_tokens  *(K3 — Link OAuth credential store)*
+One row per user: their Link OAuth state for the embedded-components onramp.
+- `user_id` PK, FK → users (RESTRICT)
+- `refresh_token_enc` TEXT — the 90-day refresh token, AES-256-GCM encrypted app-side
+  (utils/encryption.ts, AAD = user_id; deliberate deviation from the plan's pgcrypto sketch —
+  the key never reaches the DB server). NULL until the user consents and the exchange banks
+  one. Rotates on every refresh grant. Access tokens (1h) are never persisted anywhere.
+- `auth_intent_id` / `lai_expires_at` — web LAI reuse (fresh intent per page load = forced re-OTP)
+- **RLS:** deny-all — no client role may even see the row exists.
+
+Related `users` columns (K3): `stripe_crypto_customer_id` TEXT UNIQUE (crc_, from the SDK's
+authenticate callback, verify-then-persist), `stripe_kyc_tier` / `stripe_kyc_tier_status`
+(cache of the customers poll; deliberately unconstrained — they mirror a preview API that can
+drift, and nothing authorizes off them).
+
 ### sign_in_events  *(append-only by convention)*
 - `user_id` FK → users (CASCADE)
 - `ip` INET, `user_agent` TEXT — never leave the DB (deny-all RLS)

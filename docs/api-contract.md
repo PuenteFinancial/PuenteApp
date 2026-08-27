@@ -96,6 +96,23 @@ version there forces app-wide re-consent via the `/continue` router. This supers
 earlier "deferred until a consent needs versioning" note — the KYC rehaul's consent page
 (E-SIGN scope expanded to all e-records + Puente TOS/Privacy) is that need.
 
+## Crypto onramp — embedded components (K3, KYC rehaul)
+
+Server surface for Link OAuth + Stripe crypto status. **Dark until Doppler carries the OAuth
+pair** — every route 503s `not_configured` without it. Built for the K5 send flow. Endpoint
+shapes: Stripe's public embedded-components guide (fetched 2026-08-27), except
+`transaction_limits` (SA-doc only, smoke-validated). `scripts/smoke-stripe-crypto.ts`
+classifies the provisioning state (creds missing / flags unprovisioned / ready).
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| POST | `/v1/crypto/link-auth-intent` | ✓ | Creates or REUSES the user's LinkAuthIntent (web reuse rule — a fresh intent per page load forces re-OTP). Email read from the user's own row, never the request. `linkAccountExists: false` = the SDK must register the user first. |
+| POST | `/v1/crypto/link-auth-intent/exchange` | ✓ | Exchanges the STORED intent for tokens; banks the refresh token AES-256-GCM-encrypted (AAD = user id). Refuses any lai_ not minted for this user (identity-grafting guard). Access tokens never surface. |
+| POST | `/v1/crypto/customer` | ✓ | Persists the crc_ id from the SDK's authenticate callback — verify-then-persist: retrieved under the user's own OAuth token before it lands on their row. |
+| GET | `/v1/crypto/kyc-status` | ✓ | Customers poll; caches tier on `users` (display/routing hints — never authorization). 409 = re-authenticate with Link. |
+| GET | `/v1/crypto/quote?amount=` | ✓ | Headless onramp quote for the fixed USDC-on-Base corridor (native fee display, decision 7). |
+| GET | `/v1/crypto/limits` | ✓ | `transaction_limits` pass-through; response schema deliberately unpinned until smoke proves the shape. |
+
 ## KYC (Bridge-hosted, behind `IdentityVerifier`)
 
 KYC is **Bridge-hosted** (Persona under the hood): the sender verifies in Bridge's hosted flow, not
