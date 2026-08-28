@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import posthog from 'posthog-js'
 import type { Stripe } from '@stripe/stripe-js'
-import type { StripeOnramp } from '@stripe/crypto'
+import type { OnrampCoordinator, StripeOnramp } from '@stripe/crypto'
 import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js'
 import { useLanguage } from '@/components/LanguageProvider'
 import { parseApiError, errorMessage } from '@/lib/apiError'
@@ -19,6 +19,8 @@ import {
 } from '@/lib/payStep'
 import { getStripe } from '@/lib/stripe'
 import { getStripeOnramp } from '@/lib/stripeOnramp'
+import { getCryptoOnramp } from '@/lib/cryptoOnramp'
+import CryptoPayStep from '@/components/send/crypto/CryptoPayStep'
 
 // The whole PENDING_PAYMENT affordance: fetches the funding session once, then
 // renders the Payment Element (stripe), the dev simulate button (mock, non-prod),
@@ -58,6 +60,10 @@ export default function PayStep({
   const [sessionError, setSessionError] = useState(false)
   const [stripe, setStripe] = useState<Stripe | null>(null)
   const [onramp, setOnramp] = useState<StripeOnramp | null>(null)
+  // Embedded rail (K5): the coordinator is created once per publishable key
+  // and handed to CryptoPayStep — same memoized-loader discipline as the
+  // other two SDKs.
+  const [cryptoCoordinator, setCryptoCoordinator] = useState<OnrampCoordinator | null>(null)
   // The onramp widget reported `rejected` (#213): the session is dead and the
   // webhook is driving PAYMENT_FAILED — hold an error line until the
   // tracker's banner takes over. Local for the same reason `submitted` is.
@@ -126,6 +132,26 @@ export default function PayStep({
         }
         setOnramp(loaded)
         posthog.capture('send_payment_opened', { transfer_id: transferId })
+      }
+      if (body.provider === 'stripe_crypto' && body.publishableKey) {
+        // Loader-first contract, embedded-components edition: a blocked
+        // js.stripe.com load is the retryable error card, never a machine
+        // that hangs on its first SDK call.
+        let loaded: OnrampCoordinator | null = null
+        try {
+          loaded = await getCryptoOnramp(body.publishableKey)
+        } catch {
+          loaded = null
+        }
+        if (!loaded) {
+          setSessionError(true)
+          return
+        }
+        setCryptoCoordinator(loaded)
+        // Both names on purpose: send_payment_opened keeps the cross-rail
+        // dashboards whole; send_crypto_pay_opened opens the K5 funnel.
+        posthog.capture('send_payment_opened', { transfer_id: transferId })
+        posthog.capture('send_crypto_pay_opened', { transfer_id: transferId })
       }
       setSession(body)
     } catch {
@@ -342,6 +368,32 @@ export default function PayStep({
           </div>
         )}
       </div>
+    )
+  }
+
+  // Embedded rail (K5): the machine owns everything from Link auth to
+  // checkout; this component only guarantees the coordinator exists. The
+  // subtree is preserved across the tracker's 5s poll re-renders (same type,
+  // same position, no key), so live SDK surfaces never remount.
+  if (affordance === 'crypto') {
+    if (!cryptoCoordinator) {
+      return (
+        <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
+          <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '0 0 8px' }}>
+            {s.pay.sessionError}
+          </p>
+          <button type="button" className="btn btn--ghost btn--sm" onClick={() => void loadSession()}>
+            {s.retry}
+          </button>
+        </div>
+      )
+    }
+    return (
+      <CryptoPayStep
+        coordinator={cryptoCoordinator}
+        transferId={transferId}
+        onAdvanced={onAdvanced}
+      />
     )
   }
 
