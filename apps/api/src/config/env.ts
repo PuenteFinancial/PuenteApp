@@ -148,6 +148,25 @@ const envSchema = z.object({
   // SDK multiplies this by (maxNetworkRetries+1) in the worst case — still
   // minutes inside the staleness window at the 120 cap.
   STRIPE_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(120).default(15),
+  // ── Stripe crypto onramp, embedded components (K3, KYC rehaul) ──────────
+  // Link OAuth client pair, issued by Stripe during private-preview
+  // onboarding (NOT self-serve; live pair is in the SA solution plan →
+  // Doppler, sandbox pair pending provisioning). client_id rides in
+  // LinkAuthIntent creation; the secret is used ONLY in the refresh-token
+  // grant. Optional: absent means the crypto surface answers 503
+  // not_configured instead of refusing boot — the K-lane ships dark.
+  STRIPE_CRYPTO_OAUTH_CLIENT_ID: z.string().min(1).optional(),
+  STRIPE_CRYPTO_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
+  // Base URLs are knobs only so the smoke script / tests can point at a
+  // recorder; production values are the defaults.
+  STRIPE_API_BASE: z.string().url().default('https://api.stripe.com'),
+  LINK_OAUTH_API_BASE: z.string().url().default('https://login.link.com'),
+  // Beta version header on every crypto API call. Default is the value the
+  // SA doc pins (2026-08-18); Stripe's public docs already show a newer
+  // date (2026-08-26.dahlia) and say any sufficiently recent date works —
+  // overridable here so tracking their preview drift is a Doppler change,
+  // not a deploy. The crypto_onramp_beta=v2 suffix is the load-bearing part.
+  STRIPE_CRYPTO_VERSION: z.string().min(1).default('2026-05-27.preview;crypto_onramp_beta=v2'),
   // Explicit opt-in for the dev-only routes (slice 7 PR3: simulate-funding,
   // which drives PENDING_PAYMENT→FUNDED — a real ledger batch — with no real
   // payment). Same fail-closed enum shape as WAIT_FOR_CLEARING / AUTO_REFUND,

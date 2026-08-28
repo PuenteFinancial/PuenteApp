@@ -16,6 +16,7 @@ import { waitlistRoute } from './routes/v1/waitlist.js'
 import { authRoute } from './routes/v1/auth.js'
 import { usersRoute } from './routes/v1/users.js'
 import { consentsRoute } from './routes/v1/consents.js'
+import { cryptoRoute } from './routes/v1/crypto.js'
 import { recipientsRoute } from './routes/v1/recipients.js'
 import { destinationsRoute } from './routes/v1/destinations.js'
 import { quotesRoute } from './routes/v1/quotes.js'
@@ -102,6 +103,7 @@ await server.register(waitlistRoute, { prefix: '/v1' })
 await server.register(authRoute, { prefix: '/v1' })
 await server.register(usersRoute, { prefix: '/v1' })
 await server.register(consentsRoute, { prefix: '/v1' })
+await server.register(cryptoRoute, { prefix: '/v1' })
 await server.register(recipientsRoute, { prefix: '/v1' })
 await server.register(destinationsRoute, { prefix: '/v1' })
 await server.register(quotesRoute, { prefix: '/v1' })
