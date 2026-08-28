@@ -1,8 +1,8 @@
 import crypto from 'node:crypto'
 import Stripe from 'stripe'
 import { env } from '../../config/env.js'
+import { FundingInitiationError } from './errors.js'
 import {
-  FundingInitiationError,
   type FundingClientSession,
   type FundingEventType,
   type FundingInitiation,

@@ -73,25 +73,9 @@ export interface FundingInitiation {
   clientFields: Record<string, string>
 }
 
-/**
- * A processor refused to START funding for reasons the sender needs to hear
- * about (#213) — not a transport fault, not a config bug on our side:
- *   unsupported — Stripe judged this customer un-onrampable (geo/profile via
- *                 customer_ip_address pre-check). Confirm maps it to a 403
- *                 with the stable code `funding_unsupported`.
- *   disabled    — Stripe's fraud kill switch shut session creation off
- *                 account-wide. Confirm maps it to the existing 503
- *                 `not_configured` (same sender experience as an unconfigured
- *                 processor: nothing they did, try later).
- * Seam-level so confirm can branch without importing processor internals;
- * adapters throw it ONLY from initiateFunding.
- */
-export class FundingInitiationError extends Error {
-  constructor(public readonly code: 'unsupported' | 'disabled') {
-    super(`funding initiation refused: ${code}`)
-    this.name = 'FundingInitiationError'
-  }
-}
+// Moved to errors.ts: a leaf module so processor files can import it by
+// value without creating a cycle back through index.ts (see errors.ts).
+export { FundingInitiationError } from './errors.js'
 
 // What the browser needs to bootstrap the pay step (PR-S3). Served on demand
 // by GET /v1/transfers/:id/funding-session — once per pay-step mount, never on
