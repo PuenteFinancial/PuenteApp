@@ -7,6 +7,7 @@ import { useLanguage } from '@/components/LanguageProvider'
 import { parseApiError, errorMessage } from '@/lib/apiError'
 import { useIdempotencyKey } from '@/lib/idempotency'
 import { formatUsd, formatMxn, mmss, secondsUntil, isQuoteShape, type Quote } from '@/lib/sendFormat'
+import LimitsBanner from './LimitsBanner'
 
 export interface SendDestination {
   id: string
@@ -33,9 +34,12 @@ export interface CreatedTransfer {
 export default function QuoteScreen({
   recipients,
   onCreated,
+  showKycExpectation = false,
 }: {
   recipients: SendRecipient[]
   onCreated: (transfer: CreatedTransfer) => void
+  /** K5, flag-ON only (server-resolved): verify-at-payment expectation. */
+  showKycExpectation?: boolean
 }) {
   const { t } = useLanguage()
   const s = t.send
@@ -209,6 +213,8 @@ export default function QuoteScreen({
         {s.title}
       </h1>
       <p style={{ fontSize: 15, color: 'var(--muted)', margin: '0 0 16px', lineHeight: 1.6 }}>{s.sub}</p>
+
+      {showKycExpectation && <LimitsBanner />}
 
       <form className="wl-form" onSubmit={handleSubmit}>
         <div className="field">

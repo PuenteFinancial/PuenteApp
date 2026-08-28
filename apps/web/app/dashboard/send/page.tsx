@@ -1,7 +1,7 @@
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
-import { isSendMoneyEnabled } from '@/lib/flags'
+import { isKycAtFirstSendEnabled, isSendMoneyEnabled } from '@/lib/flags'
 import SendFlow from '@/components/send/SendFlow'
 import { type SendRecipient } from '@/components/send/QuoteScreen'
 
@@ -37,8 +37,13 @@ export default async function SendPage() {
   if (!meRes.ok) redirect('/signup')
 
   const { id: userId, kycStatus } = (await meRes.json()) as { id: string; kycStatus: string }
+  // K5: under KYC-at-first-send, an unverified sender is exactly who this
+  // page is FOR — verification happens in the pay step — so only the
+  // rejection ladder survives the flag. Without this skip, the dashboard's
+  // "Send money" CTA bounced flag-ON users to the pending poller (K2 wart).
+  const kycAtFirstSend = await isKycAtFirstSendEnabled(userId)
   if (kycStatus === 'rejected') redirect('/onboarding/rejected')
-  if (kycStatus !== 'approved') redirect('/onboarding/pending')
+  if (!kycAtFirstSend && kycStatus !== 'approved') redirect('/onboarding/pending')
   if (!(await isSendMoneyEnabled(userId))) redirect('/dashboard')
 
   const listRes = await apiFetch('/v1/recipients?limit=50', token)
@@ -59,6 +64,6 @@ export default async function SendPage() {
   )
 
   return (
-      <SendFlow recipients={withDestinations} />
+      <SendFlow recipients={withDestinations} showKycExpectation={kycAtFirstSend} />
   )
 }

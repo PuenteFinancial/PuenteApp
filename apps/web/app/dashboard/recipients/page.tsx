@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import { redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath } from '@/lib/session'
+import { isKycAtFirstSendEnabled } from '@/lib/flags'
 import RecipientsManager, {
   type RecipientWithDestinations,
 } from '@/components/recipients/RecipientsManager'
@@ -36,9 +37,16 @@ export default async function RecipientsPage() {
   const meRes = await apiFetch('/v1/users/me', token)
   if (!meRes.ok) redirect('/signup')
 
-  const { kycStatus } = (await meRes.json()) as { kycStatus: string }
+  const { id: userId, kycStatus } = (await meRes.json()) as { id: string; kycStatus: string }
+  // K5: under KYC-at-first-send, recipients are manageable BEFORE any
+  // verification (the server gate agrees — requireOnboardedUser checks
+  // profile+consents, not kyc_status, on the deferred rail). Only the
+  // rejection ladder survives the flag; without this skip the dashboard's
+  // "Manage recipients" CTA bounced flag-ON users to the pending poller.
   if (kycStatus === 'rejected') redirect('/onboarding/rejected')
-  if (kycStatus !== 'approved') redirect('/onboarding/pending')
+  if (!(await isKycAtFirstSendEnabled(userId)) && kycStatus !== 'approved') {
+    redirect('/onboarding/pending')
+  }
 
   const listRes = await apiFetch('/v1/recipients?limit=50', token)
   const { data: recipients } = listRes.ok
