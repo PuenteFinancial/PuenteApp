@@ -12,7 +12,13 @@ export async function POST() {
   }
 
   try {
-    const apiRes = await apiFetch('/v1/crypto/link-auth-intent', token, { method: 'POST' })
+    // apiFetch always sends Content-Type: application/json, and Fastify 400s
+    // a JSON content-type with an EMPTY body — so send an explicit {} even
+    // though the route reads nothing from it.
+    const apiRes = await apiFetch('/v1/crypto/link-auth-intent', token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
     const body = await apiRes.json().catch(() => ({}))
     return NextResponse.json(body, { status: apiRes.status })
   } catch (err) {
