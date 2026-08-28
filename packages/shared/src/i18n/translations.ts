@@ -13,10 +13,14 @@ export type Translations = {
     notes: string[]
   }
   phone: {
-    greeting: string; name: string
-    scoreLabel: string; delta: string
-    remitLabel: string; remitNote: string
-    reported: string; onTime: string
+    greeting: string
+    name: string
+    scoreLabel: string
+    delta: string
+    remitLabel: string
+    remitNote: string
+    reported: string
+    onTime: string
     sends: { who: string; amt: string }[]
     cta: string
   }
@@ -26,7 +30,8 @@ export type Translations = {
     sub: string
     calc: {
       to: string
-      you: string; they: string
+      you: string
+      they: string
       rate: string
       cta: string
     }
@@ -48,7 +53,13 @@ export type Translations = {
     h2: string
     cta: string
     points: string[]
-    f: { name: string; phone: string; country: string; referralSource: string; referralSourceOther: string }
+    f: {
+      name: string
+      phone: string
+      country: string
+      referralSource: string
+      referralSourceOther: string
+    }
     referralSourceOptions: string[]
     countries: string[]
     ph: { name: string; phone: string; referralSourceOther: string }
@@ -56,8 +67,13 @@ export type Translations = {
     submit: string
     fine: string
     success: {
-      title: string; body: string; refLabel: string
-      copy: string; copied: string; wa: string; waText: string
+      title: string
+      body: string
+      refLabel: string
+      copy: string
+      copied: string
+      wa: string
+      waText: string
     }
     steps: { h: string }[]
     next: string
@@ -65,7 +81,9 @@ export type Translations = {
     errors: { generic: string; validation: string }
   }
   footer: {
-    tagline: string; privacyLink: string; termsLink: string
+    tagline: string
+    privacyLink: string
+    termsLink: string
     // NEEDS LEGAL REVIEW (EN + ES) — regulatory disclosures, legally operative
     // in both languages. `entity` is split around the two licensing links.
     disclosures: {
@@ -78,30 +96,82 @@ export type Translations = {
     rights: string
   }
   onboarding: {
-    signup: { title: string; sub: string; phone: string; phonePh: string; smsConsent: string; legal: { pre: string; privacyLink: string; and: string; termsLink: string; post: string }; cta: string; sending: string; error: string }
-    verify: { title: string; sub: string; code: string; cta: string; verifying: string; resend: string; resendIn: (seconds: number) => string; resent: string; error: string }
+    signup: {
+      title: string
+      sub: string
+      phone: string
+      phonePh: string
+      smsConsent: string
+      legal: { pre: string; privacyLink: string; and: string; termsLink: string; post: string }
+      cta: string
+      sending: string
+      error: string
+    }
+    verify: {
+      title: string
+      sub: string
+      code: string
+      cta: string
+      verifying: string
+      resend: string
+      resendIn: (seconds: number) => string
+      resent: string
+      error: string
+    }
     profile: {
-      title: string; sub: string; firstName: string; lastName: string; email: string; emailNote: string
+      title: string
+      sub: string
+      firstName: string
+      lastName: string
+      email: string
+      emailNote: string
       // K2 address section (US-only sender)
-      address: { heading: string; note: string; line1: string; line2: string; city: string; state: string; statePh: string; zip: string }
-      cta: string; saving: string; error: string
+      address: {
+        heading: string
+        note: string
+        line1: string
+        line2: string
+        city: string
+        state: string
+        statePh: string
+        zip: string
+      }
+      cta: string
+      saving: string
+      error: string
     }
     // K1 consent page: two checkboxes (E-SIGN, TOS+Privacy) + provider
     // disclosure links. Checkbox labels are legally operative in BOTH
     // languages — see NEEDS LEGAL REVIEW markers at the values.
     consent: {
-      title: string; sub: string
+      title: string
+      sub: string
       esign: { pre: string; link: string; post: string }
       policies: { pre: string; termsLink: string; and: string; privacyLink: string; post: string }
       providers: { intro: string; stripeLink: string; bridgeLink: string }
-      cta: string; saving: string; error: string; stale: string
+      cta: string
+      saving: string
+      error: string
+      stale: string
     }
-    kyc: { title: string; body: string; dataNotice: string; cta: string; starting: string; error: string }
+    kyc: {
+      title: string
+      body: string
+      dataNotice: string
+      cta: string
+      starting: string
+      error: string
+    }
     pending: { title: string; body: string; autoNote: string }
     rejected: {
-      title: string; body: string; reasonLabel: string
-      retryCta: string; retrying: string; retryError: string
-      exhaustedBody: string; supportCta: string
+      title: string
+      body: string
+      reasonLabel: string
+      retryCta: string
+      retrying: string
+      retryError: string
+      exhaustedBody: string
+      supportCta: string
     }
     dashboard: { title: string; body: string; recipientsCta: string; historyCta: string }
   }
@@ -356,7 +426,12 @@ export type Translations = {
     dwell: string
     threshold: string
     holdLabel: string
-    holdReasons: { fx_drift: string; payability: string; submit_error: string; velocity_review: string }
+    holdReasons: {
+      fx_drift: string
+      payability: string
+      submit_error: string
+      velocity_review: string
+    }
     waitClaimed: string
     waitUncleared: string
     waitCancelRequested: string
@@ -478,7 +553,10 @@ const en: Translations = {
   nav: { remit: 'Remittances', how: 'How it works', cta: 'Join the Waitlist', signIn: 'Sign in' },
   hero: {
     eyebrow: 'Remittances + credit building',
-    h1: [['Send', 'money.'], ['Build', 'credit.']],
+    h1: [
+      ['Send', 'money.'],
+      ['Build', 'credit.'],
+    ],
     sub: 'Send money the way you already do, and build real U.S. credit with every transfer. All in one app.',
     cta1: 'Join the Waitlist',
     cta2: 'See how it works',
@@ -487,11 +565,18 @@ const en: Translations = {
     notes: ['Real exchange rate', 'Built for newcomers'],
   },
   phone: {
-    greeting: 'Hi,', name: 'María',
-    scoreLabel: 'Your credit score', delta: '▲ +132',
-    remitLabel: 'Your remittances', remitNote: 'Each one counts ↑',
-    reported: 'Reported on time · bureau', onTime: '✓ on time',
-    sends: [{ who: 'To Rosa Santos', amt: '−$200' }, { who: 'To Miguel Ángel', amt: '−$150' }],
+    greeting: 'Hi,',
+    name: 'María',
+    scoreLabel: 'Your credit score',
+    delta: '▲ +132',
+    remitLabel: 'Your remittances',
+    remitNote: 'Each one counts ↑',
+    reported: 'Reported on time · bureau',
+    onTime: '✓ on time',
+    sends: [
+      { who: 'To Rosa Santos', amt: '−$200' },
+      { who: 'To Miguel Ángel', amt: '−$150' },
+    ],
     cta: 'Send money',
   },
   remit: {
@@ -500,7 +585,8 @@ const en: Translations = {
     sub: 'Secure international transfers in minutes. Every time you send using your Puente account, your U.S. credit history grows.',
     calc: {
       to: 'Sending to',
-      you: 'You send', they: 'They receive',
+      you: 'You send',
+      they: 'They receive',
       rate: '1 USD = 17.20 MXN',
       cta: 'Sign Up',
     },
@@ -509,11 +595,21 @@ const en: Translations = {
     eyebrow: 'How it works',
     h2: [['Build credit ', 'without thinking about it.']],
     sub: 'Send money and watch your credit score grow. For only $5/month, each payment builds your U.S. credit history, automatically. No credit card required.',
-    heroAlt: 'The Puente app on a desktop screen, showing a send-money form next to a credit score of 712 rising over time.',
+    heroAlt:
+      'The Puente app on a desktop screen, showing a send-money form next to a credit score of 712 rising over time.',
     steps: [
-      { t: 'Send money home', d: 'Send like you always do. Transparent pricing. International transfers in minutes.' },
-      { t: 'We report your on-time payments', d: 'Puente reports payments on your account to the 3 major U.S. credit bureaus.' },
-      { t: 'Your credit history grows', d: 'Monitor your credit score growth in real time, all from the app. No credit card or confusing terms. Just credit building.' },
+      {
+        t: 'Send money home',
+        d: 'Send like you always do. Transparent pricing. International transfers in minutes.',
+      },
+      {
+        t: 'We report your on-time payments',
+        d: 'Puente reports payments on your account to the 3 major U.S. credit bureaus.',
+      },
+      {
+        t: 'Your credit history grows',
+        d: 'Monitor your credit score growth in real time, all from the app. No credit card or confusing terms. Just credit building.',
+      },
     ],
     privacyTitle: 'Commitment to privacy',
     privacy: 'Puente keeps sensitive personal information and account data protected and private.',
@@ -525,9 +621,27 @@ const en: Translations = {
     eyebrow: 'Get started',
     h2: 'Sign up today',
     cta: 'Join the Waitlist',
-    points: ['Get more out of your remittances', 'Start building U.S. credit from your first transfer', 'Build a better financial future'],
-    f: { name: 'Name', phone: 'Phone number or WhatsApp', country: 'Where do you send money?', referralSource: 'How did you hear about us?', referralSourceOther: 'Please specify' },
-    referralSourceOptions: ['Facebook', 'Instagram', 'Friend or Family', 'Google Search', 'In Person', 'Physical Advertisement', 'Other'],
+    points: [
+      'Get more out of your remittances',
+      'Start building U.S. credit from your first transfer',
+      'Build a better financial future',
+    ],
+    f: {
+      name: 'Name',
+      phone: 'Phone number or WhatsApp',
+      country: 'Where do you send money?',
+      referralSource: 'How did you hear about us?',
+      referralSourceOther: 'Please specify',
+    },
+    referralSourceOptions: [
+      'Facebook',
+      'Instagram',
+      'Friend or Family',
+      'Google Search',
+      'In Person',
+      'Physical Advertisement',
+      'Other',
+    ],
     countries: ['Mexico', 'Other'],
     ph: { name: 'María Santos', phone: '(555) 123-4567', referralSourceOther: 'Tell us more' },
     select: 'Select…',
@@ -537,14 +651,12 @@ const en: Translations = {
       title: "You're on the list!",
       body: "We'll reach out the moment Puente is ready. Want to move up the line?",
       refLabel: 'Share your invite link and skip ahead',
-      copy: 'Copy', copied: 'Copied!',
+      copy: 'Copy',
+      copied: 'Copied!',
       wa: 'Share on WhatsApp',
       waText: 'I just joined the Puente waitlist. Send money home and build credit. Join me:',
     },
-    steps: [
-      { h: 'Tell us about yourself' },
-      { h: 'Just a couple more questions' },
-    ],
+    steps: [{ h: 'Tell us about yourself' }, { h: 'Just a couple more questions' }],
     next: 'Next',
     back: 'Back',
     errors: {
@@ -562,10 +674,13 @@ const en: Translations = {
         ' (Bridge, NMLS #2450917) and ',
         ' (Stripe).',
       ],
-      fincen: 'In the United States, Puente is registered with the U.S. Department of the Treasury Financial Crimes Enforcement Network (FinCEN) as a Money Services Business (BSA ID: 31000334222151).',
+      fincen:
+        'In the United States, Puente is registered with the U.S. Department of the Treasury Financial Crimes Enforcement Network (FinCEN) as a Money Services Business (BSA ID: 31000334222151).',
       fdic: 'Funds transferred through the Service are not deposits and are not insured by the FDIC.',
-      creditRepair: 'Puente is not a credit repair organization. Puente does not remove negative or inaccurate information from credit reports.',
-      results: 'Building credit takes time, and results are not guaranteed. Any credit scores, ranges, or improvements shown on this page are illustrative examples only. They do not reflect the actual experience of any specific customer and are not a promise, estimate, or guarantee of the results you will achieve. Individual results vary and depend on many factors, including your overall credit activity with Puente and with other creditors.',
+      creditRepair:
+        'Puente is not a credit repair organization. Puente does not remove negative or inaccurate information from credit reports.',
+      results:
+        'Building credit takes time, and results are not guaranteed. Any credit scores, ranges, or improvements shown on this page are illustrative examples only. They do not reflect the actual experience of any specific customer and are not a promise, estimate, or guarantee of the results you will achieve. Individual results vary and depend on many factors, including your overall credit activity with Puente and with other creditors.',
     },
     rights: '© 2026 Puente Financial, Inc. All rights reserved.',
   },
@@ -699,7 +814,8 @@ const en: Translations = {
       retryCta: 'Try again',
       retrying: 'Starting…',
       retryError: 'We couldn’t restart verification. Please try again.',
-      exhaustedBody: 'We weren’t able to verify your identity after several tries. Contact us and we’ll help you sort it out.',
+      exhaustedBody:
+        'We weren’t able to verify your identity after several tries. Contact us and we’ll help you sort it out.',
       supportCta: 'Contact support',
     },
     dashboard: {
@@ -738,7 +854,8 @@ const en: Translations = {
     labelPh: 'BBVA account',
     clabe: 'CLABE (18 digits)',
     clabeConfirm: 'Confirm CLABE',
-    clabeNote: 'Ask your recipient for their 18-digit CLABE. Money sent to a wrong but valid account number can’t be recovered.',
+    clabeNote:
+      'Ask your recipient for their 18-digit CLABE. Money sent to a wrong but valid account number can’t be recovered.',
     clabeMismatch: 'The CLABE numbers don’t match.',
     accountEnding: '····{last4}',
     archive: 'Archive',
@@ -821,7 +938,8 @@ const en: Translations = {
         paying: 'Sending payment…',
         // NOT "paid": the ACH debit was submitted, settlement is days away.
         submittedTitle: 'Payment submitted',
-        submittedBody: 'We are confirming your payment with your bank. This usually takes a moment.',
+        submittedBody:
+          'We are confirming your payment with your bank. This usually takes a moment.',
         sessionError: 'We could not load the payment form. Please try again.',
         bankNote:
           "If you don't see your bank, we can't accept payments from it yet. You haven't been charged.",
@@ -941,19 +1059,22 @@ const en: Translations = {
       forbidden: 'You don’t have access to do that.',
       not_found: 'We couldn’t find that. Refresh and try again.',
       kyc_required: 'You’ll need to verify your identity before sending money.',
-      limit_exceeded: 'This goes over your sending limit right now. Try a smaller amount or come back later.',
+      limit_exceeded:
+        'This goes over your sending limit right now. Try a smaller amount or come back later.',
       transfer_in_progress:
         'You already have a transfer in progress. You can send again once it clears, usually within a few business days.',
       quote_expired: 'This rate expired. Get a new quote to continue.',
       transfer_not_cancelable: 'This transfer can no longer be canceled.',
       conflict: 'This can’t be updated right now. Refresh and try again.',
-      idempotency_conflict: 'We’re still processing your last request. Give it a moment before trying again.',
+      idempotency_conflict:
+        'We’re still processing your last request. Give it a moment before trying again.',
       not_configured: 'Sending money isn’t available yet. We’ll let you know the moment it’s live.',
       funding_unsupported:
         'Our payment provider can’t accept payments from your location right now, so this transfer can’t be completed. You haven’t been charged.',
       rate_limited: 'Too many attempts. Please wait a moment and try again.',
       rate_unavailable: 'We couldn’t get an exchange rate right now. Try again in a moment.',
-      provider_rejected: 'Our payout partner couldn’t accept this. Check the recipient’s account details.',
+      provider_rejected:
+        'Our payout partner couldn’t accept this. Check the recipient’s account details.',
       provider_unavailable: 'We couldn’t reach our payout partner. Try again in a moment.',
       internal_error: 'Something went wrong on our end. Please try again.',
       cancellation_requires_support: 'Please contact support to cancel this transfer.',
@@ -1036,8 +1157,7 @@ const en: Translations = {
           cleared: 'Deposit recorded — receivable settled and float topped up.',
           cleared_skipped:
             'Already recorded — the top-up re-posted as a no-op; nothing double-counted.',
-          attached:
-            'Instructions attached — the sender’s pay step now shows the coordinates.',
+          attached: 'Instructions attached — the sender’s pay step now shows the coordinates.',
         },
       },
     },
@@ -1056,7 +1176,8 @@ const en: Translations = {
     refundMoving: 'refund in motion',
     openTransfers: 'Open transfers',
     openTransfersEmpty: 'No open transfers.',
-    openTransfersNote: 'Dwell over threshold is a marker, not a verdict \u2014 check the wait annotations; Sentry pages own stuck calls.',
+    openTransfersNote:
+      'Dwell over threshold is a marker, not a verdict \u2014 check the wait annotations; Sentry pages own stuck calls.',
     dwell: 'Dwell',
     threshold: 'Threshold',
     holdLabel: 'Hold',
@@ -1111,23 +1232,42 @@ const en: Translations = {
 }
 
 const es: Translations = {
-  nav: { remit: 'Remesas', how: 'Cómo funciona', cta: 'Únete a la Lista de Espera', signIn: 'Iniciar sesión' },
+  nav: {
+    remit: 'Remesas',
+    how: 'Cómo funciona',
+    cta: 'Únete a la Lista de Espera',
+    signIn: 'Iniciar sesión',
+  },
   hero: {
     eyebrow: 'Remesas + historial de crédito',
-    h1: [['Envía', 'dinero.'], ['Crea', 'crédito.']],
+    h1: [
+      ['Envía', 'dinero.'],
+      ['Crea', 'crédito.'],
+    ],
     sub: 'Envía dinero como ya lo haces, y construye crédito real en EE. UU. con cada transferencia. Todo en una sola app.',
     cta1: 'Únete a la Lista de Espera',
     cta2: 'Mira cómo funciona',
     elig: 'Funciona con tu ITIN o SSN.',
-    pills: ['Reporta a los 3 burós de crédito', 'Configúralo en minutos', 'No necesitas tarjeta de crédito'],
+    pills: [
+      'Reporta a los 3 burós de crédito',
+      'Configúralo en minutos',
+      'No necesitas tarjeta de crédito',
+    ],
     notes: ['Tipo de cambio real', 'Hecha para ti'],
   },
   phone: {
-    greeting: 'Buenas,', name: 'María',
-    scoreLabel: 'Tu puntaje de crédito', delta: '▲ +132',
-    remitLabel: 'Tus remesas', remitNote: 'Cada una suma ↑',
-    reported: 'Reportada a tiempo · buró', onTime: '✓ a tiempo',
-    sends: [{ who: 'Para Rosa Santos', amt: '−$200' }, { who: 'Para Miguel Ángel', amt: '−$150' }],
+    greeting: 'Buenas,',
+    name: 'María',
+    scoreLabel: 'Tu puntaje de crédito',
+    delta: '▲ +132',
+    remitLabel: 'Tus remesas',
+    remitNote: 'Cada una suma ↑',
+    reported: 'Reportada a tiempo · buró',
+    onTime: '✓ a tiempo',
+    sends: [
+      { who: 'Para Rosa Santos', amt: '−$200' },
+      { who: 'Para Miguel Ángel', amt: '−$150' },
+    ],
     cta: 'Enviar dinero',
   },
   remit: {
@@ -1136,7 +1276,8 @@ const es: Translations = {
     sub: 'Transferencias internacionales seguras en minutos. Cada vez que envías usando tu cuenta de Puente, tu historial crediticio en EE. UU. crece.',
     calc: {
       to: 'Enviar a',
-      you: 'Tú envías', they: 'Ellos reciben',
+      you: 'Tú envías',
+      they: 'Ellos reciben',
       rate: '1 USD = 17.20 MXN',
       cta: 'Regístrate',
     },
@@ -1145,11 +1286,21 @@ const es: Translations = {
     eyebrow: 'Cómo funciona',
     h2: [['Crea crédito ', 'sin siquiera pensarlo.']],
     sub: 'Envía dinero y mira crecer tu puntaje de crédito. Por solo $5/mes, cada pago construye tu historial crediticio en EE. UU., automáticamente. No requiere tarjeta de crédito.',
-    heroAlt: 'La app de Puente en una pantalla de escritorio, con el formulario para enviar dinero junto a un puntaje de crédito de 712 que sube con el tiempo.',
+    heroAlt:
+      'La app de Puente en una pantalla de escritorio, con el formulario para enviar dinero junto a un puntaje de crédito de 712 que sube con el tiempo.',
     steps: [
-      { t: 'Envía dinero a casa', d: 'Envía como siempre. Precios transparentes. Transferencias internacionales en minutos.' },
-      { t: 'Reportamos tus pagos a tiempo', d: 'Puente reporta los pagos de tu cuenta a los 3 principales burós de crédito de EE. UU.' },
-      { t: 'Tu historial de crédito crece', d: 'Monitorea el crecimiento de tu puntaje de crédito en tiempo real, todo desde la app. Sin tarjeta de crédito ni términos confusos. Solo construcción de crédito.' },
+      {
+        t: 'Envía dinero a casa',
+        d: 'Envía como siempre. Precios transparentes. Transferencias internacionales en minutos.',
+      },
+      {
+        t: 'Reportamos tus pagos a tiempo',
+        d: 'Puente reporta los pagos de tu cuenta a los 3 principales burós de crédito de EE. UU.',
+      },
+      {
+        t: 'Tu historial de crédito crece',
+        d: 'Monitorea el crecimiento de tu puntaje de crédito en tiempo real, todo desde la app. Sin tarjeta de crédito ni términos confusos. Solo construcción de crédito.',
+      },
     ],
     privacyTitle: 'Compromiso con la privacidad',
     privacy: 'Puente mantiene tu información personal y datos de cuenta protegidos y privados.',
@@ -1161,9 +1312,27 @@ const es: Translations = {
     eyebrow: 'Empieza ya',
     h2: 'Regístrate hoy',
     cta: 'Únete a la Lista de Espera',
-    points: ['Aprovecha más tus remesas', 'Empieza a crear crédito desde tu primera transferencia', 'Construye un mejor futuro financiero'],
-    f: { name: 'Nombre', phone: 'Teléfono o WhatsApp', country: '¿A dónde envías dinero?', referralSource: '¿Cómo te enteraste de nosotros?', referralSourceOther: 'Por favor especifica' },
-    referralSourceOptions: ['Facebook', 'Instagram', 'Amigo o familiar', 'Búsqueda en Google', 'En persona', 'Publicidad física', 'Otro'],
+    points: [
+      'Aprovecha más tus remesas',
+      'Empieza a crear crédito desde tu primera transferencia',
+      'Construye un mejor futuro financiero',
+    ],
+    f: {
+      name: 'Nombre',
+      phone: 'Teléfono o WhatsApp',
+      country: '¿A dónde envías dinero?',
+      referralSource: '¿Cómo te enteraste de nosotros?',
+      referralSourceOther: 'Por favor especifica',
+    },
+    referralSourceOptions: [
+      'Facebook',
+      'Instagram',
+      'Amigo o familiar',
+      'Búsqueda en Google',
+      'En persona',
+      'Publicidad física',
+      'Otro',
+    ],
     countries: ['México', 'Otro'],
     ph: { name: 'María Santos', phone: '(555) 123-4567', referralSourceOther: 'Cuéntanos más' },
     select: 'Selecciona…',
@@ -1173,14 +1342,12 @@ const es: Translations = {
       title: '¡Estás en la lista!',
       body: 'Te avisaremos en cuanto Puente esté listo. ¿Quieres adelantarte en la fila?',
       refLabel: 'Comparte tu enlace de invitación y avanza',
-      copy: 'Copiar', copied: '¡Copiado!',
+      copy: 'Copiar',
+      copied: '¡Copiado!',
       wa: 'Compartir por WhatsApp',
       waText: 'Me uní a la lista de Puente. Envía dinero a casa y crea crédito. Únete:',
     },
-    steps: [
-      { h: 'Cuéntanos sobre ti' },
-      { h: 'Un par de preguntas más' },
-    ],
+    steps: [{ h: 'Cuéntanos sobre ti' }, { h: 'Un par de preguntas más' }],
     next: 'Siguiente',
     back: 'Atrás',
     errors: {
@@ -1198,10 +1365,13 @@ const es: Translations = {
         ' (Bridge, NMLS #2450917) y ',
         ' (Stripe).',
       ],
-      fincen: 'En los Estados Unidos, Puente está registrada ante la Red de Control de Delitos Financieros del Departamento del Tesoro de EE. UU. (FinCEN) como un Negocio de Servicios Monetarios (BSA ID: 31000334222151).',
+      fincen:
+        'En los Estados Unidos, Puente está registrada ante la Red de Control de Delitos Financieros del Departamento del Tesoro de EE. UU. (FinCEN) como un Negocio de Servicios Monetarios (BSA ID: 31000334222151).',
       fdic: 'Los fondos transferidos a través del Servicio no son depósitos y no están asegurados por la FDIC.',
-      creditRepair: 'Puente no es una organización de reparación de crédito. Puente no elimina información negativa o inexacta de los reportes de crédito.',
-      results: 'Construir crédito toma tiempo y los resultados no están garantizados. Los puntajes, rangos o mejoras de crédito que se muestran en esta página son únicamente ejemplos ilustrativos. No reflejan la experiencia real de ningún cliente en particular y no son una promesa, estimación ni garantía de los resultados que usted obtendrá. Los resultados individuales varían y dependen de muchos factores, incluida su actividad crediticia general con Puente y con otros acreedores.',
+      creditRepair:
+        'Puente no es una organización de reparación de crédito. Puente no elimina información negativa o inexacta de los reportes de crédito.',
+      results:
+        'Construir crédito toma tiempo y los resultados no están garantizados. Los puntajes, rangos o mejoras de crédito que se muestran en esta página son únicamente ejemplos ilustrativos. No reflejan la experiencia real de ningún cliente en particular y no son una promesa, estimación ni garantía de los resultados que usted obtendrá. Los resultados individuales varían y dependen de muchos factores, incluida su actividad crediticia general con Puente y con otros acreedores.',
     },
     rights: '© 2026 Puente Financial, Inc. Todos los derechos reservados.',
   },
@@ -1318,7 +1488,8 @@ const es: Translations = {
       retryCta: 'Intentar de nuevo',
       retrying: 'Iniciando…',
       retryError: 'No pudimos reiniciar la verificación. Inténtalo de nuevo.',
-      exhaustedBody: 'No pudimos verificar tu identidad después de varios intentos. Contáctanos y te ayudaremos a resolverlo.',
+      exhaustedBody:
+        'No pudimos verificar tu identidad después de varios intentos. Contáctanos y te ayudaremos a resolverlo.',
       supportCta: 'Contactar soporte',
     },
     dashboard: {
@@ -1336,7 +1507,8 @@ const es: Translations = {
   recipients: {
     title: 'Tus destinatarios',
     sub: 'Las personas a quienes envías dinero, y dónde les llega.',
-    empty: 'Aún no tienes destinatarios. Agrega a la primera persona a la que quieras enviar dinero.',
+    empty:
+      'Aún no tienes destinatarios. Agrega a la primera persona a la que quieras enviar dinero.',
     addRecipient: 'Agregar destinatario',
     firstName: 'Nombre(s)',
     lastName: 'Apellidos',
@@ -1354,7 +1526,8 @@ const es: Translations = {
     labelPh: 'Cuenta BBVA',
     clabe: 'CLABE (18 dígitos)',
     clabeConfirm: 'Confirma la CLABE',
-    clabeNote: 'Pídele a tu destinatario su CLABE de 18 dígitos. El dinero enviado a una cuenta equivocada pero válida no se puede recuperar.',
+    clabeNote:
+      'Pídele a tu destinatario su CLABE de 18 dígitos. El dinero enviado a una cuenta equivocada pero válida no se puede recuperar.',
     clabeMismatch: 'Las CLABE no coinciden.',
     accountEnding: '····{last4}',
     archive: 'Archivar',
@@ -1530,20 +1703,24 @@ const es: Translations = {
       forbidden: 'No tienes acceso para hacer eso.',
       not_found: 'No encontramos eso. Actualiza e inténtalo de nuevo.',
       kyc_required: 'Necesitas verificar tu identidad antes de enviar dinero.',
-      limit_exceeded: 'Esto supera tu límite de envío por ahora. Prueba con un monto menor o vuelve más tarde.',
+      limit_exceeded:
+        'Esto supera tu límite de envío por ahora. Prueba con un monto menor o vuelve más tarde.',
       transfer_in_progress:
         'Ya tienes una transferencia en curso. Podrás enviar otra cuando se procese tu pago, normalmente en unos días hábiles.',
       quote_expired: 'Este tipo de cambio expiró. Obtén una nueva cotización para continuar.',
       transfer_not_cancelable: 'Esta transferencia ya no se puede cancelar.',
       conflict: 'Esto no se puede actualizar ahora. Actualiza e inténtalo de nuevo.',
-      idempotency_conflict: 'Todavía estamos procesando tu solicitud anterior. Espera un momento antes de intentar de nuevo.',
+      idempotency_conflict:
+        'Todavía estamos procesando tu solicitud anterior. Espera un momento antes de intentar de nuevo.',
       not_configured: 'Enviar dinero aún no está disponible. Te avisaremos en cuanto esté listo.',
       funding_unsupported:
         'Nuestro proveedor de pagos no puede aceptar pagos desde tu ubicación por ahora, así que esta transferencia no se puede completar. No se te ha cobrado.',
       rate_limited: 'Demasiados intentos. Espera un momento e inténtalo de nuevo.',
       rate_unavailable: 'No pudimos obtener el tipo de cambio ahora. Inténtalo en un momento.',
-      provider_rejected: 'Nuestro socio de pagos no pudo aceptar esto. Revisa los datos de la cuenta del destinatario.',
-      provider_unavailable: 'No pudimos conectar con nuestro socio de pagos. Inténtalo en un momento.',
+      provider_rejected:
+        'Nuestro socio de pagos no pudo aceptar esto. Revisa los datos de la cuenta del destinatario.',
+      provider_unavailable:
+        'No pudimos conectar con nuestro socio de pagos. Inténtalo en un momento.',
       internal_error: 'Algo salió mal de nuestro lado. Inténtalo de nuevo.',
       cancellation_requires_support: 'Comunícate con soporte para cancelar esta transferencia.',
       generic: 'Algo salió mal. Inténtalo de nuevo.',
@@ -1576,17 +1753,21 @@ const es: Translations = {
         'Paga al remitente este monto de nuevo como pago de correcci\u00f3n \u2014 el destinatario conserva la entrega.',
       settleNote:
         'Una ejecuci\u00f3n anterior ya desembols\u00f3 este reembolso; confirmar solo asienta el registro \u2014 no se mueve dinero.',
-      denyEvidenceLabel: 'Hora del dep\u00f3sito seg\u00fan el panel de Bridge (ISO 8601 con zona horaria)',
-      denyEvidenceHint: 'Ejemplo: 2026-08-01T15:04:05Z \u2014 la denegaci\u00f3n depende de este valor.',
+      denyEvidenceLabel:
+        'Hora del dep\u00f3sito seg\u00fan el panel de Bridge (ISO 8601 con zona horaria)',
+      denyEvidenceHint:
+        'Ejemplo: 2026-08-01T15:04:05Z \u2014 la denegaci\u00f3n depende de este valor.',
       denyComparedNote:
         'Se compara contra la hora de la solicitud de arriba: deniega solo si la solicitud lleg\u00f3 DESPU\u00c9S del dep\u00f3sito.',
       denyTypoWarning:
         'Cuidado: un valor M\u00c1S TEMPRANO hace m\u00e1s probable una denegaci\u00f3n indebida. Copia el valor del panel exactamente, incluida la zona horaria.',
-      denyInvalidTimestamp: 'Ingresa una marca de tiempo ISO 8601 v\u00e1lida con zona horaria expl\u00edcita.',
+      denyInvalidTimestamp:
+        'Ingresa una marca de tiempo ISO 8601 v\u00e1lida con zona horaria expl\u00edcita.',
       outcomes: {
         refunded: 'Reembolsado \u2014 pago de correcci\u00f3n enviado.',
         denied: 'Denegada \u2014 solicitud cerrada.',
-        already_disbursed: 'Asentado \u2014 una ejecuci\u00f3n anterior ya hab\u00eda pagado; ahora no se movi\u00f3 dinero.',
+        already_disbursed:
+          'Asentado \u2014 una ejecuci\u00f3n anterior ya hab\u00eda pagado; ahora no se movi\u00f3 dinero.',
         already_refunded: 'Ya reembolsado \u2014 solicitud cerrada; ahora no se movi\u00f3 dinero.',
       },
       errors: {
@@ -1595,7 +1776,8 @@ const es: Translations = {
         refund_owed:
           'La solicitud cumpli\u00f3 ambas condiciones de cancelaci\u00f3n \u2014 se debe un reembolso y ninguna herramienta puede denegarla. Reemb\u00f3lsala.',
         evidence_conflict: 'La hora de dep\u00f3sito citada contradice la evidencia registrada:',
-        conflict: 'El tablero est\u00e1 desactualizado \u2014 la transferencia cambi\u00f3. Actualiza y verifica de nuevo.',
+        conflict:
+          'El tablero est\u00e1 desactualizado \u2014 la transferencia cambi\u00f3. Actualiza y verifica de nuevo.',
         not_found: 'Transferencia no encontrada \u2014 actualiza el tablero.',
         validation: 'La solicitud fue rechazada como inv\u00e1lida \u2014 revisa los datos.',
         generic:
@@ -1646,7 +1828,8 @@ const es: Translations = {
     refundMoving: 'reembolso en curso',
     openTransfers: 'Transferencias abiertas',
     openTransfersEmpty: 'No hay transferencias abiertas.',
-    openTransfersNote: 'Superar el umbral es un indicador, no un veredicto \u2014 revisa las anotaciones de espera; las alertas de Sentry deciden qu\u00e9 est\u00e1 atascado.',
+    openTransfersNote:
+      'Superar el umbral es un indicador, no un veredicto \u2014 revisa las anotaciones de espera; las alertas de Sentry deciden qu\u00e9 est\u00e1 atascado.',
     dwell: 'Tiempo en estado',
     threshold: 'Umbral',
     holdLabel: 'Retenci\u00f3n',
@@ -1676,7 +1859,8 @@ const es: Translations = {
     transferCountsEmpty: 'A\u00fan no hay transferencias.',
     ledgerBalances: 'Saldos del libro contable',
     ledgerBalancesAsOf: 'al cierre de la \u00faltima conciliaci\u00f3n',
-    ledgerBalancesEmpty: 'A\u00fan no hay corridas de conciliaci\u00f3n \u2014 los saldos aparecen tras la primera.',
+    ledgerBalancesEmpty:
+      'A\u00fan no hay corridas de conciliaci\u00f3n \u2014 los saldos aparecen tras la primera.',
     reconRuns: 'Corridas de conciliaci\u00f3n',
     reconRunsEmpty: 'A\u00fan no hay corridas registradas.',
     reconStatus: { pass: 'limpia', findings: 'hallazgos', error: 'error' },
