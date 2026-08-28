@@ -485,7 +485,12 @@ function OnrampWidget({
       .createSession({ clientSecret })
       .addEventListener('onramp_session_updated', (event) => {
         if (settled) return
-        const status = event.payload.status
+        // The event envelope moved between SDK typings (0.0.2: payload IS the
+        // session; 1.1.3: payload.session nests it) and the widget script is
+        // evergreen from Stripe's CDN — read both shapes so a server-side
+        // envelope change can't silently kill the listener.
+        const payload = event.payload as { status?: string; session?: { status?: string } }
+        const status = payload.session?.status ?? payload.status
         if (status === 'fulfillment_processing' || status === 'fulfillment_complete') {
           settled = true
           handlersRef.current.onPaid()
