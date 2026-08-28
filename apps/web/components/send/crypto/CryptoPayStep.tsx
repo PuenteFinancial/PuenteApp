@@ -25,6 +25,7 @@ import {
   type KycFormMode,
   type KycFormValues,
 } from '@/lib/cryptoPayStep'
+import { KYC_NEXT_COOKIE } from '@/lib/kycReturn'
 import KycForm from './KycForm'
 import PayIntro from './PayIntro'
 import BridgeKycCard from './BridgeKycCard'
@@ -38,8 +39,6 @@ import SdkElementHost from './SdkElementHost'
 // poll re-renders the parent but React preserves this subtree, and the two
 // live SDK surfaces (authenticate modal, payment element) are mounted by
 // element identity in SdkElementHost — never remounted mid-flow.
-
-const KYC_NEXT_COOKIE = 'kyc_next'
 
 function readVerifications(body: unknown): CryptoVerification[] {
   if (typeof body !== 'object' || body === null) return []
