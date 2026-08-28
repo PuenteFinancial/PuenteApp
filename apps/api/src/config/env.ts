@@ -96,7 +96,11 @@ const envSchema = z.object({
   // operator asserts it landed, so its gate is OPS_ADMIN_USER_IDS (checked by
   // ManualFundingProcessor.isConfigured) rather than a key. Prod stays 'mock'
   // (and therefore inert — see the mock secret note) until Joshua flips Doppler.
-  FUNDING_PROCESSOR: z.enum(['mock', 'stripe', 'manual', 'stripe_onramp']).default('mock'),
+  // 'stripe_crypto' (K4, KYC rehaul): the embedded-components onramp — same
+  // webhook/session machinery as stripe_onramp, but sessions are created at
+  // the PAY STEP (deferred initiation: the SDK must mint a payment token
+  // first), authenticated per-user via Link OAuth.
+  FUNDING_PROCESSOR: z.enum(['mock', 'stripe', 'manual', 'stripe_onramp', 'stripe_crypto']).default('mock'),
   // How long a CONFIRMED transfer may sit in PENDING_PAYMENT under the manual
   // processor before the reconcile sweep declares it abandoned. Webhook-driven
   // processors keep the 30-minute rule (payment either happened or it didn't);
@@ -354,6 +358,27 @@ export const envSchemaWithRules = envSchema.superRefine((value, ctx) => {
           code: z.ZodIssueCode.custom,
           path: [key],
           message: `${key} is required when FUNDING_PROCESSOR=stripe_onramp`,
+        })
+      }
+    }
+  }
+  // The embedded-components rail (K4) needs everything the widget rail needs
+  // PLUS the Link OAuth pair — sessions are minted under the user's OAuth
+  // token, so a selection without the pair could never create one.
+  if (value.FUNDING_PROCESSOR === 'stripe_crypto') {
+    for (const key of [
+      'STRIPE_SECRET_KEY',
+      'STRIPE_WEBHOOK_SECRET',
+      'STRIPE_PUBLISHABLE_KEY',
+      'ONRAMP_DESTINATION_ADDRESS',
+      'STRIPE_CRYPTO_OAUTH_CLIENT_ID',
+      'STRIPE_CRYPTO_OAUTH_CLIENT_SECRET',
+    ] as const) {
+      if (!value[key]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is required when FUNDING_PROCESSOR=stripe_crypto`,
         })
       }
     }

@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 process.env.STRIPE_SECRET_KEY = 'sk_test_platform'
 process.env.STRIPE_CRYPTO_OAUTH_CLIENT_ID = 'lwlpk_test_client'
 process.env.STRIPE_CRYPTO_OAUTH_CLIENT_SECRET = 'lwlsk_test_secret'
+process.env.ONRAMP_DESTINATION_ADDRESS = '0x' + 'a'.repeat(40)
 
 const from = vi.fn()
 vi.mock('../services/supabase.js', () => ({
@@ -21,6 +22,8 @@ const {
   mintAccessToken,
   getCryptoCustomer,
   getOnrampQuote,
+  createOnrampSession,
+  checkoutOnrampSession,
   isStripeCryptoConfigured,
   NoStoredTokenError,
   StripeCryptoApiError,
@@ -215,6 +218,82 @@ describe('getCryptoCustomer', () => {
     expect((err as InstanceType<typeof StripeCryptoApiError>).code).toBe('invalid_token')
     // The body must not survive serialization — it can echo request context
     expect(JSON.stringify(err)).not.toContain('invalid_token')
+  })
+})
+
+describe('createOnrampSession', () => {
+  const input = {
+    transferId: 'transfer-1',
+    cryptoCustomerId: 'crc_1',
+    paymentTokenId: 'cpt_1',
+    destinationAmountUsd: '25.00',
+    clientIp: '203.0.113.7',
+    accessToken: 'liwltoken_x',
+  }
+
+  it('pins everything the sender must not control server-side', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { id: 'cos_1', status: 'initialized' }))
+
+    const session = await createOnrampSession(input)
+
+    expect(session).toEqual({ id: 'cos_1', status: 'initialized' })
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.stripe.test/v1/crypto/onramp_sessions')
+    expect(init.headers['Stripe-OAuth-Token']).toBe('liwltoken_x')
+    expect(init.headers['Stripe-Version']).toBe('2026-05-27.preview;crypto_onramp_beta=v2')
+    // Attempt-scoped dedup: same transfer + same payment token = same session
+    expect(init.headers['Idempotency-Key']).toBe('funding_init_transfer-1_cpt_1')
+    const params = new URLSearchParams(init.body)
+    expect(params.get('ui_mode')).toBe('headless')
+    expect(params.get('crypto_customer_id')).toBe('crc_1')
+    expect(params.get('payment_token')).toBe('cpt_1')
+    expect(params.get('destination_amount')).toBe('25.00')
+    expect(params.get('destination_network')).toBe('base')
+    expect(params.get('wallet_address')).toBe('0x' + 'a'.repeat(40))
+    expect(params.get('customer_ip_address')).toBe('203.0.113.7')
+    expect(params.get('metadata[transfer_id]')).toBe('transfer-1')
+  })
+
+  it('refuses a session Stripe returns without an id', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { status: 'initialized' }))
+    await expect(createOnrampSession(input)).rejects.toThrow(StripeCryptoApiError)
+  })
+})
+
+describe('checkoutOnrampSession', () => {
+  it('card checkout sends no mandate body', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { client_secret: 'cos_secret_x' }))
+
+    const result = await checkoutOnrampSession({ sessionId: 'cos_1', accessToken: 'liwltoken_x' })
+
+    expect(result).toEqual({ clientSecret: 'cos_secret_x' })
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.stripe.test/v1/crypto/onramp_sessions/cos_1/checkout')
+    expect(init.method).toBe('POST')
+    expect(init.body).toBeUndefined()
+  })
+
+  it('ACH checkout carries the online mandate acceptance evidence', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { client_secret: 'cos_secret_x' }))
+
+    await checkoutOnrampSession({
+      sessionId: 'cos_1',
+      accessToken: 'liwltoken_x',
+      achMandate: { clientIp: '203.0.113.7', userAgent: 'test-browser' },
+    })
+
+    const [, init] = fetchMock.mock.calls[0]!
+    const params = new URLSearchParams(init.body)
+    expect(params.get('mandate_data[customer_acceptance][type]')).toBe('online')
+    expect(params.get('mandate_data[customer_acceptance][online][ip_address]')).toBe('203.0.113.7')
+    expect(params.get('mandate_data[customer_acceptance][online][user_agent]')).toBe('test-browser')
+  })
+
+  it('refuses a checkout response without a client_secret', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, {}))
+    await expect(
+      checkoutOnrampSession({ sessionId: 'cos_1', accessToken: 'liwltoken_x' }),
+    ).rejects.toThrow(StripeCryptoApiError)
   })
 })
 

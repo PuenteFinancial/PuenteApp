@@ -17,7 +17,26 @@ const service = {
   cacheKycStatus: vi.fn(),
   getOnrampQuote: vi.fn(),
   getTransactionLimits: vi.fn(),
+  createOnrampSession: vi.fn(),
+  checkoutOnrampSession: vi.fn(),
 }
+
+// The money routes are live only under a deferred-initiation processor (K4).
+const deferredInitiation = vi.fn(() => true)
+const getPaymentStatus = vi.fn()
+vi.mock('../../services/funding/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/funding/index.js')>()
+  return {
+    ...actual,
+    getFundingProcessor: () => ({
+      provider: 'stripe_crypto',
+      signatureHeader: 'stripe-signature',
+      isConfigured: () => true,
+      deferredInitiation: deferredInitiation(),
+      getPaymentStatus,
+    }),
+  }
+})
 
 vi.mock('../../services/stripe-crypto.js', async () => {
   const actual = await vi.importActual<typeof import('../../services/stripe-crypto.js')>(
@@ -26,6 +45,7 @@ vi.mock('../../services/stripe-crypto.js', async () => {
   return {
     NoStoredTokenError: actual.NoStoredTokenError,
     StripeCryptoApiError: actual.StripeCryptoApiError,
+    KYC_STEP_UP_CODES: actual.KYC_STEP_UP_CODES,
     isStripeCryptoConfigured: () => service.isStripeCryptoConfigured(),
     createOrReuseLinkAuthIntent: (...a: unknown[]) => service.createOrReuseLinkAuthIntent(...a),
     exchangeLinkAuthIntent: (...a: unknown[]) => service.exchangeLinkAuthIntent(...a),
@@ -34,6 +54,8 @@ vi.mock('../../services/stripe-crypto.js', async () => {
     cacheKycStatus: (...a: unknown[]) => service.cacheKycStatus(...a),
     getOnrampQuote: (...a: unknown[]) => service.getOnrampQuote(...a),
     getTransactionLimits: (...a: unknown[]) => service.getTransactionLimits(...a),
+    createOnrampSession: (...a: unknown[]) => service.createOnrampSession(...a),
+    checkoutOnrampSession: (...a: unknown[]) => service.checkoutOnrampSession(...a),
   }
 })
 
@@ -79,6 +101,236 @@ beforeEach(() => {
   service.cacheKycStatus.mockReset()
   service.getOnrampQuote.mockReset()
   service.getTransactionLimits.mockReset()
+  service.createOnrampSession.mockReset()
+  service.checkoutOnrampSession.mockReset()
+  deferredInitiation.mockReset()
+  deferredInitiation.mockReturnValue(true)
+  getPaymentStatus.mockReset()
+})
+
+// ── K4 pay-step money routes ────────────────────────────────────────────────
+
+const TRANSFER_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
+
+const payableTransfer = {
+  id: TRANSFER_ID,
+  state: 'PENDING_PAYMENT',
+  disclosure_accepted_at: '2026-08-28T12:00:00Z',
+  send_amount_minor: 19801,
+  fee_amount_minor: 199,
+  funding_payment_ref: null,
+}
+
+// Two-table dispatch used by the money routes: transfers (guard) + users (crc_).
+function moneyTables(overrides: { transfer?: unknown; user?: unknown } = {}) {
+  const transfer = 'transfer' in overrides ? overrides.transfer : payableTransfer
+  const user = 'user' in overrides ? overrides.user : { stripe_crypto_customer_id: 'crc_1' }
+  const update = vi.fn(() => ({ eq: vi.fn(() => ({ eq: vi.fn(async () => ({ error: null })) })) }))
+  from.mockImplementation((table: string) => {
+    if (table === 'transfers') {
+      return {
+        select: vi.fn(() => ({
+          eq: vi.fn(() => ({
+            eq: vi.fn(() => ({ maybeSingle: vi.fn(async () => ({ data: transfer, error: null })) })),
+          })),
+        })),
+        update,
+      }
+    }
+    return {
+      select: vi.fn(() => ({ eq: vi.fn(() => ({ single: vi.fn(async () => ({ data: user, error: null })) })) })),
+    }
+  })
+  return { update }
+}
+
+describe('POST /v1/crypto/transfers/:id/onramp-session', () => {
+  const post = (app: Awaited<ReturnType<typeof buildApp>>, body: Record<string, unknown> = { paymentTokenId: 'cpt_1' }) =>
+    supertest(app.server)
+      .post(`/v1/crypto/transfers/${TRANSFER_ID}/onramp-session`)
+      .set('Authorization', 'Bearer t')
+      .set('X-Client-Ip', '203.0.113.7')
+      .send(body)
+
+  it('refuses when the active rail does not defer initiation', async () => {
+    deferredInitiation.mockReturnValue(false)
+    const app = await buildApp()
+    const res = await post(app)
+    expect(res.status).toBe(409)
+    expect(service.createOnrampSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('creates the session with server-pinned amount and IP, then stamps the ref', async () => {
+    const { update } = moneyTables()
+    service.mintAccessToken.mockResolvedValue('liwltoken_x')
+    service.createOnrampSession.mockResolvedValue({ id: 'cos_1', status: 'initialized' })
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ sessionId: 'cos_1', status: 'initialized' })
+    expect(service.createOnrampSession).toHaveBeenCalledWith({
+      transferId: TRANSFER_ID,
+      cryptoCustomerId: 'crc_1',
+      paymentTokenId: 'cpt_1',
+      destinationAmountUsd: '200.00',
+      clientIp: '203.0.113.7',
+      accessToken: 'liwltoken_x',
+    })
+    expect(update).toHaveBeenCalledWith({ funding_payment_ref: 'cos_1' })
+    await app.close()
+  })
+
+  it('refuses replacement while a prior session is moving money', async () => {
+    moneyTables({ transfer: { ...payableTransfer, funding_payment_ref: 'cos_old' } })
+    getPaymentStatus.mockResolvedValue({ paymentRef: 'cos_old', status: 'fulfillment_processing' })
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(409)
+    expect(service.createOnrampSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('allows replacement of an abandoned pre-checkout session', async () => {
+    moneyTables({ transfer: { ...payableTransfer, funding_payment_ref: 'cos_old' } })
+    getPaymentStatus.mockResolvedValue({ paymentRef: 'cos_old', status: 'requires_payment' })
+    service.mintAccessToken.mockResolvedValue('liwltoken_x')
+    service.createOnrampSession.mockResolvedValue({ id: 'cos_new', status: 'initialized' })
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body.sessionId).toBe('cos_new')
+    await app.close()
+  })
+
+  it('409s before Stripe when the user has no crypto customer yet', async () => {
+    moneyTables({ user: { stripe_crypto_customer_id: null } })
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(409)
+    expect(service.mintAccessToken).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('maps KYC step-up refusals to 400 kyc_required with the exact Stripe code', async () => {
+    moneyTables()
+    service.mintAccessToken.mockResolvedValue('liwltoken_x')
+    service.createOnrampSession.mockRejectedValue(
+      new StripeCryptoApiError(400, {
+        error: { code: 'crypto_onramp_missing_identity_verification' },
+      }),
+    )
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('kyc_required')
+    expect(res.body.error.details).toEqual([
+      { path: 'kyc', issue: 'crypto_onramp_missing_identity_verification' },
+    ])
+    await app.close()
+  })
+
+  it('maps geo/profile refusals to the stable 403 funding_unsupported', async () => {
+    moneyTables()
+    service.mintAccessToken.mockResolvedValue('liwltoken_x')
+    service.createOnrampSession.mockRejectedValue(
+      new StripeCryptoApiError(400, { error: { code: 'crypto_onramp_unsupportable_customer' } }),
+    )
+    const app = await buildApp()
+
+    const res = await post(app)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('funding_unsupported')
+    await app.close()
+  })
+
+  it('rejects a malformed payment token at the schema', async () => {
+    const app = await buildApp()
+    const res = await post(app, { paymentTokenId: 'tok_not_cpt' })
+    expect(res.status).toBe(400)
+    await app.close()
+  })
+})
+
+describe('POST /v1/crypto/transfers/:id/onramp-checkout', () => {
+  const post = (app: Awaited<ReturnType<typeof buildApp>>, body: Record<string, unknown>) =>
+    supertest(app.server)
+      .post(`/v1/crypto/transfers/${TRANSFER_ID}/onramp-checkout`)
+      .set('Authorization', 'Bearer t')
+      .set('X-Client-Ip', '203.0.113.7')
+      .set('User-Agent', 'test-browser')
+      .send(body)
+
+  it('binds checkout to the CURRENT session — a replaced session id is refused', async () => {
+    moneyTables({ transfer: { ...payableTransfer, funding_payment_ref: 'cos_current' } })
+    const app = await buildApp()
+
+    const res = await post(app, { sessionId: 'cos_stale', paymentMethodType: 'card' })
+
+    expect(res.status).toBe(409)
+    expect(service.checkoutOnrampSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('card checkout returns the client_secret with no mandate', async () => {
+    moneyTables({ transfer: { ...payableTransfer, funding_payment_ref: 'cos_1' } })
+    service.mintAccessToken.mockResolvedValue('liwltoken_x')
+    service.checkoutOnrampSession.mockResolvedValue({ clientSecret: 'secret_x' })
+    const app = await buildApp()
+
+    const res = await post(app, { sessionId: 'cos_1', paymentMethodType: 'card' })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ clientSecret: 'secret_x' })
+    expect(service.checkoutOnrampSession).toHaveBeenCalledWith({
+      sessionId: 'cos_1',
+      accessToken: 'liwltoken_x',
+    })
+    await app.close()
+  })
+
+  it('ACH checkout carries the mandate evidence from the accepting browser', async () => {
+    moneyTables({ transfer: { ...payableTransfer, funding_payment_ref: 'cos_1' } })
+    service.mintAccessToken.mockResolvedValue('liwltoken_x')
+    service.checkoutOnrampSession.mockResolvedValue({ clientSecret: 'secret_x' })
+    const app = await buildApp()
+
+    const res = await post(app, { sessionId: 'cos_1', paymentMethodType: 'us_bank_account' })
+
+    expect(res.status).toBe(200)
+    expect(service.checkoutOnrampSession).toHaveBeenCalledWith({
+      sessionId: 'cos_1',
+      accessToken: 'liwltoken_x',
+      achMandate: { clientIp: '203.0.113.7', userAgent: 'test-browser' },
+    })
+    await app.close()
+  })
+
+  it('an unusable session (other 4xx) maps to 409 — start a fresh attempt', async () => {
+    moneyTables({ transfer: { ...payableTransfer, funding_payment_ref: 'cos_1' } })
+    service.mintAccessToken.mockResolvedValue('liwltoken_x')
+    service.checkoutOnrampSession.mockRejectedValue(
+      new StripeCryptoApiError(400, { error: { code: 'crypto_onramp_quote_expired' } }),
+    )
+    const app = await buildApp()
+
+    const res = await post(app, { sessionId: 'cos_1', paymentMethodType: 'card' })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('conflict')
+    await app.close()
+  })
 })
 
 describe('crypto surface configuration gate', () => {

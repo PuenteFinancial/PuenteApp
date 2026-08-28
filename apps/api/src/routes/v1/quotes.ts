@@ -8,7 +8,7 @@ import {
   InvalidBuyRateError,
   QuoteAmountError,
 } from '../../services/quotes.js'
-import { requireApprovedUser } from './recipients.js'
+import { requireOnboardedUser } from './recipients.js'
 import { assessUnclearedCap, UNCLEARED_CAP_MESSAGE } from '../../services/risk.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
@@ -144,7 +144,7 @@ export async function quotesRoute(server: FastifyInstance) {
     async (request, reply) => {
       const userId = request.user!.id
 
-      if (!(await requireApprovedUser(userId, reply))) return
+      if (!(await requireOnboardedUser(userId, reply))) return
 
       // Uncleared-exposure cap (slice-8 O3): one committed send in flight per
       // user until its ACH pull settles. Checked here purely for UX — the

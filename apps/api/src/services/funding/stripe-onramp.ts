@@ -43,7 +43,9 @@ const SESSION_STATUS_MAP = new Map<string, FundingEventType>([
 // Stripe 400 codes from session create that mean "this sender, not us":
 // geo/profile refusal off the customer_ip_address pre-check. Mapped to
 // FundingInitiationError('unsupported') → confirm 403 funding_unsupported.
-const UNSUPPORTED_CODES = new Set([
+// Exported for the embedded rail's pay-step routes (K4), which meet the same
+// refusals at session create and must map them identically.
+export const UNSUPPORTED_CODES: ReadonlySet<string> = new Set([
   'crypto_onramp_unsupportable_customer',
   'crypto_onramp_unsupported_country',
 ])
@@ -125,7 +127,9 @@ export function usdcMicroFromDecimal(value: unknown): number | undefined {
 }
 
 export class StripeOnrampFundingProcessor implements FundingProcessor {
-  readonly provider = 'stripe_onramp'
+  // Widened to string (not the literal) so the embedded-rail subclass (K4)
+  // can carry its own provider name through the inherited machinery.
+  readonly provider: string = 'stripe_onramp'
   readonly signatureHeader = 'stripe-signature'
   // ONLY for webhooks.constructEvent (parse + HMAC + 300s timestamp
   // tolerance, purely local). Every network call in this file is raw fetch.

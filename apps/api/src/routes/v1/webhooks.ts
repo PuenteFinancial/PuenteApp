@@ -4,7 +4,7 @@ import type { FastifyInstance } from 'fastify'
 import type { KycStatus } from '@puente/shared'
 import { env } from '../../config/env.js'
 import { supabaseAdmin } from '../../services/supabase.js'
-import { getFundingProcessor } from '../../services/funding/index.js'
+import { getFundingProcessor, isOnrampSessionRail } from '../../services/funding/index.js'
 import { enqueuePaymentEventProcess } from '../../services/queue.js'
 import { recordEvent, markProcessed } from '../../services/payment-events.js'
 import { actOnRefundTailEvent } from '../../services/refunds.js'
@@ -424,7 +424,7 @@ export async function webhooksRoute(server: FastifyInstance) {
         // catch-up (fulfillment_complete can beat fulfillment_processing) and
         // the float top-up for the USDC Stripe just delivered to the treasury.
         try {
-          if (processor.provider === 'stripe_onramp') {
+          if (isOnrampSessionRail(processor.provider)) {
             const settled = await applyOnrampSettlement({
               transferId,
               paymentRef: event.paymentRef,
@@ -547,7 +547,7 @@ export async function webhooksRoute(server: FastifyInstance) {
       // say-so alone.
       let result: ApplyFundingOutcome
       try {
-        if (event.type === 'funding_succeeded' && processor.provider === 'stripe_onramp') {
+        if (event.type === 'funding_succeeded' && isOnrampSessionRail(processor.provider)) {
           const funded = await applyOnrampFunded({
             transferId,
             paymentRef: event.paymentRef,

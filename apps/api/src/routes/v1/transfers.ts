@@ -23,7 +23,7 @@ import {
   recordCancellationRequest,
   type CancellationRequestState,
 } from '../../services/cancellations.js'
-import { requireApprovedUser } from './recipients.js'
+import { requireOnboardedUser } from './recipients.js'
 import {
   assessTransferRisk,
   assessUnclearedCap,
@@ -298,7 +298,7 @@ export async function transfersRoute(server: FastifyInstance) {
     async (request, reply) => {
       const userId = request.user!.id
 
-      if (!(await requireApprovedUser(userId, reply))) return
+      if (!(await requireOnboardedUser(userId, reply))) return
 
       if (!fundingConfigured()) {
         return sendError(reply, 503, 'not_configured', 'Funding is not available yet')
@@ -440,7 +440,7 @@ export async function transfersRoute(server: FastifyInstance) {
     async (request, reply) => {
       const userId = request.user!.id
 
-      const approvedUser = await requireApprovedUser(userId, reply)
+      const approvedUser = await requireOnboardedUser(userId, reply)
       if (!approvedUser) return
 
       if (!fundingConfigured()) {
@@ -486,7 +486,15 @@ export async function transfersRoute(server: FastifyInstance) {
         return sendError(reply, 409, 'quote_expired', 'The quoted rate has expired')
       }
 
-      if (transfer.disclosure_accepted_at && transfer.funding_payment_ref) {
+      // Deferred processors (stripe_crypto, K4) never mint a ref at confirm,
+      // so acceptance ALONE is confirmed-ness for them; for everyone else the
+      // ref still distinguishes "accepted but initiation failed — retry" from
+      // "fully confirmed".
+      const processor = getFundingProcessor()
+      if (
+        transfer.disclosure_accepted_at &&
+        (transfer.funding_payment_ref || processor.deferredInitiation)
+      ) {
         return sendError(reply, 409, 'conflict', 'Transfer is already confirmed')
       }
 
@@ -545,7 +553,7 @@ export async function transfersRoute(server: FastifyInstance) {
             disclosure_accepted_at: string | null
             funding_payment_ref: string | null
           } | null
-          if (row?.funding_payment_ref) {
+          if (row?.funding_payment_ref || (processor.deferredInitiation && row?.disclosure_accepted_at)) {
             return sendError(reply, 409, 'conflict', 'Transfer is already confirmed')
           }
           acceptedAt = row?.disclosure_accepted_at ?? null
@@ -567,9 +575,22 @@ export async function transfersRoute(server: FastifyInstance) {
       const forwardedIp = request.headers['x-client-ip']
       const clientIp = (typeof forwardedIp === 'string' ? forwardedIp : request.ip) || undefined
 
+      // K4: the embedded rail can't create a session yet — the SDK must mint
+      // a payment token first. Confirm's job ends at acceptance; the pay step
+      // creates the session (POST /v1/crypto/transfers/:id/onramp-session),
+      // which is also what first writes funding_payment_ref.
+      if (processor.deferredInitiation) {
+        return {
+          id: transfer.id,
+          state: transfer.state,
+          disclosureAcceptedAt: acceptedAt,
+          funding: { provider: processor.provider, method: 'onramp', clientFields: {} },
+        }
+      }
+
       let funding: FundingInitiation
       try {
-        funding = await getFundingProcessor().initiateFunding({
+        funding = await processor.initiateFunding({
           transferId: transfer.id,
           userId,
           totalAmountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,
@@ -644,7 +665,7 @@ export async function transfersRoute(server: FastifyInstance) {
 
   // POST /transfers/:id/cancel — the sender's Reg E cancellation right. Modeled
   // on /confirm: idempotent, owner-scoped, synchronous (the void is instant).
-  // Deliberately NOT gated on requireApprovedUser or fundingConfigured: canceling
+  // Deliberately NOT gated on requireOnboardedUser or fundingConfigured: canceling
   // is a legal right that must not be blocked by KYC status, and a FUNDED
   // transfer already implies funding was configured; owner-scoping is the
   // authorization. The audit-log entry is automatic (global audit plugin).
@@ -1150,7 +1171,7 @@ export async function transfersRoute(server: FastifyInstance) {
   // poll) and it is never persisted or logged on our side (the audit plugin
   // logs url/status only).
   //
-  // Deliberately NO requireApprovedUser and NO O3 uncleared-cap check: this is
+  // Deliberately NO requireOnboardedUser and NO O3 uncleared-cap check: this is
   // a read-only bootstrap for a send that already passed the approved-user +
   // risk gates at confirm. A mid-window KYC flip (Bridge rewrites kyc_status on
   // every customer.updated) must not strand a committed sender inside the
