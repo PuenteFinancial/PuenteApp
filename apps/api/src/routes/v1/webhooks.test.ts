@@ -933,6 +933,30 @@ describe('POST /v1/webhooks/funding — onramp settlement (#213)', () => {
     await app.close()
   })
 
+  it('THE DRILL holds under the embedded rail too (stripe_crypto, K4)', async () => {
+    // Regression pin: the route used to branch on the LITERAL 'stripe_onramp',
+    // which would have routed the embedded rail's events through the plain
+    // funding applier — no amount guard, underpaid session funds anyway. The
+    // isOnrampSessionRail predicate is what this test exists to protect.
+    processorOverride.current = {
+      ...fakeOnrampProcessor('funding_succeeded', 10_000_000),
+      provider: 'stripe_crypto',
+    }
+    from.mockReturnValueOnce(selectChain({ data: transferRow }))
+    const app = await buildApp()
+
+    const res = await postOnramp(app)
+
+    expect(res.status).toBe(200)
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
+    expect(captureMessage).toHaveBeenCalledWith(
+      'onramp funding amount mismatch',
+      expect.objectContaining({ level: 'error' }),
+    )
+    await app.close()
+  })
+
   it('an amount-less fulfillment event refuses the same way — fail closed', async () => {
     processorOverride.current = fakeOnrampProcessor('funding_succeeded', 'absent')
     from.mockReturnValueOnce(selectChain({ data: transferRow }))

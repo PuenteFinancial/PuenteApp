@@ -388,3 +388,138 @@ export async function getTransactionLimits(accessToken: string): Promise<unknown
     oauthToken: accessToken,
   })
 }
+
+// ── Onramp sessions (K4 — the money surface) ───────────────────────────────
+
+// Stripe's KYC step-up refusals from session create — each names the exact
+// verification the user still needs. K5's UI branches on these (L0/L1 form vs
+// verifyDocuments); the route surfaces them as 400 kyc_required with the code
+// in details. Captured from the integration guide + SA doc error taxonomy.
+export const KYC_STEP_UP_CODES: ReadonlySet<string> = new Set([
+  'crypto_onramp_missing_minimum_identity_verification',
+  'crypto_onramp_missing_identity_verification',
+  'crypto_onramp_missing_document_verification',
+])
+
+export interface OnrampSession {
+  id: string
+  status: string
+}
+
+// Create a headless onramp session for a transfer — the pay-step call, made
+// only after the SDK minted a payment token (cpt_). Everything the sender
+// must not control is pinned server-side: the amount comes from the transfer
+// row, delivery is hard-wired to the treasury's Base address, and the
+// transfer id rides in metadata as the webhook's join key (same contract as
+// the widget rail — parseEvent and the amount guard are unchanged).
+//
+// destination_amount (not source_amount): the sender owes send+fee exactly;
+// Stripe adds its own fee on top of the source side, and the webhook-side
+// amount guard verifies the DELIVERED amount against the transfer to the
+// cent, so the two must name the same number.
+//
+// NOTE the ui_mode=headless embedded create uses wallet_address directly
+// (per the public guide's own curl). The guide also describes SDK-side
+// wallet REGISTRATION — if the live API turns out to demand a registered
+// ccw_ for headless sessions, the failure is a loud 400 here and the fix is
+// one SDK call in K5 (registerWalletAddress with this same address), not a
+// schema change.
+export async function createOnrampSession(input: {
+  transferId: string
+  cryptoCustomerId: string
+  paymentTokenId: string
+  destinationAmountUsd: string // decimal string, e.g. "25.00"
+  clientIp: string
+  accessToken: string
+}): Promise<OnrampSession> {
+  const destinationAddress = env.ONRAMP_DESTINATION_ADDRESS
+  if (!destinationAddress) {
+    // superRefine guarantees this under FUNDING_PROCESSOR=stripe_crypto —
+    // guards direct construction; a session without the locked address would
+    // let the sender pick the delivery wallet.
+    throw new Error('createOnrampSession requires ONRAMP_DESTINATION_ADDRESS')
+  }
+
+  const params = new URLSearchParams({
+    ui_mode: 'headless',
+    crypto_customer_id: input.cryptoCustomerId,
+    payment_token: input.paymentTokenId,
+    source_currency: 'usd',
+    destination_currency: 'usdc',
+    destination_network: 'base',
+    destination_amount: input.destinationAmountUsd,
+    wallet_address: destinationAddress,
+    customer_ip_address: input.clientIp,
+    'metadata[transfer_id]': input.transferId,
+  })
+  params.append('destination_currencies[]', 'usdc')
+  params.append('destination_networks[]', 'base')
+
+  const session = (await cryptoFetch(env.STRIPE_API_BASE, '/v1/crypto/onramp_sessions', {
+    method: 'POST',
+    oauthToken: input.accessToken,
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      // Attempt-scoped, NOT transfer-scoped (security review, K4): the
+      // never-resume rule means a transfer legitimately gets a new session
+      // per attempt, so the widget rail's per-transfer key would replay an
+      // abandoned session forever. Each attempt is identified by its payment
+      // token — a double-click or network retry of the SAME attempt dedupes
+      // at Stripe; a genuine new attempt (new cpt_) mints fresh. The
+      // two-tabs-with-two-tokens race remains the documented, self-inflicted
+      // residual (books stay correct; float recon surfaces the orphan).
+      'Idempotency-Key': `funding_init_${input.transferId}_${input.paymentTokenId}`,
+    },
+    body: params.toString(),
+  })) as { id?: unknown; status?: unknown }
+
+  if (typeof session.id !== 'string' || session.id === '') {
+    throw new StripeCryptoApiError(502, { error: { code: 'session_missing_id' } })
+  }
+  return {
+    id: session.id,
+    status: typeof session.status === 'string' ? session.status : 'initialized',
+  }
+}
+
+// Execute checkout for a session. ONLY ever called from inside the SDK's
+// performCheckout callback (the SDK owns the 3DS/next-action loop; a checkout
+// fired outside it can look successful in sandbox and still never finalize —
+// the guide is explicit). For ACH the mandate evidence (ip + user agent of
+// the accepting browser) rides along; Stripe's docs name mandate_data without
+// publishing its shape for this endpoint, so the customer_acceptance form is
+// the standard Stripe mandate encoding — the first staging ACH run validates
+// it (cards need none).
+export async function checkoutOnrampSession(input: {
+  sessionId: string
+  accessToken: string
+  achMandate?: { clientIp: string; userAgent: string }
+}): Promise<{ clientSecret: string }> {
+  let body: string | undefined
+  if (input.achMandate) {
+    const params = new URLSearchParams({
+      'mandate_data[customer_acceptance][type]': 'online',
+      'mandate_data[customer_acceptance][online][ip_address]': input.achMandate.clientIp,
+      'mandate_data[customer_acceptance][online][user_agent]': input.achMandate.userAgent,
+    })
+    body = params.toString()
+  }
+
+  const result = (await cryptoFetch(
+    env.STRIPE_API_BASE,
+    `/v1/crypto/onramp_sessions/${encodeURIComponent(input.sessionId)}/checkout`,
+    {
+      method: 'POST',
+      oauthToken: input.accessToken,
+      ...(body && {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+      }),
+    },
+  )) as { client_secret?: unknown }
+
+  if (typeof result.client_secret !== 'string' || result.client_secret === '') {
+    throw new StripeCryptoApiError(502, { error: { code: 'checkout_missing_client_secret' } })
+  }
+  return { clientSecret: result.client_secret }
+}

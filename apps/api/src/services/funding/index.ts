@@ -3,6 +3,7 @@ import { MockFundingProcessor } from './mock.js'
 import { StripeFundingProcessor } from './stripe.js'
 import { ManualFundingProcessor } from './manual.js'
 import { StripeOnrampFundingProcessor } from './stripe-onramp.js'
+import { StripeCryptoFundingProcessor } from './stripe-crypto.js'
 
 export type FundingEventType =
   | 'funding_succeeded'
@@ -151,6 +152,19 @@ export interface FundingUndo {
 }
 
 /**
+ * Whether a provider is an onramp-SESSION rail — the two rails whose funding
+ * events carry a delivered-USDC amount and must route through the amount
+ * guard + float top-up appliers (applyOnrampFunded / applyOnrampSettlement)
+ * instead of the plain funding appliers. The webhook route branches on THIS,
+ * not on a provider string: when the embedded rail (K4) joined, a literal
+ * 'stripe_onramp' comparison would have silently routed its events past the
+ * amount guard the rail exists to enforce.
+ */
+export function isOnrampSessionRail(provider: string): boolean {
+  return provider === 'stripe_onramp' || provider === 'stripe_crypto'
+}
+
+/**
  * Recover a persisted undo's mode from its ref alone — the crash-recovery
  * counterpart to FundingUndo.mode. The `already_disbursed` replay paths
  * (services/refunds.ts, services/cancellation-review.ts) reach the REFUNDED
@@ -217,6 +231,14 @@ export interface FundingProcessor {
    * Stripe: stripe-signature).
    */
   readonly signatureHeader: string
+  /**
+   * K4 (embedded onramp): true = confirm must NOT call initiateFunding or
+   * persist a funding_payment_ref — the processor's payment object can only
+   * be created later, at the pay step, with client-side material (the SDK's
+   * payment token). The transfer sits PENDING_PAYMENT with a null ref until
+   * then, which the existing null-ref abandonment sweep already handles.
+   */
+  readonly deferredInitiation?: boolean
   /**
    * Whether this processor can actually run here: its secrets are present.
    * The route 503s the funding webhook and confirm gates on this — for the
@@ -290,6 +312,7 @@ const processors: Record<typeof env.FUNDING_PROCESSOR, () => FundingProcessor> =
   stripe: () => new StripeFundingProcessor(),
   manual: () => new ManualFundingProcessor(),
   stripe_onramp: () => new StripeOnrampFundingProcessor(),
+  stripe_crypto: () => new StripeCryptoFundingProcessor(),
 }
 
 let instance: FundingProcessor | undefined

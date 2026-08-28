@@ -112,6 +112,16 @@ classifies the provisioning state (creds missing / flags unprovisioned / ready).
 | GET | `/v1/crypto/kyc-status` | ✓ | Customers poll; caches tier on `users` (display/routing hints — never authorization). 409 = re-authenticate with Link. |
 | GET | `/v1/crypto/quote?amount=` | ✓ | Headless onramp quote for the fixed USDC-on-Base corridor (native fee display, decision 7). |
 | GET | `/v1/crypto/limits` | ✓ | `transaction_limits` pass-through; response schema deliberately unpinned until smoke proves the shape. |
+| POST | `/v1/crypto/transfers/:id/onramp-session` | ✓ | K4 pay-step: creates the headless onramp session for a confirmed PENDING_PAYMENT transfer — amount pinned from the transfer row, delivery hard-wired to the treasury address, `metadata[transfer_id]` as the webhook join key. Body `{ paymentTokenId: cpt_… }` (from the SDK). **New session per attempt, never resume**: replaces a prior session only while it provably hasn't moved money (`fulfillment_*` → 409). KYC step-ups → 400 `kyc_required` with the exact Stripe code in `details`; geo refusals → 403 `funding_unsupported`. Live only under `FUNDING_PROCESSOR=stripe_crypto`. |
+| POST | `/v1/crypto/transfers/:id/onramp-checkout` | ✓ | Executes checkout for the CURRENT session (a replaced/stale session id → 409). Called ONLY from inside the SDK's `performCheckout` callback. Body `{ sessionId, paymentMethodType }`; ACH carries the online mandate evidence (accepting browser's ip + user agent). Returns `{ clientSecret }` — never persisted, never logged. |
+
+**Confirm under `stripe_crypto` (deferred initiation):** `POST /transfers/:id/confirm` records
+acceptance and returns `funding: { provider, method: 'onramp', clientFields: {} }` WITHOUT
+creating a session or writing `funding_payment_ref` — the SDK must mint a payment token first,
+so the session is created by the pay-step route above, which is also what first writes the ref.
+Acceptance alone is confirmed-ness (re-confirm → 409). Webhook side is UNCHANGED from the
+widget rail: same `crypto.onramp_session.updated` event, same status map, same delivered-amount
+guard before FUNDED.
 
 ## KYC (Bridge-hosted, behind `IdentityVerifier`)
 
@@ -131,6 +141,12 @@ and the PRD "Where reality diverges").
 `GET /v1/users/me`; the gate raises `kyc_required` (403) until it is `approved`. The result
 **arrives via the Bridge webhook `customer.*` branch** (`customer.created`/`updated`/
 `status_transitioned` → `users.kyc_status`; see Webhooks), never a client call.
+
+**Gate rework (K4, KYC rehaul):** the shared gate is now `requireOnboardedUser`
+(recipients.ts). Under legacy rails it still means `kyc_status = 'approved'`; under
+`FUNDING_PROCESSOR=stripe_crypto` (deferred initiation) it means **profile complete + consents
+current** — identity verification moved inside the send flow (Stripe refuses sessions until
+verified), so a kyc_status gate would deadlock new-flow users out of the flow that IS their KYC.
 
 **Deferred (not built):** the `/v1/kyc/*` endpoints, the Sumsub webhook, and the ERD's `kyc_records`
 table — Sumsub was superseded by Bridge-hosted KYC for the MVP. `IdentityVerifier` is retained only

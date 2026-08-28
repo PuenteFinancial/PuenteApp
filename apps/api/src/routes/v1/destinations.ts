@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../../services/supabase.js'
 import { createExternalAccount, listExternalAccounts, BridgeApiError } from '../../services/bridge.js'
 import { isValidClabe } from '../../utils/clabe.js'
 import { encryptString } from '../../utils/encryption.js'
-import { requireApprovedUser } from './recipients.js'
+import { requireOnboardedUser } from './recipients.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 const DESTINATION_COLUMNS =
@@ -131,7 +131,7 @@ export async function destinationsRoute(server: FastifyInstance) {
       const userId = request.user!.id
 
       // 1. KYC + Bridge customer gate — this is the Bridge-touching step.
-      const approved = await requireApprovedUser(userId, reply)
+      const approved = await requireOnboardedUser(userId, reply)
       if (!approved) return
       if (!approved.bridgeCustomerId) {
         return sendError(reply, 403, 'kyc_required', 'Complete identity verification before adding payout details')
@@ -323,7 +323,7 @@ export async function destinationsRoute(server: FastifyInstance) {
     },
     async (request, reply) => {
       const userId = request.user!.id
-      if (!(await requireApprovedUser(userId, reply))) return
+      if (!(await requireOnboardedUser(userId, reply))) return
 
       // Archived recipients stay readable — history, not UI actions.
       const { data: recipient } = await supabaseAdmin
@@ -393,7 +393,7 @@ export async function destinationsRoute(server: FastifyInstance) {
         return sendError(reply, 400, 'validation_error', 'No updatable fields provided')
       }
 
-      if (!(await requireApprovedUser(userId, reply))) return
+      if (!(await requireOnboardedUser(userId, reply))) return
 
       // Flat path — ownership traverses destination → recipient → user.
       const { data: owned } = await supabaseAdmin

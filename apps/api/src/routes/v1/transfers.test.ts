@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { REQUIRED_CONSENTS } from '@puente/shared'
 import supertest from 'supertest'
 import Fastify from 'fastify'
 import fp from 'fastify-plugin'
@@ -57,6 +58,7 @@ vi.mock('../../services/deposit-instructions.js', () => ({
   getDepositInstructions: (...args: unknown[]) => getDepositInstructions(...args),
 }))
 const isConfigured = vi.fn(() => true)
+const deferredInitiation = vi.fn(() => false)
 
 // Only the PROCESSOR is mocked. The ref-namespace helpers (undoModeForRef,
 // undoRequiresManualDisbursement) are pure and are what the cancel tail reads to
@@ -70,6 +72,8 @@ vi.mock('../../services/funding/index.js', async (importOriginal) => {
       provider: 'mock',
       signatureHeader: 'funding-signature',
       isConfigured: () => isConfigured(),
+      // K4: flipped true by the deferred-initiation tests; read at call time.
+      deferredInitiation: deferredInitiation(),
       initiateFunding,
       voidFunding,
       getClientSession,
@@ -210,6 +214,8 @@ beforeEach(() => {
   createTransferFromQuote.mockReset()
   cancelTransfer.mockReset()
   transitionTransfer.mockReset()
+  deferredInitiation.mockReset()
+  deferredInitiation.mockReturnValue(false)
   initiateFunding.mockReset()
   voidFunding.mockReset()
   initiateFunding.mockResolvedValue({
@@ -401,6 +407,70 @@ describe('POST /v1/transfers/:id/confirm', () => {
     const app = await buildApp()
     const res = await confirm(app, { disclosureId: DISCLOSURE_ID, accepted: false })
     expect(res.status).toBe(400)
+    await app.close()
+  })
+
+  // ── K4: deferred initiation (stripe_crypto — sessions are pay-step) ──
+  // Under the deferred rail the gate is profile+consents, NOT kyc_status —
+  // the fixture user is deliberately not_started to pin that.
+  const newFlowUser = {
+    ...approvedUser,
+    kyc_status: 'not_started',
+    address_line1: '500 East Cesar Chavez St',
+    address_city: 'Austin',
+    address_state: 'TX',
+    address_postal_code: '78701',
+  }
+  const grantedConsents = REQUIRED_CONSENTS.map((r) => ({
+    type: r.type,
+    version: r.version,
+    locale: 'en',
+    consented_at: '2026-08-27T12:00:00Z',
+  }))
+
+  it('deferred rail: records acceptance, never initiates, persists no ref', async () => {
+    deferredInitiation.mockReturnValue(true)
+    routeTables({
+      users: () => chain({ data: newFlowUser }),
+      consents: () => chain({ data: grantedConsents }),
+    })
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body.funding).toEqual({ provider: 'mock', method: 'onramp', clientFields: {} })
+    expect(initiateFunding).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('deferred rail: acceptance ALONE is confirmed-ness — re-confirm 409s', async () => {
+    deferredInitiation.mockReturnValue(true)
+    routeTables({
+      users: () => chain({ data: newFlowUser }),
+      consents: () => chain({ data: grantedConsents }),
+      transfers: () =>
+        chain({ data: { ...transferRow, disclosure_accepted_at: '2026-07-17T20:01:00.000Z' } }),
+    })
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(409)
+    expect(res.body.error.code).toBe('conflict')
+    expect(initiateFunding).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('deferred rail: an incomplete new-flow profile is refused before acceptance', async () => {
+    deferredInitiation.mockReturnValue(true)
+    routeTables() // default user: approved KYC but NO address — incomplete under the new gate
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('forbidden')
     await app.close()
   })
 

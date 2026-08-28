@@ -1,5 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { supabaseAdmin } from '../../services/supabase.js'
+import { getFundingProcessor } from '../../services/funding/index.js'
+import { fetchGrantedConsents, missingConsents } from './consents.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
 export const RECIPIENT_COLUMNS =
@@ -43,8 +45,8 @@ export const recipientResponseSchema = {
   },
 } as const
 
-// The whole /v1/recipients surface is post-KYC: recipient rows are PII we
-// only hold for onboarded senders. Returns the user's bridge_customer_id
+// The whole /v1/recipients surface is post-onboarding: recipient rows are PII
+// we only hold for onboarded senders. Returns the user's bridge_customer_id
 // for the destination-create path; replies 403 and returns null otherwise.
 //
 // "The whole surface" now means the reads too. Until 2026-08-14 this was called
@@ -54,7 +56,16 @@ export const recipientResponseSchema = {
 // before identity verification. Found by porting the screen to mobile and
 // measuring the gate rather than trusting this comment. Every handler on this
 // surface calls it now; a new one that does not is the bug.
-export async function requireApprovedUser(
+//
+// WHAT "onboarded" means depends on the funding rail (K4, KYC rehaul):
+//   legacy rails — kyc_status = 'approved' (Bridge/Persona verified during
+//     onboarding; the pre-rehaul front door).
+//   stripe_crypto (deferredInitiation) — profile complete + consents current.
+//     Identity verification moved INSIDE the send flow (Stripe verifies at
+//     the pay step and refuses sessions until verified), so gating this
+//     surface on kyc_status would deadlock every new-flow user out of the
+//     send flow that IS their KYC. Renamed from requireApprovedUser in K4.
+export async function requireOnboardedUser(
   userId: string,
   reply: FastifyReply,
 ): Promise<{
@@ -67,7 +78,9 @@ export async function requireApprovedUser(
 } | null> {
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select('kyc_status, bridge_customer_id, first_name, last_name, email')
+    .select(
+      'kyc_status, bridge_customer_id, first_name, last_name, email, address_line1, address_city, address_state, address_postal_code',
+    )
     .eq('id', userId)
     .single()
 
@@ -81,11 +94,40 @@ export async function requireApprovedUser(
     first_name: string | null
     last_name: string | null
     email: string | null
+    address_line1: string | null
+    address_city: string | null
+    address_state: string | null
+    address_postal_code: string | null
   }
-  if (user.kyc_status !== 'approved') {
+
+  if (getFundingProcessor().deferredInitiation) {
+    const profileComplete = Boolean(
+      user.first_name &&
+        user.last_name &&
+        user.email &&
+        user.address_line1 &&
+        user.address_city &&
+        user.address_state &&
+        user.address_postal_code,
+    )
+    if (!profileComplete) {
+      await sendError(reply, 403, 'forbidden', 'Complete your profile first')
+      return null
+    }
+    const granted = await fetchGrantedConsents(userId)
+    if (granted === null) {
+      await sendError(reply, 500, 'internal_error', 'Failed to load consents')
+      return null
+    }
+    if (missingConsents(granted).length > 0) {
+      await sendError(reply, 403, 'forbidden', 'Review and accept the required agreements first')
+      return null
+    }
+  } else if (user.kyc_status !== 'approved') {
     await sendError(reply, 403, 'kyc_required', 'Complete identity verification first')
     return null
   }
+
   return {
     bridgeCustomerId: user.bridge_customer_id,
     firstName: user.first_name,
@@ -160,7 +202,7 @@ export async function recipientsRoute(server: FastifyInstance) {
     },
     async (request, reply) => {
       const userId = request.user!.id
-      if (!(await requireApprovedUser(userId, reply))) return
+      if (!(await requireOnboardedUser(userId, reply))) return
 
       const { firstName, lastName, relationship, country } = request.body
       const { data, error } = await supabaseAdmin
@@ -212,7 +254,7 @@ export async function recipientsRoute(server: FastifyInstance) {
     },
     async (request, reply) => {
       const userId = request.user!.id
-      if (!(await requireApprovedUser(userId, reply))) return
+      if (!(await requireOnboardedUser(userId, reply))) return
 
       const { limit } = request.query
 
@@ -271,7 +313,7 @@ export async function recipientsRoute(server: FastifyInstance) {
     },
     async (request, reply) => {
       const userId = request.user!.id
-      if (!(await requireApprovedUser(userId, reply))) return
+      if (!(await requireOnboardedUser(userId, reply))) return
 
       const { data, error } = await supabaseAdmin
         .from('recipients')
@@ -333,7 +375,7 @@ export async function recipientsRoute(server: FastifyInstance) {
         return sendError(reply, 400, 'validation_error', 'No updatable fields provided')
       }
 
-      if (!(await requireApprovedUser(userId, reply))) return
+      if (!(await requireOnboardedUser(userId, reply))) return
 
       // Archiving cascades to the recipient's destinations FIRST, so a crash
       // between the two updates can never leave payable destinations under an
