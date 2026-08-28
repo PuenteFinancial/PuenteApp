@@ -173,7 +173,17 @@ export type Translations = {
       exhaustedBody: string
       supportCta: string
     }
-    dashboard: { title: string; body: string; recipientsCta: string; historyCta: string }
+    dashboard: {
+      title: string
+      // K5: rendered instead of `title` when web-kyc-at-first-send is ON and
+      // the user has NOT been verified — the K2 wart was "You're verified"
+      // shown to unverified users. `body` never claims verification, so it
+      // needs no flag-aware twin.
+      readyTitle: string
+      body: string
+      recipientsCta: string
+      historyCta: string
+    }
   }
   dashNav: {
     send: string
@@ -221,6 +231,14 @@ export type Translations = {
     title: string
     sub: string
     dashboardReady: string
+    // K5 expectation banner on the quote screen (flag-ON only): identity
+    // verification happens at payment, on this page. limitLine renders only
+    // when the (deliberately unpinned) limits response parses.
+    limitsBanner: {
+      title: string
+      body: string
+      limitLine: (max: string) => string
+    }
     recipient: string
     recipientPh: string
     account: string
@@ -337,6 +355,106 @@ export type Translations = {
           error: string
         }
       }
+      // Embedded-components pay surface (K5): Link auth → KYC in OUR UI →
+      // payment → checkout, all at PENDING_PAYMENT. Stripe authors and
+      // localizes its own SDK surfaces (the Link OTP modal, the payment
+      // element, the document upload); these are the Puente-authored frame
+      // and the identity form around them. Busy states reuse the repo idiom
+      // (label swap + disabled, no spinners); the submitted state reuses
+      // pay.submittedTitle/submittedBody above.
+      crypto: {
+        intro: {
+          title: string
+          // Names the Stripe/Link emails and the USDC mechanism (decision 7:
+          // de-emphasize crypto, never deny it).
+          // NEEDS LEGAL REVIEW (EN + ES)
+          expectation: string
+          // Debit-forward labeling is the ONLY credit-card discouragement (no
+          // backend restriction exists). States the cash-advance risk without
+          // asserting any specific issuer's behavior.
+          // NEEDS LEGAL REVIEW (EN + ES)
+          methodsNote: string
+          continueCta: string
+        }
+        link: {
+          starting: string
+          registering: string
+          // Rendered above the SDK's OTP/consent modal.
+          modalHint: string
+          abandonedTitle: string
+          abandonedBody: string
+          resumeCta: string
+          // The OAuth consent screen was declined — consent is required to
+          // continue, so this explains rather than retries silently.
+          declined: string
+          // A later call answered link_auth_required: the flow returns to
+          // Link auth and this line says why.
+          reauthNote: string
+        }
+        kyc: {
+          formTitle: string
+          // Step-up re-entry (the 400 named the exact missing tier).
+          formTitleStepUp: string
+          sub: string
+          firstName: string
+          lastName: string
+          addressLine1: string
+          addressLine2: string
+          city: string
+          state: string
+          postalCode: string
+          // DOB is three separate numeric fields on purpose: EN and ES
+          // readers order date parts differently, and a single text input
+          // invites silently-swapped day/month.
+          dobLegend: string
+          dobMonth: string
+          dobDay: string
+          dobYear: string
+          ssn: string
+          // Where the SSN/DOB go (client → Stripe SDK only, never Puente).
+          // NEEDS LEGAL REVIEW (EN + ES)
+          ssnPrivacyNote: string
+          submitCta: string
+          submitting: string
+          verifying: string
+          verifyTimeout: string
+          retryCta: string
+          rejectedTitle: string
+          // Must not claim anything was charged; routes to support.
+          // NEEDS LEGAL REVIEW (EN + ES)
+          rejectedBody: string
+          docsTitle: string
+          docsBody: string
+          docsCta: string
+          docsAbandoned: string
+          achRequiresDocs: string
+        }
+        // Persona/Bridge fallback branch (decision 2, ratified 2026-08-28:
+        // BEFORE payment). The user leaves for the partner-hosted flow and
+        // returns; the waiting copy promises only the in-place update the
+        // polling page actually delivers ("truthful pending copy").
+        bridge: {
+          title: string
+          body: string
+          tosCta: string
+          waitingTitle: string
+          waitingBody: string
+        }
+        collect: {
+          title: string
+          debitNote: string
+        }
+        pay: {
+          creatingSession: string
+          startingCheckout: string
+        }
+        errors: {
+          // 409 conflict from session create/checkout: the attempt is dead,
+          // payment restarts from method selection (never claims a charge).
+          restartPayment: string
+          retryCta: string
+        }
+      }
       loadError: string
       retry: string
       done: string
@@ -392,6 +510,10 @@ export type Translations = {
       transfer_not_cancelable: string
       conflict: string
       idempotency_conflict: string
+      // Embedded onramp (K5): the user must (re)connect with Link before the
+      // call can work. The pay step handles this state machine-side; this
+      // mapping is the fallback for any other surface.
+      link_auth_required: string
       not_configured: string
       // Stripe onramp supportability refusal (#213): the payment provider
       // can't serve this sender's location/profile. Mentions that payment
@@ -820,6 +942,7 @@ const en: Translations = {
     },
     dashboard: {
       title: 'You’re verified',
+      readyTitle: 'You’re all set',
       body: 'Sending money is coming soon. We’ll let you know the moment it’s live.',
       recipientsCta: 'Manage recipients',
       historyCta: 'Transfer history',
@@ -875,6 +998,11 @@ const en: Translations = {
     title: 'Send money',
     sub: 'Choose who to pay and how much. We’ll show you the rate before anything is sent.',
     dashboardReady: 'Send money to your recipients, or manage who you send to.',
+    limitsBanner: {
+      title: 'Quick identity check at payment',
+      body: 'You’ll verify your identity when you pay, right on this page. It usually takes under a minute.',
+      limitLine: (max: string) => `Transfers over ${max} may also need a photo ID.`,
+    },
     recipient: 'Recipient',
     recipientPh: 'Choose a recipient',
     account: 'Account',
@@ -976,6 +1104,86 @@ const en: Translations = {
           error: 'We couldn’t record that just now. Please try again.',
         },
       },
+      crypto: {
+        intro: {
+          title: 'Verify and pay',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          expectation:
+            'Payments are processed by Stripe and its Link service, which convert your dollars to USDC, a digital dollar, to deliver your transfer. You may get confirmation emails from Stripe and from Link.',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          methodsNote:
+            'You can pay with a debit card or your bank account. Credit cards work too, but some card issuers treat this kind of payment as a cash advance and charge their own fees.',
+          continueCta: 'Continue',
+        },
+        link: {
+          starting: 'Connecting…',
+          registering: 'Setting up your secure account…',
+          modalHint: 'Verify with the code sent to your phone.',
+          abandonedTitle: 'Verification not finished',
+          abandonedBody:
+            'No problem, nothing was charged. Pick up where you left off when you’re ready.',
+          resumeCta: 'Continue verifying',
+          declined:
+            'To send money, you’ll need to allow the connection with Link. Nothing was charged. You can try again whenever you’re ready.',
+          reauthNote: 'Your secure session expired. Please verify with Link again.',
+        },
+        kyc: {
+          formTitle: 'Verify your identity',
+          formTitleStepUp: 'A few more details',
+          sub: 'Federal law requires us to verify who’s sending money. This usually takes seconds.',
+          firstName: 'Legal first name',
+          lastName: 'Legal last name',
+          addressLine1: 'Street address',
+          addressLine2: 'Apt, suite, unit (optional)',
+          city: 'City',
+          state: 'State',
+          postalCode: 'ZIP code',
+          dobLegend: 'Date of birth',
+          dobMonth: 'Month',
+          dobDay: 'Day',
+          dobYear: 'Year',
+          ssn: 'Social Security number',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          ssnPrivacyNote:
+            'Your SSN and date of birth go directly to Stripe for identity verification. Puente never receives or stores them.',
+          submitCta: 'Verify my identity',
+          submitting: 'Submitting…',
+          verifying: 'Verifying your identity…',
+          verifyTimeout: 'This is taking longer than usual. We’re still checking.',
+          retryCta: 'Check again',
+          rejectedTitle: 'We couldn’t verify your identity',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          rejectedBody:
+            'This transfer can’t continue and you haven’t been charged. Contact us at support@puentefinancial.com and we’ll help you sort it out.',
+          docsTitle: 'Verify with a photo ID',
+          docsBody:
+            'Stripe will ask you to upload an ID document and take a selfie. It usually takes under a minute.',
+          docsCta: 'Start ID verification',
+          docsAbandoned: 'ID verification was closed before finishing. You can start it again.',
+          achRequiresDocs: 'Paying from your bank account requires a photo ID first.',
+        },
+        bridge: {
+          title: 'One more verification step',
+          body: 'Our delivery partner also needs to verify your identity before your money can be delivered. You’ll complete it on our partner’s secure page and come right back here.',
+          tosCta: 'Continue verification',
+          waitingTitle: 'Finishing verification',
+          waitingBody:
+            'We’re waiting for our partner to confirm your verification. This page will update as soon as it’s done.',
+        },
+        collect: {
+          title: 'Choose how to pay',
+          debitNote: 'Debit is usually the cheaper option.',
+        },
+        pay: {
+          creatingSession: 'Preparing your payment…',
+          startingCheckout: 'Finishing your payment…',
+        },
+        errors: {
+          restartPayment:
+            'That payment attempt expired, so nothing was charged. Choose how to pay to try again.',
+          retryCta: 'Try again',
+        },
+      },
       loadError: 'We couldn’t load this transfer. Try again.',
       retry: 'Retry',
       done: 'Back to dashboard',
@@ -1068,6 +1276,7 @@ const en: Translations = {
       conflict: 'This can’t be updated right now. Refresh and try again.',
       idempotency_conflict:
         'We’re still processing your last request. Give it a moment before trying again.',
+      link_auth_required: 'Please verify with Link again to continue.',
       not_configured: 'Sending money isn’t available yet. We’ll let you know the moment it’s live.',
       funding_unsupported:
         'Our payment provider can’t accept payments from your location right now, so this transfer can’t be completed. You haven’t been charged.',
@@ -1494,6 +1703,7 @@ const es: Translations = {
     },
     dashboard: {
       title: 'Estás verificado',
+      readyTitle: 'Todo listo',
       body: 'Muy pronto podrás enviar dinero. Te avisaremos en cuanto esté disponible.',
       recipientsCta: 'Administrar destinatarios',
       historyCta: 'Historial de transferencias',
@@ -1547,6 +1757,12 @@ const es: Translations = {
     title: 'Enviar dinero',
     sub: 'Elige a quién pagar y cuánto. Te mostramos el tipo de cambio antes de enviar nada.',
     dashboardReady: 'Envía dinero a tus destinatarios, o administra a quién le envías.',
+    limitsBanner: {
+      title: 'Verificación rápida al pagar',
+      body: 'Verificarás tu identidad al momento de pagar, aquí mismo en esta página. Normalmente toma menos de un minuto.',
+      limitLine: (max: string) =>
+        `Las transferencias de más de ${max} también pueden requerir una identificación con foto.`,
+    },
     recipient: 'Destinatario',
     recipientPh: 'Elige un destinatario',
     account: 'Cuenta',
@@ -1639,6 +1855,88 @@ const es: Translations = {
           error: 'No pudimos registrarlo en este momento. Inténtalo de nuevo.',
         },
       },
+      crypto: {
+        intro: {
+          title: 'Verifica y paga',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          expectation:
+            'Los pagos son procesados por Stripe y su servicio Link, que convierten tus dólares a USDC, un dólar digital, para entregar tu transferencia. Es posible que recibas correos de confirmación de Stripe y de Link.',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          methodsNote:
+            'Puedes pagar con tarjeta de débito o con tu cuenta bancaria. Las tarjetas de crédito también funcionan, pero algunos emisores tratan este tipo de pago como adelanto de efectivo y cobran sus propias comisiones.',
+          continueCta: 'Continuar',
+        },
+        link: {
+          starting: 'Conectando…',
+          registering: 'Preparando tu cuenta segura…',
+          modalHint: 'Verifica con el código que llegó a tu teléfono.',
+          abandonedTitle: 'Verificación sin terminar',
+          abandonedBody:
+            'No hay problema, no se hizo ningún cargo. Continúa donde quedaste cuando estés listo.',
+          resumeCta: 'Seguir verificando',
+          declined:
+            'Para enviar dinero, necesitas permitir la conexión con Link. No se hizo ningún cargo. Puedes intentarlo de nuevo cuando quieras.',
+          reauthNote: 'Tu sesión segura expiró. Verifica con Link de nuevo.',
+        },
+        kyc: {
+          formTitle: 'Verifica tu identidad',
+          formTitleStepUp: 'Unos datos más',
+          sub: 'La ley federal nos exige verificar quién envía dinero. Normalmente toma unos segundos.',
+          firstName: 'Nombre legal',
+          lastName: 'Apellido legal',
+          addressLine1: 'Dirección',
+          addressLine2: 'Apto, interior, unidad (opcional)',
+          city: 'Ciudad',
+          state: 'Estado',
+          postalCode: 'Código postal (ZIP)',
+          dobLegend: 'Fecha de nacimiento',
+          dobMonth: 'Mes',
+          dobDay: 'Día',
+          dobYear: 'Año',
+          ssn: 'Número de Seguro Social (SSN)',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          ssnPrivacyNote:
+            'Tu SSN y tu fecha de nacimiento van directamente a Stripe para verificar tu identidad. Puente nunca los recibe ni los guarda.',
+          submitCta: 'Verificar mi identidad',
+          submitting: 'Enviando…',
+          verifying: 'Verificando tu identidad…',
+          verifyTimeout: 'Está tardando más de lo normal. Seguimos verificando.',
+          retryCta: 'Revisar de nuevo',
+          rejectedTitle: 'No pudimos verificar tu identidad',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          rejectedBody:
+            'Esta transferencia no puede continuar y no se te hizo ningún cargo. Escríbenos a support@puentefinancial.com y te ayudamos a resolverlo.',
+          docsTitle: 'Verifica con una identificación',
+          docsBody:
+            'Stripe te pedirá subir un documento de identidad y tomarte una selfie. Normalmente toma menos de un minuto.',
+          docsCta: 'Iniciar verificación de identificación',
+          docsAbandoned:
+            'La verificación de identificación se cerró antes de terminar. Puedes iniciarla de nuevo.',
+          achRequiresDocs:
+            'Para pagar desde tu cuenta bancaria, primero necesitas verificar una identificación.',
+        },
+        bridge: {
+          title: 'Un paso más de verificación',
+          body: 'Nuestro socio de entrega también necesita verificar tu identidad antes de entregar tu dinero. Lo completarás en la página segura de nuestro socio y volverás aquí.',
+          tosCta: 'Continuar verificación',
+          waitingTitle: 'Terminando la verificación',
+          waitingBody:
+            'Estamos esperando que nuestro socio confirme tu verificación. Esta página se actualizará en cuanto termine.',
+        },
+        collect: {
+          title: 'Elige cómo pagar',
+          debitNote: 'El débito suele ser la opción más económica.',
+        },
+        pay: {
+          creatingSession: 'Preparando tu pago…',
+          startingCheckout: 'Terminando tu pago…',
+        },
+        errors: {
+          restartPayment:
+            'Ese intento de pago expiró, así que no se hizo ningún cargo. Elige cómo pagar para intentarlo de nuevo.',
+          retryCta: 'Intentar de nuevo',
+        },
+      },
       loadError: 'No pudimos cargar esta transferencia. Inténtalo de nuevo.',
       retry: 'Reintentar',
       done: 'Volver al panel',
@@ -1712,6 +2010,7 @@ const es: Translations = {
       conflict: 'Esto no se puede actualizar ahora. Actualiza e inténtalo de nuevo.',
       idempotency_conflict:
         'Todavía estamos procesando tu solicitud anterior. Espera un momento antes de intentar de nuevo.',
+      link_auth_required: 'Verifica con Link de nuevo para continuar.',
       not_configured: 'Enviar dinero aún no está disponible. Te avisaremos en cuanto esté listo.',
       funding_unsupported:
         'Nuestro proveedor de pagos no puede aceptar pagos desde tu ubicación por ahora, así que esta transferencia no se puede completar. No se te ha cobrado.',
