@@ -1,6 +1,6 @@
 import { env } from '../config/env.js'
 import { supabaseAdmin } from '../services/supabase.js'
-import { getFundingProcessor } from '../services/funding/index.js'
+import { getFundingProcessor, isOnrampSessionRail } from '../services/funding/index.js'
 import { transitionTransfer, TransferRpcError } from '../services/transfers.js'
 
 // A PENDING_PAYMENT older than this never got its funding webhook — the
@@ -23,7 +23,7 @@ function staleAfterMs(): number {
   if (env.FUNDING_PROCESSOR === 'manual') {
     return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60 * 1000
   }
-  if (env.FUNDING_PROCESSOR === 'stripe_onramp') {
+  if (isOnrampSessionRail(env.FUNDING_PROCESSOR)) {
     return env.ONRAMP_PENDING_MAX_AGE_HOURS * 60 * 60 * 1000
   }
   return STALE_AFTER_MS
@@ -54,7 +54,7 @@ async function failRejectedOnrampSessions(
 ): Promise<Set<string>> {
   const failed = new Set<string>()
   const processor = getFundingProcessor()
-  if (processor.provider !== 'stripe_onramp' || !processor.getPaymentStatus) return failed
+  if (!isOnrampSessionRail(processor.provider) || !processor.getPaymentStatus) return failed
 
   for (const row of rows) {
     if (!row.funding_payment_ref?.startsWith('cos_')) continue
@@ -122,7 +122,7 @@ export async function reconcilePendingTransfers(): Promise<number> {
         reason:
           env.FUNDING_PROCESSOR === 'manual'
             ? `funding_not_received_within_${env.MANUAL_PENDING_MAX_AGE_DAYS}_days`
-            : env.FUNDING_PROCESSOR === 'stripe_onramp'
+            : isOnrampSessionRail(env.FUNDING_PROCESSOR)
               ? `funding_not_received_within_${env.ONRAMP_PENDING_MAX_AGE_HOURS}_hours`
               : 'funding_not_received_within_30_minutes',
       })
