@@ -9,6 +9,7 @@
     "build": "tsup src/server.ts src/worker.ts --format esm",
     "start": "node dist/server.js",
     "start:worker": "node dist/worker.js",
+    "ci:boot-smoke": "tsx scripts/ci-boot-smoke.ts",
     "lint": "eslint src/ scripts/",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "test": "vitest run --passWithNoTests",
