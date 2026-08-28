@@ -53,6 +53,24 @@ jobs:
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
           TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
 
+      # Through turbo for the same @puente/shared dist reason as "Build web".
+      - name: Build API
+        run: pnpm turbo run build --filter=@puente/api
+        env:
+          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+          TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+
+      # Typecheck/lint/test all run against src/ through tsc's resolver or
+      # tsx — both use Node's real per-file ESM loader, which tolerates
+      # circular-import orderings that tsup/esbuild's bundled, code-split
+      # dist/ (server.ts + worker.ts share a chunk) does not. #255 shipped a
+      # circular import that was inert under tsx but crashed Railway on boot
+      # with "Class extends value undefined" — every other gate was green.
+      # This actually runs the built dist/server.js and dist/worker.js
+      # against a stub env and asserts each reaches its ready log line.
+      - name: API boot smoke (built dist/)
+        run: pnpm --filter @puente/api run ci:boot-smoke
+
   # Integration tests that need a real Postgres (ledger DB triggers, RLS,
   # append-only enforcement). Separate job so `check` stays fast and
   # Docker flakes don't block lint/typecheck feedback.
