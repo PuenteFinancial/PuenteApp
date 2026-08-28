@@ -52,6 +52,7 @@ const userRow = {
   first_name: 'Test',
   last_name: 'User',
   email: 'test@example.com',
+  phone: '+12125551234',
   kyc_status: 'not_started',
   bridge_customer_id: null,
   address_line1: null,
@@ -440,6 +441,8 @@ describe('GET /v1/users/me', () => {
       firstName: 'Test',
       lastName: 'User',
       email: 'test@example.com',
+      // Login identity, surfaced for the K5 Link-registration prefill.
+      phone: '+12125551234',
       kycStatus: 'not_started',
       bridgeCustomerId: null,
       addressLine1: null,

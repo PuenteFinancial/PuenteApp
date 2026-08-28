@@ -43,7 +43,7 @@ function handleProviderError(
 ) {
   if (err instanceof NoStoredTokenError) {
     // Not an error state: the user simply has to (re)authenticate with Link.
-    return sendError(reply, 409, 'conflict', 'Link authentication required')
+    return sendError(reply, 409, 'link_auth_required', 'Link authentication required')
   }
   if (err instanceof StripeCryptoApiError) {
     server.log.error({ userId, stripeStatus: err.status, stripeCode: err.code }, 'stripe crypto request failed')
@@ -446,7 +446,7 @@ export async function cryptoRoute(server: FastifyInstance) {
       const cryptoCustomerId = (userData as { stripe_crypto_customer_id: string | null } | null)
         ?.stripe_crypto_customer_id
       if (!cryptoCustomerId) {
-        return sendError(reply, 409, 'conflict', 'Link authentication required')
+        return sendError(reply, 409, 'link_auth_required', 'Link authentication required')
       }
 
       // Real client IP (widget-rail contract): Stripe geo-checks it and
@@ -481,7 +481,7 @@ export async function cryptoRoute(server: FastifyInstance) {
         return { sessionId: session.id, status: session.status }
       } catch (err) {
         if (err instanceof NoStoredTokenError) {
-          return sendError(reply, 409, 'conflict', 'Link authentication required')
+          return sendError(reply, 409, 'link_auth_required', 'Link authentication required')
         }
         if (err instanceof StripeCryptoApiError) {
           return sendSessionError(reply, userId, err)
@@ -551,7 +551,7 @@ export async function cryptoRoute(server: FastifyInstance) {
         return { clientSecret }
       } catch (err) {
         if (err instanceof NoStoredTokenError) {
-          return sendError(reply, 409, 'conflict', 'Link authentication required')
+          return sendError(reply, 409, 'link_auth_required', 'Link authentication required')
         }
         if (err instanceof StripeCryptoApiError) {
           return sendSessionError(reply, userId, err)

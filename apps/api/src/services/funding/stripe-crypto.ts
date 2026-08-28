@@ -1,6 +1,6 @@
 import { env } from '../../config/env.js'
 import { StripeOnrampFundingProcessor } from './stripe-onramp.js'
-import type { FundingInitiation } from './index.js'
+import type { FundingClientSession, FundingInitiation } from './index.js'
 
 // Embedded-components onramp rail (K4, KYC rehaul). The money machinery is
 // the widget rail's, inherited verbatim — same webhook event type, same
@@ -32,6 +32,19 @@ export class StripeCryptoFundingProcessor extends StripeOnrampFundingProcessor {
         env.STRIPE_CRYPTO_OAUTH_CLIENT_ID &&
         env.STRIPE_CRYPTO_OAUTH_CLIENT_SECRET,
     )
+  }
+
+  // K5 pay-step bootstrap: with a null ref (the normal deferred state) the
+  // browser still needs the publishable key to initialize the embedded SDK —
+  // it is deliberately NOT a NEXT_PUBLIC_ env (docs/decisions.md), so the
+  // funding-session route serves it. Public-by-design material only.
+  getDeferredClientBootstrap(): FundingClientSession {
+    return {
+      provider: this.provider,
+      // superRefine guarantees the key under FUNDING_PROCESSOR=stripe_crypto;
+      // the assertion guards direct construction, same as getClientSession.
+      fields: { publishableKey: env.STRIPE_PUBLISHABLE_KEY! },
+    }
   }
 
   override async initiateFunding(): Promise<FundingInitiation> {

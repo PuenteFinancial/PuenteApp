@@ -1248,16 +1248,46 @@ export async function transfersRoute(server: FastifyInstance) {
         return sendError(reply, 409, 'conflict', 'Transfer is no longer awaiting payment')
       }
 
-      // The confirm-crashed window (accepted but no ref): confirm's own retry
-      // path is the recovery — it re-initiates and Stripe's funding_init_<id>
-      // idempotency key returns the same PI — not this read-only route.
+      const processor = getFundingProcessor()
+
       if (!transfer.funding_payment_ref) {
+        // Deferred rails (K5): a null ref is the NORMAL state between confirm
+        // and the pay step's session mint — serve the SDK bootstrap (provider
+        // + publishable key, both public-by-design) so the browser can start
+        // the Link-auth/KYC flow.
+        if (processor.getDeferredClientBootstrap) {
+          const bootstrap = processor.getDeferredClientBootstrap()
+          return { provider: bootstrap.provider, ...bootstrap.fields }
+        }
+        // Eager rails: the confirm-crashed window (accepted but no ref) —
+        // confirm's own retry path is the recovery — it re-initiates and
+        // Stripe's funding_init_<id> idempotency key returns the same PI —
+        // not this read-only route.
         return sendError(reply, 409, 'conflict', 'Payment has not been set up for this transfer')
       }
 
-      const session = await getFundingProcessor().getClientSession({
-        paymentRef: transfer.funding_payment_ref,
-      })
+      let session
+      try {
+        session = await processor.getClientSession({
+          paymentRef: transfer.funding_payment_ref,
+        })
+      } catch (err) {
+        // Embedded sessions (cos_ under stripe_crypto) are created with the
+        // USER'S OAuth token; whether the platform-key retrieval resolves
+        // them is a preview-API unknown. Degrade to the bootstrap shape —
+        // sessions are never resumed anyway, and the onramp-session route's
+        // in-progress check is the double-pay backstop — instead of 500ing
+        // the whole pay step on a read.
+        if (processor.getDeferredClientBootstrap) {
+          request.log.warn(
+            { transferId: transfer.id, err: err instanceof Error ? err.message : String(err) },
+            'funding-session: live session read failed on a deferred rail; serving bootstrap',
+          )
+          const bootstrap = processor.getDeferredClientBootstrap()
+          return { provider: bootstrap.provider, ...bootstrap.fields }
+        }
+        throw err
+      }
 
       // Manual only: the attached deposit coordinates ride along when they
       // exist; their absence keeps the pay step on the fallback copy. Owner

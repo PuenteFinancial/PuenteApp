@@ -216,6 +216,9 @@ describe('POST /v1/crypto/transfers/:id/onramp-session', () => {
     const res = await post(app)
 
     expect(res.status).toBe(409)
+    // link_auth_required, not the generic conflict: the client restarts Link
+    // auth on this code and recollects payment on 'conflict' (K5).
+    expect(res.body.error.code).toBe('link_auth_required')
     expect(service.mintAccessToken).not.toHaveBeenCalled()
     await app.close()
   })
@@ -496,7 +499,7 @@ describe('GET /v1/crypto/kyc-status', () => {
       .set('Authorization', 'Bearer t')
 
     expect(res.status).toBe(409)
-    expect(res.body.error.code).toBe('conflict')
+    expect(res.body.error.code).toBe('link_auth_required')
     await app.close()
   })
 

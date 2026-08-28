@@ -6,6 +6,21 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-08-28 · Persona/Bridge fallback sits BEFORE payment in the K5 send flow.** When Stripe KYC
+verifies but the user has no `bridge_customer_id` (Bridge→Stripe sharing not live), the send flow
+routes through Bridge TOS + hosted KYC *before* `collectPaymentMethod` — no money moves until the
+payout side can accept it. The alternative (pay first, gate the payout) is faster-feeling but can
+strand funds at FUNDED behind an abandoned or manually-reviewed Persona pass, making refund ops
+the failure mode. `payout-submit`'s throw on a null `bridge_customer_id` remains the backstop,
+not the mechanism. **Status: active** (K5).
+
+**2026-08-28 · KYC-form address edits sync back to the profile.** The K5 KYC form prefills from
+`users` (name + address); if the sender edits the address there, the client PATCHes
+`/v1/users/me` (K2's all-or-none address group) before `submitKycInfo`, so our stored address
+stays consistent with the identity Stripe verified. SSN/DOB are never part of that PATCH — they
+go client→SDK only, and a unit test pins that no payload builder can emit them. **Status:
+active** (K5).
+
 **2026-08-27 · KYC moves from onboarding to first send (KYC rehaul, K-lane).** Identity
 verification leaves onboarding entirely: onboarding collects information and consents only, and
 ALL KYC happens at first send, in our own UI, via Stripe embedded components (private preview) —
