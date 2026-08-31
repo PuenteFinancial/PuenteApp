@@ -60,6 +60,7 @@ vi.mock('../../services/deposit-instructions.js', () => ({
 const isConfigured = vi.fn(() => true)
 const deferredInitiation = vi.fn(() => false)
 const getDeferredClientBootstrap = vi.fn()
+const getPaymentStatus = vi.fn()
 
 // Only the PROCESSOR is mocked. The ref-namespace helpers (undoModeForRef,
 // undoRequiresManualDisbursement) are pure and are what the cancel tail reads to
@@ -80,7 +81,7 @@ vi.mock('../../services/funding/index.js', async (importOriginal) => {
       getClientSession,
       // Present only on the deferred rail, like the real registry (K5): the
       // funding-session route feature-detects this method.
-      ...(deferredInitiation() ? { getDeferredClientBootstrap } : {}),
+      ...(deferredInitiation() ? { getDeferredClientBootstrap, getPaymentStatus } : {}),
     }),
   }
 })
@@ -1347,13 +1348,18 @@ describe('GET /v1/transfers/:id/funding-session', () => {
     await app.close()
   })
 
-  it('deferred rail + live cos_ ref: passes the retrieved session through', async () => {
+  it('deferred rail + live cos_ ref: bootstrap + live status, never the stale secret', async () => {
+    // A prior attempt's session is NEVER resumed on this rail, so its client
+    // secret is worthless to the browser — what every load needs is the
+    // material to start a fresh attempt (key + treasury address). Serving the
+    // stale session instead was a live regression: without walletAddress the
+    // pay step could not register the wallet and rendered its error card
+    // (caught on the 2026-08-29 drive). The status still rides along so an
+    // already-paid session renders "submitted" rather than offering a second
+    // charge.
     deferredInitiation.mockReturnValue(true)
     from.mockReturnValueOnce(chain({ data: { ...transferRow, funding_payment_ref: 'cos_1' } }))
-    getClientSession.mockResolvedValue({
-      provider: 'stripe_crypto',
-      fields: { clientSecret: 'cs_x', publishableKey: 'pk_test_x', status: 'requires_payment' },
-    })
+    getPaymentStatus.mockResolvedValue({ status: 'requires_payment' })
     const app = await buildApp()
 
     const res = await get(app)
@@ -1361,11 +1367,13 @@ describe('GET /v1/transfers/:id/funding-session', () => {
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
       provider: 'stripe_crypto',
-      clientSecret: 'cs_x',
       publishableKey: 'pk_test_x',
+      walletAddress: '0xTREASURY',
       status: 'requires_payment',
     })
-    expect(getClientSession).toHaveBeenCalledWith({ paymentRef: 'cos_1' })
+    expect(res.body.clientSecret).toBeUndefined()
+    expect(getPaymentStatus).toHaveBeenCalledWith({ paymentRef: 'cos_1' })
+    expect(getClientSession).not.toHaveBeenCalled()
     await app.close()
   })
 
@@ -1375,7 +1383,7 @@ describe('GET /v1/transfers/:id/funding-session', () => {
     // never resumed, so the bootstrap is a safe answer either way.
     deferredInitiation.mockReturnValue(true)
     from.mockReturnValueOnce(chain({ data: { ...transferRow, funding_payment_ref: 'cos_1' } }))
-    getClientSession.mockRejectedValue(new Error('platform key cannot read user-scoped session'))
+    getPaymentStatus.mockRejectedValue(new Error('platform key cannot read user-scoped session'))
     const app = await buildApp()
 
     const res = await get(app)

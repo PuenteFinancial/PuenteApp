@@ -103,7 +103,7 @@ async function main() {
     if (!u.includes('/api/crypto/') && !u.includes('/api/transfers/')) return
     const path = new URL(u).pathname
     let detail = ''
-    if (!res.ok()) {
+    if (!res.ok() || path.endsWith('/funding-session')) {
       const body = await res.text().catch(() => '')
       detail = ' ← ' + body.slice(0, 300)
     }
@@ -126,6 +126,8 @@ async function main() {
   const en = page.getByRole('button', { name: 'EN' })
   if (await en.isVisible({ timeout: 5000 }).catch(() => false)) await en.click()
 
+  await page.waitForTimeout(4000)
+  console.log('  [early step]', (await page.locator('main').innerText()).replace(/\n+/g, ' | ').slice(-200))
   const cont = page.getByRole('button', { name: /^(Continue|Continuar)$/ })
   await cont.waitFor({ state: 'visible', timeout: 15000 })
   await cont.click()
