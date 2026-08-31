@@ -1923,7 +1923,7 @@ const es: Translations = {
         bridge: {
           title: 'Un paso más de verificación',
           // NEEDS LEGAL REVIEW (EN + ES) — ver la nota en la versión en inglés.
-          body: 'Bridge (bridge.xyz), la empresa de transferencia de dinero con licencia que entrega tu dinero, también necesita verificar tu identidad. Lo completarás en la página segura de Bridge y volverás aquí.',
+          body: 'Bridge (bridge.xyz), el transmisor de dinero con licencia que entrega tu dinero, también necesita verificar tu identidad. Lo completarás en la página segura de Bridge y volverás aquí.',
           tosCta: 'Continuar verificación',
           waitingTitle: 'Terminando la verificación',
           waitingBody:
