@@ -86,50 +86,46 @@ describe('boot routing (resume-at-right-step)', () => {
     expect(state.view).toEqual({ step: 'intro' })
   })
 
-  it('customer + identity not started → straight to the combined form, no Link UI', () => {
-    const { state, captures } = run([
-      { type: 'BOOT_OK', prefill, kyc: { cryptoCustomerId: 'crc_1', verifications: NOT_STARTED } },
-    ])
-    expect(state.view).toEqual({ step: 'kyc_form', mode: 'l1', invalid: false })
-    expect(captures.map((c) => c.event)).toEqual(['send_kyc_form_viewed'])
-  })
-
-  it('customer + identity pending → polling (a submission may be mid-verify)', () => {
+  // A known crypto customer does NOT mean THIS browser's SDK is
+  // authenticated — they are different credentials (drive finding
+  // 2026-08-28: resuming past Link auth put an unauthenticated SDK in front
+  // of collectPaymentMethod and 403'd). Every non-rejected boot re-enters
+  // through intro → Link auth, which no-ops when the SDK is already good.
+  it.each([
+    ['not started', NOT_STARTED],
+    ['pending', PENDING],
+    ['verified', VERIFIED],
+  ])('customer with %s identity still boots to intro (SDK auth is per-browser)', (_label, v) => {
     const { state, effects } = run([
-      { type: 'BOOT_OK', prefill, kyc: { cryptoCustomerId: 'crc_1', verifications: PENDING } },
+      { type: 'BOOT_OK', prefill, kyc: { cryptoCustomerId: 'crc_1', verifications: v } },
     ])
-    expect(state.view).toEqual({ step: 'kyc_polling', timedOut: false })
-    expect(effects).toEqual([{ kind: 'poll_kyc' }])
+    expect(state.view).toEqual({ step: 'intro' })
+    expect(effects).toEqual([])
   })
 
-  it('identity verified + no bridge customer → the Persona fallback gate (before payment)', () => {
+  it('post-auth exchange routes a verified user with no bridge customer to the fallback gate', () => {
     const { state, captures } = run([
       { type: 'BOOT_OK', prefill, kyc: { cryptoCustomerId: 'crc_1', verifications: VERIFIED } },
+      { type: 'CONTINUE' },
+      { type: 'INTENT_OK', authIntentId: 'lai_1', linkAccountExists: true },
+      { type: 'AUTH_RESULT', result: 'success', cryptoCustomerId: 'crc_1' },
+      { type: 'EXCHANGE_OK', verifications: VERIFIED },
     ])
     expect(state.view).toEqual({ step: 'bridge_tos' })
-    expect(captures.map((c) => c.event)).toEqual(['send_bridge_fallback_started'])
+    expect(captures.map((c) => c.event)).toContain('send_bridge_fallback_started')
   })
 
-  it('identity verified + bridge approved → collect', () => {
+  it('post-auth exchange routes a fully-ready user to collect', () => {
     const ready = { ...prefill, bridgeCustomerId: 'bc_1', kycStatus: 'approved' }
     const { state, effects } = run([
       { type: 'BOOT_OK', prefill: ready, kyc: { cryptoCustomerId: 'crc_1', verifications: VERIFIED } },
+      { type: 'CONTINUE' },
+      { type: 'INTENT_OK', authIntentId: 'lai_1', linkAccountExists: true },
+      { type: 'AUTH_RESULT', result: 'success', cryptoCustomerId: 'crc_1' },
+      { type: 'EXCHANGE_OK', verifications: VERIFIED },
     ])
     expect(state.view).toEqual({ step: 'collect', notice: null })
-    expect(effects).toEqual([{ kind: 'sdk_collect' }])
-  })
-
-  it('identity verified + bridge pending → bridge polling (the return leg landing)', () => {
-    const returning = { ...prefill, bridgeCustomerId: 'bc_1', kycStatus: 'pending' }
-    const { state, effects } = run([
-      {
-        type: 'BOOT_OK',
-        prefill: returning,
-        kyc: { cryptoCustomerId: 'crc_1', verifications: VERIFIED },
-      },
-    ])
-    expect(state.view).toEqual({ step: 'bridge_polling' })
-    expect(effects).toEqual([{ kind: 'poll_users_me' }])
+    expect(effects.at(-1)).toEqual({ kind: 'sdk_collect' })
   })
 
   it('stripe KYC rejected at boot → terminal rejection', () => {
@@ -321,7 +317,11 @@ describe('step-up re-entry', () => {
   const atCollect = () => {
     const ready = { ...prefill, bridgeCustomerId: 'bc_1', kycStatus: 'approved' }
     return run([
-      { type: 'BOOT_OK', prefill: ready, kyc: { cryptoCustomerId: 'crc_1', verifications: VERIFIED } },
+      { type: 'BOOT_OK', prefill: ready, kyc: null },
+      { type: 'CONTINUE' },
+      { type: 'INTENT_OK', authIntentId: 'lai_1', linkAccountExists: true },
+      { type: 'AUTH_RESULT', result: 'success', cryptoCustomerId: 'crc_1' },
+      { type: 'EXCHANGE_OK', verifications: VERIFIED },
     ]).state
   }
 
@@ -333,8 +333,30 @@ describe('step-up re-entry', () => {
     wallet: null,
   }
 
+  /** collect → payment method → treasury wallet registered → session create. */
+  const atSessionCreate = () => run([collected, { type: 'WALLET_READY' }], atCollect())
+
+  it('registers the treasury wallet before the first session create', () => {
+    // Stripe refuses a raw wallet_address on headless session create
+    // (crypto_onramp_consumer_wallet_doesnt_exist, proven live 2026-08-29).
+    const t = transition(atCollect(), collected)
+    expect(t.state.view).toEqual({ step: 'session_create' })
+    expect(t.effects).toEqual([{ kind: 'sdk_register_wallet' }])
+    const ready = transition(t.state, { type: 'WALLET_READY' })
+    expect(ready.effects).toEqual([
+      { kind: 'create_session', body: { paymentTokenId: 'cpt_1' } },
+    ])
+    expect(ready.state.ctx.walletRegistered).toBe(true)
+  })
+
+  it('a wallet registration failure never claims a payment was attempted', () => {
+    const t = transition(transition(atCollect(), collected).state, { type: 'WALLET_FAILED' })
+    expect(t.state.view).toEqual({ step: 'failed', kind: 'retryable' })
+    expect(t.captures[0]).toMatchObject({ props: { code: 'wallet_registration_failed' } })
+  })
+
   it('session-create kyc_required(identity) → l1 form → verified resumes create with the SAME cpt_', () => {
-    const t1 = transition(atCollect(), collected)
+    const t1 = { state: atSessionCreate().state, effects: [], captures: [] }
     expect(t1.state.view).toEqual({ step: 'session_create' })
     const t2 = transition(t1.state, {
       type: 'SESSION_ERROR',
@@ -358,7 +380,7 @@ describe('step-up re-entry', () => {
   })
 
   it('session-create kyc_required(minimum) → l0 form (no SSN/DOB demanded)', () => {
-    const t1 = transition(atCollect(), collected)
+    const t1 = atSessionCreate()
     const t2 = transition(t1.state, {
       type: 'SESSION_ERROR',
       failure: {
@@ -371,7 +393,7 @@ describe('step-up re-entry', () => {
   })
 
   it('session-create kyc_required(document) → verifyDocuments → verified resumes create', () => {
-    const t1 = transition(atCollect(), collected)
+    const t1 = atSessionCreate()
     const t2 = transition(t1.state, {
       type: 'SESSION_ERROR',
       failure: {
@@ -401,7 +423,7 @@ describe('step-up re-entry', () => {
   })
 
   it('abandoned docs re-offer the flow instead of hanging', () => {
-    const t1 = transition(atCollect(), collected)
+    const t1 = atSessionCreate()
     const t2 = transition(t1.state, {
       type: 'SESSION_ERROR',
       failure: {
@@ -417,7 +439,7 @@ describe('step-up re-entry', () => {
   })
 
   it('checkout kyc_required resumes CHECKOUT with the same session', () => {
-    const t1 = transition(atCollect(), collected)
+    const t1 = atSessionCreate()
     const t2 = transition(t1.state, { type: 'SESSION_OK', sessionId: 'cos_1' })
     expect(t2.state.view).toEqual({ step: 'checkout' })
     const t3 = transition(t2.state, {
@@ -440,7 +462,7 @@ describe('step-up re-entry', () => {
   })
 
   it('409 conflict → recollect with a FRESH token (never resume)', () => {
-    const t1 = transition(atCollect(), collected)
+    const t1 = atSessionCreate()
     const t2 = transition(t1.state, {
       type: 'SESSION_ERROR',
       failure: { status: 409, code: 'conflict', issue: null },
@@ -453,7 +475,7 @@ describe('step-up re-entry', () => {
   })
 
   it('409 link_auth_required → back to Link auth, attempt discarded', () => {
-    const t1 = transition(atCollect(), collected)
+    const t1 = atSessionCreate()
     const t2 = transition(t1.state, {
       type: 'SESSION_ERROR',
       failure: { status: 409, code: 'link_auth_required', issue: null },
@@ -464,7 +486,7 @@ describe('step-up re-entry', () => {
   })
 
   it('403 → terminal unsupported; 5xx → retryable', () => {
-    const t1 = transition(atCollect(), collected)
+    const t1 = atSessionCreate()
     const unsupported = transition(t1.state, {
       type: 'SESSION_ERROR',
       failure: { status: 403, code: 'funding_unsupported', issue: null },
@@ -477,8 +499,21 @@ describe('step-up re-entry', () => {
     expect(flaky.state.view).toEqual({ step: 'failed', kind: 'retryable' })
   })
 
+  it('a failed collect re-enters Link auth once, then gives up honestly', () => {
+    // The SDK's session is not our OAuth token and can lapse independently;
+    // re-authenticating is the real remedy (drive finding 2026-08-28).
+    const first = transition(atCollect(), { type: 'COLLECT_FAILED' })
+    expect(first.state.view).toEqual({ step: 'link_auth' })
+    expect(first.effects).toEqual([{ kind: 'create_intent' }])
+    expect(first.state.ctx.sdkReauthed).toBe(true)
+
+    const second = transition(first.state, { type: 'COLLECT_FAILED' })
+    expect(second.state.view).toEqual({ step: 'failed', kind: 'retryable' })
+    expect(second.captures[0]).toMatchObject({ props: { code: 'collect_failed' } })
+  })
+
   it('checkout success → submitted, with the cross-rail capture', () => {
-    const t1 = transition(atCollect(), collected)
+    const t1 = atSessionCreate()
     const t2 = transition(t1.state, { type: 'SESSION_OK', sessionId: 'cos_1' })
     const t3 = transition(t2.state, { type: 'CHECKOUT_OK', successful: true })
     expect(t3.state.view).toEqual({ step: 'submitted' })
@@ -486,7 +521,7 @@ describe('step-up re-entry', () => {
   })
 
   it('checkout unsuccessful-without-error → recollect, never claims a charge', () => {
-    const t1 = transition(atCollect(), collected)
+    const t1 = atSessionCreate()
     const t2 = transition(t1.state, { type: 'SESSION_OK', sessionId: 'cos_1' })
     const t3 = transition(t2.state, { type: 'CHECKOUT_OK', successful: false })
     expect(t3.state.view).toEqual({ step: 'collect', notice: 'restart' })
@@ -497,11 +532,11 @@ describe('bridge fallback polling', () => {
   const atBridgePolling = () => {
     const returning = { ...prefill, bridgeCustomerId: 'bc_1', kycStatus: 'pending' }
     return run([
-      {
-        type: 'BOOT_OK',
-        prefill: returning,
-        kyc: { cryptoCustomerId: 'crc_1', verifications: VERIFIED },
-      },
+      { type: 'BOOT_OK', prefill: returning, kyc: null },
+      { type: 'CONTINUE' },
+      { type: 'INTENT_OK', authIntentId: 'lai_1', linkAccountExists: true },
+      { type: 'AUTH_RESULT', result: 'success', cryptoCustomerId: 'crc_1' },
+      { type: 'EXCHANGE_OK', verifications: VERIFIED },
     ]).state
   }
 
@@ -528,7 +563,11 @@ describe('bridge fallback polling', () => {
     // Fresh flow: verified, no bridge customer → bridge_tos → user leaves and
     // returns → polling sees the id appear.
     const t1 = run([
-      { type: 'BOOT_OK', prefill, kyc: { cryptoCustomerId: 'crc_1', verifications: VERIFIED } },
+      { type: 'BOOT_OK', prefill, kyc: null },
+      { type: 'CONTINUE' },
+      { type: 'INTENT_OK', authIntentId: 'lai_1', linkAccountExists: true },
+      { type: 'AUTH_RESULT', result: 'success', cryptoCustomerId: 'crc_1' },
+      { type: 'EXCHANGE_OK', verifications: VERIFIED },
     ]).state
     expect(t1.view).toEqual({ step: 'bridge_tos' })
     // Simulate the polling landing (return leg boots into bridge_polling with
@@ -648,6 +687,10 @@ describe('helpers', () => {
     expect(kycOutcomeFor([{ type: 'identity', status: 'approved' }])).toBe('verified')
     expect(kycOutcomeFor([{ type: 'kyc_verified', status: 'in_review' }])).toBe('pending')
     expect(kycOutcomeFor([{ type: 'document_verified', status: 'verified' }])).toBe('not_started')
+    // The tier vocabulary the preview API answered with live (2026-08-28):
+    // kyc_tiers[]-derived entries whose type is the bare tier name.
+    expect(kycOutcomeFor([{ type: 'l1', status: 'verified' }])).toBe('verified')
+    expect(kycOutcomeFor([{ type: 'l1', status: 'pending' }])).toBe('pending')
     expect(kycTierFor(VERIFIED)).toBe('L1')
     expect(
       kycTierFor([

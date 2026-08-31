@@ -245,7 +245,7 @@ describe('shouldRefetchSession', () => {
 
 describe('payAffordanceFor — stripe_crypto (K5 embedded rail)', () => {
   it('deferred bootstrap (publishableKey, no clientSecret, no status) → crypto', () => {
-    expect(payAffordanceFor({ provider: 'stripe_crypto', publishableKey: 'pk_test_x' }, false)).toBe(
+    expect(payAffordanceFor({ provider: 'stripe_crypto', publishableKey: 'pk_test_x', walletAddress: '0xabc' }, false)).toBe(
       'crypto',
     )
   })
@@ -257,7 +257,7 @@ describe('payAffordanceFor — stripe_crypto (K5 embedded rail)', () => {
   it('paid statuses on a live session read → submitted, never a second machine', () => {
     for (const status of ['fulfillment_processing', 'fulfillment_complete']) {
       expect(
-        payAffordanceFor({ provider: 'stripe_crypto', publishableKey: 'pk_test_x', status }, false),
+        payAffordanceFor({ provider: 'stripe_crypto', publishableKey: 'pk_test_x', walletAddress: '0xabc', status }, false),
       ).toBe('submitted')
     }
   })
@@ -265,7 +265,7 @@ describe('payAffordanceFor — stripe_crypto (K5 embedded rail)', () => {
   it('rejected session → error card (the reconcile poll drives PAYMENT_FAILED)', () => {
     expect(
       payAffordanceFor(
-        { provider: 'stripe_crypto', publishableKey: 'pk_test_x', status: 'rejected' },
+        { provider: 'stripe_crypto', publishableKey: 'pk_test_x', walletAddress: '0xabc', status: 'rejected' },
         false,
       ),
     ).toBe('error')
@@ -274,14 +274,25 @@ describe('payAffordanceFor — stripe_crypto (K5 embedded rail)', () => {
   it('any other status starts the machine fresh — sessions are never resumed', () => {
     for (const status of ['initialized', 'requires_payment', 'something_new']) {
       expect(
-        payAffordanceFor({ provider: 'stripe_crypto', publishableKey: 'pk_test_x', status }, false),
+        payAffordanceFor({ provider: 'stripe_crypto', publishableKey: 'pk_test_x', walletAddress: '0xabc', status }, false),
       ).toBe('crypto')
     }
   })
 
   it('never refetches (the machine owns its own polling)', () => {
     expect(
-      shouldRefetchSession({ provider: 'stripe_crypto', publishableKey: 'pk_test_x' }),
+      shouldRefetchSession({ provider: 'stripe_crypto', publishableKey: 'pk_test_x', walletAddress: '0xabc' }),
     ).toBe(false)
+  })
+})
+
+describe('payAffordanceFor — stripe_crypto missing the treasury address', () => {
+  it('errors rather than starting a machine that cannot create a session', () => {
+    // Stripe refuses a headless session for an unregistered wallet
+    // (crypto_onramp_consumer_wallet_doesnt_exist, proven live 2026-08-29),
+    // so without the address to register there is nothing the flow can do.
+    expect(payAffordanceFor({ provider: 'stripe_crypto', publishableKey: 'pk_test_x' }, false)).toBe(
+      'error',
+    )
   })
 })

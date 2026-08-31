@@ -105,6 +105,14 @@ export interface CryptoPayContext {
   /** First sighting of bridgeCustomerId during bridge polling → the
    *  send_bridge_tos_accepted capture fires exactly once. */
   bridgeCustomerSeen: boolean
+  /** The treasury wallet is registered on this customer (ccw_ exists), so
+   *  session create will be accepted. Survives step-up round-trips. */
+  walletRegistered: boolean
+  /** Whether an SDK failure has already sent us back through Link auth once.
+   *  The SDK's session can lapse mid-flow (it is not our OAuth token), and
+   *  re-authenticating is the actual remedy — but only once, so a genuinely
+   *  broken collect can't loop the sender forever. */
+  sdkReauthed: boolean
 }
 
 export interface CryptoPayState {
@@ -127,6 +135,12 @@ export type CryptoPayEffect =
   | { kind: 'bridge_redirect' }
   | { kind: 'poll_users_me' }
   | { kind: 'sdk_collect' }
+  /** Register the treasury wallet with the SDK. Stripe's headless session
+   *  create refuses a raw wallet_address
+   *  (`crypto_onramp_consumer_wallet_doesnt_exist`, proven live 2026-08-29),
+   *  so the address must exist as a ccw_ on the customer first. Wallets are
+   *  reusable, so this runs once per attempt at most. */
+  | { kind: 'sdk_register_wallet' }
   | { kind: 'create_session'; body: { paymentTokenId: string } }
   | { kind: 'sdk_checkout'; sessionId: string }
 
@@ -194,6 +208,8 @@ export type CryptoPayEvent =
       wallet: string | null
     }
   | { type: 'COLLECT_FAILED' }
+  | { type: 'WALLET_READY' }
+  | { type: 'WALLET_FAILED' }
   | { type: 'SESSION_OK'; sessionId: string }
   | { type: 'SESSION_ERROR'; failure: CryptoApiFailure }
   | { type: 'CHECKOUT_OK'; successful: boolean }
@@ -215,11 +231,14 @@ type KycOutcome = 'verified' | 'rejected' | 'pending' | 'not_started'
 const VERIFIED_STATUSES = new Set(['verified', 'approved', 'active'])
 const REJECTED_STATUSES = new Set(['rejected', 'failed', 'canceled'])
 
-/** The identity (L0/L1) entry: type mentions kyc/identity but not document. */
+/** The identity (L0/L1) entry: any non-document entry. Deliberately loose —
+ *  the preview API has answered with BOTH `verifications[]` types like
+ *  'kyc_verified' AND `kyc_tiers[]`-derived types like 'l1' (seen live
+ *  2026-08-28); matching on kyc/identity substrings missed the tier
+ *  vocabulary and stranded the poll. Mirrors the server's own posture
+ *  (cacheKycStatus: any verified non-document entry ⇒ L1+). */
 function identityEntry(verifications: CryptoVerification[]): CryptoVerification | undefined {
-  return verifications.find(
-    (v) => !v.type.includes('document') && (v.type.includes('kyc') || v.type.includes('identity')),
-  )
+  return verifications.find((v) => !v.type.includes('document'))
 }
 
 function documentEntry(verifications: CryptoVerification[]): CryptoVerification | undefined {
@@ -425,6 +444,8 @@ export function initialCryptoPayState(transferId: string): CryptoPayState {
       stepUp: null,
       pollCount: 0,
       bridgeCustomerSeen: false,
+      walletRegistered: false,
+      sdkReauthed: false,
     },
   }
 }
@@ -437,39 +458,37 @@ function cap(ctx: CryptoPayContext, event: string, props: Record<string, string 
   return { event, props: { transfer_id: ctx.transferId, ...props } }
 }
 
-/** Resume-at-right-step: a reload (or the Bridge return leg) reconstructs the
- *  position from server truth instead of trusting any client memory. */
+/**
+ * Where a boot lands. Everything except a settled rejection goes through the
+ * intro → Link-auth path, EVEN when the server already knows this user's
+ * crypto customer.
+ *
+ * Why (found on the 2026-08-28 drive, in a fresh browser): our server's
+ * OAuth token and the SDK's Link session are DIFFERENT credentials living in
+ * different places. `stripe_crypto_customer_id` on the row proves the user
+ * verified once — it says nothing about whether THIS browser's SDK is
+ * authenticated. Resuming straight to kyc_form/collect on that basis put an
+ * unauthenticated SDK in front of `collectPaymentMethod`, which threw 403s
+ * and dead-ended the sender with a generic retry card. Real users hit this
+ * by switching device, clearing storage, or using a second browser.
+ *
+ * Routing through `authenticate` costs nothing when the SDK IS already
+ * authenticated — Stripe's contract is that the callback fires immediately
+ * and no element is presented — and the stored LinkAuthIntent is reused
+ * server-side (K3's 5-minute margin), so no extra OTP is forced. The
+ * exchange that follows re-reads verifications, so the post-auth routing
+ * lands on exactly the step the old shortcut was trying to guess.
+ */
 function stepAfterBoot(ctx: CryptoPayContext): Transition {
-  const { prefill, verifications, cryptoCustomerId } = ctx
-  if (!cryptoCustomerId) {
-    return { state: { view: { step: 'intro' }, ctx }, effects: [], captures: [] }
-  }
-  const outcome = kycOutcomeFor(verifications)
-  if (outcome === 'rejected') {
+  if (kycOutcomeFor(ctx.verifications) === 'rejected') {
+    // The one shortcut worth keeping: a settled rejection needs no SDK.
     return {
       state: { view: { step: 'failed', kind: 'kyc_rejected' }, ctx },
       effects: [],
       captures: [cap(ctx, 'send_kyc_rejected', { code: 'boot_rejected' })],
     }
   }
-  if (outcome === 'not_started' || outcome === 'pending') {
-    // pending at boot: a submission may be mid-verify — polling is the safe
-    // landing (it flows to the form when the outcome regresses). not_started
-    // goes straight to the combined form: the token is stored, no Link UI.
-    if (outcome === 'pending') {
-      return {
-        state: { view: { step: 'kyc_polling', timedOut: false }, ctx },
-        effects: [{ kind: 'poll_kyc' }],
-        captures: [],
-      }
-    }
-    return {
-      state: { view: { step: 'kyc_form', mode: 'l1', invalid: false }, ctx },
-      effects: [],
-      captures: [cap(ctx, 'send_kyc_form_viewed', { mode: 'l1' })],
-    }
-  }
-  return afterStripeKycVerified(ctx)
+  return { state: { view: { step: 'intro' }, ctx }, effects: [], captures: [] }
 }
 
 /** Where a verified Stripe KYC goes next: the Persona/Bridge fallback gate
@@ -513,12 +532,8 @@ function afterKycVerified(ctx: CryptoPayContext, verifications: CryptoVerificati
   const next = { ...ctx, verifications, pollCount: 0 }
   const verifiedCap = cap(next, 'send_kyc_verified', { tier: kycTierFor(verifications) })
   if (next.stepUp?.resume === 'session_create' && next.paymentTokenId) {
-    const resumed = { ...next, stepUp: null }
-    return {
-      state: { view: { step: 'session_create' }, ctx: resumed },
-      effects: [{ kind: 'create_session', body: buildSessionCreateBody(resumed.paymentTokenId!) }],
-      captures: [verifiedCap],
-    }
+    const t = startSessionCreate({ ...next, stepUp: null })
+    return { ...t, captures: [verifiedCap, ...t.captures] }
   }
   if (next.stepUp?.resume === 'checkout' && next.sessionId) {
     const resumed = { ...next, stepUp: null }
@@ -530,6 +545,32 @@ function afterKycVerified(ctx: CryptoPayContext, verifications: CryptoVerificati
   }
   const t = afterStripeKycVerified({ ...next, stepUp: null })
   return { ...t, captures: [verifiedCap, ...t.captures] }
+}
+
+/**
+ * Enter the session-create leg. The treasury wallet must exist as a ccw_ on
+ * the customer first — Stripe's headless create refuses a raw address — so
+ * this registers it once, then creates. Both legs render the same busy view;
+ * the sender sees one "preparing your payment" beat either way.
+ */
+function startSessionCreate(ctx: CryptoPayContext): Transition {
+  if (!ctx.paymentTokenId) {
+    // No token to spend — recollect rather than call with nothing.
+    return {
+      state: { view: { step: 'collect', notice: null }, ctx },
+      effects: [{ kind: 'sdk_collect' }],
+      captures: [],
+    }
+  }
+  return {
+    state: { view: { step: 'session_create' }, ctx },
+    effects: [
+      ctx.walletRegistered
+        ? { kind: 'create_session', body: buildSessionCreateBody(ctx.paymentTokenId) }
+        : { kind: 'sdk_register_wallet' },
+    ],
+    captures: [],
+  }
 }
 
 /** Shared handler for session-create and checkout failures. */
@@ -959,9 +1000,9 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
         paymentTokenId: event.cryptoPaymentToken,
         paymentMethodType: event.methodType,
       }
+      const t = startSessionCreate(next)
       return {
-        state: { view: { step: 'session_create' }, ctx: next },
-        effects: [{ kind: 'create_session', body: buildSessionCreateBody(event.cryptoPaymentToken) }],
+        ...t,
         captures: [
           cap(next, 'send_payment_method_collected', {
             type: event.methodType,
@@ -971,11 +1012,36 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
         ],
       }
     }
-    case 'COLLECT_FAILED':
+    case 'COLLECT_FAILED': {
+      // The SDK refused to present the payment sheet. Overwhelmingly this
+      // means ITS session lapsed (ours is a different credential), so send
+      // the sender back through Link auth — which is a no-op when the SDK is
+      // fine — rather than stranding them on a retry card. Once only.
+      if (!ctx.sdkReauthed) {
+        const next = { ...ctx, sdkReauthed: true }
+        return {
+          state: { view: { step: 'link_auth' }, ctx: next },
+          effects: [{ kind: 'create_intent' }],
+          captures: [cap(next, 'send_link_auth_started', { reason: 'sdk_collect_failed' })],
+        }
+      }
       return {
         state: { view: { step: 'failed', kind: 'retryable' }, ctx },
         effects: [],
         captures: [cap(ctx, 'send_payment_failed', { code: 'collect_failed' })],
+      }
+    }
+
+    case 'WALLET_READY':
+      return startSessionCreate({ ...ctx, walletRegistered: true })
+    case 'WALLET_FAILED':
+      // Nothing the sender can do about a wallet registration failure, and
+      // nothing was charged — surface it as retryable, not as a payment
+      // problem (no send_payment_failed: no payment was ever attempted).
+      return {
+        state: { view: { step: 'failed', kind: 'retryable' }, ctx },
+        effects: [],
+        captures: [cap(ctx, 'send_payment_failed', { code: 'wallet_registration_failed' })],
       }
 
     case 'SESSION_OK': {

@@ -1197,6 +1197,10 @@ export async function transfersRoute(server: FastifyInstance) {
               provider: { type: 'string' },
               clientSecret: { type: 'string' },
               publishableKey: { type: 'string' },
+              // Deferred rail only (K5): the treasury address the client
+              // registers with the SDK before session create. Public chain
+              // address, never a credential.
+              walletAddress: { type: 'string' },
               // Live PI status (stripe only) — lets a reload after
               // confirmPayment render "submitted" instead of the pay form.
               status: { type: 'string' },

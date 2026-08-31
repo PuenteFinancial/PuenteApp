@@ -376,7 +376,7 @@ export default function PayStep({
   // subtree is preserved across the tracker's 5s poll re-renders (same type,
   // same position, no key), so live SDK surfaces never remount.
   if (affordance === 'crypto') {
-    if (!cryptoCoordinator) {
+    if (!cryptoCoordinator || !session.walletAddress) {
       return (
         <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
           <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '0 0 8px' }}>
@@ -392,6 +392,7 @@ export default function PayStep({
       <CryptoPayStep
         coordinator={cryptoCoordinator}
         transferId={transferId}
+        walletAddress={session.walletAddress}
         onAdvanced={onAdvanced}
       />
     )

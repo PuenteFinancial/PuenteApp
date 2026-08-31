@@ -239,7 +239,10 @@ beforeEach(() => {
   getDeferredClientBootstrap.mockReset()
   getDeferredClientBootstrap.mockReturnValue({
     provider: 'stripe_crypto',
-    fields: { publishableKey: 'pk_test_x' },
+    // walletAddress rides along from K5: Stripe refuses a headless session
+    // for an unregistered wallet, so the client must register this exact
+    // treasury address before create.
+    fields: { publishableKey: 'pk_test_x', walletAddress: '0xTREASURY' },
   })
   getDepositInstructions.mockReset().mockResolvedValue(null)
   assessTransferRisk.mockReset()
@@ -1335,7 +1338,11 @@ describe('GET /v1/transfers/:id/funding-session', () => {
     const res = await get(app)
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ provider: 'stripe_crypto', publishableKey: 'pk_test_x' })
+    expect(res.body).toEqual({
+      provider: 'stripe_crypto',
+      publishableKey: 'pk_test_x',
+      walletAddress: '0xTREASURY',
+    })
     expect(getClientSession).not.toHaveBeenCalled()
     await app.close()
   })
@@ -1374,7 +1381,11 @@ describe('GET /v1/transfers/:id/funding-session', () => {
     const res = await get(app)
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ provider: 'stripe_crypto', publishableKey: 'pk_test_x' })
+    expect(res.body).toEqual({
+      provider: 'stripe_crypto',
+      publishableKey: 'pk_test_x',
+      walletAddress: '0xTREASURY',
+    })
     await app.close()
   })
 

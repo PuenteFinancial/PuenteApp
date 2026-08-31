@@ -370,7 +370,15 @@ export async function cryptoRoute(server: FastifyInstance) {
     }
     // Other 4xx: the session/quote is no longer usable (expired quote,
     // consumed token…). Never-resume rule: the client starts a fresh attempt.
+    // LOGGED (K5 drive, 2026-08-28): this branch is where every unmapped
+    // provider refusal lands, and swallowing the code made a live failure
+    // undiagnosable — the sender saw "start again" and the server said
+    // nothing. Code only, never the body (it can carry sender PII).
     if (err.status < 500) {
+      server.log.warn(
+        { userId, stripeStatus: err.status, stripeCode: code },
+        'stripe crypto session refused — client must restart the attempt',
+      )
       return sendError(reply, 409, 'conflict', 'This payment attempt can no longer be used — start again')
     }
     server.log.error({ userId, stripeStatus: err.status, stripeCode: code }, 'stripe crypto session failed')

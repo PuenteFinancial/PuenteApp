@@ -76,10 +76,15 @@ function readPrefill(body: unknown): CryptoPrefill | null {
 export default function CryptoPayStep({
   coordinator,
   transferId,
+  walletAddress,
   onAdvanced,
 }: {
   coordinator: OnrampCoordinator
   transferId: string
+  /** Treasury address from the funding-session bootstrap. The SDK must
+   *  register it before a session can be created; the client never chooses
+   *  an address, it only registers the one the server pins. */
+  walletAddress: string
   /** The tracker's refresh — nudged once checkout submits so FUNDED lands on
    *  the next webhook-driven poll without waiting a full interval. */
   onAdvanced: () => Promise<void>
@@ -397,6 +402,19 @@ export default function CryptoPayStep({
           return
         }
 
+        case 'sdk_register_wallet': {
+          try {
+            // Base is the corridor's fixed network (server-side constant);
+            // re-registering an existing wallet is safe and returns the same
+            // ccw_, so no bookkeeping is needed across attempts.
+            await coordRef.current.registerWalletAddress(walletAddress, 'base')
+            dispatch({ type: 'WALLET_READY' })
+          } catch {
+            dispatch({ type: 'WALLET_FAILED' })
+          }
+          return
+        }
+
         case 'create_session': {
           try {
             const res = await fetch(`/api/crypto/transfers/${transferId}/onramp-session`, {
@@ -473,7 +491,7 @@ export default function CryptoPayStep({
         }
       }
     },
-    [router, schedule, transferId],
+    [router, schedule, transferId, walletAddress],
   )
 
   const dispatch = useCallback(
