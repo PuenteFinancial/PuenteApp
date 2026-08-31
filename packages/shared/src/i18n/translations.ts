@@ -1164,11 +1164,16 @@ const en: Translations = {
         },
         bridge: {
           title: 'One more verification step',
-          body: 'Our delivery partner also needs to verify your identity before your money can be delivered. You’ll complete it on our partner’s secure page and come right back here.',
+          // NEEDS LEGAL REVIEW (EN + ES) — names the partner AT the handoff,
+          // matching the onboarding disclosure's precedent. Compliance review
+          // 2026-08-31 flagged "our delivery partner" as under-specific at the
+          // moment the user leaves our surface, even though the consent page
+          // names Bridge upstream.
+          body: 'Bridge (bridge.xyz), the licensed money transmitter that delivers your money, also needs to verify your identity. You’ll complete it on Bridge’s secure page and come right back here.',
           tosCta: 'Continue verification',
           waitingTitle: 'Finishing verification',
           waitingBody:
-            'We’re waiting for our partner to confirm your verification. This page will update as soon as it’s done.',
+            'We’re waiting for Bridge to confirm your verification. This page will update as soon as it’s done.',
         },
         collect: {
           title: 'Choose how to pay',
@@ -1917,11 +1922,12 @@ const es: Translations = {
         },
         bridge: {
           title: 'Un paso más de verificación',
-          body: 'Nuestro socio de entrega también necesita verificar tu identidad antes de entregar tu dinero. Lo completarás en la página segura de nuestro socio y volverás aquí.',
+          // NEEDS LEGAL REVIEW (EN + ES) — ver la nota en la versión en inglés.
+          body: 'Bridge (bridge.xyz), la empresa de transferencia de dinero con licencia que entrega tu dinero, también necesita verificar tu identidad. Lo completarás en la página segura de Bridge y volverás aquí.',
           tosCta: 'Continuar verificación',
           waitingTitle: 'Terminando la verificación',
           waitingBody:
-            'Estamos esperando que nuestro socio confirme tu verificación. Esta página se actualizará en cuanto termine.',
+            'Estamos esperando que Bridge confirme tu verificación. Esta página se actualizará en cuanto termine.',
         },
         collect: {
           title: 'Elige cómo pagar',
