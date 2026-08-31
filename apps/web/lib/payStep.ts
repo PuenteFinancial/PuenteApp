@@ -19,6 +19,9 @@ export interface FundingSession {
   provider: string
   clientSecret?: string
   publishableKey?: string
+  /** stripe_crypto only: the treasury address the SDK must register before a
+   *  session can be created (Stripe refuses a raw address on headless). */
+  walletAddress?: string
   /** Live PI status (stripe only) — drives the reload-after-pay branch. */
   status?: string
   /** Validated at RENDER time (isDepositInstructionsShape), not here — a
@@ -54,6 +57,7 @@ export function isFundingSessionShape(body: unknown): body is FundingSession {
   if (typeof b.provider !== 'string') return false
   if (b.clientSecret !== undefined && typeof b.clientSecret !== 'string') return false
   if (b.publishableKey !== undefined && typeof b.publishableKey !== 'string') return false
+  if (b.walletAddress !== undefined && typeof b.walletAddress !== 'string') return false
   if (b.status !== undefined && typeof b.status !== 'string') return false
   // depositInstructions is deliberately NOT validated here: the offline panel
   // works without it, so a malformed object degrades to the fallback copy
@@ -88,6 +92,7 @@ const ONRAMP_PAID_STATUSES = new Set(['fulfillment_processing', 'fulfillment_com
 export type PayAffordance =
   | 'stripe'
   | 'onramp'
+  | 'crypto'
   | 'simulate'
   | 'offline'
   | 'submitted'
@@ -124,6 +129,23 @@ export function payAffordanceFor(session: FundingSession, canSimulate: boolean):
     // form), the widget renders the session's own live state, so showing it
     // is safe and stranding the sender behind an error card is not.
     return 'onramp'
+  }
+  if (session.provider === 'stripe_crypto') {
+    // Embedded rail (K5): the deferred bootstrap carries no clientSecret —
+    // only the publishable key the SDK initializes with. Session status rides
+    // along when a live read resolved (reload after an attempt): paid
+    // statuses show submitted, a rejected session shows the error card until
+    // the tracker's PAYMENT_FAILED banner takes over (the reconcile poll is
+    // driving that transition), and anything else starts the machine fresh —
+    // sessions are never resumed, so "fresh" is always a safe landing.
+    // Both are required to run the flow: the key initializes the SDK, and
+    // the treasury address must be registered before any session create.
+    if (!session.publishableKey || !session.walletAddress) return 'error'
+    if (session.status !== undefined && ONRAMP_PAID_STATUSES.has(session.status)) {
+      return 'submitted'
+    }
+    if (session.status === 'rejected') return 'error'
+    return 'crypto'
   }
   if (session.provider === 'mock') {
     return canSimulate ? 'simulate' : 'none'

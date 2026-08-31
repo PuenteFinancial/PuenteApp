@@ -35,9 +35,14 @@ const getPaymentStatus = vi.hoisted(() => vi.fn())
 const processorMock = vi.hoisted(() => ({
   current: { provider: 'mock' } as { provider: string; getPaymentStatus?: unknown },
 }))
-vi.mock('../services/funding/index.js', () => ({
-  getFundingProcessor: () => processorMock.current,
-}))
+vi.mock('../services/funding/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/funding/index.js')>()
+  return {
+    // Real rail classifier (pure); only the processor registry is faked.
+    isOnrampSessionRail: actual.isOnrampSessionRail,
+    getFundingProcessor: () => processorMock.current,
+  }
+})
 
 const { reconcilePendingTransfers } = await import('./reconcile-pending.js')
 const { TransferRpcError } = await import('../services/transfers.js')
@@ -109,19 +114,25 @@ describe('reconcilePendingTransfers — staleness windows', () => {
     expect(input.reason).toBe('funding_not_received_within_5_days')
   })
 
-  it('onramp processor: hours-scale — widget KYC outlives 30 minutes (#213)', async () => {
-    envMock.FUNDING_PROCESSOR = 'stripe_onramp'
-    processorMock.current = { provider: 'stripe_onramp', getPaymentStatus }
-    // Refs deliberately null: these rows exercise the AGE arm, not the poll.
-    mockPendingSelect([row('tr-old', 5 * HOURS), row('tr-midkyc', 3 * HOURS)])
+  // Both onramp rails share the window: KYC-at-first-send makes a slow first
+  // pass NORMAL under stripe_crypto too (K5 fix — the literal 'stripe_onramp'
+  // branch left the embedded rail on the 30-minute default).
+  it.each(['stripe_onramp', 'stripe_crypto'])(
+    '%s: hours-scale — first-send KYC outlives 30 minutes (#213)',
+    async (rail) => {
+      envMock.FUNDING_PROCESSOR = rail
+      processorMock.current = { provider: rail, getPaymentStatus }
+      // Refs deliberately null: these rows exercise the AGE arm, not the poll.
+      mockPendingSelect([row('tr-old', 5 * HOURS), row('tr-midkyc', 3 * HOURS)])
 
-    const count = await reconcilePendingTransfers()
+      const count = await reconcilePendingTransfers()
 
-    expect(count).toBe(1)
-    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
-    expect(input.transferId).toBe('tr-old')
-    expect(input.reason).toBe('funding_not_received_within_4_hours')
-  })
+      expect(count).toBe(1)
+      const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+      expect(input.transferId).toBe('tr-old')
+      expect(input.reason).toBe('funding_not_received_within_4_hours')
+    },
+  )
 
   it('transitions every stale row and returns the count', async () => {
     mockPendingSelect([row('tr-1', 1 * HOURS), row('tr-2', 2 * HOURS), row('tr-3', 3 * HOURS)])
@@ -167,10 +178,15 @@ describe('reconcilePendingTransfers — staleness windows', () => {
   })
 })
 
-describe('reconcilePendingTransfers — rejected-session poll (#213)', () => {
+// Runs identically for the widget rail and the embedded rail: both stamp cos_
+// refs, and a KYC rejection under stripe_crypto must fail in ≤ one tick just
+// like the drill pinned for stripe_onramp.
+describe.each(['stripe_onramp', 'stripe_crypto'])(
+  'reconcilePendingTransfers — rejected-session poll (#213, %s)',
+  (rail) => {
   beforeEach(() => {
-    envMock.FUNDING_PROCESSOR = 'stripe_onramp'
-    processorMock.current = { provider: 'stripe_onramp', getPaymentStatus }
+    envMock.FUNDING_PROCESSOR = rail
+    processorMock.current = { provider: rail, getPaymentStatus }
   })
 
   it('fails a rejected session IMMEDIATELY — no webhook exists for rejection', async () => {
@@ -266,4 +282,5 @@ describe('reconcilePendingTransfers — rejected-session poll (#213)', () => {
 
     expect(getPaymentStatus).not.toHaveBeenCalled()
   })
-})
+  },
+)

@@ -253,6 +253,15 @@ export interface FundingProcessor {
    */
   getClientSession(input: { paymentRef: string }): Promise<FundingClientSession>
   /**
+   * Deferred rails only (K5): the pay-step bootstrap for a transfer that has
+   * NO payment object yet — a null funding_payment_ref is the NORMAL state
+   * between confirm and the SDK's payment-token mint, not the crash window it
+   * is for eager rails. Returns what the browser needs to initialize the
+   * client SDK (the publishable key — deliberately served here, not via a
+   * NEXT_PUBLIC_ env; see docs/decisions.md). Synchronous and secret-free.
+   */
+  getDeferredClientBootstrap?(): FundingClientSession
+  /**
    * Reconciliation reads (slice-8 O2, both OPTIONAL — see the interface note):
    * the live status of one payment, and the newest payments on the account
    * (orphan detection). Read-only; never create or mutate processor objects.

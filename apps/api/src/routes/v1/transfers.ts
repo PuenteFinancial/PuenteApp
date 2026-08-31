@@ -1197,6 +1197,10 @@ export async function transfersRoute(server: FastifyInstance) {
               provider: { type: 'string' },
               clientSecret: { type: 'string' },
               publishableKey: { type: 'string' },
+              // Deferred rail only (K5): the treasury address the client
+              // registers with the SDK before session create. Public chain
+              // address, never a credential.
+              walletAddress: { type: 'string' },
               // Live PI status (stripe only) — lets a reload after
               // confirmPayment render "submitted" instead of the pay form.
               status: { type: 'string' },
@@ -1248,16 +1252,57 @@ export async function transfersRoute(server: FastifyInstance) {
         return sendError(reply, 409, 'conflict', 'Transfer is no longer awaiting payment')
       }
 
-      // The confirm-crashed window (accepted but no ref): confirm's own retry
-      // path is the recovery — it re-initiates and Stripe's funding_init_<id>
-      // idempotency key returns the same PI — not this read-only route.
+      const processor = getFundingProcessor()
+
+      // Deferred rails (K5) always answer with the SDK bootstrap — provider,
+      // publishable key, and the treasury address the client must register —
+      // whether or not a prior attempt left a ref behind. Sessions are NEVER
+      // resumed on this rail, so a stale session's client secret is worthless
+      // to the browser; what the pay step needs on every load is the material
+      // to start a fresh attempt. The live status rides along when it can be
+      // read, purely so a session that already reached payment renders as
+      // "submitted" instead of offering a second charge.
+      if (processor.getDeferredClientBootstrap) {
+        const bootstrap = processor.getDeferredClientBootstrap()
+        let status: string | undefined
+        if (transfer.funding_payment_ref && processor.getPaymentStatus) {
+          try {
+            status = (
+              await processor.getPaymentStatus({ paymentRef: transfer.funding_payment_ref })
+            ).status
+          } catch (err) {
+            // Embedded sessions are created with the USER'S OAuth token, so
+            // whether a platform-key read resolves them is a preview-API
+            // unknown. A failed read must not break the pay step: the
+            // onramp-session route's own in-progress check is the double-pay
+            // backstop, not this one.
+            request.log.warn(
+              { transferId: transfer.id, err: err instanceof Error ? err.message : String(err) },
+              'funding-session: live session read failed on a deferred rail; serving bootstrap',
+            )
+          }
+        }
+        return { provider: bootstrap.provider, ...bootstrap.fields, ...(status ? { status } : {}) }
+      }
+
       if (!transfer.funding_payment_ref) {
+        // Eager rails: the confirm-crashed window (accepted but no ref) —
+        // confirm's own retry path is the recovery — it re-initiates and
+        // Stripe's funding_init_<id> idempotency key returns the same PI —
+        // not this read-only route.
         return sendError(reply, 409, 'conflict', 'Payment has not been set up for this transfer')
       }
 
-      const session = await getFundingProcessor().getClientSession({
-        paymentRef: transfer.funding_payment_ref,
-      })
+      let session
+      try {
+        session = await processor.getClientSession({
+          paymentRef: transfer.funding_payment_ref,
+        })
+      } catch (err) {
+        // Eager rails only — deferred rails returned above and never reach
+        // this read.
+        throw err
+      }
 
       // Manual only: the attached deposit coordinates ride along when they
       // exist; their absence keeps the pay step on the fallback copy. Owner

@@ -27,6 +27,12 @@ export type ApiErrorCode =
   // this sender's location/profile. 403 at confirm; permanent for the sender
   // from this network location, not retryable-later like not_configured.
   | 'funding_unsupported'
+  // Embedded onramp (K5): the user must (re)authenticate with Link before
+  // this call can work — no stored OAuth token, or no crypto customer yet.
+  // Distinct from the generic 409 'conflict' because the client reaction
+  // differs (restart Link auth vs. recollect payment), and clients may only
+  // branch on codes, never messages.
+  | 'link_auth_required'
   | 'rate_limited'
   | 'rate_unavailable'
   | 'provider_rejected'

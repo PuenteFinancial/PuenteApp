@@ -43,7 +43,7 @@ function handleProviderError(
 ) {
   if (err instanceof NoStoredTokenError) {
     // Not an error state: the user simply has to (re)authenticate with Link.
-    return sendError(reply, 409, 'conflict', 'Link authentication required')
+    return sendError(reply, 409, 'link_auth_required', 'Link authentication required')
   }
   if (err instanceof StripeCryptoApiError) {
     server.log.error({ userId, stripeStatus: err.status, stripeCode: err.code }, 'stripe crypto request failed')
@@ -370,7 +370,15 @@ export async function cryptoRoute(server: FastifyInstance) {
     }
     // Other 4xx: the session/quote is no longer usable (expired quote,
     // consumed token…). Never-resume rule: the client starts a fresh attempt.
+    // LOGGED (K5 drive, 2026-08-28): this branch is where every unmapped
+    // provider refusal lands, and swallowing the code made a live failure
+    // undiagnosable — the sender saw "start again" and the server said
+    // nothing. Code only, never the body (it can carry sender PII).
     if (err.status < 500) {
+      server.log.warn(
+        { userId, stripeStatus: err.status, stripeCode: code },
+        'stripe crypto session refused — client must restart the attempt',
+      )
       return sendError(reply, 409, 'conflict', 'This payment attempt can no longer be used — start again')
     }
     server.log.error({ userId, stripeStatus: err.status, stripeCode: code }, 'stripe crypto session failed')
@@ -446,7 +454,7 @@ export async function cryptoRoute(server: FastifyInstance) {
       const cryptoCustomerId = (userData as { stripe_crypto_customer_id: string | null } | null)
         ?.stripe_crypto_customer_id
       if (!cryptoCustomerId) {
-        return sendError(reply, 409, 'conflict', 'Link authentication required')
+        return sendError(reply, 409, 'link_auth_required', 'Link authentication required')
       }
 
       // Real client IP (widget-rail contract): Stripe geo-checks it and
@@ -481,7 +489,7 @@ export async function cryptoRoute(server: FastifyInstance) {
         return { sessionId: session.id, status: session.status }
       } catch (err) {
         if (err instanceof NoStoredTokenError) {
-          return sendError(reply, 409, 'conflict', 'Link authentication required')
+          return sendError(reply, 409, 'link_auth_required', 'Link authentication required')
         }
         if (err instanceof StripeCryptoApiError) {
           return sendSessionError(reply, userId, err)
@@ -551,7 +559,7 @@ export async function cryptoRoute(server: FastifyInstance) {
         return { clientSecret }
       } catch (err) {
         if (err instanceof NoStoredTokenError) {
-          return sendError(reply, 409, 'conflict', 'Link authentication required')
+          return sendError(reply, 409, 'link_auth_required', 'Link authentication required')
         }
         if (err instanceof StripeCryptoApiError) {
           return sendSessionError(reply, userId, err)

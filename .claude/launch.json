@@ -21,6 +21,25 @@
         "dev:e2e"
       ],
       "port": 3001
+    },
+    {
+      "name": "api-crypto",
+      "runtimeExecutable": "doppler",
+      "runtimeArgs": [
+        "run",
+        "--project",
+        "puente-api",
+        "--config",
+        "stg_main",
+        "--",
+        "env",
+        "FUNDING_PROCESSOR=stripe_crypto",
+        "pnpm",
+        "--filter",
+        "@puente/api",
+        "dev"
+      ],
+      "port": 3001
     }
   ]
 }

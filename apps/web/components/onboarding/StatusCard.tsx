@@ -6,12 +6,17 @@ import { useLanguage } from '@/components/LanguageProvider'
 // Static end-of-flow states: KYC pending review, and the verified dashboard.
 // `sendEnabled` is resolved server-side from the web-send-money flag and gates
 // the "Send money" entry point (dark launch, no client flag flash).
+// `kycAtFirstSend` (K5): under the new flow the dashboard user has NOT been
+// verified — verification happens inside the send flow — so the title must
+// not say "You're verified" (the K2 wart). Server-resolved, same reason.
 export default function StatusCard({
   variant,
   sendEnabled = false,
+  kycAtFirstSend = false,
 }: {
   variant: 'pending' | 'dashboard'
   sendEnabled?: boolean
+  kycAtFirstSend?: boolean
 }) {
   const { t } = useLanguage()
 
@@ -32,7 +37,7 @@ export default function StatusCard({
   return (
     <div className="wl-card">
       <h1 style={{ fontFamily: 'var(--font)', fontSize: 24, fontWeight: 700, margin: '0 0 8px', color: 'var(--ink)' }}>
-        {s.title}
+        {kycAtFirstSend ? s.readyTitle : s.title}
       </h1>
       <p style={{ fontSize: 15, color: 'var(--muted)', margin: '0 0 16px', lineHeight: 1.6 }}>
         {sendEnabled ? t.send.dashboardReady : s.body}

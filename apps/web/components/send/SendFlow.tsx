@@ -10,7 +10,15 @@ import ReviewConfirm from './ReviewConfirm'
 // review+confirm. Once confirmed, the transfer exists and money is about to
 // move, so it stops being a step in an in-memory machine and gets its own URL
 // (/dashboard/send/:id) — reload-safe, linkable, and where the tracker lives.
-export default function SendFlow({ recipients }: { recipients: SendRecipient[] }) {
+export default function SendFlow({
+  recipients,
+  showKycExpectation = false,
+}: {
+  recipients: SendRecipient[]
+  /** K5, flag-ON only: the quote screen sets the verify-at-payment
+   *  expectation (server-resolved — no client flag flash). */
+  showKycExpectation?: boolean
+}) {
   const { t } = useLanguage()
   const router = useRouter()
   const [transfer, setTransfer] = useState<CreatedTransfer | null>(null)
@@ -47,5 +55,11 @@ export default function SendFlow({ recipients }: { recipients: SendRecipient[] }
     )
   }
 
-  return <QuoteScreen recipients={recipients} onCreated={setTransfer} />
+  return (
+    <QuoteScreen
+      recipients={recipients}
+      onCreated={setTransfer}
+      showKycExpectation={showKycExpectation}
+    />
+  )
 }

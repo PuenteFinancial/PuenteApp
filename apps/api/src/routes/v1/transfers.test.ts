@@ -59,6 +59,8 @@ vi.mock('../../services/deposit-instructions.js', () => ({
 }))
 const isConfigured = vi.fn(() => true)
 const deferredInitiation = vi.fn(() => false)
+const getDeferredClientBootstrap = vi.fn()
+const getPaymentStatus = vi.fn()
 
 // Only the PROCESSOR is mocked. The ref-namespace helpers (undoModeForRef,
 // undoRequiresManualDisbursement) are pure and are what the cancel tail reads to
@@ -77,6 +79,9 @@ vi.mock('../../services/funding/index.js', async (importOriginal) => {
       initiateFunding,
       voidFunding,
       getClientSession,
+      // Present only on the deferred rail, like the real registry (K5): the
+      // funding-session route feature-detects this method.
+      ...(deferredInitiation() ? { getDeferredClientBootstrap, getPaymentStatus } : {}),
     }),
   }
 })
@@ -232,6 +237,14 @@ beforeEach(() => {
   })
   getClientSession.mockReset()
   getClientSession.mockResolvedValue({ provider: 'mock', fields: {} })
+  getDeferredClientBootstrap.mockReset()
+  getDeferredClientBootstrap.mockReturnValue({
+    provider: 'stripe_crypto',
+    // walletAddress rides along from K5: Stripe refuses a headless session
+    // for an unregistered wallet, so the client must register this exact
+    // treasury address before create.
+    fields: { publishableKey: 'pk_test_x', walletAddress: '0xTREASURY' },
+  })
   getDepositInstructions.mockReset().mockResolvedValue(null)
   assessTransferRisk.mockReset()
   assessTransferRisk.mockResolvedValue({ ok: true })
@@ -1313,6 +1326,74 @@ describe('GET /v1/transfers/:id/funding-session', () => {
     const res = await get(app)
     expect(res.status).toBe(409)
     expect(getClientSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  // ── Deferred rail (K5): a null ref is the NORMAL pre-session state, not a
+  // crash window — the route serves the SDK bootstrap instead of a 409.
+  it('deferred rail + null ref: serves the SDK bootstrap, never a session read', async () => {
+    deferredInitiation.mockReturnValue(true)
+    from.mockReturnValueOnce(chain({ data: transferRow })) // ref is null in the fixture
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      provider: 'stripe_crypto',
+      publishableKey: 'pk_test_x',
+      walletAddress: '0xTREASURY',
+    })
+    expect(getClientSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('deferred rail + live cos_ ref: bootstrap + live status, never the stale secret', async () => {
+    // A prior attempt's session is NEVER resumed on this rail, so its client
+    // secret is worthless to the browser — what every load needs is the
+    // material to start a fresh attempt (key + treasury address). Serving the
+    // stale session instead was a live regression: without walletAddress the
+    // pay step could not register the wallet and rendered its error card
+    // (caught on the 2026-08-29 drive). The status still rides along so an
+    // already-paid session renders "submitted" rather than offering a second
+    // charge.
+    deferredInitiation.mockReturnValue(true)
+    from.mockReturnValueOnce(chain({ data: { ...transferRow, funding_payment_ref: 'cos_1' } }))
+    getPaymentStatus.mockResolvedValue({ status: 'requires_payment' })
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      provider: 'stripe_crypto',
+      publishableKey: 'pk_test_x',
+      walletAddress: '0xTREASURY',
+      status: 'requires_payment',
+    })
+    expect(res.body.clientSecret).toBeUndefined()
+    expect(getPaymentStatus).toHaveBeenCalledWith({ paymentRef: 'cos_1' })
+    expect(getClientSession).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('deferred rail + failing session read: degrades to the bootstrap, not a 500', async () => {
+    // Embedded sessions are created under the user's OAuth token; whether the
+    // platform-key read resolves them is a preview-API unknown. Sessions are
+    // never resumed, so the bootstrap is a safe answer either way.
+    deferredInitiation.mockReturnValue(true)
+    from.mockReturnValueOnce(chain({ data: { ...transferRow, funding_payment_ref: 'cos_1' } }))
+    getPaymentStatus.mockRejectedValue(new Error('platform key cannot read user-scoped session'))
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      provider: 'stripe_crypto',
+      publishableKey: 'pk_test_x',
+      walletAddress: '0xTREASURY',
+    })
     await app.close()
   })
 

@@ -44,6 +44,6 @@ export default async function DashboardPage() {
   }
 
   return (
-      <StatusCard variant="dashboard" sendEnabled={sendEnabled} />
+      <StatusCard variant="dashboard" sendEnabled={sendEnabled} kycAtFirstSend={kycAtFirstSend} />
   )
 }

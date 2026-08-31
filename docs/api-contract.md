@@ -58,6 +58,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 403 | `funding_unsupported` | Onramp rail (#213): the funding processor can't serve this sender's location/profile (Stripe supportability pre-check at confirm) |
 | 404 | `not_found` | Unknown resource |
 | 409 | `conflict` | Illegal state transition |
+| 409 | `link_auth_required` | Embedded onramp (K5): no stored Link OAuth token / no crypto customer — client restarts Link auth (distinct from `conflict`, which means recollect payment / start the attempt over) |
 | 409 | `idempotency_conflict` | Idempotency-Key reused with different body |
 | 409 | `quote_expired` | Quote past `expires_at` |
 | 409 | `transfer_not_cancelable` | Not in `FUNDED`, or already claimed for payout submission |
@@ -84,7 +85,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| GET | `/v1/users/me` | ✓ | Current profile: `firstName`, `lastName`, `email`, `kycStatus`, `bridgeCustomerId`, address fields (K2), `profileComplete` (name+email+address — the router's profile gate), `consentsCurrent` (K1 — GET only; the web `/continue` router gates on both). |
+| GET | `/v1/users/me` | ✓ | Current profile: `firstName`, `lastName`, `email`, `phone` (login identity, E.164 — K5 Link-registration prefill), `kycStatus`, `bridgeCustomerId`, address fields (K2), `profileComplete` (name+email+address — the router's profile gate), `consentsCurrent` (K1 — GET only; the web `/continue` router gates on both). |
 | PATCH | `/v1/users/me` | ✓ | Update `firstName`, `lastName`, `email` (all required) + optional address group `addressLine1/2`, `addressCity`, `addressState`, `addressPostalCode` (K2 — all-or-none when present, `line2` optional; state validated against shared `US_STATES`; absent group never nulls a stored address, so the frozen mobile app's name-only PATCH is unaffected). |
 | GET | `/v1/users/me/consents` | ✓ | `{ required, granted, missing }` against `REQUIRED_CONSENTS` (packages/shared). |
 | POST | `/v1/users/me/consents` | ✓ | Body `{ consents: [{type, version}], locale }`. Only pairs the server **currently requires** are accepted (stale client → 400 `validation_error`); `bridge_tos` is refused here (first-send paths write it server-side with `signed_agreement_id` evidence). Idempotent: re-grant of an existing (user, type, version) is a no-op that keeps the original evidence. |
@@ -109,7 +110,7 @@ classifies the provisioning state (creds missing / flags unprovisioned / ready).
 | POST | `/v1/crypto/link-auth-intent` | ✓ | Creates or REUSES the user's LinkAuthIntent (web reuse rule — a fresh intent per page load forces re-OTP). Email read from the user's own row, never the request. `linkAccountExists: false` = the SDK must register the user first. |
 | POST | `/v1/crypto/link-auth-intent/exchange` | ✓ | Exchanges the STORED intent for tokens; banks the refresh token AES-256-GCM-encrypted (AAD = user id). Refuses any lai_ not minted for this user (identity-grafting guard). Access tokens never surface. |
 | POST | `/v1/crypto/customer` | ✓ | Persists the crc_ id from the SDK's authenticate callback — verify-then-persist: retrieved under the user's own OAuth token before it lands on their row. |
-| GET | `/v1/crypto/kyc-status` | ✓ | Customers poll; caches tier on `users` (display/routing hints — never authorization). 409 = re-authenticate with Link. |
+| GET | `/v1/crypto/kyc-status` | ✓ | Customers poll; caches tier on `users` (display/routing hints — never authorization). 409 `link_auth_required` = re-authenticate with Link (K5 — distinct from `conflict`). |
 | GET | `/v1/crypto/quote?amount=` | ✓ | Headless onramp quote for the fixed USDC-on-Base corridor (native fee display, decision 7). |
 | GET | `/v1/crypto/limits` | ✓ | `transaction_limits` pass-through; response schema deliberately unpinned until smoke proves the shape. |
 | POST | `/v1/crypto/transfers/:id/onramp-session` | ✓ | K4 pay-step: creates the headless onramp session for a confirmed PENDING_PAYMENT transfer — amount pinned from the transfer row, delivery hard-wired to the treasury address, `metadata[transfer_id]` as the webhook join key. Body `{ paymentTokenId: cpt_… }` (from the SDK). **New session per attempt, never resume**: replaces a prior session only while it provably hasn't moved money (`fulfillment_*` → 409). KYC step-ups → 400 `kyc_required` with the exact Stripe code in `details`; geo refusals → 403 `funding_unsupported`. Live only under `FUNDING_PROCESSOR=stripe_crypto`. |
@@ -291,19 +292,24 @@ webhook** drives `FUNDED`. Under the manual rail, a successful confirm also enqu
 attaches deposit instructions with system attribution — confirm never fails on Bridge or the
 queue being down (the ops attach button is the break-glass).
 
-**`GET /v1/transfers/:id/funding-session`** — pay-step bootstrap *(S3)*
+**`GET /v1/transfers/:id/funding-session`** — pay-step bootstrap *(S3; deferred-rail bootstrap K5)*
 ```jsonc
 // response 200 — stripe processor
 { "provider": "stripe", "clientSecret": "pi_…_secret_…", "publishableKey": "pk_test_…" }
 // response 200 — mock processor (web falls back to the simulate affordance)
 { "provider": "mock" }
+// response 200 — stripe_crypto with no session yet (the NORMAL deferred state):
+// the SDK bootstrap — the publishable key is deliberately not a NEXT_PUBLIC_ env
+{ "provider": "stripe_crypto", "publishableKey": "pk_test_…" }
 ```
 Owner-scoped. The tracker calls this once per pay-step mount (never on the poll) so a reload at
 `PENDING_PAYMENT` can re-mount the Payment Element: the `clientSecret` is retrieved from the
 processor **on demand and never persisted or logged** on our side — Stripe stays the only store of
 the credential. Errors: `not_found` (404 — missing or not yours; never leaks existence), `conflict`
-(409 — the transfer left `PENDING_PAYMENT`, or funding was never initiated: that confirm-crashed
-window is recovered by confirm's own idempotent retry, not this route), `not_configured` (503 —
+(409 — the transfer left `PENDING_PAYMENT`, or — eager rails only — funding was never initiated:
+that confirm-crashed window is recovered by confirm's own idempotent retry, not this route; on the
+deferred rail a null ref serves the bootstrap instead, and a failing live-session read also degrades
+to the bootstrap since sessions are never resumed), `not_configured` (503 —
 same posture as confirm; in prod-mock this endpoint cannot serve). Deliberately **no KYC gate and
 no uncleared-cap check** — a read-only bootstrap for an already-committed send must not strand a
 sender mid-window on a KYC flip (same rationale as cancel's shortened guard ladder).

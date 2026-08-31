@@ -15,7 +15,7 @@ import { fetchGrantedConsents, missingConsents } from './consents.js'
 // One literal on purpose: supabase-js parses the column list at the type
 // level, and a concatenated string widens to `string`, which its types treat
 // as an error shape — poisoning every row cast.
-const USER_COLUMNS = 'id, first_name, last_name, email, kyc_status, bridge_customer_id, address_line1, address_line2, address_city, address_state, address_postal_code'
+const USER_COLUMNS = 'id, first_name, last_name, email, phone, kyc_status, bridge_customer_id, address_line1, address_line2, address_city, address_state, address_postal_code'
 
 const KYC_MAX_RETRIES = 3
 const KYC_RETRY_COLUMNS = 'kyc_status, bridge_customer_id, kyc_retry_count'
@@ -31,6 +31,7 @@ interface UserRow {
   first_name: string | null
   last_name: string | null
   email: string | null
+  phone: string
   kyc_status: string
   bridge_customer_id: string | null
   address_line1: string | null
@@ -62,6 +63,9 @@ function toApiUser(row: UserRow) {
     firstName: row.first_name,
     lastName: row.last_name,
     email: row.email,
+    // Login identity (E.164, unique not null since signup). Surfaced for the
+    // K5 client: the Link registration SDK call requires the user's phone.
+    phone: row.phone,
     kycStatus: row.kyc_status,
     bridgeCustomerId: row.bridge_customer_id,
     addressLine1: row.address_line1,
@@ -80,6 +84,7 @@ const userResponseSchema = {
     firstName: { type: ['string', 'null'] },
     lastName: { type: ['string', 'null'] },
     email: { type: ['string', 'null'] },
+    phone: { type: 'string' },
     kycStatus: { type: 'string' },
     bridgeCustomerId: { type: ['string', 'null'] },
     addressLine1: { type: ['string', 'null'] },
