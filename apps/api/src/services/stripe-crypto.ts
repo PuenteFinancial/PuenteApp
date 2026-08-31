@@ -190,11 +190,38 @@ export async function exchangeLinkAuthIntent(userId: string, authIntentId: strin
   return data.access_token
 }
 
-async function storeRefreshToken(userId: string, refreshToken: string): Promise<void> {
+async function storeRefreshToken(
+  userId: string,
+  refreshToken: string,
+  /**
+   * The ciphertext this rotation consumed. When present the write is a
+   * compare-and-swap: it lands only while the row still holds that exact
+   * value, so a slower concurrent rotation can never clobber a fresher
+   * token with its own stale one. (AES-GCM uses a random IV, so every
+   * encryption is a distinct ciphertext — the column value is a de-facto
+   * version stamp.) Absent on first store, where there is nothing to swap.
+   */
+  expectedCiphertext?: string,
+): Promise<void> {
+  const nextCiphertext = encryptString(refreshToken, userId)
+
+  if (expectedCiphertext) {
+    const { error } = await supabaseAdmin
+      .from(LINK_TOKENS_TABLE)
+      .update({ refresh_token_enc: nextCiphertext })
+      .eq('user_id', userId)
+      .eq('refresh_token_enc', expectedCiphertext)
+      .select('user_id')
+    if (error) throw new StripeCryptoApiError(500, { error: { code: 'token_store_failed' } })
+    // No row matched: someone else rotated first and their token is newer
+    // than ours. Losing the race is success — theirs is the live credential.
+    return
+  }
+
   const { error } = await supabaseAdmin.from(LINK_TOKENS_TABLE).upsert(
     {
       user_id: userId,
-      refresh_token_enc: encryptString(refreshToken, userId),
+      refresh_token_enc: nextCiphertext,
     },
     { onConflict: 'user_id' },
   )
@@ -216,7 +243,9 @@ export class NoStoredTokenError extends Error {
 // the refresh token on every grant — the new one replaces the old before the
 // access token is returned, so a crash between grant and store costs one
 // re-OTP, never a stuck credential.
-export async function mintAccessToken(userId: string): Promise<string> {
+async function readStoredRefresh(
+  userId: string,
+): Promise<{ token: string; ciphertext: string }> {
   const { data } = await supabaseAdmin
     .from(LINK_TOKENS_TABLE)
     .select('refresh_token_enc')
@@ -226,44 +255,81 @@ export async function mintAccessToken(userId: string): Promise<string> {
   const row = data as { refresh_token_enc: string } | null
   if (!row?.refresh_token_enc) throw new NoStoredTokenError()
 
-  let refreshToken: string
   try {
-    refreshToken = decryptString(row.refresh_token_enc, userId)
+    return { token: decryptString(row.refresh_token_enc, userId), ciphertext: row.refresh_token_enc }
   } catch (err) {
     if (err instanceof DecryptionError) throw new NoStoredTokenError()
     throw err
   }
+}
 
-  const params = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: env.STRIPE_CRYPTO_OAUTH_CLIENT_ID!,
-    client_secret: env.STRIPE_CRYPTO_OAUTH_CLIENT_SECRET!,
-  })
+/**
+ * Exchange the stored refresh token for an access token, rotating what we
+ * hold.
+ *
+ * Concurrency (found on the 2026-08-29 drive: the first crypto call of a page
+ * load 409'd `link_auth_required`, then the next succeeded). Two requests for
+ * the same user race here — two tabs in production, React's double-invoked
+ * effects in dev — and both present the SAME refresh token. Stripe rotates on
+ * the first and rejects the second, which we used to report as "re-authenticate",
+ * costing the sender a spurious OTP.
+ *
+ * Worse than the UX: RFC 9700 (OAuth 2.0 Security BCP) has authorization
+ * servers treat reuse of a rotated refresh token as a breach signal and
+ * REVOKE THE WHOLE GRANT. A benign race must therefore never look like reuse
+ * we shrugged at, and the loser must never write its stale token back.
+ *
+ * Two guards, the standard pairing:
+ *   1. the store is a compare-and-swap on the ciphertext we consumed, so a
+ *      loser cannot overwrite the winner's fresher token;
+ *   2. a rejected grant re-reads the row — if the stored token CHANGED under
+ *      us, a concurrent rotation won and we retry ONCE with its result.
+ *      Only an unchanged token means the grant is genuinely dead.
+ */
+export async function mintAccessToken(userId: string): Promise<string> {
+  let stored = await readStoredRefresh(userId)
 
-  let granted: TokenSet
-  try {
-    const data = (await cryptoFetch(env.LINK_OAUTH_API_BASE, '/auth/token', {
-      method: 'POST',
-      stripeVersion: false,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: params.toString(),
-    })) as { access_token: string; refresh_token?: string }
-    granted = { accessToken: data.access_token, refreshToken: data.refresh_token ?? null }
-  } catch (err) {
-    // An invalid/expired/revoked refresh token means the user must
-    // re-authenticate — same recovery as having no token at all.
-    if (err instanceof StripeCryptoApiError && (err.status === 400 || err.status === 401 || err.status === 403)) {
+  for (let attempt = 0; ; attempt++) {
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: stored.token,
+      client_id: env.STRIPE_CRYPTO_OAUTH_CLIENT_ID!,
+      client_secret: env.STRIPE_CRYPTO_OAUTH_CLIENT_SECRET!,
+    })
+
+    let granted: TokenSet
+    try {
+      const data = (await cryptoFetch(env.LINK_OAUTH_API_BASE, '/auth/token', {
+        method: 'POST',
+        stripeVersion: false,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: params.toString(),
+      })) as { access_token: string; refresh_token?: string }
+      granted = { accessToken: data.access_token, refreshToken: data.refresh_token ?? null }
+    } catch (err) {
+      const rejected =
+        err instanceof StripeCryptoApiError &&
+        (err.status === 400 || err.status === 401 || err.status === 403)
+      if (!rejected) throw err
+
+      // Rejected once: was it a race, or a genuinely dead grant?
+      if (attempt === 0) {
+        const fresh = await readStoredRefresh(userId)
+        if (fresh.ciphertext !== stored.ciphertext) {
+          stored = fresh
+          continue // a concurrent rotation won — use its token.
+        }
+      }
+      // Unchanged (or already retried): the user must re-authenticate.
       throw new NoStoredTokenError()
     }
-    throw err
-  }
 
-  if (granted.refreshToken && granted.refreshToken !== refreshToken) {
-    await storeRefreshToken(userId, granted.refreshToken)
-  }
+    if (granted.refreshToken && granted.refreshToken !== stored.token) {
+      await storeRefreshToken(userId, granted.refreshToken, stored.ciphertext)
+    }
 
-  return granted.accessToken
+    return granted.accessToken
+  }
 }
 
 // ── Crypto customer (KYC status) ───────────────────────────────────────────

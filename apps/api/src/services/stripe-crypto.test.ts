@@ -49,11 +49,27 @@ function selectRow(row: unknown) {
 const upsert = vi.fn(async (..._args: unknown[]) => ({ error: null }))
 const update = vi.fn(() => ({ eq: vi.fn(async () => ({ error: null })) }))
 
+// The compare-and-swap store: .update(payload).eq(user).eq(ciphertext).select()
+// `casRows` is what the swap matched — [] means another rotation won the race.
+let casRows: unknown[] = [{ user_id: 'user-1' }]
+const casUpdate = vi.fn((_payload: unknown) => {
+  const chain: Record<string, unknown> = {}
+  chain.eq = vi.fn(() => chain)
+  chain.select = vi.fn(async () => ({ data: casRows, error: null }))
+  return chain
+})
+/** A `from()` result that serves a row read AND the CAS store. */
+function tokenTable(row: unknown) {
+  return { ...selectRow(row), upsert, update: casUpdate }
+}
+
 beforeEach(() => {
   from.mockReset()
   fetchMock.mockReset()
   upsert.mockClear()
   update.mockClear()
+  casUpdate.mockClear()
+  casRows = [{ user_id: 'user-1' }]
 })
 
 describe('isStripeCryptoConfigured', () => {
@@ -136,7 +152,7 @@ describe('exchangeLinkAuthIntent', () => {
 describe('mintAccessToken', () => {
   it('runs the refresh grant with the OAuth pair and rotates the stored token', async () => {
     const enc = encryptString('liwlrefresh_old', 'user-1')
-    from.mockImplementation(() => ({ ...selectRow({ refresh_token_enc: enc }), upsert }))
+    from.mockImplementation(() => tokenTable({ refresh_token_enc: enc }))
     fetchMock.mockResolvedValue(
       jsonResponse(200, { access_token: 'liwltoken_new', refresh_token: 'liwlrefresh_new' }),
     )
@@ -152,7 +168,7 @@ describe('mintAccessToken', () => {
     expect(params.get('client_id')).toBe('lwlpk_test_client')
     expect(params.get('client_secret')).toBe('lwlsk_test_secret')
 
-    const stored = (upsert.mock.calls[0]![0] as { refresh_token_enc: string }).refresh_token_enc
+    const stored = (casUpdate.mock.calls[0]![0] as { refresh_token_enc: string }).refresh_token_enc
     expect(decryptString(stored, 'user-1')).toBe('liwlrefresh_new')
   })
 
@@ -168,6 +184,63 @@ describe('mintAccessToken', () => {
     fetchMock.mockResolvedValue(jsonResponse(400, { error: 'invalid_grant' }))
 
     await expect(mintAccessToken('user-1')).rejects.toThrow(NoStoredTokenError)
+  })
+
+  // ── Refresh-rotation race (drive finding 2026-08-29) ───────────────────
+  // Two requests for one user (two tabs; React's double-invoked effects in
+  // dev) both present the same refresh token. Stripe rotates on the first and
+  // rejects the second. RFC 9700 has authorization servers treat reuse of a
+  // rotated token as a breach signal and revoke the whole grant, so losing
+  // this race must be handled, never shrugged at.
+  it('retries once with the token a concurrent rotation just stored', async () => {
+    const mine = encryptString('liwlrefresh_mine', 'user-1')
+    const theirs = encryptString('liwlrefresh_theirs', 'user-1')
+    // First read gives our token; the post-rejection re-read shows the row
+    // changed under us — the other request won.
+    const reads = [{ refresh_token_enc: mine }, { refresh_token_enc: theirs }]
+    let call = 0
+    from.mockImplementation(() => tokenTable(reads[Math.min(call++, reads.length - 1)]))
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(400, { error: 'invalid_grant' }))
+      .mockResolvedValueOnce(
+        jsonResponse(200, { access_token: 'liwltoken_ok', refresh_token: 'liwlrefresh_next' }),
+      )
+
+    const token = await mintAccessToken('user-1')
+
+    expect(token).toBe('liwltoken_ok')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    // The retry presented the WINNER's token, not our rejected one.
+    const retried = new URLSearchParams(fetchMock.mock.calls[1]![1].body)
+    expect(retried.get('refresh_token')).toBe('liwlrefresh_theirs')
+  })
+
+  it('does not retry when the stored token is unchanged — the grant is truly dead', async () => {
+    const enc = encryptString('liwlrefresh_revoked', 'user-1')
+    from.mockImplementation(() => tokenTable({ refresh_token_enc: enc }))
+    fetchMock.mockResolvedValue(jsonResponse(400, { error: 'invalid_grant' }))
+
+    await expect(mintAccessToken('user-1')).rejects.toThrow(NoStoredTokenError)
+    // One grant attempt, plus the re-read that proved nothing had changed.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('the compare-and-swap never clobbers a fresher token', async () => {
+    const enc = encryptString('liwlrefresh_old', 'user-1')
+    from.mockImplementation(() => tokenTable({ refresh_token_enc: enc }))
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, { access_token: 'liwltoken_slow', refresh_token: 'liwlrefresh_slow' }),
+    )
+    casRows = [] // the row already moved on — our swap matches nothing
+
+    // Losing the write race is success: the winner's token is the live one,
+    // and this call's access token is still valid for its own request.
+    await expect(mintAccessToken('user-1')).resolves.toBe('liwltoken_slow')
+
+    const eqCalls = casUpdate.mock.results[0]!.value as { eq: ReturnType<typeof vi.fn> }
+    // Guarded on BOTH the user and the exact ciphertext we consumed.
+    expect(eqCalls.eq).toHaveBeenCalledWith('user_id', 'user-1')
+    expect(eqCalls.eq).toHaveBeenCalledWith('refresh_token_enc', enc)
   })
 
   it('rejects a ciphertext bound to a different user (AAD)', async () => {
