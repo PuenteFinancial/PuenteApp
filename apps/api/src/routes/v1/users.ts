@@ -11,6 +11,7 @@ import {
 import { US_STATES } from '@puente/shared'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 import { fetchGrantedConsents, missingConsents } from './consents.js'
+import { registerPendingDestinations } from '../../services/destination-registration.js'
 
 // One literal on purpose: supabase-js parses the column list at the type
 // level, and a concatenated string widens to `string`, which its types treat
@@ -658,6 +659,35 @@ export async function usersRoute(server: FastifyInstance) {
           if (saveError) {
             server.log.error({ userId, supabaseError: saveError.code }, 'bridge customer save failed')
             return sendError(reply, 500, 'internal_error', 'Failed to start identity verification')
+          }
+
+          // The customer now exists, so any destinations the sender added
+          // beforehand can finally be registered. Under KYC-at-first-send that
+          // is the normal case, not an edge one — recipients are added from
+          // the dashboard long before verification.
+          //
+          // Best-effort on purpose: a Bridge hiccup here must not cost the
+          // sender their KYC link. Anything left unregistered is retried by
+          // the payout worker, and until then checkPayability holds the payout
+          // rather than paying blind.
+          try {
+            const registration = await registerPendingDestinations(userId, bridgeCustomerId)
+            if (registration.registered > 0 || registration.failed.length > 0) {
+              server.log.info(
+                {
+                  userId,
+                  registered: registration.registered,
+                  failed: registration.failed.length,
+                  reasons: registration.failed.map((f) => f.reason),
+                },
+                'registered pending payout destinations after bridge customer create',
+              )
+            }
+          } catch (err) {
+            server.log.error(
+              { userId, err: err instanceof Error ? err.message : String(err) },
+              'pending destination registration failed after bridge customer create',
+            )
           }
         }
 

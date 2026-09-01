@@ -133,9 +133,14 @@ export async function destinationsRoute(server: FastifyInstance) {
       // 1. KYC + Bridge customer gate — this is the Bridge-touching step.
       const approved = await requireOnboardedUser(userId, reply)
       if (!approved) return
-      if (!approved.bridgeCustomerId) {
-        return sendError(reply, 403, 'kyc_required', 'Complete identity verification before adding payout details')
-      }
+      // A Bridge customer is NO LONGER required here. Under KYC-at-first-send
+      // the sender verifies in the pay step, so they reach this route with no
+      // customer yet — and demanding one deadlocked the product: a destination
+      // needed a customer, the customer only appeared at first send, and first
+      // send needed a destination. With no customer the row is persisted with
+      // a null provider_account_ref and registered later by
+      // registerPendingDestinations. checkPayability still refuses to pay an
+      // unregistered destination, so nothing goes out unregistered.
 
       // 2. Owner-scoped recipient load.
       const { data: recipientData } = await supabaseAdmin
@@ -167,97 +172,104 @@ export async function destinationsRoute(server: FastifyInstance) {
 
       // 5. Register with Bridge BEFORE persisting anything: a failure leaves
       // no row behind, and a retry is simply a resubmit.
-      let bridgeAccountId: string
-      try {
-        const account = await createExternalAccount(approved.bridgeCustomerId, {
-          firstName: recipient.first_name,
-          lastName: recipient.last_name,
-          clabe,
-        })
-        bridgeAccountId = account.id
-      } catch (err) {
-        if (err instanceof BridgeApiError) {
-          const bridgeCode = (err.body as { code?: string } | null)?.code
-          server.log.error(
-            { userId, recipientId: recipient.id, bridgeStatus: err.status, bridgeCode },
-            'bridge external account create failed',
-          )
-          // Bridge dedupes identical CLABEs per customer (sandbox-verified
-          // 2026-07-16): re-adding a previously registered account — even a
-          // locally archived one — 400s with this code rather than minting a
-          // new id. A blind 409 here would dead-end two legitimate retries:
-          // a resubmit after a lost response / failed insert (Bridge has the
-          // account, we have no row), and the documented archive-then-re-add
-          // reactivation flow. Adopt the existing Bridge account instead.
-          if (bridgeCode === 'duplicate_external_account') {
-            let accounts: Awaited<ReturnType<typeof listExternalAccounts>>
-            try {
-              accounts = await listExternalAccounts(approved.bridgeCustomerId)
-            } catch {
-              server.log.error(
-                { userId, recipientId: recipient.id },
-                'bridge external account list failed during adoption',
-              )
-              return sendError(reply, 502, 'provider_unavailable', 'Payout provider is unavailable, try again shortly')
-            }
-            // Bridge only exposes last_4, so require an unambiguous match —
-            // on a collision fall back to the conservative 409
-            const matches = accounts.filter((a) => a.clabeLast4 === clabe.slice(-4))
-            if (matches.length !== 1) {
-              return sendError(reply, 409, 'conflict', 'This account is already saved')
-            }
-            const adoptedId = matches[0]!.id
-
-            const { data: existing } = await supabaseAdmin
-              .from('payout_destinations')
-              .select('id, recipient_id, status')
-              .eq('provider_account_ref', adoptedId)
-              .maybeSingle()
-            const existingRow = existing as {
-              id: string
-              recipient_id: string
-              status: string
-            } | null
-
-            if (existingRow) {
-              const revivable =
-                existingRow.recipient_id === recipient.id && existingRow.status === 'archived'
-              if (!revivable) {
-                // genuinely saved already — either active here, or it lives
-                // under a different recipient of the same user
+      const customerId = approved.bridgeCustomerId
+      let bridgeAccountId: string | null = null
+      // Deferred registration: with no Bridge customer yet there is
+      // nothing to register against, so the row lands unregistered and
+      // registerPendingDestinations fills the ref in once one exists.
+      if (customerId) {
+        try {
+          const account = await createExternalAccount(customerId, {
+            firstName: recipient.first_name,
+            lastName: recipient.last_name,
+            clabe,
+          })
+          bridgeAccountId = account.id
+        } catch (err) {
+          if (err instanceof BridgeApiError) {
+            const bridgeCode = (err.body as { code?: string } | null)?.code
+            server.log.error(
+              { userId, recipientId: recipient.id, bridgeStatus: err.status, bridgeCode },
+              'bridge external account create failed',
+            )
+            // Bridge dedupes identical CLABEs per customer (sandbox-verified
+            // 2026-07-16): re-adding a previously registered account — even a
+            // locally archived one — 400s with this code rather than minting a
+            // new id. A blind 409 here would dead-end two legitimate retries:
+            // a resubmit after a lost response / failed insert (Bridge has the
+            // account, we have no row), and the documented archive-then-re-add
+            // reactivation flow. Adopt the existing Bridge account instead.
+            if (bridgeCode === 'duplicate_external_account') {
+              let accounts: Awaited<ReturnType<typeof listExternalAccounts>>
+              try {
+                accounts = await listExternalAccounts(customerId)
+              } catch {
+                server.log.error(
+                  { userId, recipientId: recipient.id },
+                  'bridge external account list failed during adoption',
+                )
+                return sendError(reply, 502, 'provider_unavailable', 'Payout provider is unavailable, try again shortly')
+              }
+              // Bridge only exposes last_4, so require an unambiguous match —
+              // on a collision fall back to the conservative 409
+              const matches = accounts.filter((a) => a.clabeLast4 === clabe.slice(-4))
+              if (matches.length !== 1) {
                 return sendError(reply, 409, 'conflict', 'This account is already saved')
               }
-              // archive + re-add reactivation: revive the archived row
-              const { data: revived, error: reviveError } = await supabaseAdmin
-                .from('payout_destinations')
-                .update({ status: 'active', label: label?.trim() ?? null })
-                .eq('id', existingRow.id)
-                .eq('recipient_id', recipient.id)
-                .select(DESTINATION_COLUMNS)
-                .single()
-              if (reviveError || !revived) {
-                server.log.error(
-                  { userId, recipientId: recipient.id, supabaseError: reviveError?.code },
-                  'destination revive failed',
-                )
-                return sendError(reply, 500, 'internal_error', 'Failed to save payout destination')
-              }
-              return reply.status(201).send(toApiDestination(revived as DestinationRow))
-            }
+              const adoptedId = matches[0]!.id
 
-            // no local row: heal the orphan by inserting with the adopted id
-            bridgeAccountId = adoptedId
-          } else if (err.status < 500) {
-            return sendError(reply, 422, 'provider_rejected', 'The bank rejected this account — verify the CLABE with your recipient')
+              const { data: existing } = await supabaseAdmin
+                .from('payout_destinations')
+                .select('id, recipient_id, status')
+                .eq('provider_account_ref', adoptedId)
+                .maybeSingle()
+              const existingRow = existing as {
+                id: string
+                recipient_id: string
+                status: string
+              } | null
+
+              if (existingRow) {
+                const revivable =
+                  existingRow.recipient_id === recipient.id && existingRow.status === 'archived'
+                if (!revivable) {
+                  // genuinely saved already — either active here, or it lives
+                  // under a different recipient of the same user
+                  return sendError(reply, 409, 'conflict', 'This account is already saved')
+                }
+                // archive + re-add reactivation: revive the archived row
+                const { data: revived, error: reviveError } = await supabaseAdmin
+                  .from('payout_destinations')
+                  .update({ status: 'active', label: label?.trim() ?? null })
+                  .eq('id', existingRow.id)
+                  .eq('recipient_id', recipient.id)
+                  .select(DESTINATION_COLUMNS)
+                  .single()
+                if (reviveError || !revived) {
+                  server.log.error(
+                    { userId, recipientId: recipient.id, supabaseError: reviveError?.code },
+                    'destination revive failed',
+                  )
+                  return sendError(reply, 500, 'internal_error', 'Failed to save payout destination')
+                }
+                return reply.status(201).send(toApiDestination(revived as DestinationRow))
+              }
+
+              // no local row: heal the orphan by inserting with the adopted id
+              bridgeAccountId = adoptedId
+            } else if (err.status < 500) {
+              return sendError(reply, 422, 'provider_rejected', 'The bank rejected this account — verify the CLABE with your recipient')
+            } else {
+              return sendError(reply, 502, 'provider_unavailable', 'Payout provider is unavailable, try again shortly')
+            }
           } else {
+            // fetch network failures (TypeError) must not surface as a raw 500
+            server.log.error({ userId, recipientId: recipient.id }, 'bridge request failed')
             return sendError(reply, 502, 'provider_unavailable', 'Payout provider is unavailable, try again shortly')
           }
-        } else {
-          // fetch network failures (TypeError) must not surface as a raw 500
-          server.log.error({ userId, recipientId: recipient.id }, 'bridge request failed')
-          return sendError(reply, 502, 'provider_unavailable', 'Payout provider is unavailable, try again shortly')
         }
       }
+
 
       // 6. Persist. verification_status stays at its 'unverified' default —
       // a Bridge 201 means registered, not verified.
