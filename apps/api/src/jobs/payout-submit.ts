@@ -14,6 +14,7 @@ import {
 import { createBridgePayout, getExchangeRate, BridgeApiError } from '../services/bridge.js'
 import { enqueuePaymentEventProcess } from '../services/queue.js'
 import { assessTransferRisk, assessUnclearedCap, hasClearedHistory } from '../services/risk.js'
+import { registerPendingDestinations } from '../services/destination-registration.js'
 
 // The payout submission job (`payout.submit`) — the ONLY code path that asks
 // Bridge to move money. Ordering is load → cheap gates → claim → Bridge POST →
@@ -140,7 +141,32 @@ export async function submitPayout(transferId: string): Promise<number> {
       return 0
     }
 
-    const payability = await checkPayability(transfer.payout_destination_id)
+    let payability = await checkPayability(transfer.payout_destination_id)
+
+    // Self-heal the deferred-registration window. A sender who added their
+    // recipient before verifying (the normal path under KYC-at-first-send)
+    // has destinations whose Bridge account is registered when their customer
+    // is created — but that backfill is best-effort, and a Bridge hiccup there
+    // would otherwise strand this payout on a hold no retry could clear.
+    // Registering here closes that gap: it is the same call the backfill makes,
+    // and it runs ONLY for the one reason it can fix, never as a blanket retry.
+    if (!payability.payable && payability.reason === 'provider_account_ref_missing') {
+      // Swallowed on purpose: a sender with no Bridge customer yet, or a
+      // Bridge outage, must fall through to the ordinary payability hold —
+      // never throw, or pg-boss would retry a money job over a condition
+      // retrying cannot fix.
+      try {
+        const customerId = await loadBridgeCustomerId(transfer.user_id)
+        await registerPendingDestinations(transfer.user_id, customerId)
+        payability = await checkPayability(transfer.payout_destination_id)
+      } catch {
+        // Fall through to the hold below, which already carries the Sentry
+        // signal. No event of its own: a sender with no Bridge customer yet
+        // is the ORDINARY pre-verification state, not an anomaly, and paging
+        // on it would bury the holds that do need a human.
+      }
+    }
+
     if (!payability.payable) {
       await placeHold(transfer.id, 'payability', { reason: payability.reason })
       return 0
