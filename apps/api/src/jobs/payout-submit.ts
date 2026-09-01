@@ -272,7 +272,31 @@ export async function submitPayout(transferId: string): Promise<number> {
       if (err.statusCode === 400) {
         // Sandbox-verified: sync 400 = wallet drained or concurrent-payout
         // serialization — NO Bridge transfer was created, so retry is safe.
-        throw err
+        //
+        // Safe, but not safe FOREVER. The self-heal premise is that the blocker
+        // drains on its own; a treasury simply too small for the payout never
+        // refills, so the 1-min sweep re-enters the recovery path indefinitely
+        // and every pass captures an exception with no hold for ops to act on.
+        // Staging 2026-08-25: one $100 test send against a 47 USDC sandbox
+        // wallet looped 23.5h — 1,378 Sentry events, ended only by a manual
+        // unwind. Past the ceiling, treat it like every other 4xx: hold, and
+        // let the runbook own it.
+        //
+        // Measured from submit_attempted_at (the FIRST claim, never cleared),
+        // so this bounds the whole episode, not one attempt. It is null on the
+        // first pass — claimForSubmission stamps the row after this snapshot
+        // was read — so a first-attempt 400 always retries.
+        const attemptingSince = transfer.submit_attempted_at
+          ? Date.parse(transfer.submit_attempted_at)
+          : null
+        const attemptingForMs = attemptingSince === null ? 0 : Date.now() - attemptingSince
+        if (attemptingForMs < env.SUBMIT_RETRY_CEILING_MINUTES * 60_000) throw err
+        await placeHold(transfer.id, 'submit_error', {
+          statusCode: 400,
+          cause: 'retry_ceiling_exhausted',
+          attemptingForMinutes: Math.round(attemptingForMs / 60_000),
+        })
+        return 0
       }
       // 422 (idempotency mismatch) or other 4xx: an engineering incident, not
       // a transient — hold for the runbook.
