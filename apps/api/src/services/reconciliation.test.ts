@@ -121,6 +121,7 @@ describe('agingFindings', () => {
     completed_at: null,
     refund_payment_ref: null,
     payout_hold_reason: null,
+    payout_held_at: null,
     funding_cleared: false,
     ...over,
   })
@@ -184,6 +185,55 @@ describe('agingFindings', () => {
     expect(keys).toContain('aging:funded-unheld-stuck:t-1')
     expect(keys).not.toContain('aging:funded-held-overdue:t-2')
     expect(keys).toContain('aging:funded-held-overdue:t-3')
+  })
+
+  // A hold set by payout-submit waits on the RUNBOOK, not on the ACH clock.
+  // Behind the 8-day clearing window its single page at hold time was the only
+  // signal for a week — stuck-watch skips held rows entirely.
+  it('flags an ops-actioned hold at 24h, not at the 8-day clearing bound', () => {
+    const fresh = row({
+      id: 't-1',
+      payment_at: daysAgo(9),
+      payout_hold_reason: 'submit_error',
+      payout_held_at: hoursAgo(23),
+    })
+    const overdue = row({
+      id: 't-2',
+      payment_at: daysAgo(9),
+      payout_hold_reason: 'submit_error',
+      payout_held_at: hoursAgo(25),
+    })
+    const keys = agingFindings([fresh, overdue], nowMs).map((f) => f.key)
+    expect(keys).not.toContain('aging:funded-held-overdue:t-1')
+    expect(keys).toContain('aging:funded-held-overdue:t-2')
+  })
+
+  it('anchors a hold on the hold stamp, so long-funded rows are not instantly overdue', () => {
+    // Pre-fix this flagged immediately: the funding anchor was 9 days old even
+    // though ops had held the row a minute earlier.
+    // funding_cleared so the unrelated funding-uncleared-overdue bucket, which
+    // legitimately fires on a 9-day-old uncleared row, stays out of the way.
+    const justHeld = row({
+      id: 't-1',
+      payment_at: daysAgo(9),
+      funding_cleared: true,
+      payout_hold_reason: 'payability',
+      payout_held_at: hoursAgo(0.02),
+    })
+    const keys = agingFindings([justHeld], nowMs).map((f) => f.key)
+    expect(keys).not.toContain('aging:funded-held-overdue:t-1')
+  })
+
+  it('keeps the clearing bound for a hold reason outside the ops set', () => {
+    const policy = row({
+      id: 't-1',
+      payment_at: daysAgo(5),
+      funding_cleared: true,
+      payout_hold_reason: 'first_transfer_hold',
+      payout_held_at: daysAgo(5),
+    })
+    const keys = agingFindings([policy], nowMs).map((f) => f.key)
+    expect(keys).not.toContain('aging:funded-held-overdue:t-1')
   })
 
   it('flags SUBMITTED/IN_FLIGHT past 24h from funding (SPEI settles in seconds)', () => {

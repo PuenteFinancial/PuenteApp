@@ -307,10 +307,28 @@ const envSchema = z.object({
   STUCK_FUNDED_AFTER_MINUTES: z.coerce.number().int().min(1).default(15),
   STUCK_SUBMITTED_AFTER_MINUTES: z.coerce.number().int().min(1).default(30),
   STUCK_IN_FLIGHT_AFTER_MINUTES: z.coerce.number().int().min(1).default(60),
+  // Ceiling on the Bridge-400 resubmission loop (payout.submit). A 400 is the
+  // one 4xx treated as retry-safe rather than held — see the catch in
+  // jobs/payout-submit.ts — because "wallet drained" is expected to drain and
+  // refill. When it does NOT (a treasury simply too small for the payout), the
+  // 1-min sweep re-enters the recovery path forever. Measured from the FIRST
+  // claim (submit_attempted_at, which is never cleared), so it bounds the whole
+  // episode rather than any single attempt. 30m ≈ 3 stale-claim recoveries
+  // (STALE_CLAIM_MS is 10m) — long enough for a genuinely transient drain to
+  // clear, short enough that the loop cannot run overnight.
+  SUBMIT_RETRY_CEILING_MINUTES: z.coerce.number().int().min(1).default(30),
   // The "dumb >1-business-day" UNDER_REVIEW age alert — calendar-blind by
   // design (weekend false positives accepted); statutory-clock tracking waits
   // for counsel's error-resolution process adoption.
   STUCK_UNDER_REVIEW_AFTER_HOURS: z.coerce.number().int().min(1).default(24),
+  // How long transfers.stuck-watch keeps paging one episode before handing it
+  // to reconcile's `transfer_aging` audit check. The two have documented
+  // roles — stuck-watch is the REAL-TIME pager, transfer_aging the coarse
+  // backstop — and a transfer stuck for days has stopped being a real-time
+  // signal: it is an audit finding that keeps costing pager volume. 72h leaves
+  // a full long weekend of paging before the handoff. Floor of 1h so a
+  // fat-fingered value cannot disable detection outright.
+  STUCK_MAX_PAGE_HOURS: z.coerce.number().int().min(1).default(72),
   // No TWILIO_* vars here on purpose. The API never calls Twilio: phone OTP
   // goes through Supabase Auth (`signInWithOtp({ channel: 'sms' })`), and
   // GoTrue holds the Twilio account SID / auth token / Messaging Service SID
