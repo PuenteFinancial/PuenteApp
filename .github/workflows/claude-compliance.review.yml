@@ -27,9 +27,19 @@ jobs:
       - uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c # v1.0.193
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The ACTION owns posting, not Claude. Without this the run went
+          # green while saying nothing (2026-08-31, PR #265): Claude reviewed
+          # across 9 turns, tried once to post, and was denied — CI is
+          # non-interactive, the project allowlist in .claude/settings.json
+          # permits only pnpm typecheck/lint/test, and .mcp.json exposes no
+          # GitHub tool. track_progress makes the action create and update the
+          # PR comment itself, so findings land without granting a CI-run
+          # Claude new powers on a public repo.
+          track_progress: true
           prompt: |
             Review the diff in this PR (against the base branch) using TWO subagents:
             1. The security-reviewer subagent.
             2. The compliance-reviewer subagent.
-            Run each, then post a single PR comment with their findings grouped by
-            agent. If both report no issues, post "✅ Security & compliance: no issues."
+            Report their findings grouped by agent. If both report no issues,
+            say "✅ Security & compliance: no issues." Do NOT try to post a
+            comment yourself — the action publishes this output to the PR.
