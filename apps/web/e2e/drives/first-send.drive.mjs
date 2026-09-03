@@ -555,8 +555,18 @@ async function main() {
     }
 
     // ── Stripe poll → relay → Bridge poll ──
-    const post = await waitForStep(page, ['Finishing verification', 'Choose how to pay', 'One more detail', 'We need to check', 'couldn’t verify', 'Something went wrong'], 120000)
+    const post = await waitForStep(page, ['Finishing verification', 'Choose how to pay', 'One more detail', 'Before you verify', 'We need to check', 'couldn’t verify', 'Something went wrong'], 120000)
     console.log('  [after relay]', post ?? '(timeout)', '|', await stepText(page))
+    if (post === 'Before you verify') {
+      // The relay answered 409 conflict: the agreement id on file was consumed
+      // by an earlier create (--reset-customer leaves exactly this state), so
+      // the machine re-enters the click-through. Proven; stop here rather
+      // than mint a second Bridge customer for the same identity.
+      await page.screenshot({ path: `${SCREENSHOT_DIR}/drive-k6-tos-again.png`, fullPage: true })
+      console.log('--- consumed agreement id → ToS card re-shown (no Bridge write) ---')
+      await browser.close()
+      return
+    }
     if (BLOCK_RELAY) {
       await page.screenshot({ path: `${SCREENSHOT_DIR}/drive-k6-blocked-relay.png`, fullPage: true })
       console.log('--- relay blocked by the drive (fixture: Stripe verified, no customer) ---')
