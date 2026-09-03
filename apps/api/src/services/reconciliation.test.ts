@@ -35,9 +35,13 @@ vi.mock('./bridge.js', () => ({
 }))
 
 const getFundingProcessor = vi.hoisted(() => vi.fn())
-vi.mock('./funding/index.js', () => ({
-  getFundingProcessor: (...args: unknown[]) => getFundingProcessor(...args),
-}))
+vi.mock('./funding/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./funding/index.js')>()
+  return {
+    ...actual,
+    getFundingProcessor: (...args: unknown[]) => getFundingProcessor(...args),
+  }
+})
 
 const pollPayouts = vi.hoisted(() => vi.fn())
 vi.mock('../jobs/payout-poll.js', () => ({

@@ -6,6 +6,24 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-09-03 · `transfers.funding_processor`: the rail is a property of the ROW, not the process
+(audit 2026-09-02 corner 1).** Every job that acted on a transfer read `env.FUNDING_PROCESSOR` to
+decide its rail: the reconcile-pending abandonment clock (30 min vs hours vs days), which adapter
+`refund()`/`voidFunding()` runs on, whether an operator may record manual funding, the aging
+watchdog's bound. Correct only while every row was funded under the deployment's current rail —
+the K7 prod flip (`manual` → `stripe_crypto`) would have reaped every pending manual row at 30
+minutes and sent manual refunds to Stripe. Now confirm and onramp-session stamp
+`funding_processor`, and those readers go through `processorNameFor(row)` / `processorFor(row)`
+(`services/funding/index.ts`), which fall back to the process value for a null. Two deliberate
+non-choices: no CHECK on the column (the enum lives in `env.ts`; a CHECK turns a new rail into the
+drop-and-re-add dance), and no backfill for `cos_` refs (`stripe_onramp` and `stripe_crypto` share
+that namespace — a guess would be worse than the env fallback, which is today's behaviour). One
+semantic change: `recordManualFunding` now reads the row FIRST and refuses on the row's rail, so a
+`pi_` row is refused on a manual deployment and a manual row stays recordable after a flip. Left
+on env on purpose (deployment-capability or no-row-yet decisions): the confirm/funding-session
+gates, the webhook signature gate, `onramp-prepare`'s replay guard, Stripe receivables/orphan
+sweeps. Reversal: drop the column; every reader degrades to the env fallback. **Status: active.**
+
 **2026-09-03 · K6: DOB and tax ID are RELAYED once to Bridge — the 2026-08-27 custody rule's
 degrade clause, invoked.** The rule said SSN through our servers is a hard never, degrading to
 relay-never-persist only if Bridge's docs proved they require us in the middle. Proven in the

@@ -57,6 +57,9 @@ export interface TransferRow {
   cancelable_until: string | null
   idempotency_key: string
   funding_payment_ref: string | null
+  // Audit corner 1: the rail that funded this row; null on pre-migration
+  // rows (readers fall back to env via processorNameFor).
+  funding_processor?: string | null
   provider_transfer_ref: string | null
   refund_payment_ref: string | null
   refunded_at: string | null

@@ -2,7 +2,7 @@ import { env } from '../config/env.js'
 import { supabaseAdmin } from './supabase.js'
 import { getAccountBalance } from './ledger.js'
 import { getBridgeWalletBalances, listBridgeTransfers } from './bridge.js'
-import { getFundingProcessor } from './funding/index.js'
+import { getFundingProcessor, processorNameFor, type RailRow } from './funding/index.js'
 import { pollPayouts } from '../jobs/payout-poll.js'
 
 // The reconciliation checks registry (slice-8 O2, docs/runbooks/reconciliation.md).
@@ -63,8 +63,10 @@ const PENDING_PAYMENT_REAPER_GRACE_MS = 6 * 60 * 60_000
 // MANUAL_PENDING_MAX_AGE_DAYS before reaping — so only past THAT clock (plus
 // grace) does a PENDING_PAYMENT row mean the reaper is dead. Webhook rails
 // keep the 40-minute bound.
-function pendingPaymentStaleMs(): number {
-  if (env.FUNDING_PROCESSOR !== 'manual') return PENDING_PAYMENT_STALE_WEBHOOK_MS
+// Per ROW since audit corner 1 (same rule as reconcile-pending's clock): a
+// null funding_processor falls back to the process rail.
+function pendingPaymentStaleMs(row: RailRow): number {
+  if (processorNameFor(row) !== 'manual') return PENDING_PAYMENT_STALE_WEBHOOK_MS
   return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60_000 + PENDING_PAYMENT_REAPER_GRACE_MS
 }
 const FUNDED_UNHELD_STALE_MS = 2 * 60 * 60_000 // sweep enqueues every minute; hours stuck = pipeline down
@@ -235,6 +237,7 @@ async function runAccountBalances(): Promise<CheckOutcome> {
 // ── Transfer aging vs known timing windows ──────────────────────────────────
 
 interface AgingRow {
+  funding_processor?: string | null
   id: string
   state: string
   created_at: string
@@ -285,7 +288,7 @@ export function agingFindings(rows: AgingRow[], nowMs: number): CheckFinding[] {
     const fundedAge = nowMs - new Date(funded).getTime()
     switch (row.state) {
       case 'PENDING_PAYMENT':
-        if (nowMs - new Date(row.created_at).getTime() > pendingPaymentStaleMs())
+        if (nowMs - new Date(row.created_at).getTime() > pendingPaymentStaleMs(row))
           flag('pending-payment-autofail-dead', row, row.created_at)
         break
       case 'FUNDED':
@@ -349,7 +352,7 @@ async function runTransferAging(): Promise<CheckOutcome> {
   const { data, error } = await supabaseAdmin
     .from('transfers')
     .select(
-      'id, state, created_at, payment_at, submit_attempted_at, completed_at, refund_payment_ref, payout_hold_reason, payout_held_at, funding_cleared',
+      'id, state, created_at, payment_at, submit_attempted_at, completed_at, refund_payment_ref, payout_hold_reason, payout_held_at, funding_cleared, funding_processor',
     )
     .or(AGING_OR_FILTER)
     .limit(ROW_BOUND)

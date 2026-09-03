@@ -9,7 +9,7 @@ import {
   type LedgerEntryJson,
 } from './transfers.js'
 import { postLedgerTransaction, type LedgerEntryInput } from './ledger.js'
-import { getFundingProcessor, undoModeForRef } from './funding/index.js'
+import { processorFor, undoModeForRef } from './funding/index.js'
 import { getBridgeTransfer } from './bridge.js'
 
 // The PAYOUT_FAILED → REFUNDED refund-from-float tail (ledger-rules.md), lifted
@@ -55,6 +55,7 @@ interface RefundableTransfer {
   margin_minor: number
   refund_payment_ref: string | null
   funding_payment_ref: string | null
+  funding_processor?: string | null
   idempotency_key: string
   refund_claimed_at: string | null
   refund_claimed_by: string | null
@@ -62,7 +63,7 @@ interface RefundableTransfer {
 
 const REFUNDABLE_COLUMNS =
   'id, state, send_amount_minor, fee_amount_minor, margin_minor, refund_payment_ref, ' +
-  'funding_payment_ref, idempotency_key, refund_claimed_at, refund_claimed_by'
+  'funding_payment_ref, funding_processor, idempotency_key, refund_claimed_at, refund_claimed_by'
 
 // How long an unfinished claim stays "in progress" before it is ABANDONED.
 //
@@ -248,7 +249,9 @@ export async function refundPayoutFailure(input: {
       // No try/catch, deliberately. A throw here leaves the claim standing —
       // see the header: releasing it would green-light a retry that may
       // double-pay, because a timeout and a rejection throw identically.
-      const undo = await getFundingProcessor().refund({
+      // The ROW's rail (audit corner 1): a pull collected under one processor
+      // is refunded by that processor, whatever FUNDING_PROCESSOR says today.
+      const undo = await processorFor(transfer).refund({
         transferId: transfer.id,
         paymentRef: transfer.funding_payment_ref,
         amountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,

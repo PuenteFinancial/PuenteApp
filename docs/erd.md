@@ -208,7 +208,8 @@ slippage (see ledger `fx_slippage`).
   denylist trigger): `send_amount_minor`/`_currency`, `receive_amount_minor`/`_currency`, `fx_rate`,
   `fx_rate_at`, `fee_amount_minor`/`_currency`, `margin_minor` (#193, same identities as on quotes),
   `provider_fee_amount_minor` *(estimated at quote; actual booked at `SUBMITTED` — Bridge doesn't lock)*
-- `funding_source_type` TEXT — `ach` | `card` | (`loc` later) — **the abstraction hook**
+- `funding_source_type` TEXT — `ach` | `card` | (`loc` later) — **the abstraction hook** (the sender's bank rail; CHECK-pinned to `ach`, frozen)
+- `funding_processor` TEXT — **which `FUNDING_PROCESSOR` funded this row** (`mock` | `stripe` | `manual` | `stripe_onramp` | `stripe_crypto`), stamped at initiation (confirm / onramp-session). Nullable, no CHECK — the value set lives in code; readers go through `processorNameFor(row)` and a null falls back to the process value (pre-migration rows; `cos_` rows the backfill could not classify). Added 2026-09-03 (audit corner 1) so the reaper's clock, refunds/voids, and the manual-funding guard follow the ROW, not the deployment. Not frozen (the stamp is an UPDATE).
 - `funding_cleared` BOOLEAN default false — the gate flag
 - `disclosure_accepted_at` timestamptz — when the sender accepted the Reg E prepayment disclosure (gates funding; set at `confirm`)
 - `payment_at` timestamptz — when the sender paid (starts the cancellation clock)

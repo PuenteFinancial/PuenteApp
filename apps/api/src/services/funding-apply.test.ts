@@ -89,10 +89,21 @@ describe('recordManualFunding — processor guard', () => {
     expect(transitionTransfer).not.toHaveBeenCalled()
   })
 
-  it('refuses BEFORE reading the transfer', async () => {
+  // Audit 2026-09-02 corner 1: the row's stamped rail decides, not the
+  // deployment's. Both directions of a FUNDING_PROCESSOR flip are covered.
+  it('refuses a row stamped under another rail even on a manual deployment', async () => {
+    getFundingProcessor.mockReturnValue({ provider: 'manual' })
+    stubTransfer({ ...PENDING, funding_processor: 'stripe', funding_payment_ref: 'pi_123' })
+    const result = await call()
+    expect(result).toEqual({ done: false, reason: 'processor_not_manual', provider: 'stripe' })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+  })
+
+  it('still records a manual-stamped row after the deployment flips to stripe', async () => {
     getFundingProcessor.mockReturnValue({ provider: 'stripe' })
-    await call()
-    expect(from).not.toHaveBeenCalled()
+    stubTransfer({ ...PENDING, funding_processor: 'manual' })
+    const result = await call()
+    expect(result).not.toMatchObject({ reason: 'processor_not_manual' })
   })
 })
 
