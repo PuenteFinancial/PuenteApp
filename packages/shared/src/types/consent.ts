@@ -32,3 +32,10 @@ export const REQUIRED_CONSENTS: readonly ConsentDocument[] = [
   { type: 'puente_tos', version: '2026-07-21' },
   { type: 'puente_privacy', version: '2026-07-21' },
 ]
+
+// The Bridge ToS row's version is BRIDGE'S label, not a "Last updated" date:
+// we do not author that document, and the SPEI endorsement requires
+// terms_of_service_v2. Bumping this forces a fresh click-through at the next
+// send (bridgeTosAccepted on GET /users/me flips false), the same forcing
+// behaviour REQUIRED_CONSENTS gives our own documents. K6, 2026-09-03.
+export const BRIDGE_TOS_VERSION = 'v2'

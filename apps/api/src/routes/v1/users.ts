@@ -10,13 +10,13 @@ import {
 } from '../../services/bridge.js'
 import { US_STATES } from '@puente/shared'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
-import { fetchGrantedConsents, missingConsents } from './consents.js'
+import { fetchGrantedConsents, hasBridgeTos, missingConsents } from './consents.js'
 import { registerPendingDestinations } from '../../services/destination-registration.js'
 
 // One literal on purpose: supabase-js parses the column list at the type
 // level, and a concatenated string widens to `string`, which its types treat
 // as an error shape — poisoning every row cast.
-const USER_COLUMNS = 'id, first_name, last_name, email, phone, kyc_status, bridge_customer_id, address_line1, address_line2, address_city, address_state, address_postal_code'
+export const USER_COLUMNS = 'id, first_name, last_name, email, phone, kyc_status, bridge_customer_id, address_line1, address_line2, address_city, address_state, address_postal_code'
 
 const KYC_MAX_RETRIES = 3
 const KYC_RETRY_COLUMNS = 'kyc_status, bridge_customer_id, kyc_retry_count'
@@ -27,7 +27,7 @@ interface KycRetryRow {
   kyc_retry_count: number
 }
 
-interface UserRow {
+export interface UserRow {
   id: string
   first_name: string | null
   last_name: string | null
@@ -46,7 +46,7 @@ interface UserRow {
 // incomplete profiles — including pre-K2 users with no address — back to the
 // profile form. Address values are PII: returned to their owner here and
 // nowhere else (never logged, never in URLs).
-function isProfileComplete(row: UserRow): boolean {
+export function isProfileComplete(row: UserRow): boolean {
   return Boolean(
     row.first_name &&
       row.last_name &&
@@ -98,6 +98,9 @@ const userResponseSchema = {
     // GET only (PATCH omits it): whether every REQUIRED_CONSENTS pair is
     // granted. The /continue router gates on this (K1).
     consentsCurrent: { type: 'boolean' },
+    // GET only: whether the current Bridge ToS (BRIDGE_TOS_VERSION) has been
+    // accepted. The pay step skips its click-through on this (K6).
+    bridgeTosAccepted: { type: 'boolean' },
   },
 } as const
 
@@ -214,6 +217,7 @@ export async function usersRoute(server: FastifyInstance) {
       return {
         ...toApiUser(data as UserRow),
         consentsCurrent: missingConsents(granted).length === 0,
+        bridgeTosAccepted: hasBridgeTos(granted),
       }
     },
   )
