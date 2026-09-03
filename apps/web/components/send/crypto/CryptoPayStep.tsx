@@ -15,6 +15,7 @@ import {
   classifyCryptoApiError,
   initialCryptoPayState,
   initialEffects,
+  linkPhoneFor,
   transition,
   type CryptoApiFailure,
   type CryptoPayEffect,
@@ -216,14 +217,17 @@ export default function CryptoPayStep({
 
         case 'sdk_register': {
           const prefill = stateRef.current.ctx.prefill
-          if (!prefill?.email) {
+          // The stored login phone is not reliably E.164 (see linkPhoneFor);
+          // Stripe's sign-up refuses anything else.
+          const phone = prefill ? linkPhoneFor(prefill.phone) : null
+          if (!prefill?.email || !phone) {
             dispatch({ type: 'REGISTER_FAILED' })
             return
           }
           try {
             const fullName =
               [prefill.firstName, prefill.lastName].filter(Boolean).join(' ') || undefined
-            await coordRef.current.registerLinkUser(prefill.email, prefill.phone, 'US', fullName)
+            await coordRef.current.registerLinkUser(prefill.email, phone, 'US', fullName)
             dispatch({ type: 'REGISTER_OK' })
           } catch {
             dispatch({ type: 'REGISTER_FAILED' })
@@ -304,7 +308,15 @@ export default function CryptoPayStep({
           try {
             await coordRef.current.submitKycInfo(buildKycInfo(effect.values, effect.mode))
             dispatch({ type: 'KYC_SUBMITTED' })
-          } catch {
+          } catch (err) {
+            // Code/name only — the SDK error can wrap the submitted info.
+            // (Same posture as the session-error logging: an unlogged refusal
+            // here cost a day of diagnosis on the 2026-08-29 drive.)
+            const e = err as { code?: unknown; name?: unknown }
+            console.warn(
+              '[kyc] submitKycInfo refused:',
+              typeof e?.code === 'string' ? e.code : typeof e?.name === 'string' ? e.name : 'unknown',
+            )
             dispatch({ type: 'KYC_SUBMIT_FAILED' })
           }
           return

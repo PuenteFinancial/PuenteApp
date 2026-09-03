@@ -14,6 +14,7 @@ import {
   invalidKycFields,
   invalidIdentityFields,
   isPermanentRejection,
+  linkPhoneFor,
   addressEdited,
   classifyCryptoApiError,
   stepUpFormFor,
@@ -1059,6 +1060,17 @@ describe('helpers', () => {
         { type: 'document_verified', status: 'verified' },
       ]),
     ).toBe('L2')
+  })
+
+  it('linkPhoneFor: the stored login phone (with or without +1) becomes E.164 for Link sign-up', () => {
+    // GoTrue stores the login phone without its "+"; the SDK's sign-up 400s
+    // on that shape. Both spellings must land on one E.164 value.
+    expect(linkPhoneFor('12025550193')).toBe('+12025550193')
+    expect(linkPhoneFor('+12025550193')).toBe('+12025550193')
+    expect(linkPhoneFor('2025550193')).toBe('+12025550193')
+    expect(linkPhoneFor('(202) 555-0193')).toBe('+12025550193')
+    expect(linkPhoneFor('+52 55 1234 5678')).toBeNull()
+    expect(linkPhoneFor('')).toBeNull()
   })
 
   it('addressEdited compares against the prefill, treating null as empty', () => {

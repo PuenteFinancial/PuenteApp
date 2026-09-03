@@ -19,6 +19,24 @@
 //     --approve     after the relay lands, POST simulate_kyc_approval on the
 //                   sandbox customer (BRIDGE_API_KEY) and wait for the
 //                   webhook → `collect`. Without it, stops at the Bridge poll.
+//     --stop-after-tos  end right after the return leg records the consent —
+//                   leaves the fixture at "ToS accepted, no customer".
+//     --block-relay abort the relay POST from the browser (RELAY_ERROR 0 →
+//                   retryable card) — leaves the fixture at "Stripe verified,
+//                   no customer", so the NEXT run exercises relay_form(reload).
+//     --reset-customer  before driving, null bridge_customer_id/kyc_status on
+//                   the fixture's users row (service role). The customer stays
+//                   at Bridge; a re-relay with the same values replays the
+//                   per-user+body-hash Idempotency-Key and gets the same id.
+//   Starting states this covers (run in order, each on a fresh browser):
+//     fresh · ToS-only · verified-no-customer (reload form) · customer pending
+//     · fully approved (also the K5 path). Rejection/Persona need a sandbox
+//     rejection Bridge does not simulate — live pilot only.
+//   Bridge's ToS page redirects to the ORIGIN the API honored (ALLOWED_ORIGINS
+//   on the API config, so on a Doppler stg_main run that is the staging web
+//   deploy, not localhost). The drive catches that redirect, lifts the
+//   signed_agreement_id, and replays the return leg on the local app — the
+//   same page, cookies, and API call a real return would hit.
 //   The K6 fixture is created on first use through the GoTrue admin API and
 //   seeded (profile, consents, one recipient + CLABE) through OUR API. Its
 //   password is RESET to a fresh random value on every run and never printed
@@ -35,6 +53,9 @@ const RUN_CHECKOUT = process.argv.includes('--checkout')
 const RELAY = process.argv.includes('--relay')
 const ACCEPT_TOS = process.argv.includes('--accept-tos')
 const APPROVE = process.argv.includes('--approve')
+const STOP_AFTER_TOS = process.argv.includes('--stop-after-tos')
+const BLOCK_RELAY = process.argv.includes('--block-relay')
+const RESET_CUSTOMER = process.argv.includes('--reset-customer')
 
 const url = process.env.SUPABASE_URL
 const anon = process.env.SUPABASE_PUBLISHABLE_KEY
@@ -118,6 +139,18 @@ async function ensureK6Fixture() {
     console.log('k6 fixture password reset (in-process only)')
   }
   const token = await passwordGrant(K6_EMAIL, password)
+
+  if (RESET_CUSTOMER) {
+    // Test-only state surgery on the synthetic row: forget the customer so
+    // the relay leg runs again. Production never nulls this column.
+    const res = await fetch(`${url}/rest/v1/users?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: { ...adminHeaders(), Prefer: 'return=minimal' },
+      body: JSON.stringify({ bridge_customer_id: null, kyc_status: 'not_started' }),
+    })
+    if (!res.ok) throw new Error(`reset-customer failed: ${res.status}`)
+    console.log('k6 fixture: bridge_customer_id cleared (customer remains at Bridge)')
+  }
 
   // Seed through OUR API so every row goes through the real validation.
   const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
@@ -280,7 +313,10 @@ async function waitForStep(page, phrases, timeoutMs) {
  *  confirm the sheet actually went away; retry a few times. */
 async function completeLinkOtp(page) {
   const findOtp = async () => {
+    // Stripe's frames only: our own KYC form has numeric inputs (ZIP, DOB)
+    // and once the sheet closes they would match — and receive the code.
     for (const f of page.frames()) {
+      if (f === page.mainFrame()) continue
       const otp = f.locator('input[inputmode="numeric"], input[autocomplete="one-time-code"]').first()
       if (await otp.isVisible({ timeout: 400 }).catch(() => false)) return otp
     }
@@ -389,6 +425,19 @@ async function main() {
   })
   page.on('response', async (res) => {
     const u = res.url()
+    // Third-party failures (Stripe, Link, hCaptcha) — status + host/path only.
+    if (!u.startsWith(WEB) && !res.ok() && res.status() !== 304) {
+      const p = new URL(u)
+      let detail = ''
+      if (p.host === 'api.stripe.com' && res.status() < 500) {
+        // Stripe's error envelope: code/param/message only (no request echo).
+        const body = await res.json().catch(() => null)
+        const e = body?.error
+        if (e) detail = ` ← ${e.code ?? e.type ?? ''} ${e.param ?? ''} ${String(e.message ?? '').slice(0, 160)}`
+      }
+      console.log(`  [net] ${res.status()} ${p.host}${p.pathname.slice(0, 80)}${detail}`)
+      return
+    }
     if (!u.includes('/api/crypto/') && !u.includes('/api/transfers/') && !u.includes('/api/users/me/')) return
     const path = new URL(u).pathname
     let detail = ''
@@ -406,6 +455,20 @@ async function main() {
       route.fulfill({ status: 499, body: '{"error":{"code":"drive_stopped_here"}}' }),
     )
   }
+  if (BLOCK_RELAY) {
+    await page.route('**/api/users/me/bridge-customer', (route) => route.abort())
+  }
+
+  // Bridge's terms page redirects to whichever origin the API honored. Catch
+  // the return URL at the request layer (an HTTP redirect chain never becomes
+  // a committed navigation the URL matcher would see) and keep the id.
+  let returnedAgreementId = null
+  page.on('request', (req) => {
+    const u = req.url()
+    if (u.includes('/onboarding/kyc/tos-return') && u.includes('signed_agreement_id=')) {
+      returnedAgreementId = new URL(u).searchParams.get('signed_agreement_id')
+    }
+  })
 
   const transferUrl = `${WEB}/dashboard/send/${transferId}`
   await page.goto(transferUrl)
@@ -434,15 +497,36 @@ async function main() {
         return
       }
       await clickThroughBridgeTos(page)
-      await page.waitForURL((u) => u.toString().startsWith(transferUrl), { timeout: 30000 })
+      // Either Bridge sent us straight home (localhost allowlisted) or it sent
+      // us to the deployed origin — in which case replay the return leg here.
+      const home = await page
+        .waitForURL((u) => u.toString().startsWith(transferUrl), { timeout: 15000 })
+        .then(() => true)
+        .catch(() => false)
+      if (!home) {
+        for (let i = 0; i < 10 && !returnedAgreementId; i++) await page.waitForTimeout(1000)
+        if (!returnedAgreementId) throw new Error('no tos-return redirect observed after Accept')
+        console.log('bridge redirected to the deployed origin; replaying the return leg locally')
+        await page.goto(`${WEB}/onboarding/kyc/tos-return?signed_agreement_id=${encodeURIComponent(returnedAgreementId)}`)
+        await page.waitForURL((u) => u.toString().startsWith(transferUrl), { timeout: 30000 })
+      }
       console.log('returned to the transfer (ToS recorded server-side)')
+      const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
+      const after = await (await fetch(`${API}/v1/users/me`, { headers: H })).json()
+      console.log('  bridgeTosAccepted now:', after.bridgeTosAccepted)
+      if (STOP_AFTER_TOS) {
+        await page.screenshot({ path: `${SCREENSHOT_DIR}/drive-k6-after-tos.png`, fullPage: true })
+        console.log('--- stopped after the ToS return (fixture: ToS accepted, no customer) ---')
+        await browser.close()
+        return
+      }
       await page.waitForTimeout(3000)
       const again = page.getByRole('button', { name: /^(Continue|Continuar)$/ })
       await again.waitFor({ state: 'visible', timeout: 15000 })
       await again.click()
       console.log('intro → continue (post-ToS boot)')
     } else {
-      console.log('no ToS card (bridge_tos already on file)')
+      console.log('no ToS card (bridge_tos already on file, or a customer exists)')
     }
 
     // ── Link auth → KYC form ──
@@ -462,6 +546,9 @@ async function main() {
       if (landed === 'Verify your identity') {
         await page.fill('#kyc-first', 'John')
         await page.fill('#kyc-last', 'Verified')
+        // Stripe's sandbox verifies only its magic address; editing it here
+        // also exercises the address sync-back (PATCH before the SDK submit).
+        await page.fill('#kyc-line1', 'address_full_match')
       }
       await page.getByRole('button', { name: /Verify my identity|^Continue$/ }).click()
       console.log('identity form submitted')
@@ -470,8 +557,21 @@ async function main() {
     // ── Stripe poll → relay → Bridge poll ──
     const post = await waitForStep(page, ['Finishing verification', 'Choose how to pay', 'One more detail', 'We need to check', 'couldn’t verify', 'Something went wrong'], 120000)
     console.log('  [after relay]', post ?? '(timeout)', '|', await stepText(page))
+    if (BLOCK_RELAY) {
+      await page.screenshot({ path: `${SCREENSHOT_DIR}/drive-k6-blocked-relay.png`, fullPage: true })
+      console.log('--- relay blocked by the drive (fixture: Stripe verified, no customer) ---')
+      await browser.close()
+      return
+    }
     if (post !== 'Finishing verification' && post !== 'Choose how to pay') {
       await page.screenshot({ path: `${SCREENSHOT_DIR}/drive-k6-relay.png`, fullPage: true })
+      // What the form holds when it bounced (tax ID masked).
+      const dump = await page.evaluate(() =>
+        ['kyc-first', 'kyc-last', 'kyc-line1', 'kyc-city', 'kyc-state', 'kyc-zip', 'kyc-dob-m', 'kyc-dob-d', 'kyc-dob-y', 'kyc-taxid-type']
+          .map((id) => `${id}=${document.getElementById(id)?.value ?? '(none)'}`)
+          .join(' '),
+      )
+      console.log('  [form]', dump)
       throw new Error('relay did not reach the Bridge poll')
     }
 
