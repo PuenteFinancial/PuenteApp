@@ -33,6 +33,11 @@ export type ApiErrorCode =
   // differs (restart Link auth vs. recollect payment), and clients may only
   // branch on codes, never messages.
   | 'link_auth_required'
+  // K6 relay (409): Bridge already holds a customer with this identity (tax
+  // id or email) that is not this user's. Terminal for self-serve — support
+  // route only, never auto-link (decision 9). Distinct from the generic
+  // 'conflict' because the client shows a dead end, not a retry.
+  | 'duplicate_identity'
   | 'rate_limited'
   | 'rate_unavailable'
   | 'provider_rejected'

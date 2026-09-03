@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/node'
 import { env } from '../../config/env.js'
 import { MockFundingProcessor } from './mock.js'
 import { StripeFundingProcessor } from './stripe.js'
@@ -313,4 +314,48 @@ let instance: FundingProcessor | undefined
 export function getFundingProcessor(): FundingProcessor {
   instance ??= processors[env.FUNDING_PROCESSOR]()
   return instance
+}
+
+// ── Per-row rail (audit 2026-09-02 corner 1) ─────────────────────────────────
+// transfers.funding_processor is stamped at initiation. Every job that acts on
+// a specific row — refund, void, abandonment clock, manual-funding guard —
+// should ask the ROW which rail funded it, not the process: after a
+// FUNDING_PROCESSOR flip the table holds rows from both worlds. A null (a
+// pre-migration row, or a cos_ row the backfill could not classify) falls
+// back to the process value, i.e. exactly today's behaviour.
+
+export interface RailRow {
+  funding_processor?: string | null
+}
+
+export function processorNameFor(row: RailRow): string {
+  return row.funding_processor ?? env.FUNDING_PROCESSOR
+}
+
+const byName = new Map<string, FundingProcessor>()
+
+export function processorFor(row: RailRow): FundingProcessor {
+  const name = processorNameFor(row)
+  // Same rail as the process: reuse the memoized instance (and keep tests
+  // that mock getFundingProcessor honest).
+  if (name === env.FUNDING_PROCESSOR) return getFundingProcessor()
+  const known = byName.get(name)
+  if (known) return known
+  const build = (processors as Record<string, (() => FundingProcessor) | undefined>)[name]
+  // An unknown name (the column has no CHECK) is not a reason to throw in
+  // the middle of a refund — fall back to the process rail, as before — but
+  // it IS a reason to page: a stamp nobody recognizes means a row whose
+  // undo may be about to run on the wrong adapter. Fingerprinted per name so
+  // the dedupe window collapses repeats.
+  if (!build) {
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['funding-processor-unknown', name])
+      scope.setContext('funding_processor', { name, fallback: env.FUNDING_PROCESSOR })
+      Sentry.captureMessage('unknown funding_processor stamp — falling back to env', 'warning')
+    })
+    return getFundingProcessor()
+  }
+  const built = build()
+  byName.set(name, built)
+  return built
 }

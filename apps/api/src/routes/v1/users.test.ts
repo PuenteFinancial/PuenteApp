@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import supertest from 'supertest'
 import Fastify from 'fastify'
 import fp from 'fastify-plugin'
-import { REQUIRED_CONSENTS } from '@puente/shared'
+import { BRIDGE_TOS_VERSION, REQUIRED_CONSENTS } from '@puente/shared'
 
 const from = vi.fn()
 const updateUserById = vi.fn(async (..._args: unknown[]) => ({ data: {}, error: null }))
@@ -452,7 +452,27 @@ describe('GET /v1/users/me', () => {
       addressPostalCode: null,
       profileComplete: false,
       consentsCurrent: false,
+      bridgeTosAccepted: false,
     })
+    await app.close()
+  })
+
+  it('reports bridgeTosAccepted from the bridge_tos evidence row without touching consentsCurrent (K6)', async () => {
+    fromByTable({
+      users: selectResult({ data: userRow, error: null }),
+      consents: consentsSelect([
+        { type: 'bridge_tos', version: BRIDGE_TOS_VERSION, locale: 'en', consented_at: '2026-09-03T00:00:00Z' },
+      ]),
+    })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/users/me')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(res.body.bridgeTosAccepted).toBe(true)
+    expect(res.body.consentsCurrent).toBe(false)
     await app.close()
   })
 

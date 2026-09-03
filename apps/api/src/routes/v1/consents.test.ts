@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import supertest from 'supertest'
 import Fastify from 'fastify'
 import fp from 'fastify-plugin'
-import { REQUIRED_CONSENTS } from '@puente/shared'
+import { BRIDGE_TOS_VERSION, REQUIRED_CONSENTS } from '@puente/shared'
 
 const from = vi.fn()
 
@@ -12,7 +12,7 @@ vi.mock('../../services/supabase.js', () => ({
   },
 }))
 
-const { consentsRoute } = await import('./consents.js')
+const { consentsRoute, hasBridgeTos } = await import('./consents.js')
 
 // Stand-in for the real JWT plugin: any non-empty bearer token authenticates
 // as a fixed test user; requests without one get 401.
@@ -259,6 +259,133 @@ describe('POST /v1/users/me/consents', () => {
     const app = await buildApp()
     const res = await supertest(app.server).post('/v1/users/me/consents').send(validBody)
     expect(res.status).toBe(401)
+    await app.close()
+  })
+})
+
+describe('hasBridgeTos', () => {
+  it('is true only for a bridge_tos row at the current version', () => {
+    expect(hasBridgeTos([])).toBe(false)
+    expect(hasBridgeTos([{ type: 'bridge_tos', version: 'v1' }])).toBe(false)
+    expect(hasBridgeTos([{ type: 'esign', version: BRIDGE_TOS_VERSION }])).toBe(false)
+    expect(hasBridgeTos([{ type: 'bridge_tos', version: BRIDGE_TOS_VERSION }])).toBe(true)
+  })
+})
+
+describe('POST /v1/users/me/bridge-tos (K6)', () => {
+  // Two tables: the consents evidence upsert, then the users pointer update.
+  function bridgeTosTables(opts: { consentError?: unknown; pointerError?: unknown } = {}) {
+    const upsert = vi.fn(async (..._args: unknown[]) => ({ error: opts.consentError ?? null }))
+    const eq = vi.fn(async (..._args: unknown[]) => ({ error: opts.pointerError ?? null }))
+    const update = vi.fn((..._args: unknown[]) => ({ eq }))
+    from.mockImplementation((table: string) =>
+      table === 'consents' ? { upsert } : table === 'users' ? { update } : undefined,
+    )
+    return { upsert, update, eq }
+  }
+
+  it('records the evidence row and the latest agreement pointer', async () => {
+    const { upsert, update, eq } = bridgeTosTables()
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/bridge-tos')
+      .set('Authorization', 'Bearer test-token')
+      .set('x-client-ip', '203.0.113.7')
+      .set('user-agent', 'drive/1.0')
+      .send({ signed_agreement_id: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d', locale: 'es' })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ bridgeTosAccepted: true })
+    expect(upsert).toHaveBeenCalledWith(
+      {
+        user_id: 'user-123',
+        type: 'bridge_tos',
+        version: BRIDGE_TOS_VERSION,
+        locale: 'es',
+        evidence: {
+          ip: '203.0.113.7',
+          user_agent: 'drive/1.0',
+          signed_agreement_id: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+        },
+      },
+      { onConflict: 'user_id,type,version', ignoreDuplicates: true },
+    )
+    expect(update).toHaveBeenCalledWith({
+      bridge_signed_agreement_id: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+    })
+    expect(eq).toHaveBeenCalledWith('id', 'user-123')
+    await app.close()
+  })
+
+  it('defaults the locale to en', async () => {
+    const { upsert } = bridgeTosTables()
+    const app = await buildApp()
+    const res = await supertest(app.server)
+      .post('/v1/users/me/bridge-tos')
+      .set('Authorization', 'Bearer test-token')
+      .send({ signed_agreement_id: 'agr-12345678' })
+    expect(res.status).toBe(200)
+    expect(upsert.mock.calls[0]![0]).toMatchObject({ locale: 'en' })
+    await app.close()
+  })
+
+  it('refuses an agreement id that could carry URL syntax', async () => {
+    const { upsert } = bridgeTosTables()
+    const app = await buildApp()
+
+    const bad = await supertest(app.server)
+      .post('/v1/users/me/bridge-tos')
+      .set('Authorization', 'Bearer test-token')
+      .send({ signed_agreement_id: 'agr_123?next=https://evil.test' })
+    expect(bad.status).toBe(400)
+    expect(upsert).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('strips unknown fields — the consent type can never be chosen by the client', async () => {
+    // Fastify's default Ajv removes properties additionalProperties:false
+    // forbids rather than 400ing; either way `type` is fixed server-side.
+    const { upsert } = bridgeTosTables()
+    const app = await buildApp()
+    const res = await supertest(app.server)
+      .post('/v1/users/me/bridge-tos')
+      .set('Authorization', 'Bearer test-token')
+      .send({ signed_agreement_id: 'agr-12345678', type: 'esign', version: '2020-01-01' })
+    expect(res.status).toBe(200)
+    expect(upsert.mock.calls[0]![0]).toMatchObject({ type: 'bridge_tos', version: BRIDGE_TOS_VERSION })
+    await app.close()
+  })
+
+  it('returns 401 without a token', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server)
+      .post('/v1/users/me/bridge-tos')
+      .send({ signed_agreement_id: 'agr-12345678' })
+    expect(res.status).toBe(401)
+    await app.close()
+  })
+
+  it('500s and never writes the pointer when the evidence row fails', async () => {
+    const { update } = bridgeTosTables({ consentError: { code: 'XX000' } })
+    const app = await buildApp()
+    const res = await supertest(app.server)
+      .post('/v1/users/me/bridge-tos')
+      .set('Authorization', 'Bearer test-token')
+      .send({ signed_agreement_id: 'agr-12345678' })
+    expect(res.status).toBe(500)
+    expect(update).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('500s when the pointer write fails', async () => {
+    bridgeTosTables({ pointerError: { code: 'XX000' } })
+    const app = await buildApp()
+    const res = await supertest(app.server)
+      .post('/v1/users/me/bridge-tos')
+      .set('Authorization', 'Bearer test-token')
+      .send({ signed_agreement_id: 'agr-12345678' })
+    expect(res.status).toBe(500)
     await app.close()
   })
 })

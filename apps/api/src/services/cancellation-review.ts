@@ -4,7 +4,7 @@ import {
   correctionRefundLedgerEntries,
   correctionVoidLedgerEntries,
 } from './transfers.js'
-import { getFundingProcessor, undoModeForRef } from './funding/index.js'
+import {  undoModeForRef, processorFor } from './funding/index.js'
 import { claimRefund, isClaimAbandoned } from './refunds.js'
 import { pendingCancellationFor, resolveCancellationRequest } from './cancellations.js'
 import { earliestDepositEvidenceAt } from './payment-events.js'
@@ -39,13 +39,14 @@ interface ReviewableTransfer {
   payment_at: string | null
   refund_payment_ref: string | null
   funding_payment_ref: string | null
+  funding_processor?: string | null
   idempotency_key: string
   refund_claimed_at: string | null
   refund_claimed_by: string | null
 }
 
 const REVIEWABLE_COLUMNS =
-  'id, state, send_amount_minor, fee_amount_minor, margin_minor, payment_at, refund_payment_ref, funding_payment_ref, idempotency_key, refund_claimed_at, refund_claimed_by'
+  'id, state, send_amount_minor, fee_amount_minor, margin_minor, payment_at, refund_payment_ref, funding_payment_ref, funding_processor, idempotency_key, refund_claimed_at, refund_claimed_by'
 
 export type ReviewOutcome =
   // `already_disbursed` = the money left in a PRIOR run (a crash between the
@@ -138,7 +139,8 @@ export async function refundCancellation(input: {
       // No try/catch, deliberately — same rule as the PAYOUT_FAILED tail: a
       // timeout and a rejection throw identically, so releasing the claim would
       // green-light a retry that may pay a third time.
-      const undo = await getFundingProcessor().refund({
+      // The ROW's rail (audit corner 1), same rule as the PAYOUT_FAILED tail.
+      const undo = await processorFor(transfer).refund({
         transferId: transfer.id,
         paymentRef: transfer.funding_payment_ref,
         amountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,

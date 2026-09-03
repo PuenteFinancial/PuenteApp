@@ -1,8 +1,11 @@
 import crypto from 'node:crypto'
 import * as Sentry from '@sentry/node'
 import type { FastifyInstance } from 'fastify'
-import type { KycStatus } from '@puente/shared'
 import { env } from '../../config/env.js'
+import { BRIDGE_KYC_STATUS_MAP } from '../../services/bridge.js'
+import { registerPendingDestinations } from '../../services/destination-registration.js'
+import { bridgeKycToVerificationStatus, recordKycVerification } from '../../services/kyc-verifications.js'
+import { releaseSenderKycHolds } from '../../services/payout-holds.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { getFundingProcessor, isOnrampSessionRail } from '../../services/funding/index.js'
 import { enqueuePaymentEventProcess } from '../../services/queue.js'
@@ -18,21 +21,6 @@ import {
   type OnrampAmountMismatch,
 } from '../../services/funding-apply.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
-
-// Bridge statuses we don't recognize fall through unmapped and are only logged
-const BRIDGE_KYC_STATUS_MAP: Record<string, KycStatus> = {
-  not_started: 'not_started',
-  incomplete: 'pending',
-  awaiting_questionnaire: 'pending',
-  awaiting_ubo: 'pending',
-  under_review: 'pending',
-  in_review: 'pending',
-  pending: 'pending',
-  manual_review: 'manual_review',
-  approved: 'approved',
-  active: 'approved',
-  rejected: 'rejected',
-}
 
 interface BridgeWebhookEvent {
   event_type?: string
@@ -264,10 +252,11 @@ export async function webhooksRoute(server: FastifyInstance) {
           update.status = 'active'
         }
 
-        const { error } = await supabaseAdmin
+        const { data: updatedUsers, error } = await supabaseAdmin
           .from('users')
           .update(update)
           .eq('bridge_customer_id', bridgeCustomerId)
+          .select('id')
 
         if (error) {
           server.log.error(
@@ -276,6 +265,54 @@ export async function webhooksRoute(server: FastifyInstance) {
           )
           // 500 so Bridge retries the delivery
           return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
+        }
+
+        // bridge_customer_id is UNIQUE, so this is zero or one user. Everything
+        // below is best-effort follow-through on an already-committed status:
+        // none of it may turn the ack into a 500, or Bridge would redeliver a
+        // status we have already applied.
+        const userIds = ((updatedUsers ?? []) as Array<{ id: string }>).map((u) => u.id)
+        for (const userId of userIds) {
+          // Corner 2: the verdict log.
+          await recordKycVerification(
+            {
+              userId,
+              provider: 'bridge',
+              providerRef: bridgeCustomerId,
+              status: bridgeKycToVerificationStatus(kycStatus),
+              providerStatus: bridgeStatus ?? null,
+              source: 'webhook',
+            },
+            server.log,
+          )
+
+          if (kycStatus !== 'approved') continue
+
+          // K6 decision 8: release the payouts parked on this sender's KYC.
+          await releaseSenderKycHolds(userId, server.log)
+
+          // The customer can hold external accounts now (an unverified one
+          // cannot — decisions.md 2026-08-28), so register the destinations the
+          // sender added before verifying. The payout self-heal is the backstop.
+          try {
+            const registration = await registerPendingDestinations(userId, bridgeCustomerId)
+            if (registration.registered > 0 || registration.failed.length > 0) {
+              server.log.info(
+                {
+                  userId,
+                  registered: registration.registered,
+                  failed: registration.failed.length,
+                  reasons: registration.failed.map((f) => f.reason),
+                },
+                'registered pending payout destinations on bridge approval',
+              )
+            }
+          } catch (err) {
+            server.log.error(
+              { userId, err: err instanceof Error ? err.message : String(err) },
+              'pending destination registration failed on bridge approval',
+            )
+          }
         }
       }
 

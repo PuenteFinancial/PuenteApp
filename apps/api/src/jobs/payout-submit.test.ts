@@ -125,7 +125,7 @@ function setupHappy(overrides: Partial<typeof baseTransfer> = {}) {
   const claim = chain({ data: [{ id: 'tr-1' }], error: null })
   route('transfers', load, claim)
   route('quotes', chain({ data: { source_rate: 20.100251, created_at: new Date().toISOString() }, error: null }))
-  route('users', chain({ data: { bridge_customer_id: 'cust_1' }, error: null }))
+  route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'approved' }, error: null }))
   route('payment_events', chain({ data: { id: 'ev-1' }, error: null }))
   payability.mockResolvedValue({ payable: true, providerAccountRef: 'ext_1' })
   floatCeiling.mockResolvedValue({ tripped: false, balanceMinor: 0, ceilingMinor: 100 })
@@ -290,6 +290,12 @@ describe('submitPayout — uncleared-exposure gates (slice-8 O3)', () => {
 })
 
 describe('submitPayout — holds', () => {
+  // K6: the sender read now precedes payability, so every hold scenario
+  // below runs as an approved sender (the KYC gate has its own describe).
+  beforeEach(() => {
+    route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'approved' }, error: null }))
+  })
+
   it('payability failure → payability hold, no float/fx checks, no Bridge call', async () => {
     const load = chain({ data: baseTransfer, error: null })
     const hold = chain({ data: [{ id: 'tr-1' }], error: null })
@@ -513,6 +519,61 @@ describe('submitPayout — submission and transition', () => {
     expect(await submitPayout('tr-1')).toBe(1)
     expect(queues.payment_events).toHaveLength(1) // untouched
     expect(enqueueEvent).not.toHaveBeenCalled()
+  })
+})
+
+// K6 decision 8: the sender's Bridge KYC gates submission, before payability,
+// and the hold it places is the first one the system releases on its own.
+describe('submitPayout — sender_kyc_pending (K6)', () => {
+  it('unapproved sender → sender_kyc_pending hold before payability, no Bridge call', async () => {
+    const { load, claim } = setupHappy()
+    route('transfers', load, chain({ data: [{ id: 'tr-1' }], error: null }), claim)
+    route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'pending' }, error: null }))
+
+    expect(await submitPayout('tr-1')).toBe(0)
+
+    expect(payability).not.toHaveBeenCalled()
+    expect(createPayout).not.toHaveBeenCalled()
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-hold', 'sender_kyc_pending'])
+    expect(captureMessage).toHaveBeenCalledWith('payout hold placed: sender_kyc_pending', 'warning')
+  })
+
+  it('a sender with no Bridge customer at all is held the same way (not thrown into retry)', async () => {
+    const { load, claim } = setupHappy()
+    route('transfers', load, chain({ data: [{ id: 'tr-1' }], error: null }), claim)
+    route('users', chain({ data: { bridge_customer_id: null, kyc_status: 'not_started' }, error: null }))
+
+    expect(await submitPayout('tr-1')).toBe(0)
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-hold', 'sender_kyc_pending'])
+    expect(payability).not.toHaveBeenCalled()
+  })
+
+  it('approved sender → no hold, one users read serves the KYC gate and on_behalf_of', async () => {
+    setupHappy()
+    expect(await submitPayout('tr-1')).toBe(1)
+    expect(setFingerprint).not.toHaveBeenCalledWith(['payout-hold', 'sender_kyc_pending'])
+    expect(createPayout).toHaveBeenCalledWith(expect.objectContaining({ onBehalfOf: 'cust_1' }))
+    // The users queue held exactly one chain and it was consumed once.
+    expect(queues.users).toEqual([])
+  })
+
+  it('crash recovery skips the KYC gate like every other guard', async () => {
+    const load = chain({
+      data: { ...baseTransfer, submit_attempted_at: '2026-07-20T12:00:00.000Z' },
+      error: null,
+    })
+    route('transfers', load)
+    route('payout_destinations', chain({ data: { provider_account_ref: 'ext_1' }, error: null }))
+    route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'pending' }, error: null }))
+    route('payment_events', chain({ data: { id: 'ev-1' }, error: null }))
+    createPayout.mockResolvedValue({ bridgeTransferId: 'bt-1', state: 'awaiting_funds', sourceAmount: '198.55' })
+    parseMinor.mockReturnValue(19855)
+    ledgerEntries.mockReturnValue([{ account_code: 'due_from_bridge' }])
+    transition.mockResolvedValue({})
+
+    expect(await submitPayout('tr-1')).toBe(1)
+    expect(setFingerprint).not.toHaveBeenCalledWith(['payout-hold', 'sender_kyc_pending'])
+    expect(createPayout).toHaveBeenCalledWith(expect.objectContaining({ onBehalfOf: 'cust_1' }))
   })
 })
 

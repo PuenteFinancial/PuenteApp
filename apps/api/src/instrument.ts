@@ -1,5 +1,6 @@
 import * as Sentry from '@sentry/node'
 import { createDedupeFilter } from './config/sentry-dedupe.js'
+import { scrubEvent } from './config/sentry-scrub.js'
 
 // NOTE: this module is the Sentry preload — it runs before config/env.ts is
 // imported, so everything here reads process.env directly and must not pull in
@@ -33,5 +34,12 @@ Sentry.init({
   // environment, staging and prod check in to the same monitor and a dead
   // staging worker is masked by a live prod one.
   environment,
-  beforeSend: (event) => (shouldSend(event, Date.now()) ? event : null),
+  // Scrub first (K6: identity numbers are redacted by key name wherever the
+  // SDK may have picked them up), then apply the repeat-suppression window.
+  // The scrubber never touches fingerprint or exception, so dedupe keys are
+  // identical for the scrubbed and raw event.
+  beforeSend: (event) => {
+    const scrubbed = scrubEvent(event)
+    return shouldSend(scrubbed, Date.now()) ? scrubbed : null
+  },
 })

@@ -1,6 +1,6 @@
 import { env } from '../config/env.js'
 import { supabaseAdmin } from '../services/supabase.js'
-import { getFundingProcessor, isOnrampSessionRail } from '../services/funding/index.js'
+import { getFundingProcessor, isOnrampSessionRail, processorNameFor, type RailRow } from '../services/funding/index.js'
 import { transitionTransfer, TransferRpcError } from '../services/transfers.js'
 
 // A PENDING_PAYMENT older than this never got its funding webhook — the
@@ -19,14 +19,25 @@ const STALE_AFTER_MS = 30 * 60 * 1000
 // PAYMENT_FAILED row. Hours-scale window (ONRAMP_PENDING_MAX_AGE_HOURS,
 // default 4); not days — an abandoned widget has no deposit instructions
 // sitting in anyone's bank app. (#227's transfer_aging follows this branch.)
-function staleAfterMs(): number {
-  if (env.FUNDING_PROCESSOR === 'manual') {
+// Per ROW (audit corner 1): the clock belongs to the rail that funded the
+// row, which after a FUNDING_PROCESSOR flip is not always the process's. A
+// null funding_processor falls back to the process rail — the old behaviour.
+function staleAfterMs(row: RailRow): number {
+  const rail = processorNameFor(row)
+  if (rail === 'manual') {
     return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60 * 1000
   }
-  if (isOnrampSessionRail(env.FUNDING_PROCESSOR)) {
+  if (isOnrampSessionRail(rail)) {
     return env.ONRAMP_PENDING_MAX_AGE_HOURS * 60 * 60 * 1000
   }
   return STALE_AFTER_MS
+}
+
+function abandonmentReason(row: RailRow): string {
+  const rail = processorNameFor(row)
+  if (rail === 'manual') return `funding_not_received_within_${env.MANUAL_PENDING_MAX_AGE_DAYS}_days`
+  if (isOnrampSessionRail(rail)) return `funding_not_received_within_${env.ONRAMP_PENDING_MAX_AGE_HOURS}_hours`
+  return 'funding_not_received_within_30_minutes'
 }
 
 // Codes that mean another actor moved the row between our select and the
@@ -93,7 +104,7 @@ async function failRejectedOnrampSessions(
 export async function reconcilePendingTransfers(): Promise<number> {
   const { data: pendingData, error: pendingError } = await supabaseAdmin
     .from('transfers')
-    .select('id, funding_payment_ref, created_at')
+    .select('id, funding_payment_ref, funding_processor, created_at')
     .eq('state', 'PENDING_PAYMENT')
   if (pendingError) {
     throw new Error(`reconcile-pending select failed: ${pendingError.message}`)
@@ -101,14 +112,16 @@ export async function reconcilePendingTransfers(): Promise<number> {
   const pending = (pendingData ?? []) as {
     id: string
     funding_payment_ref: string | null
+    funding_processor?: string | null
     created_at: string
   }[]
 
   const rejectedNow = await failRejectedOnrampSessions(pending)
 
-  const cutoff = Date.now() - staleAfterMs()
+  const now = Date.now()
   const rows = pending.filter(
-    (row) => !rejectedNow.has(row.id) && new Date(row.created_at).getTime() < cutoff,
+    (row) =>
+      !rejectedNow.has(row.id) && new Date(row.created_at).getTime() < now - staleAfterMs(row),
   )
   let transitioned = 0
   const failures: string[] = []
@@ -119,12 +132,7 @@ export async function reconcilePendingTransfers(): Promise<number> {
         fromState: 'PENDING_PAYMENT',
         toState: 'PAYMENT_FAILED',
         actor: 'worker:reconcile-pending',
-        reason:
-          env.FUNDING_PROCESSOR === 'manual'
-            ? `funding_not_received_within_${env.MANUAL_PENDING_MAX_AGE_DAYS}_days`
-            : isOnrampSessionRail(env.FUNDING_PROCESSOR)
-              ? `funding_not_received_within_${env.ONRAMP_PENDING_MAX_AGE_HOURS}_hours`
-              : 'funding_not_received_within_30_minutes',
+        reason: abandonmentReason(row),
       })
       transitioned++
     } catch (err) {

@@ -478,7 +478,7 @@ export async function cryptoRoute(server: FastifyInstance) {
         // so last-write-wins here is safe.
         const { error: refError } = await supabaseAdmin
           .from('transfers')
-          .update({ funding_payment_ref: session.id })
+          .update({ funding_payment_ref: session.id, funding_processor: getFundingProcessor().provider })
           .eq('id', transfer.id)
           .eq('state', 'PENDING_PAYMENT')
         if (refError) {
