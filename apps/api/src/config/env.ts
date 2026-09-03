@@ -23,13 +23,23 @@ const envSchema = z.object({
   // request Host header was rejected: that header is client-controlled, and this
   // value becomes a redirect target handed to a third party.
   PUBLIC_API_URL: z.string().url().optional(),
-  // How many proxy hops sit in front of the API (Railway edge = 1). Drives
-  // trustProxy so request.ip = the rightmost X-Forwarded-For entry, i.e. the
-  // address the trusted proxy actually saw. NEVER set trustProxy: true —
-  // the leftmost XFF entries are client-controlled, so trusting the whole
-  // chain lets callers rotate fake IPs past per-IP rate limits. 0 = trust
-  // no proxy (request.ip = socket peer).
-  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(1),
+  // Which connecting addresses count as trusted reverse proxies: comma-
+  // separated proxy-addr keywords, IPs, or CIDRs ('none' = trust no proxy,
+  // request.ip = socket peer). When the socket peer matches, request.ip is
+  // derived from X-Forwarded-For, walking right to left past other trusted
+  // addresses. This replaces the old TRUST_PROXY_HOPS hop count: fastify
+  // 5.12.1 disabled numeric trustProxy (GHSA: "X-Forwarded-* spoofing under
+  // trustProxy hop-count" — a hop count never inspects WHO is connecting, so
+  // anyone reaching the origin directly could spoof X-Forwarded-*). The
+  // default trusts only local/private source ranges: Railway's edge reaches
+  // the container over the private network, and no internet client can hold
+  // a private source address. NEVER add a range public clients can occupy
+  // (and never trustProxy: true) — leftmost XFF entries are client-
+  // controlled, so over-trusting lets callers rotate fake IPs past per-IP
+  // rate limits. If request.ip on staging comes back as the edge's own
+  // address (one shared rate-limit bucket), the edge connects from outside
+  // these ranges: set its exact CIDR here via Doppler, don't widen trust.
+  TRUST_PROXY_SOURCES: z.string().min(1).default('loopback, linklocal, uniquelocal'),
   SUPABASE_URL: z.string().url(),
   SUPABASE_SECRET_KEY: z.string().min(1),
   SUPABASE_PUBLISHABLE_KEY: z.string().min(1),

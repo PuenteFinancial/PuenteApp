@@ -68,10 +68,12 @@ const server = Fastify({
     },
   },
   // Railway's edge appends the real client IP as the RIGHTMOST X-Forwarded-For
-  // entry; a hop count trusts exactly that. Without this, request.ip is the
-  // proxy's address and every user shares the same rate-limit bucket. See
-  // TRUST_PROXY_HOPS in config/env.ts for why `true` would be a bypass.
-  trustProxy: env.TRUST_PROXY_HOPS === 0 ? false : env.TRUST_PROXY_HOPS,
+  // entry. Trusting only local/private source addresses stops the right-to-left
+  // walk at that entry (internet clients can't hold private addresses). Without
+  // this, request.ip is the proxy's address and every user shares the same
+  // rate-limit bucket. See TRUST_PROXY_SOURCES in config/env.ts for why `true`
+  // or any client-occupiable range would be a bypass.
+  trustProxy: env.TRUST_PROXY_SOURCES === 'none' ? false : env.TRUST_PROXY_SOURCES,
 })
 
 Sentry.setupFastifyErrorHandler(server, {

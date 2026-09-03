@@ -94,7 +94,8 @@ promote → then flip the var.
   database trigger, and the cron ticks on `*/5`, so allow up to 5 minutes after a deploy). Green in
   Railway is exactly what the dashboard showed throughout the 22.4-hour August outage.
 - After anything touching rate limiting / IPs: check a staging audit-log row records a real client
-  IP (bump `TRUST_PROXY_HOPS` if not).
+  IP. If rows show the edge's own address instead, the edge connects from outside the default
+  private ranges — set its exact CIDR in `TRUST_PROXY_SOURCES` (Doppler), never a public range.
 
 ## Rollback
 

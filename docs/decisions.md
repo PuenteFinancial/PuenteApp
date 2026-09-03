@@ -6,6 +6,20 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-09-03 · trustProxy moves from hop count to connecting-address trust (`TRUST_PROXY_SOURCES`),
+forced by fastify 5.12.1.** Fastify disabled numeric `trustProxy` (GHSA: "X-Forwarded-* spoofing
+under trustProxy hop-count" — a hop count never inspects WHO is connecting, so anyone reaching the
+origin directly can spoof `X-Forwarded-*`). The replacement trusts source addresses, default
+`loopback, linklocal, uniquelocal`: Railway's edge reaches the container over private address
+space, and no internet client can hold a private source address, so the right-to-left XFF walk
+stops at the edge-appended real client IP — the same `request.ip` the old `TRUST_PROXY_HOPS=1`
+produced for every internet client, plus the guard the hop count lacked (a direct-to-origin caller
+from a public address is never trusted). Escape hatch: if the edge ever connects from a non-private
+range (symptom: staging audit-log IPs all = the edge's address, one shared rate-limit bucket), set
+that exact CIDR in `TRUST_PROXY_SOURCES` via Doppler — never widen to a client-occupiable range and
+never `trustProxy: true` (the 2026-07-09 rationale stands). Semantics pinned in
+`apps/api/src/config/trust-proxy.test.ts`. **Status: active.**
+
 **2026-09-03 · K6b: the web half of the relay — where the identity values live between the form
 and the POST, and why the return leg stops diverting rejected senders.** Three choices that are not
 obvious from the code. (1) The DOB + tax ID sit in exactly ONE reducer field, `ctx.relayValues`,
@@ -692,7 +706,9 @@ and makes schema-before-code atomic with the same approval. **Status: active.**
 **2026-07-09 · `TRUST_PROXY_HOPS=1`, never `trustProxy: true` (PR #49).** Rate limiting keys on the
 real client IP by trusting exactly the Railway edge hop. Trusting the whole XFF chain would let an
 attacker mint unlimited fresh rate-limit buckets (leftmost XFF is client-controlled) — strictly
-worse than no trust. Railway appends the real client IP as the *rightmost* XFF entry. **Status: active.**
+worse than no trust. Railway appends the real client IP as the *rightmost* XFF entry. **Status: the
+hop-count half is superseded (2026-09-03, fastify 5.12.1 killed numeric trustProxy → `TRUST_PROXY_SOURCES`);
+the never-`trustProxy: true` half stands.**
 
 **2026-07-08 · KYC in production is Bridge-hosted (Persona), not Sumsub (PRs #36, #40, #41).** The
 2026-06-25 pre-implementation decision picked Sumsub, but the shipped onboarding uses Bridge's
