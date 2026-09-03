@@ -25,8 +25,9 @@ import {
   type KycFormMode,
   type KycFormValues,
 } from '@/lib/cryptoPayStep'
-import { KYC_NEXT_COOKIE } from '@/lib/kycReturn'
+import { KYC_LOCALE_COOKIE, KYC_NEXT_COOKIE } from '@/lib/kycReturn'
 import KycForm from './KycForm'
+import RelayForm from './RelayForm'
 import PayIntro from './PayIntro'
 import BridgeKycCard from './BridgeKycCard'
 import SdkElementHost from './SdkElementHost'
@@ -70,7 +71,17 @@ function readPrefill(body: unknown): CryptoPrefill | null {
     addressPostalCode: str(b.addressPostalCode),
     bridgeCustomerId: str(b.bridgeCustomerId),
     kycStatus: str(b.kycStatus) ?? 'not_started',
+    // Absent on a pre-K6 API = not accepted: the gate shows, and the
+    // click-through is idempotent server-side.
+    bridgeTosAccepted: b.bridgeTosAccepted === true,
   }
+}
+
+/** The `{ url }` of a hosted-flow response, or null. */
+function readUrl(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null) return null
+  const url = (body as { url?: unknown }).url
+  return typeof url === 'string' && url ? url : null
 }
 
 export default function CryptoPayStep({
@@ -89,7 +100,7 @@ export default function CryptoPayStep({
    *  the next webhook-driven poll without waiting a full interval. */
   onAdvanced: () => Promise<void>
 }) {
-  const { t } = useLanguage()
+  const { t, lang } = useLanguage()
   const c = t.send.track.crypto
   const s = t.send.track
   const router = useRouter()
@@ -128,6 +139,15 @@ export default function CryptoPayStep({
     async (effect: CryptoPayEffect) => {
       const dispatch = (event: CryptoPayEvent) => {
         if (mountedRef.current) dispatchRef.current(event)
+      }
+
+      /** Stash the way home before any hosted-flow redirect. The return
+       *  pages read these; the Bridge/Persona redirect chain can't carry a
+       *  query param (origin-built URLs). Path-validated on read. */
+      const setReturnCookies = () => {
+        const attrs = 'path=/; max-age=3600; SameSite=Lax'
+        document.cookie = `${KYC_NEXT_COOKIE}=/dashboard/send/${transferId}; ${attrs}`
+        document.cookie = `${KYC_LOCALE_COOKIE}=${lang}; ${attrs}`
       }
 
       switch (effect.kind) {
@@ -319,23 +339,57 @@ export default function CryptoPayStep({
           return
         }
 
+        case 'relay': {
+          // THE KYC RELAY (K6): the one POST to our API carrying the DOB and
+          // tax ID, on their single pass to Bridge. Nothing here reads,
+          // logs, or keeps the body — it is the reducer's effect, sent once.
+          try {
+            const res = await fetch('/api/users/me/bridge-customer', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(effect.body),
+            })
+            if (res.status === 401) {
+              router.replace('/continue')
+              return
+            }
+            const body: unknown = await res.json().catch(() => null)
+            if (!res.ok) {
+              dispatch({ type: 'RELAY_ERROR', failure: classifyCryptoApiError(res.status, body) })
+              return
+            }
+            const b = (typeof body === 'object' && body !== null ? body : {}) as {
+              bridgeCustomerId?: unknown
+              status?: unknown
+            }
+            if (typeof b.bridgeCustomerId !== 'string' || !b.bridgeCustomerId) {
+              dispatch({
+                type: 'RELAY_ERROR',
+                failure: { status: 502, code: 'provider_unavailable', issue: null, path: null },
+              })
+              return
+            }
+            dispatch({
+              type: 'RELAY_OK',
+              bridgeCustomerId: b.bridgeCustomerId,
+              status: typeof b.status === 'string' ? b.status : 'pending',
+            })
+          } catch {
+            dispatch({ type: 'RELAY_ERROR', failure: { status: 0, code: null, issue: null, path: null } })
+          }
+          return
+        }
+
         case 'bridge_redirect': {
           try {
-            // The return path rides a cookie because the Bridge/Persona
-            // redirect chain can't carry a query param (origin-built URLs).
-            // Path-validated on read in /onboarding/kyc/return.
-            document.cookie = `${KYC_NEXT_COOKIE}=/dashboard/send/${transferId}; path=/; max-age=3600; SameSite=Lax`
+            setReturnCookies()
             const res = await fetch('/api/users/me/tos-link', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ origin: window.location.origin, platform: 'web' }),
             })
-            const body: unknown = await res.json().catch(() => null)
-            const url =
-              typeof body === 'object' && body !== null
-                ? (body as { url?: unknown }).url
-                : null
-            if (!res.ok || typeof url !== 'string' || !url) {
+            const url = readUrl(await res.json().catch(() => null))
+            if (!res.ok || !url) {
               dispatch({ type: 'BRIDGE_REDIRECT_FAILED' })
               return
             }
@@ -367,6 +421,52 @@ export default function CryptoPayStep({
               }
             })()
           })
+          return
+        }
+
+        case 'fetch_rejection': {
+          try {
+            const res = await fetch('/api/users/me/kyc-rejection', { cache: 'no-store' })
+            const body: unknown = await res.json().catch(() => null)
+            const b = (typeof body === 'object' && body !== null ? body : {}) as {
+              reasons?: unknown
+              retriesRemaining?: unknown
+            }
+            if (!res.ok || typeof b.retriesRemaining !== 'number') {
+              dispatch({ type: 'REJECTION_FAILED' })
+              return
+            }
+            dispatch({
+              type: 'REJECTION_RESULT',
+              reasons: Array.isArray(b.reasons)
+                ? b.reasons.filter((r): r is string => typeof r === 'string')
+                : [],
+              retriesRemaining: b.retriesRemaining,
+            })
+          } catch {
+            dispatch({ type: 'REJECTION_FAILED' })
+          }
+          return
+        }
+
+        case 'persona_retry': {
+          try {
+            setReturnCookies()
+            // The proxy adds the origin and allowlists the returned host.
+            const res = await fetch('/api/users/me/kyc-link/retry', { method: 'POST' })
+            if (res.status === 401) {
+              router.replace('/continue')
+              return
+            }
+            const url = readUrl(await res.json().catch(() => null))
+            if (!res.ok || !url) {
+              dispatch({ type: 'PERSONA_REDIRECT_FAILED' })
+              return
+            }
+            window.location.assign(url)
+          } catch {
+            dispatch({ type: 'PERSONA_REDIRECT_FAILED' })
+          }
           return
         }
 
@@ -438,13 +538,13 @@ export default function CryptoPayStep({
             if (typeof sessionId !== 'string' || !sessionId) {
               dispatch({
                 type: 'SESSION_ERROR',
-                failure: { status: 502, code: 'provider_unavailable', issue: null },
+                failure: { status: 502, code: 'provider_unavailable', issue: null, path: null },
               })
               return
             }
             dispatch({ type: 'SESSION_OK', sessionId })
           } catch {
-            dispatch({ type: 'SESSION_ERROR', failure: { status: 0, code: null, issue: null } })
+            dispatch({ type: 'SESSION_ERROR', failure: { status: 0, code: null, issue: null, path: null } })
           }
           return
         }
@@ -474,7 +574,12 @@ export default function CryptoPayStep({
                     ? (body as { clientSecret?: unknown }).clientSecret
                     : null
                 if (typeof secret !== 'string' || !secret) {
-                  checkoutFailureRef.current = { status: 502, code: 'provider_unavailable', issue: null }
+                  checkoutFailureRef.current = {
+                    status: 502,
+                    code: 'provider_unavailable',
+                    issue: null,
+                    path: null,
+                  }
                   throw new Error('checkout missing client secret')
                 }
                 return secret
@@ -484,14 +589,14 @@ export default function CryptoPayStep({
           } catch {
             dispatch({
               type: 'CHECKOUT_ERROR',
-              failure: checkoutFailureRef.current ?? { status: 0, code: null, issue: null },
+              failure: checkoutFailureRef.current ?? { status: 0, code: null, issue: null, path: null },
             })
           }
           return
         }
       }
     },
-    [router, schedule, transferId, walletAddress],
+    [lang, router, schedule, transferId, walletAddress],
   )
 
   const dispatch = useCallback(
@@ -551,6 +656,12 @@ export default function CryptoPayStep({
       )}
     </div>
   )
+  const titledCard = (title: string, body: string) => (
+    <div style={wrap}>
+      <p style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--ink)', margin: '0 0 4px' }}>{title}</p>
+      <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0, lineHeight: 1.5 }}>{body}</p>
+    </div>
+  )
 
   switch (view.step) {
     case 'loading':
@@ -561,6 +672,12 @@ export default function CryptoPayStep({
       return (
         <div style={wrap}>
           <PayIntro onContinue={() => dispatch({ type: 'CONTINUE' })} />
+        </div>
+      )
+    case 'bridge_tos':
+      return (
+        <div style={wrap}>
+          <BridgeKycCard variant="tos" busy={false} onContinue={() => dispatch({ type: 'BRIDGE_CONTINUE' })} />
         </div>
       )
     case 'link_auth':
@@ -617,6 +734,7 @@ export default function CryptoPayStep({
             mode={mode}
             prefill={ctx.prefill}
             invalid={view.step === 'kyc_form' && view.invalid}
+            notice={view.step === 'kyc_form' ? view.notice : null}
             busy={busy}
             onSubmit={(values, edited) => {
               pendingKycRef.current = { values, mode }
@@ -657,15 +775,36 @@ export default function CryptoPayStep({
           )}
         </div>
       )
-    case 'bridge_tos':
-    case 'bridge_polling':
+    case 'relaying':
+      return <div style={wrap}>{busyLine(c.relay.verifying)}</div>
+    case 'relay_form':
       return (
         <div style={wrap}>
-          <BridgeKycCard
-            waiting={view.step === 'bridge_polling'}
-            busy={false}
-            onContinue={() => dispatch({ type: 'BRIDGE_CONTINUE' })}
+          <RelayForm
+            key={view.reason}
+            reason={view.reason}
+            invalid={view.invalid}
+            onSubmit={(values) => dispatch({ type: 'RELAY_FORM_SUBMIT', values })}
           />
+        </div>
+      )
+    case 'bridge_polling':
+    case 'bridge_rejection':
+      return (
+        <div style={wrap}>
+          <BridgeKycCard variant="waiting" busy={false} />
+        </div>
+      )
+    case 'bridge_wait':
+      return (
+        <div style={wrap}>
+          <BridgeKycCard variant="wait" busy={false} onContinue={() => dispatch({ type: 'BRIDGE_RECHECK' })} />
+        </div>
+      )
+    case 'bridge_persona':
+      return (
+        <div style={wrap}>
+          <BridgeKycCard variant="persona" busy={false} onContinue={() => dispatch({ type: 'START_PERSONA' })} />
         </div>
       )
     case 'collect':
@@ -695,26 +834,15 @@ export default function CryptoPayStep({
     case 'checkout':
       return <div style={wrap}>{busyLine(c.pay.startingCheckout)}</div>
     case 'submitted':
-      return (
-        <div style={wrap}>
-          <p style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--ink)', margin: '0 0 4px' }}>
-            {s.pay.submittedTitle}
-          </p>
-          <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0, lineHeight: 1.5 }}>
-            {s.pay.submittedBody}
-          </p>
-        </div>
-      )
+      return titledCard(s.pay.submittedTitle, s.pay.submittedBody)
     case 'failed': {
       if (view.kind === 'kyc_rejected') {
+        return titledCard(c.kyc.rejectedTitle, c.kyc.rejectedBody)
+      }
+      if (view.kind === 'duplicate_identity') {
         return (
           <div style={wrap}>
-            <p style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--ink)', margin: '0 0 4px' }}>
-              {c.kyc.rejectedTitle}
-            </p>
-            <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0, lineHeight: 1.5 }}>
-              {c.kyc.rejectedBody}
-            </p>
+            <BridgeKycCard variant="duplicate" busy={false} />
           </div>
         )
       }
