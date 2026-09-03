@@ -1,5 +1,15 @@
 # PRD — User Onboarding: Account Creation + Identity Verification
 
+> **SUPERSEDED (2026-09-03) — kept as history, do not build from this.** The two-step shape below
+> (account, then Bridge-hosted KYC during onboarding) shipped and ran in production from
+> 2026-07-08. The K lane replaced its second half: onboarding now collects **information and
+> consents only**, and identity verification happens at first send inside our own UI via Stripe
+> embedded components, with a one-time relay of DOB + tax ID to Bridge. Current design:
+> [`../plans/kyc-at-first-send.md`](../plans/kyc-at-first-send.md); current flow:
+> [`../flows.md`](../flows.md) §1d. What is still accurate here: the phone-OTP auth leg, the
+> profile fields, and the webhook-driven `kyc_status` machinery, which survives to serve the
+> Persona fallback.
+
 **Owner:** Joshua
 **Build target:** Claude Code
 **Goal:** A user can sign up on the Puente web app with their phone number, provide basic profile info, and complete Bridge's hosted KYC — leaving them approved (or pending review) to transact when remittance launches.

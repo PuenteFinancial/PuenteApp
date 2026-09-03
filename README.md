@@ -52,7 +52,9 @@ and `apps/web` throws without `INTERNAL_API_URL` in `.env.local`.
    (`docs/runbooks/proposals/` are unadopted drafts — don't treat them as policy.)
 
 Also: [docs/pre-implementation-todo.md](docs/pre-implementation-todo.md) is the gate list for the
-remittance MVP, and [docs/prds/](docs/prds) holds the feature PRDs.
+remittance MVP, [docs/plans/kyc-at-first-send.md](docs/plans/kyc-at-first-send.md) is the current
+identity-verification design (it supersedes the onboarding-KYC PRD), and [docs/prds/](docs/prds)
+holds the feature PRDs — read their banners first, several are history rather than plans.
 
 ## Working here
 

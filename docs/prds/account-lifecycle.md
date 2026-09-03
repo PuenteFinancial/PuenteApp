@@ -1,5 +1,13 @@
 # PRD — Account Lifecycle: Returning Users, Rejected KYC, Sessions
 
+> **PARTLY SUPERSEDED (2026-09-03).** All five slices shipped (#44–#48) and the routing,
+> session, and users-row work below is still live and accurate. What moved: the **rejected-KYC**
+> slices describe rejection during *onboarding*, and under the K lane a rejection happens inside
+> the send flow instead — the pay-step machine owns it (one in-place correction, then Persona on a
+> Bridge database-reject). The `/continue` router no longer has a KYC branch behind the flag.
+> See [`../plans/kyc-at-first-send.md`](../plans/kyc-at-first-send.md) and
+> [`../flows.md`](../flows.md) §1d.
+
 **Owner:** Joshua
 **Build target:** Claude Code
 **Goal:** Every user who is *not* mid-happy-path — returning, rejected, expired session, broken row — lands on the right screen with a truthful message and a way forward. Onboarding/login must be fully done before remittance MVP work starts.

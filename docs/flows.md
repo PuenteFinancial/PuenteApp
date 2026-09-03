@@ -1,14 +1,19 @@
 # Flow / Sequence Diagrams — USD → MXN Remittance
 
-**Date:** 2026-07-10 · **Updated:** 2026-08-26 (de-stale pass: merged-rate quote, the four funding
-rails as first-class flows, onramp guard, funding-cleared cash leg, AUTO_REFUND gate, ops actions)
-**Status:** current through funding-ops slices 1–4 + the Stripe onramp rail
+**Date:** 2026-07-10 · **Updated:** 2026-09-03 (de-stale pass: §1d — the K5/K6 embedded-components
+rail with the ToS gate and the Bridge identity relay; §1c demoted to legacy)
+**Status:** current through the K lane (K1–K6) + K7a pre-flip hardening
 **Pairs with:** `transfer-state-machine.md` (states), `ledger-rules.md` (postings),
-`api-contract.md` (routes), `architecture.md` (components)
+`api-contract.md` (routes), `architecture.md` (components), `plans/kyc-at-first-send.md` (the K lane)
 
 The flows: send-money happy path (per funding rail), payout webhook, error resolution,
 cancel/refund. States in `CAPS` are transfer states; ledger postings are named, not restated
 (ledger-rules.md is authoritative).
+
+**Which send flow is real depends on `FUNDING_PROCESSOR` and one flag.** §1d is the rail the K lane
+built and the one the K7 flip makes universal; it is preview-only today. §1c is the widget rail it
+replaces, and §1 / §1b are the ACH and out-of-band rails. Everything from `FUNDED` onward (§2, §4)
+is shared by all of them.
 
 ## 1. Send money — happy path (stripe Payment Element rail)
 
@@ -82,7 +87,7 @@ Key differences from §1: the webhook door is **permanently shut** on this rail
 `FUNDED`; `PENDING_PAYMENT` is **livable** (7-day reaper, not 30 minutes — #205); and the sender's
 claim never moves money.
 
-## 1c. Send money — Stripe crypto onramp rail
+## 1c. Send money — Stripe crypto onramp rail  *(LEGACY widget — superseded by §1d, retired at the K7 flip)*
 
 ```mermaid
 sequenceDiagram
@@ -105,6 +110,79 @@ sequenceDiagram
 The widget's amount field is user-editable (`skip_quote_screen` deliberately not sent — Stripe's
 quote screen is where its fee disclosure lives), which is why the guard exists and is load-bearing.
 Reaper clock on this rail: 4 hours (`ONRAMP_PENDING_MAX_AGE_HOURS`).
+
+## 1d. Send money — Stripe embedded components + the Bridge identity relay (`stripe_crypto`, K3–K6)
+
+The rail the K lane built. Two things make it different from every flow above: **identity
+verification happens inside this flow, in our own UI** rather than during onboarding, and the
+sender's DOB and tax ID cross our server exactly once, in memory, on their way to Bridge.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor S as Sender (web)
+    participant API as Fastify API
+    participant DB as Postgres
+    participant ST as Stripe (embedded components)
+    participant BR as Bridge
+
+    S->>API: GET /v1/crypto/limits (transaction_limits pre-check, on mount)
+
+    Note over S,BR: ToS-first gate (K6b) — Bridge's terms BEFORE any Link auth
+    S->>API: POST /v1/users/me/tos-link
+    API->>BR: mint a ToS acceptance link
+    API->>DB: users.bridge_signed_agreement_id (mutable pointer, single-use at Bridge)
+    S->>BR: accept Bridge's terms on Bridge's page
+    S->>API: return leg → POST /v1/users/me/bridge-tos {signed_agreement_id}
+    API->>DB: append consents{bridge_tos} (+ ip, UA, locale) — the immutable evidence
+
+    Note over S,ST: Link auth — the LinkAuthIntent is REUSED (a fresh one forces re-OTP)
+    S->>API: POST /v1/crypto/link-auth-intent
+    S->>ST: SDK authenticate (Link OTP — sign-in or sign-up)
+    S->>API: POST /v1/crypto/link-auth-intent/exchange → POST /v1/crypto/customer {crc_}
+
+    Note over S,ST: DOB + tax ID go CLIENT → SDK ONLY here. They never reach us on this leg.
+    S->>ST: submitKycInfo (L0/L1; address prefilled from the profile via AddressElement)
+    S->>API: poll GET /v1/crypto/kyc-status every 2–3s until L1 is verified
+
+    Note over S,BR: the relay (K6) — the ONE place these values cross our server
+    S->>API: POST /v1/users/me/bridge-customer {dob, taxId}
+    Note over API: memory only — never persisted, never logged (schema-pii.test.ts pins that)
+    API->>BR: create identity (per-user + body-hash idempotency key)
+    API->>DB: append kyc_verifications; hold the payout on sender_kyc_pending
+    BR-->>API: webhook customer.updated → approved
+    API->>DB: release the hold, log the verdict, register pending payout destinations
+
+    S->>ST: collectPaymentMethod (card + us_bank_account) → cpt_
+    S->>ST: registerWalletAddress (treasury) — a headless create refuses a raw address
+    S->>API: POST /v1/crypto/transfers/:id/onramp-session {cpt_} → cos_
+    S->>ST: performCheckout(cos_) ─callback─▶ POST /v1/crypto/transfers/:id/onramp-checkout
+    API-->>S: {clientSecret} — never persisted, never logged
+    ST-->>API: webhook crypto.onramp_session.updated
+    Note over API,DB: same amount guard as §1c, then PENDING_PAYMENT → FUNDED
+    Note over API,BR: payout proceeds exactly as §1 from FUNDED
+```
+
+**Why the gate order is what it is.** Bridge's terms come first because its `signed_agreement_id` is
+single-use and must exist before the customer is created; putting it after Link auth meant a sender
+could verify with Stripe and then be blocked. The relay waits for Stripe's L1 verdict so we never
+hand Bridge an identity Stripe just refused. And `collect` is gated on **Bridge's** approval,
+because a transfer that reaches `FUNDED` without an approved Bridge customer parks on a hold that
+only a human can clear.
+
+**The branches that are not the happy path:**
+
+| Branch | What happens |
+|---|---|
+| Stripe rejects L1 | one correction is offered in-place; a second rejection ends the attempt |
+| Bridge database-reject | **Persona fallback** (`bridge_persona`) — the hosted document flow, demoted from the primary path to this one case |
+| Bridge still pending past `BRIDGE_POLL_TIMEOUT_TICKS` (40) | the pay step stops polling and tells the sender they will be emailed; the approval webhook still releases the hold whenever it lands |
+| duplicate tax ID at Bridge | **hard stop** (`duplicate_identity`) — never a retry loop, because the collision is a real person, not a transient error |
+| sender funded before Bridge approved | payout holds on `sender_kyc_pending`; auto-released by the approval webhook |
+
+Only the happy path, the reload edge, and the legacy/approved-already starting states are reachable
+in Bridge's sandbox — it auto-approves the canonical identity in seconds. Rejection, Persona,
+manual review, duplicate, and the poll timeout are **pilot-verification items**, not sandbox-tested.
 
 Key properties: jobs are enqueued after the state change commits and are idempotent replays — a
 lost enqueue is healed by the 1-min sweep, never a correctness problem (enqueue-after-commit, not a

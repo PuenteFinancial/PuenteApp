@@ -684,7 +684,11 @@ already live on web; mobile follows once the flow is proven with the five truste
 **2026-07-13 · KYC stays Bridge-hosted (Persona) for the remittance MVP.** Closes the open
 re-decision below: it's live, the SPEI endorsement flow is wired, and Sumsub adds an integration
 project with zero MVP benefit. Revisit when lending or non-Bridge rails need their own identity
-layer. **Status: active.**
+layer. **Status: SUPERSEDED 2026-08-27 by the K lane** — verification moved to Stripe embedded
+components at first send, with Persona demoted to the fallback for a Bridge database-reject (see
+the 2026-09-03 K6 entries above and `plans/kyc-at-first-send.md`). The revisit trigger named here
+is what fired: the send flow needed an identity layer that did not hand the sender to a third
+party mid-payment.
 
 **2026-07-10 · Stripe is the funding processor.** Stripe initially declined us (startup, money
 transmission adjacency); that's resolved — Stripe handles USD intake (ACH first, card later), Bridge
@@ -715,7 +719,8 @@ the never-`trustProxy: true` half stands.**
 hosted KYC links (which required server-minted session-scoped ToS URLs, #41). **Status: OPEN —
 superseded in practice, needs an explicit re-decision** for the remittance MVP: keep Bridge-hosted
 (simpler, one vendor) or move to Sumsub behind `IdentityVerifier` (the lending stack will need its
-own answer anyway). **Update 2026-07-13: resolved — Bridge-hosted for MVP (entry above).**
+own answer anyway). **Update 2026-07-13: resolved — Bridge-hosted for MVP (entry above), which was
+itself superseded by the K lane in 2026-08/09. Sumsub was never integrated at any point.**
 
 **2026-07-02 · Identity = phone number, forever.** One Supabase account per phone via SMS OTP; there
 is no account merge or phone change flow. A shared test phone means a shared account — the cause of

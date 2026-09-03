@@ -140,15 +140,20 @@ Bridge links from these routes and reads state back off `users.kyc_status` (hist
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/v1/users/me/tos-link` | ✓ | Mints a server-scoped Bridge **ToS acceptance** link (`{ url }`); the sender accepts Bridge's terms before verification. |
-| POST | `/v1/users/me/kyc-link` | ✓ | Returns the **Bridge-hosted KYC link** (`{ url }`) for a `signed_agreement_id`; requests the `spei` (MXN payout) endorsement and creates the Bridge customer on first call. Requires `first_name`/`last_name`/`email` on the profile. |
+| POST | `/v1/users/me/tos-link` | ✓ | Mints a server-scoped Bridge **ToS acceptance** link (`{ url }`); the sender accepts Bridge's terms before verification. Used by both paths — under `stripe_crypto` this is the **first** gate in the pay step (ToS-first, K6b), before any Link auth. |
+| POST | `/v1/users/me/bridge-tos` | ✓ | Records the return leg of that click-through: body `{ signed_agreement_id, locale? }` → a `consents{bridge_tos}` row (the immutable evidence) plus the mutable `users.bridge_signed_agreement_id` pointer. `POST /users/me/consents` refuses `bridge_tos` precisely because this is the only path that can attach Bridge's own id as evidence. |
+| POST | `/v1/users/me/bridge-customer` | ✓ | **The K6 relay.** Body carries the sender's DOB and tax ID; they are held in memory only, never persisted and never logged (`routes/schema-pii.test.ts` scans every migration to pin that no such column exists). Creates the Bridge identity with a per-user + body-hash idempotency key, appends `kyc_verifications`, and holds the payout on `sender_kyc_pending` until Bridge's approval webhook. Gated on `stripe_kyc_tier ∈ {L1, L2}` — we never hand Bridge an identity Stripe just refused. A duplicate tax ID returns `duplicate_identity` and is a hard stop, not a retry. |
+| POST | `/v1/users/me/kyc-link` | ✓ | *(legacy + Persona fallback)* Returns the **Bridge-hosted KYC link** (`{ url }`) for a `signed_agreement_id`; requests the `spei` (MXN payout) endorsement and creates the Bridge customer on first call. Requires `first_name`/`last_name`/`email` on the profile. |
 | POST | `/v1/users/me/kyc-link/retry` | ✓ | Re-issues the KYC link after a rejection (retry-counted). |
 | GET | `/v1/users/me/kyc-rejection` | ✓ | Rejection detail for a `rejected` sender. |
 
 `kyc_status` (`not_started`\|`pending`\|`approved`\|`rejected`\|`manual_review`) is read via
-`GET /v1/users/me`; the gate raises `kyc_required` (403) until it is `approved`. The result
-**arrives via the Bridge webhook `customer.*` branch** (`customer.created`/`updated`/
-`status_transitioned` → `users.kyc_status`; see Webhooks), never a client call.
+`GET /v1/users/me`; under the legacy rails the gate raises `kyc_required` (403) until it is
+`approved`. The result **arrives via the Bridge webhook `customer.*` branch**
+(`customer.created`/`updated`/`status_transitioned` → `users.kyc_status`; see Webhooks), never a
+client call. `users.kyc_status` and `stripe_kyc_tier*` are **derived caches**; since K6a every
+verdict from either provider also appends an immutable row to `kyc_verifications` (append-only,
+RLS deny-all, no documents and no identity numbers — reason codes only).
 
 **Gate rework (K4, KYC rehaul):** the shared gate is now `requireOnboardedUser`
 (recipients.ts). Under legacy rails it still means `kyc_status = 'approved'`; under
@@ -157,8 +162,11 @@ current** — identity verification moved inside the send flow (Stripe refuses s
 verified), so a kyc_status gate would deadlock new-flow users out of the flow that IS their KYC.
 
 **Deferred (not built):** the `/v1/kyc/*` endpoints, the Sumsub webhook, and the ERD's `kyc_records`
-table — Sumsub was superseded by Bridge-hosted KYC for the MVP. `IdentityVerifier` is retained only
-as the swap-seam if a second KYC provider is ever added.
+table. Sumsub was chosen on 2026-06-25, never integrated, superseded by Bridge-hosted KYC on
+2026-07-13, and superseded again by the K lane — verification now runs on Stripe embedded components
+with the Bridge relay behind it (decisions.md, 2026-09-03). `kyc_verifications` (K6a) is the table
+that shipped in `kyc_records`' place. `IdentityVerifier` is retained only as the swap-seam if a
+third KYC provider is ever added.
 
 ## Recipients & payout destinations
 
