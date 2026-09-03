@@ -38,7 +38,9 @@ const APPROVE = process.argv.includes('--approve')
 
 const url = process.env.SUPABASE_URL
 const anon = process.env.SUPABASE_PUBLISHABLE_KEY
-const serviceRole = process.env.SUPABASE_SERVICE_ROLE_KEY
+// The API's own name for the service key (Doppler stg_main) first; the
+// Supabase CLI's name as a fallback for local runs.
+const serviceRole = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY
 
 // K5 fixture (pre-approved).
 const K5_EMAIL = 'k5-drive-20260828@puentefinancial.com'
