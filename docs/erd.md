@@ -56,7 +56,8 @@ FK-less tables (not drawn): `waitlist`, `reconciliation_runs` (summarizes the wh
 by design — attempts precede accounts), `idempotency_keys` (FK to users only).
 
 **Built vs. designed.** Earlier versions of this doc drew `consents`, `kyc_records`, `user_limits`,
-and `audit_log` as if they existed. **None of these are tables today** — see their sections below
+and `audit_log` as if they existed. `consents` (K1) and `kyc_verifications` (K6, the built form of
+`kyc_records`) now exist; **`user_limits` and `audit_log` are still not tables today** — see their sections below
 for what carries each concern instead. `disputes` IS a real table (created with the transfers
 migration) but has no routes or UI yet.
 
@@ -75,14 +76,17 @@ App-level user record; `auth.users` (Supabase-managed) holds the auth identity. 
 - `sms_consent_at` timestamptz — TCPA consent stamp (SMS OTP)
 - `email_verified_at` timestamptz — **dormant on purpose**: stays null until email verification is
   built; not dead code
-- `kyc_status` TEXT — `not_started` | `pending` | `approved` | `rejected` | `manual_review` (CHECK; set by the Bridge webhook `customer.*` branch; `kyc_records` is deferred)
+- `kyc_status` TEXT — `not_started` | `pending` | `approved` | `rejected` | `manual_review` (CHECK; set by the Bridge webhook `customer.*` branch and the K6 relay; history in `kyc_verifications`)
 - `kyc_retry_count` INT — CHECK ≥ 0; the 3-retry ceiling is enforced in the API, not the DB
-- `bridge_customer_id` TEXT UNIQUE — Bridge customer id; set after KYC approval; used as `on_behalf_of` on transfers. Nullable until created.
+- `bridge_customer_id` TEXT UNIQUE — Bridge customer id; set by the K6 relay (or the legacy kyc-link path); used as `on_behalf_of` on transfers. Nullable until created.
+- `bridge_signed_agreement_id` TEXT — K6: the LATEST Bridge ToS `signed_agreement_id` awaiting customer creation (single-use at Bridge; the immutable `consents` row is the evidence, this is the working pointer). Cleared in the same write that sets `bridge_customer_id`. Opaque id, not PII.
 - `address_line1` / `address_line2` / `address_city` / `address_state` / `address_postal_code`
   TEXT *(PII — K2)* — sender's US home address, collected at the profile step. Nullable (pre-K2
   rows; the router bounces them to the profile form). Loose shape CHECKs in the DB; membership
   (50 states + DC) enforced in the API against `US_STATES` in packages/shared. Stored per the
-  ratified custody posture: address is the one piece of KYC PII we hold — DOB+ never lands here.
+  ratified custody posture: address is the one piece of KYC PII we *hold*. DOB and the tax ID are
+  relayed once to Bridge (K6, `POST /v1/users/me/bridge-customer`) and never stored —
+  `apps/api/src/routes/schema-pii.test.ts` scans every migration to pin that.
 - `address_country` TEXT NOT NULL default `'US'` (CHECK `'US'` — widening is a deliberate migration)
 - **RLS:** owner reads/updates own row.
 - *`risk_tier` is NOT a column yet* — earlier versions listed it; it arrives with the risk engine.
@@ -129,19 +133,23 @@ drift, and nothing authorizes off them).
 
 ## KYC
 
-### kyc_records  *(deferred — not built)*
-**Shipped KYC is Bridge-hosted** (Persona), tracked by `users.kyc_status` — this table is **not
-built** (decided 2026-07-13; see decisions.md + api-contract). Retained as the future shape if KYC
-ever moves to a dedicated provider (e.g. Sumsub) behind the `IdentityVerifier` interface: store
-**minimal** result + the provider reference, not raw documents.
-- `user_id` FK → users
-- `provider` TEXT — `sumsub`
-- `provider_ref` TEXT — Sumsub applicant id
-- `status` TEXT — `pending` | `approved` | `rejected` | `review`
-- `level` TEXT — verification level
-- `result_summary` JSONB — non-document summary only
-- `checked_at` / `expires_at` timestamptz
-- **RLS:** service-role only (most sensitive PII).
+### kyc_verifications  *(append-only — built 2026-09-03, K6; audit corner 2)*
+One row per provider verdict observed. Two providers now verify the same sender — Stripe (L1/L2
+in our UI) and Bridge (the Customers API relay) — and `users.kyc_status` / `stripe_kyc_tier*`
+remain the derived "current" caches; this log records who said what, when, from where.
+Supersedes the deferred `kyc_records` sketch (same shape: minimal result + provider ref, never
+documents, never identity numbers).
+- `user_id` FK → users (RESTRICT)
+- `provider` TEXT — `stripe_crypto` | `bridge` (no CHECK on purpose: a third verifier is a row value, not a migration)
+- `provider_ref` TEXT — `crc_…` / Bridge customer id (opaque)
+- `status` TEXT — `pending` | `verified` | `rejected` | `review` (CHECK; OUR vocabulary)
+- `provider_status` TEXT — the provider's raw word, kept beside the mapping (preview vocabularies drift)
+- `tier` TEXT — Stripe tier (L1/L2) or a Bridge endorsement name
+- `reasons` JSONB array — provider reason labels only, bounded by the API; never identity data
+- `source` TEXT — `relay` | `webhook` | `poll`
+- `occurred_at` / `created_at` timestamptz
+- `forbid_mutation` trigger — append-only, same guard as `consents`
+- **RLS:** deny-all (service-role only). Writers are best-effort and never block the primary write.
 
 ## Money movement
 

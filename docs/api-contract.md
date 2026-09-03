@@ -90,6 +90,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | PATCH | `/v1/users/me` | ✓ | Update `firstName`, `lastName`, `email` (all required) + optional address group `addressLine1/2`, `addressCity`, `addressState`, `addressPostalCode` (K2 — all-or-none when present, `line2` optional; state validated against shared `US_STATES`; absent group never nulls a stored address, so the frozen mobile app's name-only PATCH is unaffected). |
 | GET | `/v1/users/me/consents` | ✓ | `{ required, granted, missing }` against `REQUIRED_CONSENTS` (packages/shared). |
 | POST | `/v1/users/me/consents` | ✓ | Body `{ consents: [{type, version}], locale }`. Only pairs the server **currently requires** are accepted (stale client → 400 `validation_error`); `bridge_tos` is refused here (first-send paths write it server-side with `signed_agreement_id` evidence). Idempotent: re-grant of an existing (user, type, version) is a no-op that keeps the original evidence. |
+| POST | `/v1/users/me/bridge-customer` | ✓ | **K6 — the KYC relay; the only route whose body carries identity numbers.** Body `{ dob: 'YYYY-MM-DD', taxId: { type: 'ssn'\|'itin', number } }` (`additionalProperties:false`; `schema-pii.test.ts` pins this as the single such schema). Ladder: 404 → 403 `forbidden` (profile incomplete) → **200 no-op** `{ bridgeCustomerId, status }` if a customer exists (Bridge never called twice) → 403 `kyc_required` unless `stripe_kyc_tier ∈ {L1,L2}` → 409 `conflict` `details[{path:'bridge_tos'}]` without an unconsumed agreement id → create at Bridge (identity + `base`,`spei` endorsements; per-user+body-hash Idempotency-Key) → guarded persist of `bridge_customer_id` (+ clears the agreement pointer) → `kyc_verifications` row. Errors: 409 `duplicate_identity` (support only), 409 `conflict` `details[{path:'signed_agreement_id'}]` (consumed — pointer cleared, ToS re-runs), 422 `provider_rejected` (one correction), 502 `provider_unavailable`. Rate-limited 5 / 15 min per user. Never echoes inputs; handler never logs or rethrows with the body. |
 | POST | `/v1/users/me/bridge-tos` | ✓ | K6. Body `{ signed_agreement_id, locale? }` (id pattern-pinned like the kyc-link leg). The web return leg of Bridge's standalone ToS click-through: writes the append-only `consents` row (`bridge_tos` @ `BRIDGE_TOS_VERSION`, evidence = ip, user-agent, `signed_agreement_id`; re-acceptance keeps the first row) AND `users.bridge_signed_agreement_id`, the mutable pointer to the LATEST id that the relay presents to Bridge and clears on use. Returns `{ bridgeTosAccepted: true }`. |
 
 **Consents** (K1, 2026-08-27): the append-only `consents` table is live — one row per
@@ -126,12 +127,15 @@ Acceptance alone is confirmed-ness (re-confirm → 409). Webhook side is UNCHANG
 widget rail: same `crypto.onramp_session.updated` event, same status map, same delivered-amount
 guard before FUNDED.
 
-## KYC (Bridge-hosted, behind `IdentityVerifier`)
+## KYC (Bridge-hosted — the FALLBACK since K6)
 
-KYC is **Bridge-hosted** (Persona under the hood): the sender verifies in Bridge's hosted flow, not
-a Puente-owned SDK. There is **no `/v1/kyc/*` surface** — the API mints Bridge links from the
-onboarding routes and reads state back off `users.kyc_status` (decided 2026-07-13; see decisions.md
-and the PRD "Where reality diverges").
+Under `web-kyc-at-first-send` the sender verifies with **Stripe in our UI** at first send (K5,
+`/v1/crypto/*`) and the Bridge customer is created by the **relay** (`POST /v1/users/me/bridge-customer`,
+above) — Bridge runs its own database checks from the relayed identity. The Bridge-**hosted** flow
+below (Persona under the hood) is now the fallback for database-lookup failures (K6 decisions 5–6)
+and the legacy flag-OFF onboarding path. There is still **no `/v1/kyc/*` surface** — the API mints
+Bridge links from these routes and reads state back off `users.kyc_status` (history in
+`kyc_verifications`).
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
