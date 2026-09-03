@@ -16,8 +16,9 @@ export async function GET() {
     const apiRes = await apiFetch('/v1/users/me/kyc-rejection', token)
     const body = await apiRes.json().catch(() => ({}))
     return NextResponse.json(body, { status: apiRes.status })
-  } catch (err) {
-    console.error('KYC rejection fetch error:', err instanceof Error ? err.message : 'Unknown error')
+  } catch {
+    // Fixed string: an upstream error could wrap the reason text.
+    console.error('KYC rejection fetch error')
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

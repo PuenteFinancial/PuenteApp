@@ -369,6 +369,14 @@ async function main() {
   const browser = await chromium.launch({ headless: process.env.DRIVE_HEADED ? false : true })
   const context = await browser.newContext({ viewport: { width: 520, height: 1000 } })
   await context.addCookies([{ name: 'puente_session', value: token, domain: 'localhost', path: '/' }])
+  // Language is per-browser (localStorage `puente_lang`, default es). Pin EN
+  // before the first script runs so every selector below reads the same on
+  // every run — the header toggle is not reachable on every page.
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem('puente_lang', 'en')
+    } catch {}
+  })
   const page = await context.newPage()
 
   // Surface what the app tells our own API, and what it says in console.
@@ -403,11 +411,6 @@ async function main() {
   await page.goto(transferUrl)
   console.log('pay step loaded')
 
-  // Language is per-browser (localStorage, default es) — pin EN so the
-  // selectors below read the same on every run.
-  const en = page.getByRole('button', { name: 'EN' })
-  if (await en.isVisible({ timeout: 5000 }).catch(() => false)) await en.click()
-
   await page.waitForTimeout(4000)
   console.log('  [early step]', await stepText(page))
   const cont = page.getByRole('button', { name: /^(Continue|Continuar)$/ })
@@ -417,7 +420,7 @@ async function main() {
 
   if (RELAY) {
     // ── ToS-first gate ──
-    const tosBtn = page.getByRole('button', { name: /Review Bridge/ })
+    const tosBtn = page.getByRole('button', { name: /Review Bridge|términos de Bridge/ })
     if (await tosBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
       console.log('bridge ToS card shown')
       await tosBtn.click()
