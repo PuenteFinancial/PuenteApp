@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/node'
 import { env } from '../../config/env.js'
 import { MockFundingProcessor } from './mock.js'
 import { StripeFundingProcessor } from './stripe.js'
@@ -342,8 +343,18 @@ export function processorFor(row: RailRow): FundingProcessor {
   if (known) return known
   const build = (processors as Record<string, (() => FundingProcessor) | undefined>)[name]
   // An unknown name (the column has no CHECK) is not a reason to throw in
-  // the middle of a refund — fall back to the process rail, as before.
-  if (!build) return getFundingProcessor()
+  // the middle of a refund — fall back to the process rail, as before — but
+  // it IS a reason to page: a stamp nobody recognizes means a row whose
+  // undo may be about to run on the wrong adapter. Fingerprinted per name so
+  // the dedupe window collapses repeats.
+  if (!build) {
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['funding-processor-unknown', name])
+      scope.setContext('funding_processor', { name, fallback: env.FUNDING_PROCESSOR })
+      Sentry.captureMessage('unknown funding_processor stamp — falling back to env', 'warning')
+    })
+    return getFundingProcessor()
+  }
   const built = build()
   byName.set(name, built)
   return built

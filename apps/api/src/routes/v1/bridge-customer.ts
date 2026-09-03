@@ -259,6 +259,10 @@ export async function bridgeCustomerRoute(server: FastifyInstance) {
             .single()
           const stored = (current as { bridge_customer_id?: string | null } | null)?.bridge_customer_id
           if (stored && stored !== created.id) {
+            // `extra` is deliberately ids only. The scrubber redacts by KEY
+            // name, so nothing from the request body may ever be placed
+            // here as a value — the route test asserts every capture's extra
+            // keys stay outside SENSITIVE_KEY.
             Sentry.captureMessage('bridge customer orphaned by concurrent relay', {
               level: 'error',
               fingerprint: ['bridge-customer-orphan'],

@@ -12,6 +12,13 @@ import type { Breadcrumb, ErrorEvent } from '@sentry/node'
 // names an identity number is redacted before the event leaves the process.
 // Over-redacting (phone_number, account_number, routing_number) is a feature
 // — none of those belong in an error report either.
+//
+// LIMITATION, on purpose: this redacts by KEY name. A value embedded inside a
+// string (an exception message "invalid ssn 078-05-1120", a log-shaped
+// `extra.detail`) is invisible to it. The scrubber is the last line, not the
+// first: code that handles identity values must never put them in a message
+// or a string field — bridge-customer.ts logs error NAMES and Bridge CODES
+// only, and its test spies the logger to prove it.
 
 export const SENSITIVE_KEY = /dob|tax_?id|ssn|itin|number|birth|identifying_information|id_number/i
 export const REDACTED = '[redacted]'

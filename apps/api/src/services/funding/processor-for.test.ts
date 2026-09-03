@@ -12,6 +12,14 @@ const envMock = vi.hoisted(() => ({
 }))
 vi.mock('../../config/env.js', () => ({ env: envMock }))
 
+const captureMessage = vi.hoisted(() => vi.fn())
+const setFingerprint = vi.hoisted(() => vi.fn())
+vi.mock('@sentry/node', () => ({
+  withScope: (fn: (scope: unknown) => void) => fn({ setFingerprint, setContext: vi.fn() }),
+  captureMessage: (...args: unknown[]) => captureMessage(...args),
+  captureException: vi.fn(),
+}))
+
 const { getFundingProcessor, processorFor, processorNameFor } = await import('./index.js')
 
 beforeEach(() => {
@@ -42,7 +50,16 @@ describe('processorFor', () => {
     expect(processorFor({ funding_processor: 'manual' })).toBe(manual)
   })
 
-  it('never throws on an unknown stamp — the column has no CHECK — and falls back', () => {
+  it('never throws on an unknown stamp — the column has no CHECK — falls back, and pages', () => {
     expect(processorFor({ funding_processor: 'not_a_rail' })).toBe(getFundingProcessor())
+    expect(setFingerprint).toHaveBeenCalledWith(['funding-processor-unknown', 'not_a_rail'])
+    expect(captureMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not page for a known rail or a null stamp', () => {
+    captureMessage.mockClear()
+    processorFor({ funding_processor: 'manual' })
+    processorFor({ funding_processor: null })
+    expect(captureMessage).not.toHaveBeenCalled()
   })
 })

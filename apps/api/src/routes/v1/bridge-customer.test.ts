@@ -31,6 +31,7 @@ const { bridgeCustomerRoute, normalizeResidentialAddress, RELAY_RATE_LIMIT } = a
   './bridge-customer.js'
 )
 const { BridgeApiError } = await import('../../services/bridge.js')
+const { SENSITIVE_KEY } = await import('../../config/sentry-scrub.js')
 const { errorHandlerPlugin } = await import('../../plugins/error-handler.js')
 const { auditPlugin } = await import('../../plugins/audit.js')
 
@@ -390,6 +391,12 @@ describe('POST /v1/users/me/bridge-customer — the relay', () => {
       fingerprint: ['bridge-customer-orphan'],
       extra: { userId: 'user-123', storedCustomerId: 'cust_first', orphanCustomerId: 'cust_new' },
     })
+    // The scrubber works by key name: every extra key this route ever sets
+    // must be one the scrubber would leave alone, i.e. never a value slot
+    // for the request body.
+    const extra = (captureMessage.mock.calls[0]![1] as { extra: Record<string, unknown> }).extra
+    for (const key of Object.keys(extra)) expect(SENSITIVE_KEY.test(key), key).toBe(false)
+    for (const value of Object.values(extra)) expect(typeof value).toBe('string')
     await app.close()
   })
 

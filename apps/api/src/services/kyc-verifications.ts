@@ -22,7 +22,12 @@ export interface KycVerificationInput {
   providerStatus: string | null
   /** Stripe tier (L1/L2) or a Bridge endorsement name. */
   tier?: string | null
-  /** Provider reason codes/labels only — never identity data. */
+  /** Provider reason codes/labels only — never identity data. Bridge's
+   *  `rejection_reasons[].reason` is its customer-facing explanation and is
+   *  expected to be categorical ("ID photo could not be read"); the API
+   *  bounds count and length but does not inspect content. Compliance
+   *  review 2026-09-03: eyeball the first production verdicts to confirm no
+   *  label ever carries a name or number before relying on this column. */
   reasons?: string[]
   source: KycVerificationSource
 }
