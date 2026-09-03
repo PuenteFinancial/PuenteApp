@@ -1,6 +1,10 @@
 # New Engineer Onboarding
 
-**Date:** 2026-07-13 · **Status:** v1
+**Date:** 2026-07-13 · **Updated:** 2026-09-03 (renamed from `docs/onboarding.md`) · **Status:** v1
+
+> This is onboarding for **people joining the team**. Everywhere else in this repo "onboarding"
+> means the **user** flow — account creation, consents, and profile — for which see
+> [`plans/kyc-at-first-send.md`](plans/kyc-at-first-send.md) and [`flows.md`](flows.md) §1d.
 
 Start with the [README](../README.md) if you haven't. This doc is the part that can't be
 self-served: access, policy, and a first-week plan.

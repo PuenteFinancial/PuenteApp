@@ -5,7 +5,7 @@ Puente is a credit-building remittance app for LATAM immigrants in the US. Live 
 literacy content. In progress: the USD → MXN remittance MVP — pure money movement on top of Bridge
 (the licensed money transmitter), with Stripe collecting USD. Lending is a separate future stack.
 
-**New here? Read [docs/onboarding.md](docs/onboarding.md)** for the access checklist and your
+**New here? Read [docs/engineer-onboarding.md](docs/engineer-onboarding.md)** for the access checklist and your
 first-week plan. Jargon you don't recognize is probably in the [glossary](docs/glossary.md);
 the reasons behind non-obvious choices are in the [decision log](docs/decisions.md).
 
