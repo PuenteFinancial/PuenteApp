@@ -1,0 +1,20 @@
+-- Migration: drop users_update_own — no client role writes public.users (audit 2026-09-02; K7a)
+-- Created: 20260903170000
+-- Rollback:
+--   create policy "users_update_own" on public.users
+--     for update using (auth.uid() = id);
+--
+-- Every write to public.users goes through the API on service_role, which
+-- bypasses RLS. Web holds no Supabase client at all (all data via the Fastify
+-- API) and mobile reads and writes through the same API. The policy therefore
+-- served no caller — and it had no WITH CHECK, so a user JWT plus the
+-- publishable key could rewrite ANY column of its own row (kyc_status,
+-- bridge_customer_id, stripe_kyc_tier, sms_consent_at …) with no API in the
+-- loop. The publishable key ships to no client today, so this is a
+-- precondition rather than an exploit; the K7 flip puts real users behind it.
+--
+-- Table-level UPDATE for anon/authenticated still exists from the schema's
+-- default privileges (live-verified 2026-09-02). RLS is the gate: with no
+-- UPDATE policy left, the gate now closes. users_select_own stays — reading
+-- one's own row is harmless and a future client may want it.
+drop policy "users_update_own" on public.users;

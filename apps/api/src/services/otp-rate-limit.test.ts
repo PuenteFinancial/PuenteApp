@@ -8,7 +8,7 @@ vi.mock('./supabase.js', () => ({
   },
 }))
 
-const { admitOtpSend, phoneBucketKey } = await import('./otp-rate-limit.js')
+const { admitOtpSend, admitOtpVerify, phoneBucketKey } = await import('./otp-rate-limit.js')
 
 const PHONE = '15555555555'
 
@@ -80,6 +80,59 @@ describe('admitOtpSend', () => {
     // here is a bill, not an inconvenience.
     rpc.mockResolvedValue(result)
     const verdict = await admitOtpSend(PHONE)
+    expect(verdict.allowed).toBe(false)
+    expect(verdict.retryAfterSeconds).toBeGreaterThan(0)
+  })
+})
+
+describe('admitOtpVerify', () => {
+  it('goes through its own function with the same peppered key, never the number', async () => {
+    rpc.mockResolvedValue({ data: [{ allowed: true, retry_after_seconds: 0 }], error: null })
+
+    await admitOtpVerify(PHONE)
+
+    const [fn, args] = rpc.mock.calls[0] as [string, Record<string, unknown>]
+    expect(fn).toBe('otp_verify_admit')
+    expect(args.p_phone_hash).toBe(phoneBucketKey(PHONE))
+    expect(JSON.stringify(args)).not.toContain(PHONE)
+  })
+
+  it('passes a window and two caps — no cooldown on the verify leg', async () => {
+    rpc.mockResolvedValue({ data: [{ allowed: true, retry_after_seconds: 0 }], error: null })
+
+    await admitOtpVerify(PHONE)
+
+    const [, args] = rpc.mock.calls[0] as [string, Record<string, unknown>]
+    // A user types the code straight after it arrives; a cooldown here would
+    // only punish the happy path. What bounds a brute force is guesses per
+    // code (the window) and guesses across re-sends (the day).
+    expect(Object.keys(args).sort()).toEqual([
+      'p_max_day',
+      'p_max_window',
+      'p_phone_hash',
+      'p_window_seconds',
+    ])
+    expect(args.p_window_seconds).toBeGreaterThan(0)
+    expect(args.p_max_window).toBeGreaterThan(0)
+    expect(args.p_max_day).toBeGreaterThanOrEqual(args.p_max_window as number)
+  })
+
+  it('admits and denies on the function’s verdict', async () => {
+    rpc.mockResolvedValue({ data: [{ allowed: true, retry_after_seconds: 0 }], error: null })
+    await expect(admitOtpVerify(PHONE)).resolves.toEqual({ allowed: true, retryAfterSeconds: 0 })
+    rpc.mockResolvedValue({ data: [{ allowed: false, retry_after_seconds: 7 }], error: null })
+    await expect(admitOtpVerify(PHONE)).resolves.toEqual({ allowed: false, retryAfterSeconds: 7 })
+  })
+
+  it.each([
+    ['an rpc error', { data: null, error: { message: 'connection refused' } }],
+    ['an empty result', { data: [], error: null }],
+    ['a row without a verdict', { data: [{ retry_after_seconds: 0 }], error: null }],
+  ])('fails closed on %s', async (_case, result) => {
+    // The downside of opening here is not a bill but a brute force: a limiter
+    // that admits every guess while the database is unhappy is no bound at all.
+    rpc.mockResolvedValue(result)
+    const verdict = await admitOtpVerify(PHONE)
     expect(verdict.allowed).toBe(false)
     expect(verdict.retryAfterSeconds).toBeGreaterThan(0)
   })

@@ -56,6 +56,9 @@ interface RefundableTransfer {
   refund_payment_ref: string | null
   funding_payment_ref: string | null
   funding_processor?: string | null
+  /** Null = the payout never reached Bridge (#254): no principal left, so no
+   *  bridge_return batch to post. */
+  provider_transfer_ref: string | null
   idempotency_key: string
   refund_claimed_at: string | null
   refund_claimed_by: string | null
@@ -63,7 +66,8 @@ interface RefundableTransfer {
 
 const REFUNDABLE_COLUMNS =
   'id, state, send_amount_minor, fee_amount_minor, margin_minor, refund_payment_ref, ' +
-  'funding_payment_ref, funding_processor, idempotency_key, refund_claimed_at, refund_claimed_by'
+  'funding_payment_ref, funding_processor, provider_transfer_ref, idempotency_key, ' +
+  'refund_claimed_at, refund_claimed_by'
 
 // How long an unfinished claim stays "in progress" before it is ABANDONED.
 //
@@ -213,12 +217,24 @@ export async function refundPayoutFailure(input: {
 
   // 1) Book the returned principal back to cash — a stand-alone post (state
   //    stays PAYOUT_FAILED), keyed {id}:bridge_return, idempotent on replay.
-  await postLedgerTransaction({
-    transferId: transfer.id,
-    transition: 'bridge_return',
-    description: 'bridge returned principal on payout failure',
-    entries: toLedgerInput(bridgeReturnLedgerEntries(transfer)),
-  })
+  //
+  //    ONLY IF THE PRINCIPAL LEFT (#254). `bridge_return` credits
+  //    due_from_bridge, which only the SUBMITTED batch opens. A row can reach
+  //    PAYOUT_FAILED without ever reaching SUBMITTED — the submit job's Bridge
+  //    POST failed past its ceiling and an operator unwound it, or (post-K6)
+  //    the funded sender was rejected by Bridge — and for those the post would
+  //    book the return of money that never went out, pushing due_from_bridge
+  //    negative and claiming cash we do not hold. The sender's refund below is
+  //    identical either way: the obligation to them was open regardless.
+  const submitted = transfer.provider_transfer_ref != null
+  if (submitted) {
+    await postLedgerTransaction({
+      transferId: transfer.id,
+      transition: 'bridge_return',
+      description: 'bridge returned principal on payout failure',
+      entries: toLedgerInput(bridgeReturnLedgerEntries(transfer)),
+    })
+  }
 
   // 2) Return the collected funds to the sender — behind the CLAIM, so exactly
   //    one run can reach the processor. Keyed off the transfer's stable bridge
@@ -317,6 +333,9 @@ export async function refundPayoutFailure(input: {
     throw new Error(`refund settle reached with no disbursement ref for ${transfer.id}`)
   }
   const undoMode = undoModeForRef(disbursedRef)
+  // Named in the ledger description so a pre-submit refund is legible in the
+  // books without cross-referencing provider_transfer_ref.
+  const failedWhen = submitted ? 'payout failed' : 'payout failed before submission'
   await transitionTransfer({
     transferId: transfer.id,
     fromState: 'PAYOUT_FAILED',
@@ -325,8 +344,8 @@ export async function refundPayoutFailure(input: {
     reason: input.reason,
     ledgerDescription:
       undoMode === 'voided'
-        ? 'transfer REFUNDED — payout failed; uncleared funding voided (FUNDED batch reversed)'
-        : 'transfer REFUNDED — payout failed, sender refunded from float',
+        ? `transfer REFUNDED — ${failedWhen}; uncleared funding voided (FUNDED batch reversed)`
+        : `transfer REFUNDED — ${failedWhen}, sender refunded from float`,
     ledgerEntries:
       undoMode === 'voided' ? voidRefundLedgerEntries(transfer) : refundedLedgerEntries(transfer),
   })
@@ -455,7 +474,9 @@ export async function verifyPrincipalReturned(transferId: string): Promise<Princ
   if (error) throw new Error(`refund interlock transfer load failed: ${error.message}`)
   const transfer = data as { id: string; provider_transfer_ref: string | null } | null
   if (!transfer) return { returned: false, reason: 'transfer_not_found' }
-  // Never submitted to Bridge → Bridge holds nothing of ours to return.
+  // Never submitted to Bridge → Bridge holds nothing of ours to return. Not a
+  // refusal any more (#254): the refund tail posts no bridge_return for such a
+  // row, so there is no assertion here to guard. The CLI passes on this reason.
   if (!transfer.provider_transfer_ref) return { returned: false, reason: 'not_submitted' }
 
   const eventType = await findReturnEvent(transfer.id, transfer.provider_transfer_ref)
@@ -509,10 +530,17 @@ const classifyClaim = (claimedAt: string | null): ClaimStatus =>
   claimedAt === null ? 'unclaimed' : isClaimAbandoned(claimedAt) ? 'abandoned' : 'claimed'
 
 /**
- * The parked-refund backlog: every transfer stuck at `PAYOUT_FAILED` after the
- * payout was submitted. With `AUTO_REFUND` off the poller skips these entirely,
- * and a row whose terminal event was already processed while the flag was off is
- * never re-driven by flipping it on — so this IS the human backlog.
+ * The parked-refund backlog: every transfer stuck at `PAYOUT_FAILED`. With
+ * `AUTO_REFUND` off the poller skips these entirely, and a row whose terminal
+ * event was already processed while the flag was off is never re-driven by
+ * flipping it on — so this IS the human backlog.
+ *
+ * Deliberately NOT filtered on `provider_transfer_ref` either (#254): a row
+ * that failed BEFORE submission has no Bridge ref and no other path to a
+ * refund — the poller's self-heal scan requires the ref — so hiding it here
+ * left an operator reading "no parked refunds" while recon paged
+ * payout-failed-unrefunded forever. The ref is returned so the CLI can label
+ * the row; the tail itself skips bridge_return for it.
  *
  * Deliberately NOT filtered on `refund_payment_ref IS NULL`, unlike the poller's
  * self-heal scan (payout-poll.ts). A crash between the disbursement and the
@@ -529,7 +557,6 @@ export async function listRefundBacklog(): Promise<ParkedRefund[]> {
     .from('transfers')
     .select(PARKED_COLUMNS)
     .eq('state', 'PAYOUT_FAILED')
-    .not('provider_transfer_ref', 'is', null)
   // Fail closed: an empty backlog and a broken read must never look the same.
   if (error || data == null) {
     throw new Error(`refund backlog query failed: ${error?.message ?? 'no rows returned'}`)

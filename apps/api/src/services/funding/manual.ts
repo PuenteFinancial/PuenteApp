@@ -44,7 +44,6 @@ export class ManualFundingProcessor implements FundingProcessor {
       provider: this.provider,
       method: 'ach',
       paymentRef: `manualpay_${crypto.randomUUID()}`,
-      clientFields: {},
     }
   }
 

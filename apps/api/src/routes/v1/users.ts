@@ -8,7 +8,7 @@ import {
   getKycLink,
   BridgeApiError,
 } from '../../services/bridge.js'
-import { US_STATES } from '@puente/shared'
+import { US_STATES, toE164Nanp } from '@puente/shared'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 import { fetchGrantedConsents, hasBridgeTos, missingConsents } from './consents.js'
 import { registerPendingDestinations } from '../../services/destination-registration.js'
@@ -64,9 +64,12 @@ function toApiUser(row: UserRow) {
     firstName: row.first_name,
     lastName: row.last_name,
     email: row.email,
-    // Login identity (E.164, unique not null since signup). Surfaced for the
-    // K5 client: the Link registration SDK call requires the user's phone.
-    phone: row.phone,
+    // Login identity, surfaced for the K5 client: the Link registration SDK
+    // call requires the user's phone in E.164. The COLUMN is not reliably
+    // E.164 — it holds GoTrue's bare-digit shape via the signup trigger — so
+    // the contract is kept here, at the boundary. The fallback only fires for
+    // a non-NANP row, which the signup allowlist makes impossible.
+    phone: toE164Nanp(row.phone) ?? row.phone,
     kycStatus: row.kyc_status,
     bridgeCustomerId: row.bridge_customer_id,
     addressLine1: row.address_line1,

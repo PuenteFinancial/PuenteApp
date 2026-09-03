@@ -376,6 +376,76 @@ describe('auth OTP routes', () => {
 
       expect(res.status).toBe(400)
       expect(verifyOtp).not.toHaveBeenCalled()
+      // A refused format consumes none of that number's verify budget either.
+      expect(rpc).not.toHaveBeenCalled()
+    })
+
+    // ── the per-phone brute-force bound (K7a) ──────────────────────────────
+
+    it('admits the attempt before asking GoTrue, not after', async () => {
+      verifyOtp.mockResolvedValue({ data: { session: null, user: null }, error: { status: 401 } })
+
+      await supertest(app.server)
+        .post('/v1/auth/otp/verify')
+        .send({ phone: '15555555555', token: '000000' })
+
+      // Admission control: the attempt is counted when it is admitted. Counting
+      // only failures would leave the check-then-verify gap open to a burst of
+      // parallel guesses — which is the whole attack on a six-digit code.
+      expect(rpc).toHaveBeenCalledWith('otp_verify_admit', expect.any(Object))
+      const admitOrder = rpc.mock.invocationCallOrder.at(0) ?? Infinity
+      const verifyOrder = verifyOtp.mock.invocationCallOrder.at(0) ?? -Infinity
+      expect(admitOrder).toBeLessThan(verifyOrder)
+    })
+
+    it('never puts the phone number in the rpc arguments', async () => {
+      verifyOtp.mockResolvedValue({ data: { session: null, user: null }, error: { status: 401 } })
+
+      await supertest(app.server)
+        .post('/v1/auth/otp/verify')
+        .send({ phone: '15555555555', token: '000000' })
+
+      const args = JSON.stringify(rpc.mock.calls[0])
+      expect(args).not.toContain('15555555555')
+      expect(args).toMatch(/[0-9a-f]{64}/)
+    })
+
+    it('returns 429 with Retry-After when the number is over budget, and never asks GoTrue', async () => {
+      rpc.mockResolvedValue({ data: [{ allowed: false, retry_after_seconds: 300 }], error: null })
+
+      const res = await supertest(app.server)
+        .post('/v1/auth/otp/verify')
+        .send({ phone: '15555555555', token: '123456' })
+
+      expect(res.status).toBe(429)
+      expect(res.body.error.code).toBe('rate_limited')
+      expect(res.headers['retry-after']).toBe('300')
+      // The refused guess must not reach the provider — otherwise the cap is
+      // cosmetic and GoTrue answers the guess anyway.
+      expect(verifyOtp).not.toHaveBeenCalled()
+    })
+
+    it('fails closed when the limiter itself errors', async () => {
+      rpc.mockResolvedValue({ data: null, error: { message: 'connection refused' } })
+
+      const res = await supertest(app.server)
+        .post('/v1/auth/otp/verify')
+        .send({ phone: '15555555555', token: '123456' })
+
+      // Failing open here would hand an attacker an unbounded guess rate for
+      // exactly as long as the database is unhappy.
+      expect(res.status).toBe(429)
+      expect(verifyOtp).not.toHaveBeenCalled()
+    })
+
+    it('a wrong code still reads as 401 once admitted (the cap is not the answer)', async () => {
+      verifyOtp.mockResolvedValue({ data: { session: null, user: null }, error: { status: 401 } })
+
+      const res = await supertest(app.server)
+        .post('/v1/auth/otp/verify')
+        .send({ phone: '15555555555', token: '000000' })
+
+      expect(res.status).toBe(401)
     })
 
     it('returns 400 when token is missing', async () => {

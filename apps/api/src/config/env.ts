@@ -65,6 +65,15 @@ const envSchema = z.object({
   OTP_COOLDOWN_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
   OTP_MAX_PER_HOUR: z.coerce.number().int().min(1).default(5),
   OTP_MAX_PER_DAY: z.coerce.number().int().min(1).default(10),
+  // Per-phone cap on POST /v1/auth/otp/verify — the brute-force bound on a
+  // six-digit code (K7a; otp_verify_admit). No cooldown: a user types the code
+  // straight after it arrives. A window rather than an hour because a code
+  // lives minutes, so what matters is guesses per code — 5 in 10^6 at the
+  // defaults — and the day bounds guesses across re-sends. Defaulted for the
+  // same reason as above: omitting configuration must not switch it off.
+  OTP_VERIFY_WINDOW_SECONDS: z.coerce.number().int().min(60).max(86400).default(900),
+  OTP_VERIFY_MAX_PER_WINDOW: z.coerce.number().int().min(1).default(5),
+  OTP_VERIFY_MAX_PER_DAY: z.coerce.number().int().min(1).default(30),
   BRIDGE_API_KEY: z.string().min(1),
   BRIDGE_API_BASE: z.string().url().default('https://api.bridge.xyz'),
   // Hard deadline on every Bridge HTTP call (AbortSignal.timeout in

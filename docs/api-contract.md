@@ -78,7 +78,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | POST | `/v1/auth/otp/send` | public | Body `{ phone, smsConsent }`. `smsConsent` is schema-pinned to `const: true` — TCPA consent is collected on the same submit that sends the SMS, not looked up from a prior record. Sends Twilio SMS OTP. |
-| POST | `/v1/auth/otp/verify` | public | Body `{ phone, token }`. Wraps Supabase Auth. Returns `{ accessToken, refreshToken, expiresIn, userId }` — **not** a "profile is new" flag; callers route on `GET /v1/users/me` instead (`apps/web/app/continue/page.tsx`, `apps/mobile/lib/auth/routeAfterSignIn.ts`). Also self-heals a missing `users` row, stamps `sms_consent_at`, and writes a `sign_in_events` record. |
+| POST | `/v1/auth/otp/verify` | public | Body `{ phone, token }`. Wraps Supabase Auth. Returns `{ accessToken, refreshToken, expiresIn, userId }` — **not** a "profile is new" flag; callers route on `GET /v1/users/me` instead (`apps/web/app/continue/page.tsx`, `apps/mobile/lib/auth/routeAfterSignIn.ts`). Also self-heals a missing `users` row, stamps `sms_consent_at`, and writes a `sign_in_events` record. **Per-phone brute-force bound (K7a):** admitted and counted before GoTrue is asked; past the window/day caps (`OTP_VERIFY_*`) → `429 rate_limited` + `Retry-After`, same shape as the send leg. |
 | POST | `/v1/auth/refresh` | public | Body `{ refreshToken }`. Same response shape as verify. Supabase rotates refresh tokens single-use — the rotated token must be persisted or the session dies at the next expiry. |
 | GET | `/v1/kyc/tos-return` | public | Mobile KYC return leg. Query `{ state, signed_agreement_id }`, both pattern-constrained; answers `302` to `puente://kyc/tos-return` with the same two params. Exists because iOS does not surface a custom scheme reached by a page's own `location.href` to `ASWebAuthenticationSession` (which is how Bridge ends its ToS flow), but does intercept a `302`. Reads and writes nothing; the nonce check in the app is the security boundary. Needs `PUBLIC_API_URL`. |
 
@@ -121,7 +121,7 @@ classifies the provisioning state (creds missing / flags unprovisioned / ready).
 | POST | `/v1/crypto/transfers/:id/onramp-checkout` | ✓ | Executes checkout for the CURRENT session (a replaced/stale session id → 409). Called ONLY from inside the SDK's `performCheckout` callback. Body `{ sessionId, paymentMethodType }`; ACH carries the online mandate evidence (accepting browser's ip + user agent). Returns `{ clientSecret }` — never persisted, never logged. |
 
 **Confirm under `stripe_crypto` (deferred initiation):** `POST /transfers/:id/confirm` records
-acceptance and returns `funding: { provider, method: 'onramp', clientFields: {} }` WITHOUT
+acceptance and returns `funding: { provider, method: 'onramp' }` WITHOUT
 creating a session or writing `funding_payment_ref` — the SDK must mint a payment token first,
 so the session is created by the pay-step route above, which is also what first writes the ref.
 Acceptance alone is confirmed-ness (re-confirm → 409). Webhook side is UNCHANGED from the
@@ -285,16 +285,16 @@ append-only on `disclosures`; the response carries the summary.
   "id": "uuid",
   "state": "PENDING_PAYMENT",
   "disclosureAcceptedAt": "2026-07-17T19:40:00Z",
-  "funding": { "provider": "mock", "method": "ach", "clientFields": {} }
+  "funding": { "provider": "mock", "method": "ach" }
 }
 ```
 Server refuses with `conflict` (409) if the transfer is past `PENDING_PAYMENT` or already
 confirmed, 400 if `disclosureId` doesn't match, and `quote_expired` (409) past the original
 quote's `expires_at` — **the firm-offer window applies at confirm** (decided 2026-07-17): the
 disclosed rate is never staler than the quote window; re-quote on timeout. A retry after a failed
-initiation (acceptance recorded, no funding ref) re-initiates. `clientFields` carries whatever
-the active processor's client SDK needs (Stripe: a client_secret; mock: empty); the **funding
-webhook** drives `FUNDED`. Under the manual rail, a successful confirm also enqueues
+initiation (acceptance recorded, no funding ref) re-initiates. Confirm returns **no processor
+secrets** (#243): the pay step bootstraps from `GET /transfers/:id/funding-session`, which serves the
+client_secret live and on demand; the **funding webhook** drives `FUNDED`. Under the manual rail, a successful confirm also enqueues
 `funding.onramp_prepare` (funding-ops slice 3): the worker creates the Bridge onramp and
 attaches deposit instructions with system attribution — confirm never fails on Bridge or the
 queue being down (the ops attach button is the break-glass).

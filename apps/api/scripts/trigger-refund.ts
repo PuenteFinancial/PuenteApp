@@ -182,6 +182,9 @@ export async function list(): Promise<void> {
       // transfer_transitions). Labelled honestly so nobody triages on it.
       `  ${row.id}  ${usd(row.send_amount_minor + row.fee_amount_minor)}  ` +
         `bridge=${row.provider_transfer_ref ?? '—'}  created=${row.created_at}` +
+        // #254: never reached Bridge. No principal left, so the tail posts no
+        // bridge_return; the interlock passes on `not_submitted`.
+        (row.provider_transfer_ref === null ? '  ◦ PRE-SUBMIT — never reached Bridge' : '') +
         // A set ref means a prior run paid the sender and died before settling:
         // the money is gone but {id}:REFUNDED was never posted, so the ledger is
         // currently WRONG about this transfer. Re-running finishes it.
@@ -246,7 +249,17 @@ export async function trigger(
   //    back. Two independent sources must agree before we may post it.
   begin('verify Bridge returned the principal (recorded event + live Bridge)')
   const verdict = await verifyPrincipalReturned(transferId)
-  if (!verdict.returned) {
+  // #254: a row that never reached SUBMITTED has nothing at Bridge to return,
+  // and the tail posts no bridge_return for it — so there is no assertion for
+  // this interlock to guard. Passing is correct, not lax. Remembered so the
+  // ledger check below expects the right batches.
+  let preSubmit = false
+  if (verdict.returned) {
+    pass(`principal returned (event=${verdict.eventType}, bridge=${verdict.bridgeState})`)
+  } else if (verdict.reason === 'not_submitted') {
+    preSubmit = true
+    pass('never submitted to Bridge — nothing left, nothing to return; bridge_return is skipped')
+  } else {
     if (verdict.reason === 'bridge_disagrees' && verdict.bridgeState === 'refund_failed') {
       fail(
         'bridge reports refund_failed — the principal is STUCK AT BRIDGE, not returned. ' +
@@ -260,7 +273,6 @@ export async function trigger(
         `${verdict.eventType ? `, event=${verdict.eventType}` : ''}) — refusing to refund`,
     )
   }
-  pass(`principal returned (event=${verdict.eventType}, bridge=${verdict.bridgeState})`)
 
   // 2) The claim. Reported BEFORE the dry run returns, so an operator learns a
   //    claim is abandoned while they are still deciding — not after --confirm.
@@ -317,15 +329,19 @@ export async function trigger(
     }[outcome.outcome],
   )
 
-  // 3) Prove both batches landed under their distinct keys.
+  // 3) Prove the batches landed under their distinct keys — both on a
+  //    submitted row, REFUNDED alone on a pre-submit one (#254).
   begin('verify the ledger batches')
   const batches = await refundLedgerBatches(transferId)
   const keys = batches.map((b) => b.idempotency_key)
-  for (const expected of [`${transferId}:bridge_return`, `${transferId}:REFUNDED`]) {
+  const expectedKeys = preSubmit
+    ? [`${transferId}:REFUNDED`]
+    : [`${transferId}:bridge_return`, `${transferId}:REFUNDED`]
+  for (const expected of expectedKeys) {
     if (!keys.includes(expected)) fail(`missing ledger batch ${expected}`)
     console.log(`   ${expected}`)
   }
-  pass('both refund batches posted')
+  pass(preSubmit ? 'REFUNDED batch posted (no bridge_return — pre-submit)' : 'both refund batches posted')
 
   // Never claim credit for a run that wrote nothing: the verify query below
   // would show a different actor and make the tool look like it lied.

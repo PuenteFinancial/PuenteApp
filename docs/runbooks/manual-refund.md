@@ -59,8 +59,10 @@ Locally, the `dev:e2e` precedent works too:
 doppler run -- pnpm exec tsx scripts/trigger-refund.ts --list
 ```
 
-Read-only. Prints every transfer at `PAYOUT_FAILED` whose payout was submitted — ids, amounts and
-timestamps only, never recipient details. This is the whole human backlog.
+Read-only. Prints every transfer at `PAYOUT_FAILED` — ids, amounts and timestamps only, never
+recipient details. This is the whole human backlog. A row marked **`◦ PRE-SUBMIT — never reached
+Bridge`** failed before submission (#254): no principal left, so the tail posts no `bridge_return`
+and the interlock passes on `not_submitted`. It is refunded with the same `--confirm`.
 
 A row marked **`⚠ ALREADY DISBURSED — needs settling only`** is the crash case: a previous run paid
 the sender but died before posting `{id}:REFUNDED`, so the money is gone while `transfer_payable`
@@ -102,7 +104,7 @@ means it is still on its way — wait for the terminal event.
 | `no_return_event` | we never recorded a terminal return for this transfer | check the Bridge dashboard; if Bridge genuinely returned it, find out why our webhook/poller missed it before refunding |
 | `bridge_disagrees` (`bridge=refund_failed`) | the principal is **stuck at Bridge** | **escalate — do not refund.** See below. |
 | `bridge_disagrees` (other) | our event and Bridge's live state conflict | investigate; never override |
-| `not_submitted` | never sent to Bridge — Bridge holds nothing of ours | wrong runbook; this is not a payout failure |
+| `not_submitted` | never sent to Bridge — nothing left, nothing to return | **passes** (since #254): `bridge_return` is skipped and only the `REFUNDED` batch is verified. Not a refusal. |
 | `not_payout_failed` | the transfer is not parked at `PAYOUT_FAILED` | check the id. **A `COMPLETED` transfer must never be reversed here.** |
 | `transfer_not_found` | no transfer with that id | check the id against `--list` |
 | `claim_taken` | another run holds a live refund claim and is disbursing now | **wait.** Nothing was written. Re-check `--list`; do not reach for `--reclaim` — a healthy in-flight refund is not stuck |

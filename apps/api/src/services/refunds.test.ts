@@ -99,6 +99,9 @@ const parked = (over: Record<string, unknown> = {}) => ({
     margin_minor: 0,
     refund_payment_ref: null,
     funding_payment_ref: 'mockpay_1',
+    // Submitted: the normal parked row. Pre-submit rows null this out — see
+    // the #254 cases below.
+    provider_transfer_ref: 'bridge_tr_1',
     idempotency_key: 'bridge-key-1',
     ...over,
   },
@@ -188,6 +191,52 @@ describe('refundPayoutFailure', () => {
       { account_code: 'fee_revenue', direction: 'debit', amount_minor: FEE, currency: 'USD' },
       { account_code: 'cash_clearing', direction: 'credit', amount_minor: S + FEE, currency: 'USD' },
     ])
+  })
+
+  // #254: a row can reach PAYOUT_FAILED without ever reaching SUBMITTED — the
+  // submit job's Bridge POST failed repeatedly and an operator unwound it, or
+  // (post-K6) the sender was rejected by Bridge after funding. `bridge_return`
+  // books DR cash_clearing / CR due_from_bridge: the RETURN of principal that
+  // left. Nothing left, so posting it would push due_from_bridge negative and
+  // claim cash we never sent out.
+  it('pre-submit (#254): skips bridge_return, still disburses and settles REFUNDED', async () => {
+    q('transfers', parked({ provider_transfer_ref: null }), claimWon, persistOk)
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'operator-triggered' }),
+    ).resolves.toEqual({ done: true, outcome: 'refunded' })
+
+    // 1) no bridge_return — the principal never left
+    expect(postLedger).not.toHaveBeenCalled()
+
+    // 2) the sender is still made whole — the disbursement is identical
+    expect(refund).toHaveBeenCalledTimes(1)
+    expect(refund.mock.calls[0]![0]).toMatchObject({ amountMinor: S + FEE, currency: 'USD' })
+
+    // 3) REFUNDED settles with the same batch as the submitted case — the
+    //    obligation to the sender was open either way
+    expect(transition).toHaveBeenCalledTimes(1)
+    const refunded = transition.mock.calls[0]![0] as Record<string, unknown>
+    expect(refunded).toMatchObject({ fromState: 'PAYOUT_FAILED', toState: 'REFUNDED' })
+    expect(refunded.ledgerEntries).toEqual([
+      { account_code: 'transfer_payable', direction: 'debit', amount_minor: S, currency: 'USD' },
+      { account_code: 'fee_revenue', direction: 'debit', amount_minor: FEE, currency: 'USD' },
+      { account_code: 'cash_clearing', direction: 'credit', amount_minor: S + FEE, currency: 'USD' },
+    ])
+  })
+
+  it('pre-submit (#254): the crash-recovery path also skips bridge_return', async () => {
+    // Disbursed on a prior run, never settled. The only write left is the
+    // REFUNDED batch — and still no bridge_return, whatever run reaches here.
+    q('transfers', parked({ provider_transfer_ref: null, refund_payment_ref: 'mockrefund_prev' }))
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'operator-triggered' }),
+    ).resolves.toEqual({ done: true, outcome: 'already_disbursed' })
+
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).toHaveBeenCalledTimes(1)
   })
 
   it('threads the caller’s actor and reason to the transition (the only durable record of who did this)', async () => {
@@ -841,7 +890,7 @@ describe('listRefundBacklog', () => {
     ...over,
   })
 
-  it('scopes to submitted rows parked at PAYOUT_FAILED, and returns no PII', async () => {
+  it('scopes to rows parked at PAYOUT_FAILED, and returns no PII', async () => {
     q('transfers', { data: [parkedRow()], error: null })
 
     const rows = await listRefundBacklog()
@@ -862,7 +911,20 @@ describe('listRefundBacklog', () => {
       'send_amount_minor',
     ])
     expect(filtersFor('transfers', 'eq')).toContainEqual(['state', 'PAYOUT_FAILED'])
-    expect(filtersFor('transfers', 'not')).toContainEqual(['provider_transfer_ref', 'is', null])
+  })
+
+  // #254: the backlog used to filter `provider_transfer_ref IS NOT NULL`, so a
+  // row that failed BEFORE submission never showed up — an operator got "no
+  // parked refunds" while recon paged payout-failed-unrefunded forever. The
+  // CLI labels these; the service must simply not hide them.
+  it('does NOT hide pre-submit rows (#254) — the ref is returned so the CLI can label them', async () => {
+    q('transfers', { data: [parkedRow({ provider_transfer_ref: null })], error: null })
+
+    const rows = await listRefundBacklog()
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.provider_transfer_ref).toBeNull()
+    expect(filtersFor('transfers', 'not')).not.toContainEqual(['provider_transfer_ref', 'is', null])
   })
 
   // A crash between the disbursement and the REFUNDED transition leaves the ref

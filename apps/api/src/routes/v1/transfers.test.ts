@@ -231,7 +231,6 @@ beforeEach(() => {
     provider: 'mock',
     method: 'ach',
     paymentRef: 'mockpay_new',
-    clientFields: {},
   })
   voidFunding.mockResolvedValue({
     provider: 'mock',
@@ -407,8 +406,13 @@ describe('POST /v1/transfers/:id/confirm', () => {
     expect(res.body).toMatchObject({
       id: TRANSFER_ID,
       state: 'PENDING_PAYMENT',
-      funding: { provider: 'mock', method: 'ach', clientFields: {} },
+      funding: { provider: 'mock', method: 'ach' },
     })
+    // #243: confirm hands out no processor secrets. The pay step bootstraps
+    // from GET /transfers/:id/funding-session, which serves the client_secret
+    // live and on demand — a second copy on a response nobody read was a leak
+    // with no consumer.
+    expect(res.body.funding).not.toHaveProperty('clientFields')
     expect(res.body.disclosureAcceptedAt).toBeTruthy()
     // a retry of an already-committed send skips the velocity check (keeps its slot)
     expect(assessTransferRisk).not.toHaveBeenCalled()
@@ -456,7 +460,7 @@ describe('POST /v1/transfers/:id/confirm', () => {
     const res = await confirm(app)
 
     expect(res.status).toBe(200)
-    expect(res.body.funding).toEqual({ provider: 'mock', method: 'onramp', clientFields: {} })
+    expect(res.body.funding).toEqual({ provider: 'mock', method: 'onramp' })
     expect(initiateFunding).not.toHaveBeenCalled()
     await app.close()
   })
@@ -498,7 +502,6 @@ describe('POST /v1/transfers/:id/confirm', () => {
       provider: 'manual',
       method: 'ach',
       paymentRef: 'manualpay_new',
-      clientFields: {},
     })
     const app = await buildApp()
 
@@ -515,7 +518,6 @@ describe('POST /v1/transfers/:id/confirm', () => {
       provider: 'manual',
       method: 'ach',
       paymentRef: 'manualpay_new',
-      clientFields: {},
     })
     enqueueFundingOnrampPrepare.mockRejectedValue(new Error('pg-boss down'))
     const app = await buildApp()

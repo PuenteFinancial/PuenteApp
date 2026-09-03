@@ -58,7 +58,8 @@ describe('mock initiateFunding', () => {
       totalAmountMinor: 20000,
       currency: 'USD',
     })
-    expect(a).toMatchObject({ provider: 'mock', method: 'ach', clientFields: {} })
+    expect(a).toMatchObject({ provider: 'mock', method: 'ach' })
+    expect(a).not.toHaveProperty('clientFields')
     expect(a.paymentRef).toMatch(/^mockpay_/)
     expect(a.paymentRef).not.toBe(b.paymentRef)
   })

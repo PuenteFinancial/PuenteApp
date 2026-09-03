@@ -56,7 +56,7 @@ describe('manual initiateFunding', () => {
     expect(initiation.provider).toBe('manual')
     expect(initiation.method).toBe('ach')
     expect(initiation.paymentRef).toMatch(/^manualpay_[0-9a-f-]{36}$/)
-    expect(initiation.clientFields).toEqual({})
+    expect(initiation).not.toHaveProperty('clientFields')
   })
 
   it('returns no fields for the pay-step client session', async () => {
