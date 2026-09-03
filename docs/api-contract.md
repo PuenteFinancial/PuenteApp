@@ -59,6 +59,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 404 | `not_found` | Unknown resource |
 | 409 | `conflict` | Illegal state transition |
 | 409 | `link_auth_required` | Embedded onramp (K5): no stored Link OAuth token / no crypto customer — client restarts Link auth (distinct from `conflict`, which means recollect payment / start the attempt over) |
+| 409 | `duplicate_identity` | K6 relay: Bridge already holds a customer with this identity (tax id / email) that is not this user's — terminal for self-serve, support route only, never auto-linked (decision 9) |
 | 409 | `idempotency_conflict` | Idempotency-Key reused with different body |
 | 409 | `quote_expired` | Quote past `expires_at` |
 | 409 | `transfer_not_cancelable` | Not in `FUNDED`, or already claimed for payout submission |
