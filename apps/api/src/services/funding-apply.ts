@@ -404,14 +404,9 @@ export async function recordManualFunding(input: {
   amountMinor: number
   operator: string
 }): Promise<RecordManualFundingResult> {
-  const processor = getFundingProcessor()
-  if (processor.provider !== 'manual') {
-    return { done: false, reason: 'processor_not_manual', provider: processor.provider }
-  }
-
   const { data } = await supabaseAdmin
     .from('transfers')
-    .select('id, state, send_amount_minor, fee_amount_minor, funding_payment_ref')
+    .select('id, state, send_amount_minor, fee_amount_minor, funding_payment_ref, funding_processor')
     .eq('id', input.transferId)
     .maybeSingle()
   const transfer = data as {
@@ -420,8 +415,21 @@ export async function recordManualFunding(input: {
     send_amount_minor: number
     fee_amount_minor: number
     funding_payment_ref: string | null
+    funding_processor?: string | null
   } | null
   if (!transfer) return { done: false, reason: 'transfer_not_found' }
+
+  // The load-bearing guard, now keyed on the ROW's rail (audit 2026-09-02
+  // corner 1): what matters is whether THIS transfer's funding_payment_ref is
+  // an out-of-band deposit an operator can vouch for, or a processor-owned
+  // pull whose settlement the processor owns. A row stamped under another
+  // rail is refused even on a manual deployment; a manual-stamped row stays
+  // recordable after the deployment flips. A null stamp (pre-migration row)
+  // falls back to the process rail — the previous behaviour.
+  const rail = transfer.funding_processor ?? getFundingProcessor().provider
+  if (rail !== 'manual') {
+    return { done: false, reason: 'processor_not_manual', provider: rail }
+  }
 
   // The operator states an amount and it must match the transfer to the cent.
   // A mismatch means they are looking at the wrong deposit or the wrong

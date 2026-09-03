@@ -6,6 +6,79 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-09-03 · K6b: the web half of the relay — where the identity values live between the form
+and the POST, and why the return leg stops diverting rejected senders.** Three choices that are not
+obvious from the code. (1) The DOB + tax ID sit in exactly ONE reducer field, `ctx.relayValues`,
+rather than in a component ref: the relay decision is made three events after `KYC_SUBMIT`
+(submit → poll → verified → route), the file's charter is "every transition is reducer data", and
+the guard test gets *stronger* for it — part (f) of the K6 invariant now asserts that exactly two
+effects (`sdk_submit_kyc`, `relay`) and one ctx field carry the values, that every capture and view
+is clean, and that the field is null after `RELAY_OK`, `RELAY_ERROR`, a Stripe rejection, and
+`RETRY`. (2) `resolveKycReturnPath` now lets a valid `kyc_next` win unconditionally. K5 diverted a
+`rejected` status to `/onboarding/rejected`, whose retry leads back into the flag-OFF onboarding,
+not the transfer; under K6 the machine owns the rejection (`bridge_rejection` → reasons →
+Persona offer or terminal), so the return page's only job is to get the sender back to the
+transfer. The tos-return page is the same story: with the cookie it records the consent via
+`POST /users/me/bridge-tos` and redirects to the transfer whether or not the write landed (server
+truth decides; a failed write just shows the ToS card again). Without the cookie both pages are
+byte-for-byte the flag-OFF onboarding legs. (3) The come-back-later card (`bridge_wait`, shown
+past the ~2-minute poll bound or on `manual_review`) promises no email and no timeframe. The 9/2
+grill phrased decision 3 as "we'll email you", but no approval email exists in the system today —
+the card says what the page actually does (the draft persists, the page updates when Bridge
+finishes) and adding the email is a separate, honest change. Also: the ITIN rides Stripe's
+`us_ssn` field (the SDK declares no other type) and every form capture carries `taxIdType` so the
+pilot can tell the cohorts apart; the `send_bridge_fallback_started` / `send_bridge_tos_accepted`
+funnel events are gone (`send_bridge_tos_viewed/started`, `send_bridge_relay_started`,
+`send_bridge_customer_created`, `send_bridge_relay_failed`, `send_bridge_wait`,
+`send_bridge_persona_offered/started` replace them). **Status: active** (K6b).
+
+**2026-09-03 · `transfers.funding_processor`: the rail is a property of the ROW, not the process
+(audit 2026-09-02 corner 1).** Every job that acted on a transfer read `env.FUNDING_PROCESSOR` to
+decide its rail: the reconcile-pending abandonment clock (30 min vs hours vs days), which adapter
+`refund()`/`voidFunding()` runs on, whether an operator may record manual funding, the aging
+watchdog's bound. Correct only while every row was funded under the deployment's current rail —
+the K7 prod flip (`manual` → `stripe_crypto`) would have reaped every pending manual row at 30
+minutes and sent manual refunds to Stripe. Now confirm and onramp-session stamp
+`funding_processor`, and those readers go through `processorNameFor(row)` / `processorFor(row)`
+(`services/funding/index.ts`), which fall back to the process value for a null. Two deliberate
+non-choices: no CHECK on the column (the enum lives in `env.ts`; a CHECK turns a new rail into the
+drop-and-re-add dance), and no backfill for `cos_` refs (`stripe_onramp` and `stripe_crypto` share
+that namespace — a guess would be worse than the env fallback, which is today's behaviour). One
+semantic change: `recordManualFunding` now reads the row FIRST and refuses on the row's rail, so a
+`pi_` row is refused on a manual deployment and a manual row stays recordable after a flip. Left
+on env on purpose (deployment-capability or no-row-yet decisions): the confirm/funding-session
+gates, the webhook signature gate, `onramp-prepare`'s replay guard, Stripe receivables/orphan
+sweeps. Reversal: drop the column; every reader degrades to the env fallback. **Status: active.**
+
+**2026-09-03 · K6: DOB and tax ID are RELAYED once to Bridge — the 2026-08-27 custody rule's
+degrade clause, invoked.** The rule said SSN through our servers is a hard never, degrading to
+relay-never-persist only if Bridge's docs proved they require us in the middle. Proven in the
+sandbox 2026-09-02 against `POST /v0/customers`: a create with name/email/DOB/address/SSN returns
+201 and Bridge itself completes `sanctions_screen`, `pep_screen`, `blocklist_lookup` and
+`database_lookup` from those fields; its requirement tree lists a document only as
+`{ any_of: [database_lookup, government_id_document] }` (optional), while omitting the tax ID
+moves `tax_identification_number` into `missing.all_of` (mandatory, no alternative). No sharing
+endpoint exists and `kyc_links` is an alternative way to *collect*, not to accept verification done
+elsewhere. So the K5 form's two values go once to `POST /v1/users/me/bridge-customer`, straight to
+Bridge, and the custody line is now a six-part invariant instead of a convention: (a) exactly one
+route schema carries them and no response schema does, (b) no migration column stores them,
+(c) no log line ever contains them, (d) Sentry redacts them by key name, (e) the route's
+preconditions/rate limit/no-op/duplicate mapping hold, (f) the web machine names `relay` as its
+second and last PII-carrying effect (`schema-pii.test.ts`, `bridge-customer.test.ts`,
+`sentry-scrub.test.ts`, `cryptoPayStep.test.ts`). Details that are not obvious from the code: the
+relay gates on `stripe_kyc_tier IN (L1, L2)` rather than `stripe_kyc_tier_status`, because the
+status column is whatever verification Stripe lists first; the Bridge Idempotency-Key is per-user
+PLUS a body hash so a byte-identical retry replays the same customer while the one permitted
+correction gets a fresh key (Bridge 422s same-key/different-body); `signed_agreement_id` lives in a
+mutable `users` pointer beside the immutable `consents` evidence row because it is single-use at
+Bridge; destinations are registered on the approval webhook, not at relay time, because an
+unverified customer cannot hold external accounts (the 2026-08-28 probe). Persona is demoted to
+the fallback for database-lookup failures. Open facts: Bridge's rejection-reason vocabulary and
+duplicate-tax-ID error shape (classifier pinned to sandbox fixtures), whether customer-level
+`approved` implies the `spei` endorsement, and ITIN behaviour on the Stripe side (its SDK types
+`id_number` as `us_ssn` only). Supersedes the 2026-08-28 KNOWN GAP below (#269 + K6 resolve it).
+**Status: active** (K6a).
+
 **2026-08-28 · KNOWN GAP (deferred to the K6/custody session): destination-add requires an
 approved Bridge customer, which KYC-at-first-send users don't have yet.** Found on the K5 live
 drive: `POST /v1/recipients/:id/destinations` registers the CLABE with Bridge at save time and

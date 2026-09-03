@@ -9,6 +9,11 @@ import { assessUnclearedCap, hasClearedHistory } from '../services/risk.js'
 // Sentry issue per (transfer, state, entry) episode when dwell exceeds the
 // env-tuned threshold. Detection only — repairs are human, per the runbook.
 //
+// Detection is immediate; the REMINDER decays (see pageSlot/decidePage) and
+// stops entirely at STUCK_MAX_PAGE_HOURS, where reconcile's transfer_aging
+// check takes the episode over. Silence from this cron past that age therefore
+// does NOT mean the transfer recovered.
+//
 // Division of labor (overlap documented, deliberately not deduped): this cron
 // answers "is OUR pipeline stuck"; payout-poll's `payout-in-review-stale`
 // answers "is BRIDGE holding it"; O2's daily `transfer_aging` is the coarse
@@ -30,6 +35,58 @@ export type WatchedState = (typeof WATCHED_STATES)[number]
 // O2 review finding; an exactly-1000-row sweep tripping falsely is the right
 // failure direction).
 const ROW_BOUND = 1000
+
+// This cron's own cadence (worker.ts schedules JOB_STUCK_WATCH at '*/5 * * * *').
+// The repeat ladder below is derived from the dwell clock rather than stored
+// per row, so it reads the tick size from here — changing the schedule in
+// worker.ts without changing this shifts the whole ladder.
+const TICK_MINUTES = 5
+
+// Repeat ladder. A stuck transfer's FIRST page carries the whole signal; every
+// re-fire only says "still stuck". At a flat 5-minute repeat that reminder cost
+// 288 events/day per row — one 7.1-day staging episode produced 2,036 of them
+// and was 41% of a 30-day error budget (2026-09-01 quota burn). The ladder
+// keeps detection instant and decays the reminder: every 5m for the first hour,
+// hourly to 6h, every 6h to a day, then daily.
+//
+// Expressed as a monotonic SLOT index over minutes-past-threshold — a tick
+// pages when its slot differs from the previous tick's. Deriving it from the
+// dwell clock keeps the decision stateless: no per-row bookkeeping, no
+// migration, and nothing that can drift out of sync with the episode
+// fingerprint. Each boundary below increments the slot by exactly one, so no
+// interval change can skip or double a page.
+export function pageSlot(minutesPastThreshold: number): number {
+  const m = minutesPastThreshold
+  if (m < 60) return Math.floor(m / 5) //        0..11  every 5m for the first hour
+  if (m < 360) return 12 + Math.floor((m - 60) / 60) //  12..16  hourly to 6h
+  if (m < 1440) return 17 + Math.floor((m - 360) / 360) // 17..19  every 6h to 24h
+  return 20 + Math.floor((m - 1440) / 1440) //            20..    daily thereafter
+}
+
+export type PageDecision = 'page' | 'handoff' | 'skip'
+
+// Pure: given where this episode sits on the dwell clock, should THIS tick
+// page? Callers gate on ageMs > thresholdMs first; this decides the repeat.
+//
+// A missed tick (worker restart) can skip at most one rung of the ladder — the
+// next rung still fires, and the FIRST page is unaffected because it triggers
+// on the threshold crossing rather than on a slot change.
+export function decidePage(ageMs: number, thresholdMs_: number, maxPageAgeMs: number): PageDecision {
+  const tickMs = TICK_MINUTES * 60_000
+
+  // Past the handoff age the real-time pager is the wrong instrument. Emit ONE
+  // final page on the tick that crosses — so the silence afterwards is
+  // explained rather than mysterious — then leave the episode to reconcile's
+  // transfer_aging check, which already pages these rows 4x/day.
+  if (ageMs >= maxPageAgeMs) return ageMs - tickMs < maxPageAgeMs ? 'handoff' : 'skip'
+
+  const past = (ageMs - thresholdMs_) / 60_000
+  if (past <= 0) return 'skip'
+  const previousPast = past - TICK_MINUTES
+  // The previous tick was still under the threshold: this is the first page.
+  if (previousPast <= 0) return 'page'
+  return pageSlot(past) !== pageSlot(previousPast) ? 'page' : 'skip'
+}
 
 interface WatchRow {
   id: string
@@ -128,6 +185,12 @@ export async function watchStuckTransfers(): Promise<number> {
       const ageMs = nowMs - new Date(enteredAt).getTime()
       if (ageMs <= threshold) continue
 
+      // Repeat ladder, BEFORE the live re-read: it is pure arithmetic on the
+      // dwell clock, so deciding here spends no query on the ticks it skips —
+      // which, past the first hour of an episode, is nearly all of them.
+      const decision = decidePage(ageMs, threshold, env.STUCK_MAX_PAGE_HOURS * 60 * 60_000)
+      if (decision === 'skip') continue
+
       // TOCTOU guard (codex P2 + review): the bulk read is a snapshot — a
       // payment event can advance the transfer, or payout-submit can place a
       // hold, between it and this decision; paging a healthy or ops-owned row
@@ -136,7 +199,7 @@ export async function watchStuckTransfers(): Promise<number> {
       // clock next tick; a new hold already paged through its own alert).
       if (!(await stillPageable(row))) continue
 
-      pageStuck(row, enteredAt, ageMs, threshold, entered)
+      pageStuck(row, enteredAt, ageMs, threshold, entered, decision === 'handoff')
       paged++
     } catch (err) {
       // One transfer's reads failing must not blind the rest of the sweep —
@@ -242,14 +305,20 @@ function pageStuck(
   ageMs: number,
   thresholdMs_: number,
   transition: TransitionRow | null,
+  isHandoff: boolean,
 ): void {
   const ageMinutes = Math.round(ageMs / 60_000)
   // Local evidence beside the capture (correction-watch pattern): a Sentry
   // outage must not leave a stuck transfer traceless. Ids + ages only, no PII.
-  console.warn(`worker: stuck-transfer ${row.id} in ${row.state} for ${ageMinutes}m`)
+  // Stays in lockstep with the page rather than firing every tick: the ladder
+  // is the "how often is this worth saying" decision, and it applies to both.
+  console.warn(
+    `worker: stuck-transfer ${row.id} in ${row.state} for ${ageMinutes}m` +
+      (isHandoff ? ' — final page, handing off to the transfer_aging audit' : ''),
+  )
   Sentry.withScope((scope) => {
-    // One issue per (transfer, state, ENTRY) episode: the 5-min re-fire while
-    // stuck collapses into it; resolving while still stuck reopens next tick;
+    // One issue per (transfer, state, ENTRY) episode: the ladder's re-fires
+    // collapse into it; resolving while still stuck reopens on the next rung;
     // and a round trip back into the same state (new enteredAt) is a NEW
     // episode with its own issue rather than a reopened old one (codex P2).
     scope.setFingerprint(['stuck-transfer', row.id, row.state, enteredAt])
@@ -261,6 +330,10 @@ function pageStuck(
       thresholdMinutes: Math.round(thresholdMs_ / 60_000),
       lastTransitionActor: transition?.actor ?? null,
       lastTransitionReason: transition?.reason ?? null,
+      // The last page for this episode: past STUCK_MAX_PAGE_HOURS the row is
+      // owned by reconcile's transfer_aging check. Read this before concluding
+      // from silence that a transfer recovered.
+      ...(isHandoff && { handoffToAgingAudit: true }),
       // UNDER_REVIEW is the cancellation-review queue — its action lives in
       // the pending-cancellation runbook (resolve-cancellation CLI).
       runbook:

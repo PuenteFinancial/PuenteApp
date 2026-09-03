@@ -179,7 +179,7 @@ describe('POST /v1/crypto/transfers/:id/onramp-session', () => {
       clientIp: '203.0.113.7',
       accessToken: 'liwltoken_x',
     })
-    expect(update).toHaveBeenCalledWith({ funding_payment_ref: 'cos_1' })
+    expect(update).toHaveBeenCalledWith({ funding_payment_ref: 'cos_1', funding_processor: 'stripe_crypto' })
     await app.close()
   })
 

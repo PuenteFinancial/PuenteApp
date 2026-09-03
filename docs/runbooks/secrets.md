@@ -55,6 +55,27 @@ consumers are the two pipeline secrets above.
   enqueues fail and recovery falls back to `payout.sweep` — correct, but adds ~1 min (payouts) to
   ~5 min (payment events) of latency. Discovered running the slice-5 sandbox e2e (2026-07-21).
 
+### Stripe (funding rails + crypto onramp, #213 / K3–K6)
+
+All in Doppler `puente-api`, server-only — the web app never holds a Stripe var (the publishable
+key reaches the browser through `GET /v1/transfers/:id/funding-session` and, since K6,
+`GET /v1/config/web`). Which vars are REQUIRED is decided by `FUNDING_PROCESSOR`
+(`config/env.ts` superRefine):
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY` — the platform trio;
+  required for `stripe`, `stripe_onramp`, `stripe_crypto`. Test-mode keys in `dev_main`/`stg_main`,
+  live in `prd_main`. Mode (sandbox vs live) is *which platform key*, nothing else.
+- `STRIPE_CRYPTO_OAUTH_CLIENT_ID` (`lwlpk_…`) + `STRIPE_CRYPTO_OAUTH_CLIENT_SECRET` (`lwlsk_…`) —
+  the Link OAuth pair for the embedded-components onramp; required only for `stripe_crypto`.
+  ONE pair works in both test and live (Stripe, 2026-08-28); it is in `stg_main` AND `prd_main`.
+  The secret is used solely in the refresh grant at `login.link.com`; rotate by minting a new pair
+  in the Stripe dashboard, setting both values, and redeploying — users' stored refresh tokens
+  survive a pair rotation. **Undocumented until 2026-09-03** (audit debt).
+- `STRIPE_CRYPTO_VERSION` — the preview version header (code default
+  `2026-05-27.preview;crypto_onramp_beta=v2`); override only when Stripe moves the preview.
+- `STRIPE_LINK_TOKEN_KEY` (if present in your config) — see `utils/encryption.ts`: the AES-256-GCM
+  key for `stripe_link_tokens.refresh_token_enc`. Rotating it invalidates every stored refresh
+  token (users re-run Link OTP at their next send) — never rotate casually.
+
 ## Outstanding rotations (as of 2026-07-10)
 
 - [x] Prod DB password (2026-07-10)

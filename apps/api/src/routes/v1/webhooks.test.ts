@@ -38,6 +38,24 @@ vi.mock('../../services/queue.js', () => ({
   enqueuePaymentEventProcess: (...args: unknown[]) => enqueuePaymentEventProcess(...args),
 }))
 
+const releaseSenderKycHolds = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => [] as string[]))
+vi.mock('../../services/payout-holds.js', () => ({
+  releaseSenderKycHolds: (...args: unknown[]) => releaseSenderKycHolds(...args),
+}))
+const registerPendingDestinations = vi.hoisted(() =>
+  vi.fn(async (..._args: unknown[]) => ({ registered: 0, failed: [] as { reason: string }[] })),
+)
+vi.mock('../../services/destination-registration.js', () => ({
+  registerPendingDestinations: (...args: unknown[]) => registerPendingDestinations(...args),
+}))
+const recordKycVerification = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => true))
+vi.mock('../../services/kyc-verifications.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../services/kyc-verifications.js')>()
+  return {
+    ...actual,
+    recordKycVerification: (...args: unknown[]) => recordKycVerification(...args),
+  }
+})
 const recordEvent = vi.hoisted(() => vi.fn())
 const markProcessed = vi.hoisted(() => vi.fn())
 vi.mock('../../services/payment-events.js', () => ({
@@ -87,6 +105,15 @@ function updateResult(result: { error: unknown }) {
   return { update: vi.fn(() => ({ eq: vi.fn(async () => result) })) }
 }
 
+// users.update(...).eq('bridge_customer_id', …).select('id') — the K6 shape
+// (the webhook needs the matched user id for the follow-through).
+function customerUpdate(result: { data: unknown; error: unknown } = { data: [{ id: 'user-1' }], error: null }) {
+  const select = vi.fn(async (..._args: unknown[]) => result)
+  const eq = vi.fn((..._args: unknown[]) => ({ select }))
+  const update = vi.fn((..._args: unknown[]) => ({ eq }))
+  return { table: { update }, update, eq, select }
+}
+
 async function buildApp() {
   const app = Fastify({ logger: false })
   await app.register(webhooksRoute, { prefix: '/v1' })
@@ -96,6 +123,9 @@ async function buildApp() {
 
 beforeEach(() => {
   from.mockReset()
+  releaseSenderKycHolds.mockClear()
+  registerPendingDestinations.mockClear()
+  recordKycVerification.mockClear()
   postLedgerTransaction.mockReset().mockResolvedValue(undefined)
   captureMessage.mockReset()
   captureException.mockReset()
@@ -104,9 +134,8 @@ beforeEach(() => {
 
 describe('POST /v1/webhooks/bridge', () => {
   it('updates kyc_status on customer.updated.status_transitioned with a valid signature', async () => {
-    const eqSpy = vi.fn(async () => ({ error: null }))
-    const updateSpy = vi.fn(() => ({ eq: eqSpy }))
-    from.mockReturnValue({ update: updateSpy })
+    const { table, update: updateSpy, eq: eqSpy } = customerUpdate()
+    from.mockReturnValue(table)
     const app = await buildApp()
 
     // Real Bridge payload shape: status lives on event_object.status with a
@@ -129,12 +158,26 @@ describe('POST /v1/webhooks/bridge', () => {
     expect(res.body).toEqual({ received: true })
     expect(updateSpy).toHaveBeenCalledWith({ kyc_status: 'pending' })
     expect(eqSpy).toHaveBeenCalledWith('bridge_customer_id', 'cust_abc')
+    // Verdict logged; nothing released or registered for a non-approval.
+    expect(recordKycVerification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        provider: 'bridge',
+        providerRef: 'cust_abc',
+        status: 'pending',
+        providerStatus: 'under_review',
+        source: 'webhook',
+      }),
+      expect.anything(),
+    )
+    expect(releaseSenderKycHolds).not.toHaveBeenCalled()
+    expect(registerPendingDestinations).not.toHaveBeenCalled()
     await app.close()
   })
 
   it('also activates the user when kyc is approved', async () => {
-    const updateSpy = vi.fn(() => ({ eq: vi.fn(async () => ({ error: null })) }))
-    from.mockReturnValue({ update: updateSpy })
+    const { table, update: updateSpy } = customerUpdate()
+    from.mockReturnValue(table)
     const app = await buildApp()
 
     const body = JSON.stringify({
@@ -150,6 +193,86 @@ describe('POST /v1/webhooks/bridge', () => {
 
     expect(res.status).toBe(200)
     expect(updateSpy).toHaveBeenCalledWith({ kyc_status: 'approved', status: 'active' })
+    await app.close()
+  })
+
+  // K6 decision 8 + #269: approval is the moment the payout side can act.
+  it('on approval: logs the verdict, auto-releases sender_kyc_pending holds, registers destinations', async () => {
+    const { table } = customerUpdate()
+    from.mockReturnValue(table)
+    releaseSenderKycHolds.mockResolvedValueOnce(['tr-1', 'tr-2'])
+    registerPendingDestinations.mockResolvedValueOnce({ registered: 1, failed: [] })
+    const app = await buildApp()
+
+    const body = JSON.stringify({
+      event_type: 'customer.updated.status_transitioned',
+      event_object: { id: 'cust_abc', status: 'active' },
+    })
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/bridge')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', signHeader(body))
+      .send(body)
+
+    expect(res.status).toBe(200)
+    expect(recordKycVerification).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'user-1', status: 'verified', providerStatus: 'active' }),
+      expect.anything(),
+    )
+    expect(releaseSenderKycHolds).toHaveBeenCalledWith('user-1', expect.anything())
+    expect(registerPendingDestinations).toHaveBeenCalledWith('user-1', 'cust_abc')
+    // Order: verdict → release → destinations.
+    expect(recordKycVerification.mock.invocationCallOrder[0]!).toBeLessThan(
+      releaseSenderKycHolds.mock.invocationCallOrder[0]!,
+    )
+    expect(releaseSenderKycHolds.mock.invocationCallOrder[0]!).toBeLessThan(
+      registerPendingDestinations.mock.invocationCallOrder[0]!,
+    )
+    await app.close()
+  })
+
+  it('still acks 200 when the approval follow-through fails — the status is already committed', async () => {
+    const { table } = customerUpdate()
+    from.mockReturnValue(table)
+    registerPendingDestinations.mockRejectedValueOnce(new Error('bridge down'))
+    const app = await buildApp()
+
+    const body = JSON.stringify({
+      event_type: 'customer.updated',
+      event_object: { id: 'cust_abc', kyc_status: 'approved' },
+    })
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/bridge')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', signHeader(body))
+      .send(body)
+
+    expect(res.status).toBe(200)
+    expect(releaseSenderKycHolds).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  it('does nothing beyond the ack when the customer matches no user', async () => {
+    const { table } = customerUpdate({ data: [], error: null })
+    from.mockReturnValue(table)
+    const app = await buildApp()
+
+    const body = JSON.stringify({
+      event_type: 'customer.updated.status_transitioned',
+      event_object: { id: 'cust_unknown', status: 'active' },
+    })
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/bridge')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', signHeader(body))
+      .send(body)
+
+    expect(res.status).toBe(200)
+    expect(recordKycVerification).not.toHaveBeenCalled()
+    expect(releaseSenderKycHolds).not.toHaveBeenCalled()
     await app.close()
   })
 

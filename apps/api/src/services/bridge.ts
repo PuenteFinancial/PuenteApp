@@ -1,5 +1,23 @@
 import crypto from 'node:crypto'
+import type { KycStatus } from '@puente/shared'
 import { env } from '../config/env.js'
+
+// Bridge customer statuses → our KycStatus. One map, shared by the KYC webhook
+// and the K6 relay route, so a Bridge status is never mapped two ways.
+// Unrecognized statuses fall through unmapped and are only logged.
+export const BRIDGE_KYC_STATUS_MAP: Record<string, KycStatus> = {
+  not_started: 'not_started',
+  incomplete: 'pending',
+  awaiting_questionnaire: 'pending',
+  awaiting_ubo: 'pending',
+  under_review: 'pending',
+  in_review: 'pending',
+  pending: 'pending',
+  manual_review: 'manual_review',
+  approved: 'approved',
+  active: 'approved',
+  rejected: 'rejected',
+}
 
 export class BridgeApiError extends Error {
   // Raw Bridge error body — readable for code branching (err.body.code), but
@@ -73,6 +91,127 @@ export async function createBridgeCustomer(data: {
   return { id: customer.id }
 }
 
+export interface CreateBridgeCustomerWithIdentityInput {
+  /** Our user id — namespaces the idempotency key only. Never sent to Bridge. */
+  userId: string
+  firstName: string
+  lastName: string
+  email: string
+  signedAgreementId: string
+  /** YYYY-MM-DD, already validated by the route schema. */
+  birthDate: string
+  address: {
+    streetLine1: string
+    streetLine2?: string | null
+    city: string
+    /** Two-letter US state, already uppercased by the caller. */
+    subdivision: string
+    postalCode: string
+  }
+  taxId: { type: 'ssn' | 'itin'; number: string }
+}
+
+// K6 relay body. Every field comes from the request or the user row — no
+// clocks, no randomness — and the key order is fixed, so a byte-identical
+// retry serializes identically (Bridge 422s on same-Idempotency-Key/
+// different-body). The string holds DOB + tax ID: it exists only in this
+// frame and the fetch body, and nothing here logs, stores, or rethrows it.
+function buildIdentityCustomerBody(input: CreateBridgeCustomerWithIdentityInput): string {
+  return JSON.stringify({
+    type: 'individual',
+    first_name: input.firstName,
+    last_name: input.lastName,
+    email: input.email,
+    signed_agreement_id: input.signedAgreementId,
+    birth_date: input.birthDate,
+    residential_address: {
+      street_line_1: input.address.streetLine1,
+      ...(input.address.streetLine2 ? { street_line_2: input.address.streetLine2 } : {}),
+      city: input.address.city,
+      subdivision: input.address.subdivision,
+      postal_code: input.address.postalCode,
+      country: 'USA',
+    },
+    identifying_information: [
+      { type: input.taxId.type, issuing_country: 'usa', number: input.taxId.number },
+    ],
+    endorsements: ['base', 'spei'],
+  })
+}
+
+/**
+ * K6 (2026-09-03): create the Bridge customer from the identity the sender
+ * typed once into the pay step — the "relay-never-persist" degrade of the
+ * 2026-08-27 custody rule, invoked because Bridge's Customers API puts
+ * tax_identification_number in missing.all_of (proven in sandbox 9/2).
+ *
+ * Idempotency-Key = per-user + a hash of the body: a byte-identical retry
+ * (double submit, lost response, crash before persist) replays and returns
+ * the SAME customer, while a corrected body (decision 4: one correction
+ * attempt) gets a fresh key instead of Bridge's permanent same-key/
+ * different-body 422. The legacy createBridgeCustomer above keeps its
+ * random key — the flag-OFF Persona path still uses it.
+ */
+export async function createBridgeCustomerWithIdentity(
+  input: CreateBridgeCustomerWithIdentityInput,
+): Promise<{ id: string; status: string | undefined }> {
+  const body = buildIdentityCustomerBody(input)
+  const digest = crypto.createHash('sha256').update(body).digest('hex').slice(0, 16)
+  const customer = (await bridgeFetch('/v0/customers', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': `bridge-customer-${input.userId}-${digest}` },
+    body,
+  })) as { id: string; status?: string }
+
+  return { id: customer.id, status: customer.status }
+}
+
+export type BridgeCustomerErrorKind = 'duplicate' | 'agreement' | 'rejected' | 'unavailable'
+
+// Flatten Bridge's `source` object ({ key: { field: 'message' } } and
+// variants) into its keys + string leaves, depth-bounded. The output is only
+// ever pattern-matched, never logged: it can echo request values.
+function flattenSource(value: unknown, depth = 0): string[] {
+  if (depth > 4 || value === null || value === undefined) return []
+  if (typeof value === 'string') return [value]
+  if (Array.isArray(value)) return value.flatMap((v) => flattenSource(v, depth + 1))
+  if (typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) => [
+      k,
+      ...flattenSource(v, depth + 1),
+    ])
+  }
+  return []
+}
+
+/**
+ * Classify a failed identity-bearing customer create for the relay route.
+ * Bridge reports both "a customer with this email already exists" and "this
+ * signed_agreement_id was already used" as `400 invalid_parameters`, so the
+ * code alone cannot tell them apart — the field named in message/source can.
+ * Agreement errors are checked first: "signed_agreement_id has already been
+ * used" must read as agreement, not duplicate. The exact wording of Bridge's
+ * duplicate-tax-ID rejection is unevidenced as of 2026-09-03; the fixtures in
+ * bridge.test.ts are the contract and get replaced by sandbox captures.
+ */
+export function classifyBridgeCustomerError(err: BridgeApiError): BridgeCustomerErrorKind {
+  if (err.status >= 500) return 'unavailable'
+  const body = (err.body ?? {}) as { code?: unknown; message?: unknown; source?: unknown }
+  const haystack = [
+    typeof body.code === 'string' ? body.code : '',
+    typeof body.message === 'string' ? body.message : '',
+    ...flattenSource(body.source),
+  ]
+    .join(' ')
+    .toLowerCase()
+
+  if (/signed_agreement|agreement_id|terms_of_service/.test(haystack)) return 'agreement'
+  if (/duplicate|already[ _](been[ _])?(taken|exist|exists|used|registered)/.test(haystack)) {
+    return 'duplicate'
+  }
+  return 'rejected'
+}
+
 // ToS URLs must be generated per-session through the API — a statically
 // constructed dashboard link yields a signed_agreement_id that Bridge
 // rejects at customer creation.
@@ -95,13 +234,23 @@ export async function createTosLink(redirectUri: string): Promise<{ url: string 
 // rejection_reasons[].reason is Bridge's customer-facing explanation;
 // developer_reason is internal detail and is dropped here so it can never
 // reach a client or a log line.
-export async function getBridgeCustomer(customerId: string): Promise<{
+export interface BridgeCustomerEndorsement {
+  name: string
+  status: string
+}
+
+export interface BridgeCustomerSnapshot {
   status: string | undefined
   rejectionReasons: string[]
-}> {
+  /** Per-endorsement status (base, spei, …). Empty when Bridge omits the array. */
+  endorsements: BridgeCustomerEndorsement[]
+}
+
+export async function getBridgeCustomer(customerId: string): Promise<BridgeCustomerSnapshot> {
   const customer = (await bridgeFetch(`/v0/customers/${customerId}`)) as {
     status?: string
     rejection_reasons?: Array<{ reason?: string; developer_reason?: string }>
+    endorsements?: Array<{ name?: string; status?: string }>
   }
 
   return {
@@ -109,7 +258,17 @@ export async function getBridgeCustomer(customerId: string): Promise<{
     rejectionReasons: (customer.rejection_reasons ?? [])
       .map((r) => r.reason)
       .filter((reason): reason is string => Boolean(reason)),
+    endorsements: (customer.endorsements ?? [])
+      .filter((e): e is { name: string; status: string } => Boolean(e.name) && Boolean(e.status))
+      .map((e) => ({ name: e.name, status: e.status })),
   }
+}
+
+// MXN payouts ride the SPEI endorsement. Whether customer-level `approved`
+// already implies it is an open fact (2026-09-03); this reads the endorsement
+// itself so the runbook and the pilot can check the stricter signal.
+export function isPayoutReady(customer: Pick<BridgeCustomerSnapshot, 'endorsements'>): boolean {
+  return customer.endorsements.some((e) => e.name === 'spei' && e.status === 'approved')
 }
 
 // Registers a recipient's MXN CLABE account with Bridge so payouts (slice 5)

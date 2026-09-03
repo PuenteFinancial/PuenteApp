@@ -1,8 +1,26 @@
+import { cookies, headers } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { apiFetch, getSessionToken, refreshRedirectPath, requestOrigin } from '@/lib/session'
+import {
+  KYC_LOCALE_COOKIE,
+  KYC_NEXT_COOKIE,
+  validKycLocale,
+  validKycNext,
+} from '@/lib/kycReturn'
 
-// Bridge redirects here after the user accepts its Terms of Service.
-// No UI — exchange the signed agreement for a hosted KYC link and go there.
+// Bridge redirects here after the user accepts its Terms of Service. No UI.
+//
+// Two callers share this URL:
+//   • K6 send flow (kyc_next cookie set by the pay step): record the
+//     acceptance via POST /v1/users/me/bridge-tos and go back to the transfer
+//     page, where the machine reboots and continues past its ToS gate. The
+//     redirect happens whether or not the write succeeded — server truth
+//     decides, and a failed write simply shows the ToS card again.
+//   • Flag-OFF onboarding (no cookie): the legacy exchange of the signed
+//     agreement for a hosted KYC link, byte-for-byte as before K6.
+//
+// This is a server component and calls the API directly: no web proxy exists
+// for bridge-tos on purpose (one fewer surface adjacent to the KYC relay).
 export default async function TosReturnPage({
   searchParams,
 }: {
@@ -21,6 +39,38 @@ export default async function TosReturnPage({
   }
 
   if (!signedAgreementId) redirect('/onboarding/kyc?error=1')
+
+  const cookieStore = await cookies()
+  const next = validKycNext(cookieStore.get(KYC_NEXT_COOKIE)?.value)
+
+  if (next) {
+    // The API only sees this server's address — forward the real client's IP
+    // and UA (consents-proxy pattern) so the evidence records the browser
+    // that actually assented. Header, never a URL param.
+    const headerList = await headers()
+    const clientIp =
+      headerList.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      headerList.get('x-real-ip') ||
+      null
+    const userAgent = headerList.get('user-agent')
+
+    const res = await apiFetch('/v1/users/me/bridge-tos', token, {
+      method: 'POST',
+      body: JSON.stringify({
+        signed_agreement_id: signedAgreementId,
+        locale: validKycLocale(cookieStore.get(KYC_LOCALE_COOKIE)?.value),
+      }),
+      headers: {
+        ...(clientIp ? { 'x-client-ip': clientIp } : {}),
+        ...(userAgent ? { 'user-agent': userAgent } : {}),
+      },
+    })
+    if (!res.ok) {
+      // Status only — the body may echo the agreement id.
+      console.error('Bridge ToS record failed with status', res.status)
+    }
+    redirect(next)
+  }
 
   const origin = await requestOrigin()
   const res = await apiFetch('/v1/users/me/kyc-link', token, {

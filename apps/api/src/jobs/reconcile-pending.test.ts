@@ -38,8 +38,10 @@ const processorMock = vi.hoisted(() => ({
 vi.mock('../services/funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/funding/index.js')>()
   return {
-    // Real rail classifier (pure); only the processor registry is faked.
+    // Real rail classifiers (pure; processorNameFor reads the mocked env);
+    // only the processor registry is faked.
     isOnrampSessionRail: actual.isOnrampSessionRail,
+    processorNameFor: actual.processorNameFor,
     getFundingProcessor: () => processorMock.current,
   }
 })
@@ -63,8 +65,8 @@ const MINUTES = 60 * 1000
 const HOURS = 60 * MINUTES
 const DAYS = 24 * HOURS
 
-function row(id: string, ageMs: number, ref: string | null = null) {
-  return { id, funding_payment_ref: ref, created_at: ago(ageMs) }
+function row(id: string, ageMs: number, ref: string | null = null, rail: string | null = null) {
+  return { id, funding_payment_ref: ref, funding_processor: rail, created_at: ago(ageMs) }
 }
 
 beforeEach(() => {
@@ -284,3 +286,53 @@ describe.each(['stripe_onramp', 'stripe_crypto'])(
   })
   },
 )
+
+// Audit 2026-09-02 corner 1: after a FUNDING_PROCESSOR flip the table holds
+// rows from both rails. The clock follows the ROW's stamp; a null stamp keeps
+// the process clock (every test above runs on that fallback).
+describe('reconcilePendingTransfers — per-row rail', () => {
+  it('a manual-stamped row keeps its days-scale window after the process flips to stripe_crypto', async () => {
+    envMock.FUNDING_PROCESSOR = 'stripe_crypto'
+    envMock.MANUAL_PENDING_MAX_AGE_DAYS = 7
+    envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 4
+    processorMock.current = { provider: 'stripe_crypto', getPaymentStatus }
+    mockPendingSelect([
+      row('tr-manual-midwire', 2 * DAYS, 'manualpay_1', 'manual'),
+      row('tr-manual-dead', 8 * DAYS, 'manualpay_2', 'manual'),
+      row('tr-crypto-dead', 5 * HOURS, null, 'stripe_crypto'),
+      row('tr-legacy-null', 5 * HOURS, null, null),
+    ])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(3)
+    const byId = Object.fromEntries(
+      transition.mock.calls.map(([input]) => [
+        (input as { transferId: string }).transferId,
+        (input as { reason: string }).reason,
+      ]),
+    )
+    expect(byId).toEqual({
+      'tr-manual-dead': 'funding_not_received_within_7_days',
+      'tr-crypto-dead': 'funding_not_received_within_4_hours',
+      'tr-legacy-null': 'funding_not_received_within_4_hours',
+    })
+  })
+
+  it('a stripe_crypto-stamped row keeps its hours window after the process flips back to manual', async () => {
+    envMock.FUNDING_PROCESSOR = 'manual'
+    envMock.MANUAL_PENDING_MAX_AGE_DAYS = 7
+    envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 4
+    mockPendingSelect([
+      row('tr-crypto-dead', 5 * HOURS, null, 'stripe_crypto'),
+      row('tr-manual-midwire', 5 * HOURS, 'manualpay_1', 'manual'),
+    ])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input.transferId).toBe('tr-crypto-dead')
+    expect(input.reason).toBe('funding_not_received_within_4_hours')
+  })
+})
