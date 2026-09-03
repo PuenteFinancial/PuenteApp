@@ -1,8 +1,8 @@
 import crypto from 'node:crypto'
 import * as Sentry from '@sentry/node'
 import type { FastifyInstance } from 'fastify'
-import type { KycStatus } from '@puente/shared'
 import { env } from '../../config/env.js'
+import { BRIDGE_KYC_STATUS_MAP } from '../../services/bridge.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { getFundingProcessor, isOnrampSessionRail } from '../../services/funding/index.js'
 import { enqueuePaymentEventProcess } from '../../services/queue.js'
@@ -18,21 +18,6 @@ import {
   type OnrampAmountMismatch,
 } from '../../services/funding-apply.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
-
-// Bridge statuses we don't recognize fall through unmapped and are only logged
-const BRIDGE_KYC_STATUS_MAP: Record<string, KycStatus> = {
-  not_started: 'not_started',
-  incomplete: 'pending',
-  awaiting_questionnaire: 'pending',
-  awaiting_ubo: 'pending',
-  under_review: 'pending',
-  in_review: 'pending',
-  pending: 'pending',
-  manual_review: 'manual_review',
-  approved: 'approved',
-  active: 'approved',
-  rejected: 'rejected',
-}
 
 interface BridgeWebhookEvent {
   event_type?: string

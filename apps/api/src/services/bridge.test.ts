@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
+  BRIDGE_KYC_STATUS_MAP,
+  classifyBridgeCustomerError,
   createBridgeCustomer,
+  createBridgeCustomerWithIdentity,
   createBridgeOnramp,
   createBridgePayout,
   createExternalAccount,
@@ -9,6 +12,7 @@ import {
   getBridgeTransfer,
   getExchangeRate,
   getKycLink,
+  isPayoutReady,
   listExternalAccounts,
   BridgeApiError,
 } from './bridge.js'
@@ -229,18 +233,181 @@ describe('getBridgeCustomer', () => {
     expect(result).toEqual({
       status: 'rejected',
       rejectionReasons: ['ID photo could not be read', 'Address document expired'],
+      endorsements: [],
     })
   })
 
   it('returns empty reasons when rejection_reasons is missing', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { id: 'cust_abc', status: 'active' }))
     const result = await getBridgeCustomer('cust_abc')
-    expect(result).toEqual({ status: 'active', rejectionReasons: [] })
+    expect(result).toEqual({ status: 'active', rejectionReasons: [], endorsements: [] })
   })
 
   it('throws BridgeApiError on non-2xx', async () => {
     fetchMock.mockResolvedValue(jsonResponse(404, { code: 'not_found' }))
     await expect(getBridgeCustomer('cust_missing')).rejects.toBeInstanceOf(BridgeApiError)
+  })
+
+  it('parses per-endorsement statuses and drops malformed entries', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(200, {
+        id: 'cust_abc',
+        status: 'active',
+        endorsements: [
+          { name: 'base', status: 'approved', requirements: { complete: ['first_name'] } },
+          { name: 'spei', status: 'incomplete' },
+          { name: 'sepa' },
+          { status: 'approved' },
+        ],
+      }),
+    )
+    const result = await getBridgeCustomer('cust_abc')
+    expect(result.endorsements).toEqual([
+      { name: 'base', status: 'approved' },
+      { name: 'spei', status: 'incomplete' },
+    ])
+  })
+})
+
+describe('isPayoutReady', () => {
+  it('is true only when the spei endorsement is approved', () => {
+    expect(isPayoutReady({ endorsements: [{ name: 'spei', status: 'approved' }] })).toBe(true)
+    expect(isPayoutReady({ endorsements: [{ name: 'spei', status: 'incomplete' }] })).toBe(false)
+    expect(isPayoutReady({ endorsements: [{ name: 'base', status: 'approved' }] })).toBe(false)
+    expect(isPayoutReady({ endorsements: [] })).toBe(false)
+  })
+})
+
+describe('createBridgeCustomerWithIdentity (K6 relay)', () => {
+  const input = {
+    userId: '11111111-1111-4111-8111-111111111111',
+    firstName: 'Ana',
+    lastName: 'García López',
+    email: 'ana@example.com',
+    signedAgreementId: 'agr_123',
+    birthDate: '1987-03-21',
+    address: {
+      streetLine1: '123 Main St',
+      streetLine2: 'Apt 4',
+      city: 'Denver',
+      subdivision: 'CO',
+      postalCode: '80202',
+    },
+    taxId: { type: 'ssn' as const, number: '078051120' },
+  }
+
+  it('POSTs the full identity body in fixed key order with base+spei endorsements', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, { id: 'cust_new', status: 'incomplete' }))
+
+    const result = await createBridgeCustomerWithIdentity(input)
+
+    expect(result).toEqual({ id: 'cust_new', status: 'incomplete' })
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://api.bridge.test/v0/customers')
+    expect(init.method).toBe('POST')
+    // Key order is the byte-identical-retry contract, so compare the string.
+    expect(init.body).toBe(
+      JSON.stringify({
+        type: 'individual',
+        first_name: 'Ana',
+        last_name: 'García López',
+        email: 'ana@example.com',
+        signed_agreement_id: 'agr_123',
+        birth_date: '1987-03-21',
+        residential_address: {
+          street_line_1: '123 Main St',
+          street_line_2: 'Apt 4',
+          city: 'Denver',
+          subdivision: 'CO',
+          postal_code: '80202',
+          country: 'USA',
+        },
+        identifying_information: [{ type: 'ssn', issuing_country: 'usa', number: '078051120' }],
+        endorsements: ['base', 'spei'],
+      }),
+    )
+  })
+
+  it('omits street_line_2 when absent and sends itin as its own type', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, { id: 'cust_new' }))
+    await createBridgeCustomerWithIdentity({
+      ...input,
+      address: { ...input.address, streetLine2: null },
+      taxId: { type: 'itin', number: '912345678' },
+    })
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body)
+    expect(body.residential_address).not.toHaveProperty('street_line_2')
+    expect(body.identifying_information).toEqual([
+      { type: 'itin', issuing_country: 'usa', number: '912345678' },
+    ])
+  })
+
+  it('derives the same idempotency key for the same input, namespaced by user', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, { id: 'cust_new' }))
+    await createBridgeCustomerWithIdentity(input)
+    await createBridgeCustomerWithIdentity(input)
+    const keys = fetchMock.mock.calls.map(([, init]) => init.headers['Idempotency-Key'])
+    expect(keys[0]).toBe(keys[1])
+    expect(keys[0]).toMatch(/^bridge-customer-11111111-1111-4111-8111-111111111111-[0-9a-f]{16}$/)
+  })
+
+  it('derives a different key when the body changes (the one correction attempt)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, { id: 'cust_new' }))
+    await createBridgeCustomerWithIdentity(input)
+    await createBridgeCustomerWithIdentity({ ...input, birthDate: '1987-03-12' })
+    const keys = fetchMock.mock.calls.map(([, init]) => init.headers['Idempotency-Key'])
+    expect(keys[0]).not.toBe(keys[1])
+  })
+
+  it('never carries the identity into the thrown error', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(400, { code: 'invalid_parameters' }))
+    const err = await createBridgeCustomerWithIdentity(input).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(BridgeApiError)
+    expect(JSON.stringify(err)).not.toContain('078051120')
+    expect((err as Error).message).not.toContain('1987')
+  })
+})
+
+describe('classifyBridgeCustomerError', () => {
+  const at = (status: number, body: unknown) => classifyBridgeCustomerError(new BridgeApiError(status, body))
+
+  it('5xx and empty bodies are unavailable / rejected', () => {
+    expect(at(502, null)).toBe('unavailable')
+    expect(at(500, { code: 'internal' })).toBe('unavailable')
+    expect(at(422, null)).toBe('rejected')
+    expect(at(400, { code: 'invalid_parameters', message: 'birth_date is invalid' })).toBe('rejected')
+  })
+
+  it('reads a consumed or bad signed_agreement_id as agreement, even when phrased as already used', () => {
+    expect(
+      at(400, {
+        code: 'invalid_parameters',
+        message: 'signed_agreement_id has already been used',
+      }),
+    ).toBe('agreement')
+    expect(
+      at(400, { code: 'invalid_parameters', source: { key: { signed_agreement_id: 'is invalid' } } }),
+    ).toBe('agreement')
+  })
+
+  it('reads one-per-email and duplicate-identity rejections as duplicate', () => {
+    expect(
+      at(400, { code: 'invalid_parameters', source: { key: { email: 'has already been taken' } } }),
+    ).toBe('duplicate')
+    expect(at(400, { code: 'duplicate_customer' })).toBe('duplicate')
+    expect(at(409, { code: 'invalid_parameters', message: 'A customer with this tax id already exists' })).toBe(
+      'duplicate',
+    )
+  })
+})
+
+describe('BRIDGE_KYC_STATUS_MAP', () => {
+  it('maps Bridge customer statuses onto our KycStatus vocabulary', () => {
+    expect(BRIDGE_KYC_STATUS_MAP.active).toBe('approved')
+    expect(BRIDGE_KYC_STATUS_MAP.incomplete).toBe('pending')
+    expect(BRIDGE_KYC_STATUS_MAP.rejected).toBe('rejected')
+    expect(BRIDGE_KYC_STATUS_MAP.manual_review).toBe('manual_review')
+    expect(BRIDGE_KYC_STATUS_MAP.unknown_thing).toBeUndefined()
   })
 })
 
