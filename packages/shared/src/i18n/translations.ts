@@ -135,6 +135,11 @@ export type Translations = {
         state: string
         statePh: string
         zip: string
+        // K6b: the Stripe AddressElement replaces the plain inputs when the
+        // publishable key is served; these cover its load and the
+        // incomplete-on-submit case (the element validates, we only refuse).
+        loading: string
+        incomplete: string
       }
       cta: string
       saving: string
@@ -410,10 +415,19 @@ export type Translations = {
           dobMonth: string
           dobDay: string
           dobYear: string
-          ssn: string
-          // Where the SSN/DOB go (client → Stripe SDK only, never Puente).
+          // One field, "SSN or ITIN", with the type selector beside it (K6:
+          // Bridge accepts either; Stripe's SDK types both as us_ssn).
+          taxIdLabel: string
+          taxIdType: { ssn: string; itin: string }
+          // Where the tax ID and DOB go: client → Stripe SDK, and ONCE through
+          // Puente's server to Bridge (relay-never-persist, ratified
+          // 2026-09-02). Names both providers; promises no storage.
           // NEEDS LEGAL REVIEW (EN + ES)
           ssnPrivacyNote: string
+          // Stripe rejected the first L1 attempt; one correction is offered
+          // (K6 decision 4). Must not claim anything was charged.
+          // NEEDS LEGAL REVIEW (EN + ES)
+          rejectedOnce: string
           submitCta: string
           submitting: string
           verifying: string
@@ -429,16 +443,42 @@ export type Translations = {
           docsAbandoned: string
           achRequiresDocs: string
         }
-        // Persona/Bridge fallback branch (decision 2, ratified 2026-08-28:
-        // BEFORE payment). The user leaves for the partner-hosted flow and
-        // returns; the waiting copy promises only the in-place update the
-        // polling page actually delivers ("truthful pending copy").
+        // K6 relay: the DOB + tax ID leg to Bridge after Stripe verifies.
+        // `formTitle`/hints render the two-field re-entry form (decision 12)
+        // for the reload edge and the one Bridge correction.
+        relay: {
+          verifying: string
+          formTitle: string
+          formHintReload: string
+          // NEEDS LEGAL REVIEW (EN + ES)
+          formHintCorrection: string
+          submitCta: string
+        }
+        // Bridge leg (K6, ToS-first): the click-through happens BEFORE Link
+        // auth for everyone (`title`/`body`/`tosCta`); `waiting*` is the
+        // bounded poll after the relay; `wait*` is the come-back-later card
+        // past the bound or on manual review, promising only what the page
+        // actually does ("truthful pending copy", no timeframe, no email);
+        // `persona*` offers the hosted fallback on a database-lookup
+        // rejection; `duplicate*` is the support route (decision 9) and must
+        // never suggest WHOSE verification the details matched.
         bridge: {
           title: string
+          // NEEDS LEGAL REVIEW (EN + ES): names Bridge at the handoff.
           body: string
           tosCta: string
           waitingTitle: string
           waitingBody: string
+          waitTitle: string
+          waitBody: string
+          recheckCta: string
+          personaTitle: string
+          // NEEDS LEGAL REVIEW (EN + ES)
+          personaBody: string
+          personaCta: string
+          duplicateTitle: string
+          // NEEDS LEGAL REVIEW (EN + ES)
+          duplicateBody: string
         }
         collect: {
           title: string
@@ -523,6 +563,9 @@ export type Translations = {
       rate_unavailable: string
       provider_rejected: string
       provider_unavailable: string
+      // K6 relay: the details match a verification Bridge already holds.
+      // Support route only (decision 9: never auto-link, never say whose).
+      duplicate_identity: string
       internal_error: string
       cancellation_requires_support: string
       generic: string
@@ -874,6 +917,8 @@ const en: Translations = {
         state: 'State',
         statePh: 'Select state',
         zip: 'ZIP code',
+        loading: 'Loading the address form…',
+        incomplete: 'Please complete your address before continuing.',
       },
       cta: 'Continue',
       saving: 'Saving…',
@@ -1142,10 +1187,17 @@ const en: Translations = {
           dobMonth: 'Month',
           dobDay: 'Day',
           dobYear: 'Year',
-          ssn: 'Social Security number',
+          taxIdLabel: 'Social Security number or ITIN',
+          taxIdType: {
+            ssn: 'Social Security number (SSN)',
+            itin: 'Individual Taxpayer Identification Number (ITIN)',
+          },
           // NEEDS LEGAL REVIEW (EN + ES)
           ssnPrivacyNote:
-            'Your SSN and date of birth go directly to Stripe for identity verification. Puente never receives or stores them.',
+            'Your date of birth and tax ID go to Stripe for identity verification, and once to Bridge, the licensed money transmitter that delivers your money. Puente passes them along without storing them.',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          rejectedOnce:
+            'Stripe couldn’t verify these details. Check your name, address, date of birth, and tax ID, then try once more. Nothing has been charged.',
           submitCta: 'Verify my identity',
           submitting: 'Submitting…',
           verifying: 'Verifying your identity…',
@@ -1162,18 +1214,41 @@ const en: Translations = {
           docsAbandoned: 'ID verification was closed before finishing. You can start it again.',
           achRequiresDocs: 'Paying from your bank account requires a photo ID first.',
         },
+        relay: {
+          verifying: 'Registering you with Bridge…',
+          formTitle: 'One more detail',
+          formHintReload:
+            'Your identity is verified. Bridge, the licensed money transmitter that delivers your money, also needs your date of birth and tax ID. Enter them once more to continue.',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          formHintCorrection:
+            'Bridge couldn’t accept these details. Check your date of birth and tax ID and try again. Nothing has been charged.',
+          submitCta: 'Continue',
+        },
         bridge: {
-          title: 'One more verification step',
+          title: 'Before you verify',
           // NEEDS LEGAL REVIEW (EN + ES) — names the partner AT the handoff,
           // matching the onboarding disclosure's precedent. Compliance review
           // 2026-08-31 flagged "our delivery partner" as under-specific at the
           // moment the user leaves our surface, even though the consent page
           // names Bridge upstream.
-          body: 'Bridge (bridge.xyz), the licensed money transmitter that delivers your money, also needs to verify your identity. You’ll complete it on Bridge’s secure page and come right back here.',
-          tosCta: 'Continue verification',
+          body: 'Bridge (bridge.xyz), the licensed money transmitter that delivers your money, asks you to accept its terms first. You’ll review them on Bridge’s secure page and come right back here.',
+          tosCta: 'Review Bridge’s terms',
           waitingTitle: 'Finishing verification',
           waitingBody:
             'We’re waiting for Bridge to confirm your verification. This page will update as soon as it’s done.',
+          waitTitle: 'Verification is still in progress',
+          waitBody:
+            'Bridge is still reviewing your verification. You can close this page and come back anytime: your transfer will be waiting here, and this page will update once Bridge finishes. Nothing has been charged.',
+          recheckCta: 'Check again',
+          personaTitle: 'One more verification step',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          personaBody:
+            'Bridge couldn’t confirm your identity from the details provided. You can verify with a photo ID on Bridge’s secure page and come right back here. Nothing has been charged.',
+          personaCta: 'Verify with a photo ID',
+          duplicateTitle: 'We need to check something',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          duplicateBody:
+            'These details match an existing verification with our delivery partner, so this transfer can’t continue right now. You haven’t been charged. Contact us at support@puentefinancial.com and we’ll sort it out.',
         },
         collect: {
           title: 'Choose how to pay',
@@ -1290,6 +1365,8 @@ const en: Translations = {
       provider_rejected:
         'Our payout partner couldn’t accept this. Check the recipient’s account details.',
       provider_unavailable: 'We couldn’t reach our payout partner. Try again in a moment.',
+      duplicate_identity:
+        'These details match an existing verification. Contact support@puentefinancial.com to continue.',
       internal_error: 'Something went wrong on our end. Please try again.',
       cancellation_requires_support: 'Please contact support to cancel this transfer.',
       generic: 'Something went wrong. Please try again.',
@@ -1640,6 +1717,8 @@ const es: Translations = {
         state: 'Estado',
         statePh: 'Selecciona el estado',
         zip: 'Código postal (ZIP)',
+        loading: 'Cargando el formulario de dirección…',
+        incomplete: 'Completa tu dirección antes de continuar.',
       },
       cta: 'Continuar',
       saving: 'Guardando…',
@@ -1898,10 +1977,17 @@ const es: Translations = {
           dobMonth: 'Mes',
           dobDay: 'Día',
           dobYear: 'Año',
-          ssn: 'Número de Seguro Social (SSN)',
+          taxIdLabel: 'Número de Seguro Social o ITIN',
+          taxIdType: {
+            ssn: 'Número de Seguro Social (SSN)',
+            itin: 'Número de Identificación Personal del Contribuyente (ITIN)',
+          },
           // NEEDS LEGAL REVIEW (EN + ES)
           ssnPrivacyNote:
-            'Tu SSN y tu fecha de nacimiento van directamente a Stripe para verificar tu identidad. Puente nunca los recibe ni los guarda.',
+            'Tu fecha de nacimiento y tu número de identificación fiscal van a Stripe para verificar tu identidad, y una sola vez a Bridge, el transmisor de dinero con licencia que entrega tu dinero. Puente los transmite sin guardarlos.',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          rejectedOnce:
+            'Stripe no pudo verificar estos datos. Revisa tu nombre, dirección, fecha de nacimiento y número de identificación fiscal, e inténtalo una vez más. No se hizo ningún cargo.',
           submitCta: 'Verificar mi identidad',
           submitting: 'Enviando…',
           verifying: 'Verificando tu identidad…',
@@ -1920,14 +2006,37 @@ const es: Translations = {
           achRequiresDocs:
             'Para pagar desde tu cuenta bancaria, primero necesitas verificar una identificación.',
         },
+        relay: {
+          verifying: 'Registrándote con Bridge…',
+          formTitle: 'Un dato más',
+          formHintReload:
+            'Tu identidad está verificada. Bridge, el transmisor de dinero con licencia que entrega tu dinero, también necesita tu fecha de nacimiento y tu número de identificación fiscal. Ingrésalos una vez más para continuar.',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          formHintCorrection:
+            'Bridge no pudo aceptar estos datos. Revisa tu fecha de nacimiento y tu número de identificación fiscal e inténtalo de nuevo. No se hizo ningún cargo.',
+          submitCta: 'Continuar',
+        },
         bridge: {
-          title: 'Un paso más de verificación',
+          title: 'Antes de verificar',
           // NEEDS LEGAL REVIEW (EN + ES) — ver la nota en la versión en inglés.
-          body: 'Bridge (bridge.xyz), el transmisor de dinero con licencia que entrega tu dinero, también necesita verificar tu identidad. Lo completarás en la página segura de Bridge y volverás aquí.',
-          tosCta: 'Continuar verificación',
+          body: 'Bridge (bridge.xyz), el transmisor de dinero con licencia que entrega tu dinero, te pide aceptar sus términos primero. Los revisarás en la página segura de Bridge y volverás aquí.',
+          tosCta: 'Revisar los términos de Bridge',
           waitingTitle: 'Terminando la verificación',
           waitingBody:
             'Estamos esperando que Bridge confirme tu verificación. Esta página se actualizará en cuanto termine.',
+          waitTitle: 'La verificación sigue en proceso',
+          waitBody:
+            'Bridge todavía está revisando tu verificación. Puedes cerrar esta página y volver cuando quieras: tu transferencia te estará esperando aquí y esta página se actualizará cuando Bridge termine. No se hizo ningún cargo.',
+          recheckCta: 'Revisar de nuevo',
+          personaTitle: 'Un paso más de verificación',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          personaBody:
+            'Bridge no pudo confirmar tu identidad con los datos proporcionados. Puedes verificarte con una identificación con foto en la página segura de Bridge y volver aquí. No se hizo ningún cargo.',
+          personaCta: 'Verificar con identificación con foto',
+          duplicateTitle: 'Necesitamos revisar algo',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          duplicateBody:
+            'Estos datos coinciden con una verificación existente con nuestro socio de entrega, así que esta transferencia no puede continuar por ahora. No se te ha cobrado. Escríbenos a support@puentefinancial.com y lo resolvemos.',
         },
         collect: {
           title: 'Elige cómo pagar',
@@ -2026,6 +2135,8 @@ const es: Translations = {
         'Nuestro socio de pagos no pudo aceptar esto. Revisa los datos de la cuenta del destinatario.',
       provider_unavailable:
         'No pudimos conectar con nuestro socio de pagos. Inténtalo en un momento.',
+      duplicate_identity:
+        'Estos datos coinciden con una verificación existente. Escribe a support@puentefinancial.com para continuar.',
       internal_error: 'Algo salió mal de nuestro lado. Inténtalo de nuevo.',
       cancellation_requires_support: 'Comunícate con soporte para cancelar esta transferencia.',
       generic: 'Algo salió mal. Inténtalo de nuevo.',
