@@ -17,6 +17,7 @@ import { authRoute } from './routes/v1/auth.js'
 import { usersRoute } from './routes/v1/users.js'
 import { consentsRoute } from './routes/v1/consents.js'
 import { bridgeCustomerRoute } from './routes/v1/bridge-customer.js'
+import { configRoute } from './routes/v1/config.js'
 import { cryptoRoute } from './routes/v1/crypto.js'
 import { recipientsRoute } from './routes/v1/recipients.js'
 import { destinationsRoute } from './routes/v1/destinations.js'
@@ -105,6 +106,7 @@ await server.register(authRoute, { prefix: '/v1' })
 await server.register(usersRoute, { prefix: '/v1' })
 await server.register(consentsRoute, { prefix: '/v1' })
 await server.register(bridgeCustomerRoute, { prefix: '/v1' })
+await server.register(configRoute, { prefix: '/v1' })
 await server.register(cryptoRoute, { prefix: '/v1' })
 await server.register(recipientsRoute, { prefix: '/v1' })
 await server.register(destinationsRoute, { prefix: '/v1' })
