@@ -7,12 +7,17 @@
 // executes the returned `effects` (fetches against our /api, SDK calls), and
 // fires the returned `captures` into PostHog. It never decides anything.
 //
-// PII rule (decision 3, ratified 2026-08-27): SSN and DOB go client → Stripe
-// SDK ONLY. The only builders allowed to produce bodies for OUR /api are the
-// build*Body/buildAddressPatch functions below, and a test feeds full KYC
-// form values (SSN, DOB) through every one of them asserting no such field
-// survives. buildKycInfo is the single deliberate exception: its output goes
-// to onramp.submitKycInfo, never to fetch.
+// PII rule (decision 3, ratified 2026-08-27; degrade clause invoked
+// 2026-09-02): the tax ID and DOB go client → Stripe SDK, and ONCE through
+// our API to Bridge (relay-never-persist). The only builders allowed to
+// produce bodies for OUR /api are the build*Body/buildAddressPatch functions
+// below, and a test feeds full KYC form values (tax ID, DOB) through every
+// one of them asserting no such field survives. Exactly two exceptions are
+// sanctioned, and the guard test asserts both DO carry the values:
+//   • buildKycInfo → onramp.submitKycInfo (client → Stripe SDK only)
+//   • buildRelayBody → the `relay` effect → POST /api/users/me/bridge-customer
+// The values live in exactly one ctx field (`relayValues`) between the form
+// and the relay, and are nulled the moment the relay answers.
 
 // ── Wire shapes ─────────────────────────────────────────────────────────────
 
@@ -28,8 +33,12 @@ export interface CryptoPrefill {
   addressState: string | null
   addressPostalCode: string | null
   bridgeCustomerId: string | null
-  /** Bridge-side status — drives the Persona fallback branch only. */
+  /** Bridge-side status — drives the post-relay polling and the Persona
+   *  fallback branch. */
   kycStatus: string
+  /** The current Bridge ToS version is on file (consents.bridge_tos). The
+   *  ToS-first gate (K6 decision 1) is skipped when true. */
+  bridgeTosAccepted: boolean
 }
 
 /** One entry of the crypto customer's verifications array (preview API — the
@@ -39,7 +48,20 @@ export interface CryptoVerification {
   status: string
 }
 
-export interface KycFormValues {
+export type TaxIdType = 'ssn' | 'itin'
+
+/** The two values Bridge needs that Stripe does not share: DOB and the tax
+ *  ID. Rendered by the KYC form (first pass) and by the two-field re-entry
+ *  form (reload edge / Bridge correction, K6 decision 12). */
+export interface IdentityFormValues {
+  dobMonth: string
+  dobDay: string
+  dobYear: string
+  taxId: string
+  taxIdType: TaxIdType
+}
+
+export interface KycFormValues extends IdentityFormValues {
   firstName: string
   lastName: string
   addressLine1: string
@@ -47,13 +69,27 @@ export interface KycFormValues {
   city: string
   state: string
   postalCode: string
-  dobMonth: string
-  dobDay: string
-  dobYear: string
-  ssn: string
 }
 
-/** l0 = minimum identity (name + address); l1 = adds DOB + SSN. The first
+/** Normalized identity values held between the KYC form and the relay. THE
+ *  ONE PII-carrying context field; nulled after RELAY_OK/RELAY_ERROR, on a
+ *  Stripe rejection, and by RETRY (fresh initial state). */
+export interface RelayValues {
+  /** YYYY-MM-DD */
+  dob: string
+  taxIdType: TaxIdType
+  /** 9 digits, dashes stripped. */
+  taxId: string
+}
+
+/** Wire body of POST /api/users/me/bridge-customer (mirrors the API's
+ *  relayBodySchema — the only route schema that names these fields). */
+export interface RelayBody {
+  dob: string
+  taxId: { type: TaxIdType; number: string }
+}
+
+/** l0 = minimum identity (name + address); l1 = adds DOB + tax ID. The first
  *  pass renders the combined l1 form (solution-plan Option A — one
  *  submitKycInfo, no L0→L1 ping-pong); l0 exists for the step-up where the
  *  400 names only the minimum tier. */
@@ -61,24 +97,47 @@ export type KycFormMode = 'l0' | 'l1'
 
 // ── Views (discriminated on `step`) ─────────────────────────────────────────
 
-export type FailKind = 'kyc_rejected' | 'unsupported' | 'link_declined' | 'retryable'
+export type FailKind =
+  | 'kyc_rejected'
+  | 'unsupported'
+  | 'link_declined'
+  | 'retryable'
+  /** Bridge already holds a verification for this tax ID (decision 9: hard
+   *  stop, support route, never auto-link). */
+  | 'duplicate_identity'
 
 export type CryptoPayView =
   | { step: 'loading' }
   | { step: 'boot_error' }
   | { step: 'intro' }
+  /** Bridge's standalone ToS click-through, BEFORE Link auth (decision 1). */
+  | { step: 'bridge_tos' }
   | { step: 'link_auth' }
   | { step: 'link_register' }
   | { step: 'link_verify' }
   | { step: 'link_abandoned' }
   | { step: 'link_exchange' }
-  | { step: 'kyc_form'; mode: KycFormMode; invalid: boolean }
+  /** `notice: 'rejected'` = Stripe refused the first L1 attempt and this is
+   *  the one correction (decision 4). */
+  | { step: 'kyc_form'; mode: KycFormMode; invalid: boolean; notice: 'rejected' | null }
   | { step: 'kyc_address_sync' }
   | { step: 'kyc_submitting' }
   | { step: 'kyc_polling'; timedOut: boolean }
   | { step: 'kyc_docs'; abandoned: boolean }
-  | { step: 'bridge_tos' }
+  /** POST relay in flight. */
+  | { step: 'relaying' }
+  /** The two-field re-entry form: `reload` = verified but the in-memory
+   *  values are gone (page reload); `correction` = Bridge 422'd the create. */
+  | { step: 'relay_form'; reason: 'reload' | 'correction'; invalid: boolean }
+  /** Bounded poll of GET /users/me for Bridge's verdict. */
   | { step: 'bridge_polling' }
+  /** Bridge rejected; fetching the reasons to pick Persona vs terminal. */
+  | { step: 'bridge_rejection' }
+  /** The hosted-KYC fallback offer. null retries = the rejection detail
+   *  could not be read; offered anyway (the server bounds retries). */
+  | { step: 'bridge_persona'; retriesRemaining: number | null }
+  /** Past the poll bound or on manual review: come back later. */
+  | { step: 'bridge_wait' }
   | { step: 'collect'; notice: 'restart' | 'reauth' | null }
   | { step: 'session_create' }
   | { step: 'checkout' }
@@ -101,10 +160,13 @@ export interface CryptoPayContext {
    *  once the poll shows verified. session_create keeps the cpt_ (a refused
    *  create never consumed it); checkout keeps the cos_. */
   stepUp: { form: 'l0' | 'l1' | 'docs'; resume: 'session_create' | 'checkout' } | null
+  /** Shared by the Stripe KYC poll and the Bridge poll — they never overlap
+   *  (afterKycVerified resets it before the Bridge leg starts). */
   pollCount: number
-  /** First sighting of bridgeCustomerId during bridge polling → the
-   *  send_bridge_tos_accepted capture fires exactly once. */
-  bridgeCustomerSeen: boolean
+  /** THE ONE PII-carrying field. See the header comment. */
+  relayValues: RelayValues | null
+  /** The single Stripe L1 correction (decision 4) has been spent. */
+  correctionUsed: boolean
   /** The treasury wallet is registered on this customer (ccw_ exists), so
    *  session create will be accepted. Survives step-up round-trips. */
   walletRegistered: boolean
@@ -129,11 +191,20 @@ export type CryptoPayEffect =
   | { kind: 'sdk_authenticate'; authIntentId: string }
   | { kind: 'exchange_and_customer'; authIntentId: string; cryptoCustomerId: string }
   | { kind: 'patch_address'; body: Record<string, string> }
+  /** Sanctioned PII carrier #1: client → Stripe SDK only. */
   | { kind: 'sdk_submit_kyc'; values: KycFormValues; mode: KycFormMode }
   | { kind: 'poll_kyc' }
   | { kind: 'sdk_verify_documents' }
+  /** Sanctioned PII carrier #2: the one POST to our API that carries the
+   *  DOB + tax ID, on their single pass to Bridge (K6). */
+  | { kind: 'relay'; body: RelayBody }
   | { kind: 'bridge_redirect' }
   | { kind: 'poll_users_me' }
+  /** GET /api/users/me/kyc-rejection → REJECTION_RESULT | REJECTION_FAILED. */
+  | { kind: 'fetch_rejection' }
+  /** POST /api/users/me/kyc-link/retry, stash the way home, navigate to the
+   *  hosted flow. Same return leg as bridge_redirect. */
+  | { kind: 'persona_retry' }
   | { kind: 'sdk_collect' }
   /** Register the treasury wallet with the SDK. Stripe's headless session
    *  create refuses a raw wallet_address
@@ -163,6 +234,9 @@ export interface CryptoApiFailure {
   code: string | null
   /** details[0].issue on kyc_required — the exact Stripe step-up code. */
   issue: string | null
+  /** details[0].path — the relay's 409 conflict names which precondition
+   *  (`bridge_tos` | `signed_agreement_id`). */
+  path: string | null
 }
 
 export type CryptoPayEvent =
@@ -196,10 +270,18 @@ export type CryptoPayEvent =
   | { type: 'START_DOCS' }
   | { type: 'DOCS_RESULT'; result: 'success' | 'abandoned' }
   | { type: 'DOCS_FAILED' }
+  | { type: 'RELAY_OK'; bridgeCustomerId: string; status: string }
+  | { type: 'RELAY_ERROR'; failure: CryptoApiFailure }
+  | { type: 'RELAY_FORM_SUBMIT'; values: IdentityFormValues }
   | { type: 'BRIDGE_CONTINUE' }
   | { type: 'BRIDGE_REDIRECT_FAILED' }
   | { type: 'USERS_ME_RESULT'; bridgeCustomerId: string | null; kycStatus: string }
   | { type: 'USERS_ME_FAILED' }
+  | { type: 'BRIDGE_RECHECK' }
+  | { type: 'REJECTION_RESULT'; reasons: string[]; retriesRemaining: number }
+  | { type: 'REJECTION_FAILED' }
+  | { type: 'START_PERSONA' }
+  | { type: 'PERSONA_REDIRECT_FAILED' }
   | {
       type: 'PM_COLLECTED'
       cryptoPaymentToken: string
@@ -223,6 +305,10 @@ export const KYC_POLL_MS = 2_500
 /** Ticks before the polling view flips to its soft-timeout copy (~90s). */
 export const KYC_POLL_TIMEOUT_TICKS = 36
 export const BRIDGE_POLL_MS = 3_000
+/** Ticks before the Bridge poll gives up on the in-place update and shows the
+ *  come-back-later card (~2 min; sandbox approvals land in seconds, live
+ *  database lookups in well under this). The draft persists either way. */
+export const BRIDGE_POLL_TIMEOUT_TICKS = 40
 
 // ── Verification readers (defensive: preview API vocabulary is unpinned) ────
 
@@ -261,10 +347,12 @@ export function kycTierFor(verifications: CryptoVerification[]): 'L1' | 'L2' {
   return doc && VERIFIED_STATUSES.has(doc.status) ? 'L2' : 'L1'
 }
 
-// ── API-bound payload builders (THE SSN/DOB GUARD SURFACE) ─────────────────
+// ── API-bound payload builders (THE TAX-ID/DOB GUARD SURFACE) ──────────────
 // Every body this client sends to our own /api is built here and nowhere
-// else. cryptoPayStep.test.ts feeds full KYC values (SSN, DOB) through each
-// builder and asserts the serialized output never matches the PII pattern.
+// else. cryptoPayStep.test.ts feeds full KYC values (tax ID, DOB) through
+// each builder and asserts the serialized output never matches the PII
+// pattern — except buildRelayBody, the sanctioned relay, which it asserts
+// DOES.
 
 export function buildAddressPatch(
   prefill: CryptoPrefill,
@@ -305,6 +393,28 @@ export function buildCheckoutBody(
   return { sessionId, paymentMethodType }
 }
 
+/** Normalize the identity fields for the relay: ISO date (zero-padded),
+ *  digits-only tax ID. Same normalization the SDK builder applies, so the
+ *  two providers see identical values. */
+export function relayValuesFrom(values: IdentityFormValues): RelayValues {
+  const pad = (part: string) => part.trim().padStart(2, '0')
+  return {
+    dob: `${values.dobYear.trim()}-${pad(values.dobMonth)}-${pad(values.dobDay)}`,
+    taxIdType: values.taxIdType,
+    taxId: digitsOnly(values.taxId),
+  }
+}
+
+/** Sanctioned PII carrier #2 (see header). The ONLY builder whose output
+ *  reaches our API with identity numbers in it. */
+export function buildRelayBody(values: RelayValues): RelayBody {
+  return { dob: values.dob, taxId: { type: values.taxIdType, number: values.taxId } }
+}
+
+function digitsOnly(value: string): string {
+  return value.replace(/[^0-9]/g, '')
+}
+
 // ── SDK payload builder (client → Stripe ONLY — never fetch this) ──────────
 
 export interface SdkKycInfo {
@@ -318,6 +428,10 @@ export interface SdkKycInfo {
     postal_code: string
     country: 'US'
   }
+  /** `us_ssn` is the only type the SDK (1.1.3) declares; an ITIN goes in the
+   *  same field (Stripe SA, 2026-08-28: ITIN accepted with an L2 step-up).
+   *  The pilot verifies. The funnel carries `taxIdType` so the two cohorts
+   *  can be told apart. */
   id_number?: { type: 'us_ssn'; value: string }
   date_of_birth?: { day: number; month: number; year: number }
 }
@@ -335,11 +449,11 @@ export function buildKycInfo(values: KycFormValues, mode: KycFormMode): SdkKycIn
       country: 'US',
     },
     // The l0 step-up asked for minimum identity only — omitting id_number and
-    // date_of_birth there means the user is never asked for an SSN a tier
+    // date_of_birth there means the user is never asked for a tax ID a tier
     // didn't demand.
     ...(mode === 'l1'
       ? {
-          id_number: { type: 'us_ssn' as const, value: values.ssn },
+          id_number: { type: 'us_ssn' as const, value: digitsOnly(values.taxId) },
           date_of_birth: {
             day: Number(values.dobDay),
             month: Number(values.dobMonth),
@@ -350,7 +464,23 @@ export function buildKycInfo(values: KycFormValues, mode: KycFormMode): SdkKycIn
   }
 }
 
-// ── Form validation (sanity only — Stripe is the authority) ────────────────
+// ── Form validation (sanity only — Stripe and Bridge are the authorities) ──
+
+/** DOB + tax ID. An ITIN is nine digits starting with 9 (IRS format); an SSN
+ *  is any nine digits — the sandbox's canonical 000000000 must pass. */
+export function invalidIdentityFields(values: IdentityFormValues): string[] {
+  const bad: string[] = []
+  const month = Number(values.dobMonth)
+  const day = Number(values.dobDay)
+  const year = Number(values.dobYear)
+  if (!Number.isInteger(month) || month < 1 || month > 12) bad.push('dobMonth')
+  if (!Number.isInteger(day) || day < 1 || day > 31) bad.push('dobDay')
+  if (!Number.isInteger(year) || year < 1900 || year > 2100) bad.push('dobYear')
+  const digits = values.taxId.replace(/-/g, '')
+  const shape = values.taxIdType === 'itin' ? /^9[0-9]{8}$/ : /^[0-9]{9}$/
+  if (!shape.test(digits)) bad.push('taxId')
+  return bad
+}
 
 export function invalidKycFields(values: KycFormValues, mode: KycFormMode): string[] {
   const bad: string[] = []
@@ -360,15 +490,7 @@ export function invalidKycFields(values: KycFormValues, mode: KycFormMode): stri
   if (!values.city.trim()) bad.push('city')
   if (!/^[A-Z]{2}$/.test(values.state)) bad.push('state')
   if (!/^[0-9]{5}(-[0-9]{4})?$/.test(values.postalCode)) bad.push('postalCode')
-  if (mode === 'l1') {
-    const month = Number(values.dobMonth)
-    const day = Number(values.dobDay)
-    const year = Number(values.dobYear)
-    if (!Number.isInteger(month) || month < 1 || month > 12) bad.push('dobMonth')
-    if (!Number.isInteger(day) || day < 1 || day > 31) bad.push('dobDay')
-    if (!Number.isInteger(year) || year < 1900 || year > 2100) bad.push('dobYear')
-    if (!/^[0-9]{9}$/.test(values.ssn.replace(/-/g, ''))) bad.push('ssn')
-  }
+  if (mode === 'l1') bad.push(...invalidIdentityFields(values))
   return bad
 }
 
@@ -387,18 +509,20 @@ export function addressEdited(prefill: CryptoPrefill, values: KycFormValues): bo
 export function classifyCryptoApiError(status: number, body: unknown): CryptoApiFailure {
   let code: string | null = null
   let issue: string | null = null
+  let path: string | null = null
   if (typeof body === 'object' && body !== null) {
     const err = (body as { error?: unknown }).error
     if (typeof err === 'object' && err !== null) {
       const e = err as { code?: unknown; details?: unknown }
       if (typeof e.code === 'string') code = e.code
       if (Array.isArray(e.details)) {
-        const first = e.details[0] as { issue?: unknown } | undefined
+        const first = e.details[0] as { issue?: unknown; path?: unknown } | undefined
         if (first && typeof first.issue === 'string') issue = first.issue
+        if (first && typeof first.path === 'string') path = first.path
       }
     }
   }
-  return { status, code, issue }
+  return { status, code, issue, path }
 }
 
 /** Stripe step-up code → which form re-enters. */
@@ -407,6 +531,19 @@ export function stepUpFormFor(issue: string | null): 'l0' | 'l1' | 'docs' | null
   if (issue === 'crypto_onramp_missing_identity_verification') return 'l1'
   if (issue === 'crypto_onramp_missing_document_verification') return 'docs'
   return null
+}
+
+/**
+ * Bridge rejection reasons that no document upload can cure. The vocabulary
+ * is unevidenced (open fact, rep asked 2026-09-02), so this is a denylist
+ * that fails TOWARD the Persona offer: an unrecognized reason gets the
+ * hosted retry, and the server's KYC_MAX_RETRIES bounds it.
+ */
+const PERMANENT_REJECTION =
+  /sanction|\bpep\b|politically exposed|prohibited|fraud|underage|unsupported|deceased|blocklist|watchlist/i
+
+export function isPermanentRejection(reasons: string[]): boolean {
+  return reasons.some((reason) => PERMANENT_REJECTION.test(reason))
 }
 
 // ── Limits pre-check (deliberately unpinned response — parse or bail) ──────
@@ -443,7 +580,8 @@ export function initialCryptoPayState(transferId: string): CryptoPayState {
       sessionId: null,
       stepUp: null,
       pollCount: 0,
-      bridgeCustomerSeen: false,
+      relayValues: null,
+      correctionUsed: false,
       walletRegistered: false,
       sdkReauthed: false,
     },
@@ -458,10 +596,16 @@ function cap(ctx: CryptoPayContext, event: string, props: Record<string, string 
   return { event, props: { transfer_id: ctx.transferId, ...props } }
 }
 
+/** Forget the identity values. Called the moment they can no longer be
+ *  relayed (relay answered, customer already exists, Stripe rejected). */
+function dropRelayValues(ctx: CryptoPayContext): CryptoPayContext {
+  return ctx.relayValues ? { ...ctx, relayValues: null } : ctx
+}
+
 /**
  * Where a boot lands. Everything except a settled rejection goes through the
- * intro → Link-auth path, EVEN when the server already knows this user's
- * crypto customer.
+ * intro → (ToS) → Link-auth path, EVEN when the server already knows this
+ * user's crypto customer.
  *
  * Why (found on the 2026-08-28 drive, in a fresh browser): our server's
  * OAuth token and the SDK's Link session are DIFFERENT credentials living in
@@ -482,6 +626,8 @@ function cap(ctx: CryptoPayContext, event: string, props: Record<string, string 
 function stepAfterBoot(ctx: CryptoPayContext): Transition {
   if (kycOutcomeFor(ctx.verifications) === 'rejected') {
     // The one shortcut worth keeping: a settled rejection needs no SDK.
+    // (A rejection is only correctable in the session it happened in —
+    // after a reload the correction has been spent as far as we can tell.)
     return {
       state: { view: { step: 'failed', kind: 'kyc_rejected' }, ctx },
       effects: [],
@@ -491,52 +637,94 @@ function stepAfterBoot(ctx: CryptoPayContext): Transition {
   return { state: { view: { step: 'intro' }, ctx }, effects: [], captures: [] }
 }
 
-/** Where a verified Stripe KYC goes next: the Persona/Bridge fallback gate
- *  (decision 2 — BEFORE payment, ratified 2026-08-28), then payment. */
-function afterStripeKycVerified(ctx: CryptoPayContext): Transition {
-  const prefill = ctx.prefill
-  if (prefill && !prefill.bridgeCustomerId) {
+/** Where a known Bridge status goes (entered from the relay's answer, from a
+ *  verified exchange with an existing customer, or from the poll). Pending
+ *  statuses enter the bounded poll fresh (pollCount 0). */
+function routeByBridgeStatus(ctx: CryptoPayContext, kycStatus: string): Transition {
+  if (kycStatus === 'approved') {
     return {
-      state: { view: { step: 'bridge_tos' }, ctx },
-      effects: [],
-      captures: [cap(ctx, 'send_bridge_fallback_started')],
+      state: { view: { step: 'collect', notice: null }, ctx },
+      effects: [{ kind: 'sdk_collect' }],
+      captures: [cap(ctx, 'send_bridge_kyc_approved')],
     }
   }
-  if (prefill && prefill.bridgeCustomerId && prefill.kycStatus === 'rejected') {
+  if (kycStatus === 'rejected') {
     return {
-      state: { view: { step: 'failed', kind: 'kyc_rejected' }, ctx },
-      effects: [],
-      captures: [cap(ctx, 'send_kyc_rejected', { code: 'bridge_rejected' })],
+      state: { view: { step: 'bridge_rejection' }, ctx },
+      effects: [{ kind: 'fetch_rejection' }],
+      captures: [cap(ctx, 'send_bridge_kyc_rejected')],
     }
   }
-  if (prefill && prefill.bridgeCustomerId && prefill.kycStatus !== 'approved') {
+  if (kycStatus === 'manual_review') {
     return {
-      state: {
-        view: { step: 'bridge_polling' },
-        ctx: { ...ctx, bridgeCustomerSeen: true },
-      },
-      effects: [{ kind: 'poll_users_me' }],
-      captures: [],
+      state: { view: { step: 'bridge_wait' }, ctx },
+      effects: [],
+      captures: [cap(ctx, 'send_bridge_wait', { reason: 'manual_review' })],
     }
   }
   return {
-    state: { view: { step: 'collect', notice: null }, ctx },
-    effects: [{ kind: 'sdk_collect' }],
+    state: { view: { step: 'bridge_polling' }, ctx: { ...ctx, pollCount: 0 } },
+    effects: [{ kind: 'poll_users_me' }],
     captures: [],
   }
 }
 
+/** One more Bridge poll, or the come-back-later card at the bound. */
+function bridgePollTick(ctx: CryptoPayContext): Transition {
+  const next = { ...ctx, pollCount: ctx.pollCount + 1 }
+  if (next.pollCount >= BRIDGE_POLL_TIMEOUT_TICKS) {
+    return {
+      state: { view: { step: 'bridge_wait' }, ctx: next },
+      effects: [],
+      captures: [cap(next, 'send_bridge_wait', { reason: 'timeout' })],
+    }
+  }
+  return {
+    state: { view: { step: 'bridge_polling' }, ctx: next },
+    effects: [{ kind: 'poll_users_me' }],
+    captures: [],
+  }
+}
+
+/** POST the relay. Requires ctx.relayValues (callers guarantee it). */
+function startRelay(ctx: CryptoPayContext, reason: 'verified' | 'reload' | 'correction'): Transition {
+  const values = ctx.relayValues!
+  return {
+    state: { view: { step: 'relaying' }, ctx },
+    effects: [{ kind: 'relay', body: buildRelayBody(values) }],
+    captures: [cap(ctx, 'send_bridge_relay_started', { taxIdType: values.taxIdType, reason })],
+  }
+}
+
+/** Where a verified Stripe KYC goes next (decision 2, ratified 2026-08-28:
+ *  the Bridge gate sits BEFORE payment). K6: with no Bridge customer yet the
+ *  relay runs from the values the KYC form left in ctx; after a reload those
+ *  are gone and the two-field form asks again. */
+function afterStripeKycVerified(ctx: CryptoPayContext): Transition {
+  const prefill = ctx.prefill
+  if (prefill?.bridgeCustomerId) {
+    return routeByBridgeStatus(dropRelayValues(ctx), prefill.kycStatus)
+  }
+  if (ctx.relayValues) return startRelay(ctx, 'verified')
+  return {
+    state: { view: { step: 'relay_form', reason: 'reload', invalid: false }, ctx },
+    effects: [],
+    captures: [cap(ctx, 'send_relay_form_viewed', { reason: 'reload' })],
+  }
+}
+
 /** The KYC poll settled verified: resume a pending step-up, else continue the
- *  first-time flow. */
+ *  first-time flow. A step-up happens past the Bridge gate (the customer
+ *  exists), so the identity values can never be relayed from here. */
 function afterKycVerified(ctx: CryptoPayContext, verifications: CryptoVerification[]): Transition {
   const next = { ...ctx, verifications, pollCount: 0 }
   const verifiedCap = cap(next, 'send_kyc_verified', { tier: kycTierFor(verifications) })
   if (next.stepUp?.resume === 'session_create' && next.paymentTokenId) {
-    const t = startSessionCreate({ ...next, stepUp: null })
+    const t = startSessionCreate({ ...dropRelayValues(next), stepUp: null })
     return { ...t, captures: [verifiedCap, ...t.captures] }
   }
   if (next.stepUp?.resume === 'checkout' && next.sessionId) {
-    const resumed = { ...next, stepUp: null }
+    const resumed = { ...dropRelayValues(next), stepUp: null }
     return {
       state: { view: { step: 'checkout' }, ctx: resumed },
       effects: [{ kind: 'sdk_checkout', sessionId: resumed.sessionId! }],
@@ -592,7 +780,7 @@ function handleMoneyCallError(
     if (form) {
       const next = { ...ctx, stepUp: { form, resume } }
       return {
-        state: { view: { step: 'kyc_form', mode: form, invalid: false }, ctx: next },
+        state: { view: { step: 'kyc_form', mode: form, invalid: false, notice: null }, ctx: next },
         effects: [],
         captures: [cap(next, 'send_kyc_form_viewed', { mode: form })],
       }
@@ -661,6 +849,18 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
 
     case 'CONTINUE': {
       if (view.step !== 'intro') return stay()
+      // ToS first (K6 decision 1): Bridge's click-through precedes Link auth
+      // for everyone who has neither the current ToS on file nor a Bridge
+      // customer already (a pre-K6 customer accepted through the hosted
+      // flow).
+      const p = ctx.prefill
+      if (p && !p.bridgeTosAccepted && !p.bridgeCustomerId) {
+        return {
+          state: { view: { step: 'bridge_tos' }, ctx },
+          effects: [],
+          captures: [cap(ctx, 'send_bridge_tos_viewed', { reason: 'first' })],
+        }
+      }
       return {
         state: { view: { step: 'link_auth' }, ctx },
         effects: [{ kind: 'create_intent' }],
@@ -774,7 +974,7 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
         }
       }
       return {
-        state: { view: { step: 'kyc_form', mode: 'l1', invalid: false }, ctx: next },
+        state: { view: { step: 'kyc_form', mode: 'l1', invalid: false, notice: null }, ctx: next },
         effects: [],
         captures: [created, cap(next, 'send_kyc_form_viewed', { mode: 'l1' })],
       }
@@ -791,28 +991,35 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
       const mode = view.mode
       if (invalidKycFields(event.values, mode).length > 0) {
         return {
-          state: { view: { step: 'kyc_form', mode, invalid: true }, ctx },
+          state: { view: { step: 'kyc_form', mode, invalid: true, notice: view.notice }, ctx },
           effects: [],
           captures: [],
         }
       }
-      if (event.addressEdited && ctx.prefill) {
+      // The l1 form is the one place the identity values enter the machine;
+      // they wait in ctx for the relay that follows Stripe's verdict.
+      const next = mode === 'l1' ? { ...ctx, relayValues: relayValuesFrom(event.values) } : ctx
+      const submitted = cap(next, 'send_kyc_submitted', {
+        mode,
+        ...(mode === 'l1' ? { taxIdType: event.values.taxIdType } : {}),
+      })
+      if (event.addressEdited && next.prefill) {
         return {
-          state: { view: { step: 'kyc_address_sync' }, ctx },
-          effects: [{ kind: 'patch_address', body: buildAddressPatch(ctx.prefill, event.values) }],
-          captures: [cap(ctx, 'send_kyc_submitted', { mode })],
+          state: { view: { step: 'kyc_address_sync' }, ctx: next },
+          effects: [{ kind: 'patch_address', body: buildAddressPatch(next.prefill, event.values) }],
+          captures: [submitted],
         }
       }
       return {
-        state: { view: { step: 'kyc_submitting' }, ctx },
+        state: { view: { step: 'kyc_submitting' }, ctx: next },
         effects: [{ kind: 'sdk_submit_kyc', values: event.values, mode }],
-        captures: [cap(ctx, 'send_kyc_submitted', { mode })],
+        captures: [submitted],
       }
     }
     case 'KYC_INVALID': {
       if (view.step !== 'kyc_form') return stay()
       return {
-        state: { view: { step: 'kyc_form', mode: view.mode, invalid: true }, ctx },
+        state: { view: { step: 'kyc_form', mode: view.mode, invalid: true, notice: view.notice }, ctx },
         effects: [],
         captures: [],
       }
@@ -845,9 +1052,10 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
     }
     case 'ADDRESS_SYNC_FAILED': {
       // The all-or-none PATCH refused (per-field details) — back to the form.
+      // The form resubmits everything, so the held values are dropped now.
       const mode = ctx.stepUp?.form === 'l0' ? 'l0' : 'l1'
       return {
-        state: { view: { step: 'kyc_form', mode, invalid: true }, ctx },
+        state: { view: { step: 'kyc_form', mode, invalid: true, notice: null }, ctx: dropRelayValues(ctx) },
         effects: [],
         captures: [],
       }
@@ -864,7 +1072,7 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
     case 'KYC_SUBMIT_FAILED': {
       const mode = ctx.stepUp?.form === 'l0' ? 'l0' : 'l1'
       return {
-        state: { view: { step: 'kyc_form', mode, invalid: true }, ctx },
+        state: { view: { step: 'kyc_form', mode, invalid: true, notice: null }, ctx: dropRelayValues(ctx) },
         effects: [],
         captures: [cap(ctx, 'send_kyc_rejected', { code: 'submit_failed' })],
       }
@@ -875,7 +1083,23 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
       const outcome = kycOutcomeFor(event.verifications)
       if (outcome === 'verified') return afterKycVerified(ctx, event.verifications)
       if (outcome === 'rejected') {
-        const next = { ...ctx, verifications: event.verifications }
+        // Decision 4: one correction, then terminal. The held values are
+        // dropped either way — the form re-enters them or nothing does.
+        if (!ctx.correctionUsed) {
+          const next: CryptoPayContext = {
+            ...ctx,
+            verifications: event.verifications,
+            correctionUsed: true,
+            relayValues: null,
+          }
+          const mode = ctx.stepUp?.form === 'l0' ? 'l0' : 'l1'
+          return {
+            state: { view: { step: 'kyc_form', mode, invalid: false, notice: 'rejected' }, ctx: next },
+            effects: [],
+            captures: [cap(next, 'send_kyc_correction_offered')],
+          }
+        }
+        const next: CryptoPayContext = { ...ctx, verifications: event.verifications, relayValues: null }
         return {
           state: { view: { step: 'failed', kind: 'kyc_rejected' }, ctx: next },
           effects: [],
@@ -946,11 +1170,86 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
         captures: [cap(ctx, 'send_kyc_docs_completed', { result: 'failed' })],
       }
 
+    case 'RELAY_OK': {
+      if (view.step !== 'relaying') return stay()
+      // The values have done their one job. The customer now exists (or
+      // already did — the route no-ops), so route on Bridge's status.
+      const base = dropRelayValues(ctx)
+      const next: CryptoPayContext = {
+        ...base,
+        prefill: base.prefill
+          ? { ...base.prefill, bridgeCustomerId: event.bridgeCustomerId, kycStatus: event.status }
+          : base.prefill,
+      }
+      const created = cap(next, 'send_bridge_customer_created', { status: event.status })
+      const t = routeByBridgeStatus(next, event.status)
+      return { ...t, captures: [created, ...t.captures] }
+    }
+    case 'RELAY_ERROR': {
+      if (view.step !== 'relaying') return stay()
+      // Whatever the answer, the values are gone; every path that needs them
+      // again re-enters them through a form.
+      const next = dropRelayValues(ctx)
+      const f = event.failure
+      const failed = cap(next, 'send_bridge_relay_failed', {
+        code: f.code ?? `http_${f.status}`,
+        ...(f.path ? { path: f.path } : {}),
+      })
+      if (f.status === 409 && f.code === 'duplicate_identity') {
+        return {
+          state: { view: { step: 'failed', kind: 'duplicate_identity' }, ctx: next },
+          effects: [],
+          captures: [failed],
+        }
+      }
+      if (f.status === 422) {
+        return {
+          state: { view: { step: 'relay_form', reason: 'correction', invalid: false }, ctx: next },
+          effects: [],
+          captures: [failed, cap(next, 'send_relay_form_viewed', { reason: 'correction' })],
+        }
+      }
+      if (f.status === 409 && f.code === 'conflict') {
+        // bridge_tos missing, or the agreement id was consumed (pointer
+        // already cleared server-side): the click-through runs again.
+        return {
+          state: { view: { step: 'bridge_tos' }, ctx: next },
+          effects: [],
+          captures: [failed, cap(next, 'send_bridge_tos_viewed', { reason: f.path ?? 'conflict' })],
+        }
+      }
+      if (f.status === 403 && f.code === 'kyc_required') {
+        // The server's view of Stripe's tier disagrees with ours: re-verify.
+        return {
+          state: { view: { step: 'kyc_form', mode: 'l1', invalid: false, notice: null }, ctx: next },
+          effects: [],
+          captures: [failed, cap(next, 'send_kyc_form_viewed', { mode: 'l1' })],
+        }
+      }
+      return {
+        state: { view: { step: 'failed', kind: 'retryable' }, ctx: next },
+        effects: [],
+        captures: [failed],
+      }
+    }
+    case 'RELAY_FORM_SUBMIT': {
+      if (view.step !== 'relay_form') return stay()
+      if (invalidIdentityFields(event.values).length > 0) {
+        return {
+          state: { view: { step: 'relay_form', reason: view.reason, invalid: true }, ctx },
+          effects: [],
+          captures: [],
+        }
+      }
+      return startRelay({ ...ctx, relayValues: relayValuesFrom(event.values) }, view.reason)
+    }
+
     case 'BRIDGE_CONTINUE': {
-      if (view.step !== 'bridge_tos' && view.step !== 'bridge_polling') return stay()
-      // The effect sets the kyc_next cookie and navigates away — no state to
-      // keep; the return leg reboots the machine and lands via stepAfterBoot.
-      return stay([{ kind: 'bridge_redirect' }])
+      if (view.step !== 'bridge_tos') return stay()
+      // The effect sets the kyc_next/kyc_locale cookies and navigates away —
+      // no state to keep; the return leg records the consent and reboots the
+      // machine, which then passes the gate.
+      return stay([{ kind: 'bridge_redirect' }], [cap(ctx, 'send_bridge_tos_started')])
     }
     case 'BRIDGE_REDIRECT_FAILED':
       return {
@@ -960,39 +1259,77 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
       }
     case 'USERS_ME_RESULT': {
       if (view.step !== 'bridge_polling') return stay()
-      const firstSighting = !ctx.bridgeCustomerSeen && event.bridgeCustomerId !== null
       const next = {
         ...ctx,
-        bridgeCustomerSeen: ctx.bridgeCustomerSeen || event.bridgeCustomerId !== null,
         prefill: ctx.prefill
           ? { ...ctx.prefill, bridgeCustomerId: event.bridgeCustomerId, kycStatus: event.kycStatus }
           : ctx.prefill,
       }
-      const sight = firstSighting ? [cap(next, 'send_bridge_tos_accepted')] : []
-      if (event.bridgeCustomerId && event.kycStatus === 'approved') {
-        return {
-          state: { view: { step: 'collect', notice: null }, ctx: next },
-          effects: [{ kind: 'sdk_collect' }],
-          captures: [...sight, cap(next, 'send_bridge_kyc_approved')],
-        }
-      }
-      if (event.bridgeCustomerId && event.kycStatus === 'rejected') {
-        return {
-          state: { view: { step: 'failed', kind: 'kyc_rejected' }, ctx: next },
-          effects: [],
-          captures: [...sight, cap(next, 'send_kyc_rejected', { code: 'bridge_rejected' })],
-        }
-      }
-      return {
-        state: { view: { step: 'bridge_polling' }, ctx: next },
-        effects: [{ kind: 'poll_users_me' }],
-        captures: sight,
-      }
+      const settled =
+        event.kycStatus === 'approved' ||
+        event.kycStatus === 'rejected' ||
+        event.kycStatus === 'manual_review'
+      if (event.bridgeCustomerId && settled) return routeByBridgeStatus(next, event.kycStatus)
+      return bridgePollTick(next)
     }
     case 'USERS_ME_FAILED': {
       if (view.step !== 'bridge_polling') return stay()
-      return stay([{ kind: 'poll_users_me' }])
+      // Transient read failure counts toward the same bound — the wait card
+      // is the honest vent either way.
+      return bridgePollTick(ctx)
     }
+    case 'BRIDGE_RECHECK': {
+      if (view.step !== 'bridge_wait') return stay()
+      return {
+        state: { view: { step: 'bridge_polling' }, ctx: { ...ctx, pollCount: 0 } },
+        effects: [{ kind: 'poll_users_me' }],
+        captures: [cap(ctx, 'send_bridge_recheck')],
+      }
+    }
+
+    case 'REJECTION_RESULT': {
+      if (view.step !== 'bridge_rejection') return stay()
+      // Decisions 5-6: Persona is the fallback for what a document can cure;
+      // a permanent reason (or no retries left) is terminal.
+      const permanent = isPermanentRejection(event.reasons)
+      if (event.retriesRemaining > 0 && !permanent) {
+        return {
+          state: { view: { step: 'bridge_persona', retriesRemaining: event.retriesRemaining }, ctx },
+          effects: [],
+          captures: [cap(ctx, 'send_bridge_persona_offered', { retriesRemaining: event.retriesRemaining })],
+        }
+      }
+      return {
+        state: { view: { step: 'failed', kind: 'kyc_rejected' }, ctx },
+        effects: [],
+        captures: [
+          cap(ctx, 'send_kyc_rejected', {
+            code: 'bridge_rejected',
+            reason: permanent ? 'permanent' : 'retries_exhausted',
+          }),
+        ],
+      }
+    }
+    case 'REJECTION_FAILED': {
+      if (view.step !== 'bridge_rejection') return stay()
+      // Could not read the reasons: fail toward the offer. The server bounds
+      // retries, so an exhausted user gets a refused link, never a loop.
+      return {
+        state: { view: { step: 'bridge_persona', retriesRemaining: null }, ctx },
+        effects: [],
+        captures: [cap(ctx, 'send_bridge_persona_offered', { retriesRemaining: 'unknown' })],
+      }
+    }
+    case 'START_PERSONA': {
+      if (view.step !== 'bridge_persona') return stay()
+      return stay([{ kind: 'persona_retry' }], [cap(ctx, 'send_bridge_persona_started')])
+    }
+    case 'PERSONA_REDIRECT_FAILED':
+      return {
+        state: { view: { step: 'failed', kind: 'retryable' }, ctx },
+        effects: [],
+        captures: [cap(ctx, 'send_bridge_persona_failed')],
+      }
 
     case 'PM_COLLECTED': {
       const next: CryptoPayContext = {
@@ -1077,6 +1414,7 @@ export function transition(state: CryptoPayState, event: CryptoPayEvent): Transi
     case 'RETRY': {
       // Full reboot on purpose: stepAfterBoot reconstructs the position from
       // server truth, which is simpler and safer than resuming a guessed one.
+      // The fresh initial state also drops any held identity values.
       if (view.step !== 'failed' && view.step !== 'boot_error') return stay()
       return {
         state: initialCryptoPayState(ctx.transferId),
