@@ -73,6 +73,7 @@ const envMock = vi.hoisted(() => ({
   FX_MAX_DRIFT_BPS: 200,
   FX_MAX_QUOTE_AGE_MINUTES: 240,
   BRIDGE_TREASURY_WALLET_ID: 'wallet_1',
+  SUBMIT_RETRY_CEILING_MINUTES: 30,
 }))
 vi.mock('../config/env.js', () => ({ env: envMock }))
 
@@ -124,7 +125,7 @@ function setupHappy(overrides: Partial<typeof baseTransfer> = {}) {
   const claim = chain({ data: [{ id: 'tr-1' }], error: null })
   route('transfers', load, claim)
   route('quotes', chain({ data: { source_rate: 20.100251, created_at: new Date().toISOString() }, error: null }))
-  route('users', chain({ data: { bridge_customer_id: 'cust_1' }, error: null }))
+  route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'approved' }, error: null }))
   route('payment_events', chain({ data: { id: 'ev-1' }, error: null }))
   payability.mockResolvedValue({ payable: true, providerAccountRef: 'ext_1' })
   floatCeiling.mockResolvedValue({ tripped: false, balanceMinor: 0, ceilingMinor: 100 })
@@ -148,6 +149,7 @@ beforeEach(() => {
   envMock.FIRST_TRANSFER_HOLD = false
   envMock.FX_MAX_DRIFT_BPS = 200
   envMock.FX_MAX_QUOTE_AGE_MINUTES = 240
+  envMock.SUBMIT_RETRY_CEILING_MINUTES = 30
   envMock.BRIDGE_TREASURY_WALLET_ID = 'wallet_1'
   from.mockImplementation((table: string) => {
     const next = queues[table]?.shift()
@@ -288,6 +290,12 @@ describe('submitPayout — uncleared-exposure gates (slice-8 O3)', () => {
 })
 
 describe('submitPayout — holds', () => {
+  // K6: the sender read now precedes payability, so every hold scenario
+  // below runs as an approved sender (the KYC gate has its own describe).
+  beforeEach(() => {
+    route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'approved' }, error: null }))
+  })
+
   it('payability failure → payability hold, no float/fx checks, no Bridge call', async () => {
     const load = chain({ data: baseTransfer, error: null })
     const hold = chain({ data: [{ id: 'tr-1' }], error: null })
@@ -514,6 +522,61 @@ describe('submitPayout — submission and transition', () => {
   })
 })
 
+// K6 decision 8: the sender's Bridge KYC gates submission, before payability,
+// and the hold it places is the first one the system releases on its own.
+describe('submitPayout — sender_kyc_pending (K6)', () => {
+  it('unapproved sender → sender_kyc_pending hold before payability, no Bridge call', async () => {
+    const { load, claim } = setupHappy()
+    route('transfers', load, chain({ data: [{ id: 'tr-1' }], error: null }), claim)
+    route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'pending' }, error: null }))
+
+    expect(await submitPayout('tr-1')).toBe(0)
+
+    expect(payability).not.toHaveBeenCalled()
+    expect(createPayout).not.toHaveBeenCalled()
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-hold', 'sender_kyc_pending'])
+    expect(captureMessage).toHaveBeenCalledWith('payout hold placed: sender_kyc_pending', 'warning')
+  })
+
+  it('a sender with no Bridge customer at all is held the same way (not thrown into retry)', async () => {
+    const { load, claim } = setupHappy()
+    route('transfers', load, chain({ data: [{ id: 'tr-1' }], error: null }), claim)
+    route('users', chain({ data: { bridge_customer_id: null, kyc_status: 'not_started' }, error: null }))
+
+    expect(await submitPayout('tr-1')).toBe(0)
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-hold', 'sender_kyc_pending'])
+    expect(payability).not.toHaveBeenCalled()
+  })
+
+  it('approved sender → no hold, one users read serves the KYC gate and on_behalf_of', async () => {
+    setupHappy()
+    expect(await submitPayout('tr-1')).toBe(1)
+    expect(setFingerprint).not.toHaveBeenCalledWith(['payout-hold', 'sender_kyc_pending'])
+    expect(createPayout).toHaveBeenCalledWith(expect.objectContaining({ onBehalfOf: 'cust_1' }))
+    // The users queue held exactly one chain and it was consumed once.
+    expect(queues.users).toEqual([])
+  })
+
+  it('crash recovery skips the KYC gate like every other guard', async () => {
+    const load = chain({
+      data: { ...baseTransfer, submit_attempted_at: '2026-07-20T12:00:00.000Z' },
+      error: null,
+    })
+    route('transfers', load)
+    route('payout_destinations', chain({ data: { provider_account_ref: 'ext_1' }, error: null }))
+    route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'pending' }, error: null }))
+    route('payment_events', chain({ data: { id: 'ev-1' }, error: null }))
+    createPayout.mockResolvedValue({ bridgeTransferId: 'bt-1', state: 'awaiting_funds', sourceAmount: '198.55' })
+    parseMinor.mockReturnValue(19855)
+    ledgerEntries.mockReturnValue([{ account_code: 'due_from_bridge' }])
+    transition.mockResolvedValue({})
+
+    expect(await submitPayout('tr-1')).toBe(1)
+    expect(setFingerprint).not.toHaveBeenCalledWith(['payout-hold', 'sender_kyc_pending'])
+    expect(createPayout).toHaveBeenCalledWith(expect.objectContaining({ onBehalfOf: 'cust_1' }))
+  })
+})
+
 describe('submitPayout — crash recovery', () => {
   it('claimed row: skips every guard, re-POSTs from the raw destination ref', async () => {
     // Arm every O3 gate hostile: if recovery consulted them at all, this run
@@ -551,6 +614,78 @@ describe('submitPayout — crash recovery', () => {
     )
     const [input] = transition.mock.calls[0] as [Record<string, unknown>]
     expect((input.metadata as Record<string, unknown>).driftBps).toBeUndefined()
+  })
+
+  // The 2026-08-25 staging burn: a $100 test send against a 47 USDC sandbox
+  // treasury 400'd on every attempt. A 400 is retry-safe, but the drain it
+  // assumes never happened, so the 1-min sweep looped for 23.5h and produced
+  // 1,378 Sentry events with no hold for ops to see.
+  describe('persistent 400 retry ceiling', () => {
+    const attemptingSince = (minutesAgo: number) =>
+      new Date(Date.now() - minutesAgo * 60_000).toISOString()
+
+    function setupRecovery400(minutesAgo: number) {
+      const load = chain({
+        data: { ...baseTransfer, submit_attempted_at: attemptingSince(minutesAgo) },
+        error: null,
+      })
+      const hold = chain({ data: [{ id: 'tr-1' }], error: null })
+      route('transfers', load, hold)
+      route('payout_destinations', chain({ data: { provider_account_ref: 'ext_1' }, error: null }))
+      route('users', chain({ data: { bridge_customer_id: 'cust_1' }, error: null }))
+      createPayout.mockRejectedValue(new BridgeApiError(400, {}))
+      return { hold }
+    }
+
+    it('inside the ceiling → still rethrows, so a genuine drain gets its retries', async () => {
+      setupRecovery400(29)
+      await expect(submitPayout('tr-1')).rejects.toThrow()
+      expect(transition).not.toHaveBeenCalled()
+    })
+
+    it('past the ceiling → submit_error hold, no throw, no transition', async () => {
+      const { hold } = setupRecovery400(31)
+      expect(await submitPayout('tr-1')).toBe(0)
+      expect(hold.update).toHaveBeenCalledWith(
+        expect.objectContaining({ payout_hold_reason: 'submit_error' }),
+      )
+      expect(transition).not.toHaveBeenCalled()
+    })
+
+    it('the hold ends the loop: a held row is refused before the Bridge call', async () => {
+      route(
+        'transfers',
+        chain({
+          data: {
+            ...baseTransfer,
+            submit_attempted_at: attemptingSince(60),
+            payout_hold_reason: 'submit_error',
+          },
+          error: null,
+        }),
+      )
+      expect(await submitPayout('tr-1')).toBe(0)
+      expect(createPayout).not.toHaveBeenCalled()
+    })
+
+    it('pages exactly once — the hold write is what stops the re-page', async () => {
+      const { hold } = setupRecovery400(31)
+      await submitPayout('tr-1')
+      expect(captureMessage).toHaveBeenCalledTimes(1)
+      expect(captureMessage).toHaveBeenCalledWith(
+        expect.stringContaining('payout hold placed'),
+        'warning',
+      )
+      expect(hold.update).toHaveBeenCalledTimes(1)
+    })
+
+    it('a first attempt (never claimed) always retries, whatever the ceiling', async () => {
+      envMock.SUBMIT_RETRY_CEILING_MINUTES = 1
+      setupHappy()
+      createPayout.mockRejectedValue(new BridgeApiError(400, {}))
+      await expect(submitPayout('tr-1')).rejects.toThrow()
+      expect(queues.transfers).toHaveLength(0) // no hold write
+    })
   })
 
   it('recovery with a missing destination ref → submit_error hold, no Bridge call', async () => {

@@ -2,7 +2,7 @@ import { env } from '../config/env.js'
 import { supabaseAdmin } from './supabase.js'
 import { getAccountBalance } from './ledger.js'
 import { getBridgeWalletBalances, listBridgeTransfers } from './bridge.js'
-import { getFundingProcessor } from './funding/index.js'
+import { getFundingProcessor, processorNameFor, type RailRow } from './funding/index.js'
 import { pollPayouts } from '../jobs/payout-poll.js'
 
 // The reconciliation checks registry (slice-8 O2, docs/runbooks/reconciliation.md).
@@ -63,8 +63,10 @@ const PENDING_PAYMENT_REAPER_GRACE_MS = 6 * 60 * 60_000
 // MANUAL_PENDING_MAX_AGE_DAYS before reaping — so only past THAT clock (plus
 // grace) does a PENDING_PAYMENT row mean the reaper is dead. Webhook rails
 // keep the 40-minute bound.
-function pendingPaymentStaleMs(): number {
-  if (env.FUNDING_PROCESSOR !== 'manual') return PENDING_PAYMENT_STALE_WEBHOOK_MS
+// Per ROW since audit corner 1 (same rule as reconcile-pending's clock): a
+// null funding_processor falls back to the process rail.
+function pendingPaymentStaleMs(row: RailRow): number {
+  if (processorNameFor(row) !== 'manual') return PENDING_PAYMENT_STALE_WEBHOOK_MS
   return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60_000 + PENDING_PAYMENT_REAPER_GRACE_MS
 }
 const FUNDED_UNHELD_STALE_MS = 2 * 60 * 60_000 // sweep enqueues every minute; hours stuck = pipeline down
@@ -72,6 +74,28 @@ const SUBMITTED_STALE_MS = 24 * 60 * 60_000 // SPEI settles in seconds; a day in
 const PAYOUT_FAILED_UNREFUNDED_STALE_MS = 24 * 60 * 60_000 // sender owed, nothing in motion
 const UNDER_REVIEW_STALE_MS = 24 * 60 * 60_000 // cancellation-review SLA guard (O1 owns the business-day version)
 const FUNDING_UNCLEARED_STALE_MS = 8 * 24 * 60 * 60_000 // ACH T+4 business days + weekend buffer
+// Ops holds wait on a HUMAN, not on the ACH clock: payout-submit sets exactly
+// these four reasons and the runbook owns every one of them. Bucketing them
+// behind the 8-day uncleared-funding window meant a hold's single page at hold
+// time was the ONLY signal for a week — stuck-watch skips held rows entirely
+// (isDeliberateFundedWait), so nothing re-raised them. 24h matches the other
+// buckets where a human owes an action (payout-failed-unrefunded, under-review).
+// Surfaced reviewing the 2026-09-01 submit_error hold, which lands here.
+//
+// A reason OUTSIDE this set keeps the clearing-window bound: a policy-shaped
+// hold that legitimately dwells until funding clears is not overdue at 24h.
+// 'sender_kyc_pending' (K6) is the deliberate exception: it is auto-released
+// by the Bridge approval webhook and nobody owes an action while Bridge
+// reviews, so a 24h page would fire on every ordinary manual review. Money
+// FUNDED for the full 8-day window with KYC still unresolved IS a human's
+// problem, and that bound re-raises it (runbooks/payout-holds.md).
+const HUMAN_ACTIONED_HOLD_REASONS = new Set([
+  'fx_drift',
+  'payability',
+  'submit_error',
+  'velocity_review',
+])
+const FUNDED_HELD_ACTIONABLE_STALE_MS = 24 * 60 * 60_000
 const ORPHAN_WINDOW_MS = 7 * 24 * 60 * 60_000
 const LIST_LIMIT = 100
 // PostgREST caps every response at max_rows (1000, supabase/config.toml) no
@@ -213,6 +237,7 @@ async function runAccountBalances(): Promise<CheckOutcome> {
 // ── Transfer aging vs known timing windows ──────────────────────────────────
 
 interface AgingRow {
+  funding_processor?: string | null
   id: string
   state: string
   created_at: string
@@ -221,6 +246,7 @@ interface AgingRow {
   completed_at: string | null
   refund_payment_ref: string | null
   payout_hold_reason: string | null
+  payout_held_at: string | null
   funding_cleared: boolean
 }
 
@@ -262,16 +288,23 @@ export function agingFindings(rows: AgingRow[], nowMs: number): CheckFinding[] {
     const fundedAge = nowMs - new Date(funded).getTime()
     switch (row.state) {
       case 'PENDING_PAYMENT':
-        if (nowMs - new Date(row.created_at).getTime() > pendingPaymentStaleMs())
+        if (nowMs - new Date(row.created_at).getTime() > pendingPaymentStaleMs(row))
           flag('pending-payment-autofail-dead', row, row.created_at)
         break
       case 'FUNDED':
         if (row.payout_hold_reason == null) {
           if (fundedAge > FUNDED_UNHELD_STALE_MS) flag('funded-unheld-stuck', row, funded)
-        } else if (fundedAge > FUNDING_UNCLEARED_STALE_MS) {
-          // Held rows legitimately dwell until clearing (~T+4) — only flag
-          // past the same bound as the uncleared-funding window.
-          flag('funded-held-overdue', row, funded)
+        } else {
+          // Anchor on when the HOLD landed, not on funding: a row funded days
+          // ago and held a minute ago is not overdue, but the funding anchor
+          // flagged it on the very next run. Rows predating the stamp fall
+          // back to the funding anchor, i.e. the old behaviour.
+          const heldAt = row.payout_held_at ?? funded
+          const heldAge = nowMs - new Date(heldAt).getTime()
+          const bound = HUMAN_ACTIONED_HOLD_REASONS.has(row.payout_hold_reason)
+            ? FUNDED_HELD_ACTIONABLE_STALE_MS
+            : FUNDING_UNCLEARED_STALE_MS
+          if (heldAge > bound) flag('funded-held-overdue', row, heldAt)
         }
         break
       case 'SUBMITTED':
@@ -319,7 +352,7 @@ async function runTransferAging(): Promise<CheckOutcome> {
   const { data, error } = await supabaseAdmin
     .from('transfers')
     .select(
-      'id, state, created_at, payment_at, submit_attempted_at, completed_at, refund_payment_ref, payout_hold_reason, funding_cleared',
+      'id, state, created_at, payment_at, submit_attempted_at, completed_at, refund_payment_ref, payout_hold_reason, payout_held_at, funding_cleared, funding_processor',
     )
     .or(AGING_OR_FILTER)
     .limit(ROW_BOUND)

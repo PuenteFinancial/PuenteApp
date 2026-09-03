@@ -18,6 +18,7 @@ const envMock = vi.hoisted(() => ({
   STUCK_SUBMITTED_AFTER_MINUTES: 30,
   STUCK_IN_FLIGHT_AFTER_MINUTES: 60,
   STUCK_UNDER_REVIEW_AFTER_HOURS: 24,
+  STUCK_MAX_PAGE_HOURS: 72,
   WAIT_FOR_CLEARING: false,
   FIRST_TRANSFER_HOLD: false,
 }))
@@ -38,7 +39,9 @@ vi.mock('@sentry/node', () => ({
   captureMessage: (...a: unknown[]) => captureMessage(...a),
 }))
 
-const { watchStuckTransfers, coarseAnchor } = await import('./stuck-watch.js')
+const { watchStuckTransfers, coarseAnchor, pageSlot, decidePage } = await import(
+  './stuck-watch.js'
+)
 
 const NOW = new Date('2026-08-01T12:00:00.000Z')
 const nowMs = NOW.getTime()
@@ -132,6 +135,7 @@ beforeEach(() => {
   envMock.STUCK_SUBMITTED_AFTER_MINUTES = 30
   envMock.STUCK_IN_FLIGHT_AFTER_MINUTES = 60
   envMock.STUCK_UNDER_REVIEW_AFTER_HOURS = 24
+  envMock.STUCK_MAX_PAGE_HOURS = 72
   envMock.WAIT_FOR_CLEARING = false
   envMock.FIRST_TRANSFER_HOLD = false
   transfersResult = { data: [], error: null }
@@ -526,5 +530,93 @@ describe('watchStuckTransfers — read posture', () => {
     await watchStuckTransfers()
     expect(warnSpy).toHaveBeenCalledWith('worker: stuck-transfer t-ev in FUNDED for 20m')
     warnSpy.mockRestore()
+  })
+})
+
+// The repeat ladder (2026-09-01 quota burn). Detection must stay instant; only
+// the "still stuck" reminder decays.
+describe('pageSlot', () => {
+  it('increments every 5 minutes through the first hour', () => {
+    expect(pageSlot(0)).toBe(0)
+    expect(pageSlot(4)).toBe(0)
+    expect(pageSlot(5)).toBe(1)
+    expect(pageSlot(55)).toBe(11)
+  })
+
+  it('increments by exactly one across every cadence boundary', () => {
+    // A boundary that skipped or repeated a slot would drop or double a page.
+    expect(pageSlot(60) - pageSlot(59)).toBe(1) // 5m  → hourly
+    expect(pageSlot(360) - pageSlot(359)).toBe(1) // hourly → 6h
+    expect(pageSlot(1440) - pageSlot(1439)).toBe(1) // 6h → daily
+  })
+
+  it('is monotonic across a 30-day dwell', () => {
+    let previous = -1
+    for (let m = 0; m < 30 * 24 * 60; m += 1) {
+      const slot = pageSlot(m)
+      expect(slot).toBeGreaterThanOrEqual(previous)
+      previous = slot
+    }
+  })
+
+  it('decays to one slot per day past 24h', () => {
+    expect(pageSlot(1440)).toBe(20)
+    expect(pageSlot(2879)).toBe(20)
+    expect(pageSlot(2880)).toBe(21)
+  })
+})
+
+describe('decidePage', () => {
+  const MIN = 60_000
+  const THRESHOLD = 30 * MIN
+  const MAX_AGE = 72 * 60 * MIN
+
+  const at = (ageMinutes: number) => decidePage(ageMinutes * MIN, THRESHOLD, MAX_AGE)
+
+  it('does not page below the threshold', () => {
+    expect(at(29)).toBe('skip')
+  })
+
+  it('pages immediately on the tick that crosses the threshold', () => {
+    // Detection speed is the one thing the ladder must not cost.
+    expect(at(31)).toBe('page')
+    expect(at(34)).toBe('page')
+  })
+
+  it('repeats every tick through the first hour past threshold', () => {
+    expect(at(36)).toBe('page')
+    expect(at(41)).toBe('page')
+  })
+
+  it('thins to hourly, then 6-hourly, then daily', () => {
+    expect(at(30 + 60)).toBe('page') // first hourly rung
+    expect(at(30 + 65)).toBe('skip')
+    expect(at(30 + 360)).toBe('page') // first 6h rung
+    expect(at(30 + 365)).toBe('skip')
+    expect(at(30 + 1440)).toBe('page') // first daily rung
+    expect(at(30 + 1445)).toBe('skip')
+  })
+
+  it('emits exactly one handoff page at the max age, then goes silent', () => {
+    expect(at(72 * 60 - 1)).not.toBe('handoff')
+    expect(at(72 * 60)).toBe('handoff')
+    expect(at(72 * 60 + 5)).toBe('skip')
+    expect(at(10 * 24 * 60)).toBe('skip')
+  })
+
+  it('collapses the real 7.1-day episode that burned the quota', () => {
+    // NODE-Z: transfer 1a334643 sat in SUBMITTED for 10,219 minutes and paged
+    // every 5 minutes — 2,036 events, 41% of a 30-day error budget.
+    let pages = 0
+    let handoffs = 0
+    for (let m = 0; m <= 10219; m += 5) {
+      const decision = at(m)
+      if (decision === 'page') pages++
+      if (decision === 'handoff') handoffs++
+    }
+    expect(handoffs).toBe(1)
+    expect(pages).toBeLessThan(25)
+    // Still detected within one tick of the 30-minute threshold.
+    expect(at(31)).toBe('page')
   })
 })

@@ -6,25 +6,31 @@ import { useLanguage } from '@/components/LanguageProvider'
 import {
   addressEdited,
   type CryptoPrefill,
+  type IdentityFormValues,
   type KycFormMode,
   type KycFormValues,
 } from '@/lib/cryptoPayStep'
+import IdentityFields from './IdentityFields'
 
-// The K5 identity form — OUR UI, prefilled from the profile. SSN and DOB are
-// rendered here but their values ONLY ever reach the reducer's KYC_SUBMIT
-// event, whose sdk_submit_kyc effect hands them to the Stripe SDK; the
-// PII-guard test in lib/cryptoPayStep.test.ts pins that no API-bound payload
-// can carry them. Dispatch-only: zero fetches in this component.
+// The K5 identity form — OUR UI, prefilled from the profile. The tax ID and
+// DOB are rendered here but their values ONLY ever reach the reducer's
+// KYC_SUBMIT event, whose sdk_submit_kyc effect hands them to the Stripe SDK
+// and whose ctx holds them for the one relay to Bridge (K6); the PII-guard
+// test in lib/cryptoPayStep.test.ts pins that no other API-bound payload can
+// carry them. Dispatch-only: zero fetches in this component.
 export default function KycForm({
   mode,
   prefill,
   invalid,
+  notice,
   busy,
   onSubmit,
 }: {
   mode: KycFormMode
   prefill: CryptoPrefill | null
   invalid: boolean
+  /** Stripe rejected the first attempt; this is the one correction. */
+  notice: 'rejected' | null
   busy: boolean
   onSubmit: (values: KycFormValues, edited: boolean) => void
 }) {
@@ -42,11 +48,14 @@ export default function KycForm({
     dobMonth: '',
     dobDay: '',
     dobYear: '',
-    ssn: '',
+    taxId: '',
+    taxIdType: 'ssn',
   }))
 
   const set = (key: keyof KycFormValues) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setValues((v) => ({ ...v, [key]: e.target.value }))
+  const setIdentity = (key: keyof IdentityFormValues, value: string) =>
+    setValues((v) => ({ ...v, [key]: value }))
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -61,6 +70,11 @@ export default function KycForm({
       <p style={{ fontSize: 13, color: 'var(--muted)', margin: '0 0 10px', lineHeight: 1.5 }}>
         {c.sub}
       </p>
+      {notice === 'rejected' && (
+        <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '0 0 10px', lineHeight: 1.5 }}>
+          {c.rejectedOnce}
+        </p>
+      )}
 
       <div className="field">
         <label htmlFor="kyc-first">{c.firstName}</label>
@@ -100,40 +114,7 @@ export default function KycForm({
         </div>
       </div>
 
-      {mode === 'l1' && (
-        <>
-          <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
-            <legend
-              style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', padding: 0, marginBottom: 4 }}
-            >
-              {c.dobLegend}
-            </legend>
-            <div style={{ display: 'flex', gap: 10 }}>
-              <div className="field" style={{ flex: 1 }}>
-                <label htmlFor="kyc-dob-m">{c.dobMonth}</label>
-                <input id="kyc-dob-m" value={values.dobMonth} onChange={set('dobMonth')} inputMode="numeric" placeholder="MM" autoComplete="bday-month" />
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label htmlFor="kyc-dob-d">{c.dobDay}</label>
-                <input id="kyc-dob-d" value={values.dobDay} onChange={set('dobDay')} inputMode="numeric" placeholder="DD" autoComplete="bday-day" />
-              </div>
-              <div className="field" style={{ flex: 1.4 }}>
-                <label htmlFor="kyc-dob-y">{c.dobYear}</label>
-                <input id="kyc-dob-y" value={values.dobYear} onChange={set('dobYear')} inputMode="numeric" placeholder="YYYY" autoComplete="bday-year" />
-              </div>
-            </div>
-          </fieldset>
-          <div className="field">
-            <label htmlFor="kyc-ssn">{c.ssn}</label>
-            {/* SSN: SDK-only destination; never autofilled from the browser,
-                never logged, never in any payload to our own API. */}
-            <input id="kyc-ssn" value={values.ssn} onChange={set('ssn')} inputMode="numeric" autoComplete="off" />
-          </div>
-          <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 10px', lineHeight: 1.5 }}>
-            {c.ssnPrivacyNote}
-          </p>
-        </>
-      )}
+      {mode === 'l1' && <IdentityFields values={values} onChange={setIdentity} />}
 
       {invalid && (
         <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '0 0 8px' }}>

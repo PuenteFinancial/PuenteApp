@@ -20,7 +20,8 @@ const refund = vi.hoisted(() => vi.fn())
 vi.mock('./funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./funding/index.js')>()
   // real undoModeForRef — the settle picks its correction batch off the ref prefix
-  return { ...actual, getFundingProcessor: () => ({ refund: (...a: unknown[]) => refund(...a) }) }
+  const fake = { refund: (...a: unknown[]) => refund(...a) }
+  return { ...actual, getFundingProcessor: () => fake, processorFor: () => fake }
 })
 
 const claimRefund = vi.hoisted(() => vi.fn())

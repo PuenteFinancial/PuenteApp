@@ -5,7 +5,8 @@ Held rows are listed with their reasons on the read-only ops page at `/dashboard
 **Date:** 2026-07-20 · **Status:** live process (slice 5)
 
 A payout hold is a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`,
-`submit_error`, or `velocity_review`) and `payout_held_at`. The submit job sets the hold and stops; the 1-min
+`submit_error`, `velocity_review`, or — since K6 — the auto-released `sender_kyc_pending`) and
+`payout_held_at`. The submit job sets the hold and stops; the 1-min
 `payout.sweep` cron skips held rows. Releasing a hold means clearing the column — the sweep
 resubmits automatically within a minute. There is no admin endpoint at MVP; release is SQL via
 the Supabase SQL editor (a sanctioned ops **data** fix — schema changes still go through
@@ -30,6 +31,31 @@ migrations only). Background: [transfer-state-machine.md](../transfer-state-mach
    `SUBMITTED` (check `transfer_transitions` for the `worker:payout` actor).
 4. Provenance: no extra logging step needed — the Supabase query history records who ran the
    release, and the submit job's transition metadata records the resulting submission.
+
+## `sender_kyc_pending` — sender's Bridge KYC not approved at payout time (AUTO-RELEASED, K6)
+
+**Look at the customer in Bridge, not the transfer.** Under KYC-at-first-send the Bridge customer
+is created by the relay (`POST /v1/users/me/bridge-customer`) and Bridge runs its own database
+checks; the pay step waits for approval before collecting payment, so this hold is a backstop for
+the gaps — an approval that regressed to review after the sender paid, a webhook that never
+landed, or a sandbox customer left in `incomplete`. It is the only hold **the system releases on
+its own**: the Bridge `customer.*` webhook with an `approved` / `active` status clears every
+`sender_kyc_pending` hold for that sender and re-enqueues the submit (`services/payout-holds.ts`).
+
+1. Find the sender: `select id, kyc_status, bridge_customer_id from users where id = (select user_id from transfers where id = '<transfer-id>')`.
+2. Open that customer in the Bridge dashboard and read its status and the `spei` endorsement.
+   - **Approved at Bridge but `users.kyc_status` is not `approved`** → the webhook was missed.
+     Check `GET /v0/webhooks/{id}/logs` for the delivery; a redelivery (or any later
+     `customer.updated`) releases the hold automatically. If none is coming, set
+     `users.kyc_status = 'approved'` and run the standard release SQL — do not release without
+     fixing the status, or `payout-submit` re-holds on its next pass.
+   - **Under review / incomplete at Bridge** → nothing to do; wait. The reconciliation aging
+     bound for this reason is the 8-day clearing window (deliberately NOT the 24h human-actioned
+     bound — nobody owes an action while Bridge reviews); `funded-held-overdue` re-raises it.
+   - **Rejected at Bridge** → the payout can never go out. Cancel/refund path
+     (`manual-refund.md`); the sender's Persona fallback is offered by the pay step, not here.
+3. **Never release while the customer is unverified.** Bridge 4xxs the payout and the row re-holds
+   as `submit_error` — a worse place to be.
 
 ## `fx_drift` — FX submission backstop tripped
 

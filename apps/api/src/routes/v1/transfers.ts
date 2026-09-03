@@ -8,6 +8,7 @@ import {
   getFundingProcessor,
   undoRequiresManualDisbursement,
   type FundingInitiation,
+  processorFor,
 } from '../../services/funding/index.js'
 import {
   cancelTransfer,
@@ -40,7 +41,7 @@ const TRANSFER_COLUMNS =
   'funding_source_type, funding_cleared, disclosure_accepted_at, payment_at, ' +
   'cancelable_until, idempotency_key, funding_payment_ref, provider_transfer_ref, ' +
   'refund_payment_ref, refunded_at, submit_attempted_at, cancellation_requested_at, ' +
-  'payment_claimed_at, completed_at, created_at'
+  'payment_claimed_at, completed_at, created_at, funding_processor'
 
 const moneySchema = (currency: string) =>
   ({
@@ -620,9 +621,11 @@ export async function transfersRoute(server: FastifyInstance) {
         throw err
       }
 
+      // Stamp the rail beside the ref (audit corner 1): jobs that later act on
+      // this row ask IT which processor funded it, not the process.
       const { error: refError } = await supabaseAdmin
         .from('transfers')
-        .update({ funding_payment_ref: funding.paymentRef })
+        .update({ funding_payment_ref: funding.paymentRef, funding_processor: funding.provider })
         .eq('id', transfer.id)
         .is('funding_payment_ref', null)
       if (refError) {
@@ -853,7 +856,9 @@ export async function transfersRoute(server: FastifyInstance) {
         // Keyed off the transfer's stable bridge idempotency key (not the client
         // header) so a crash-and-retry with a fresh header still dedupes the void
         // against real Stripe in slice 7.
-        const undo = await getFundingProcessor().voidFunding({
+        // The ROW's rail, not the process's: a pull made under one processor
+        // must be voided by that processor even after a FUNDING_PROCESSOR flip.
+        const undo = await processorFor(transfer).voidFunding({
           transferId: transfer.id,
           paymentRef: transfer.funding_payment_ref,
           idempotencyKey: `${transfer.idempotency_key}:void`,

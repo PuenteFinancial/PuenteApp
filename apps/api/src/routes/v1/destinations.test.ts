@@ -102,6 +102,38 @@ beforeEach(() => {
 })
 
 describe('POST /v1/recipients/:id/destinations', () => {
+  // KYC-at-first-send (K-lane): a sender adds recipients from the dashboard
+  // BEFORE verifying, so there is no Bridge customer to register against yet.
+  // Demanding one here deadlocked the product — a destination needed a
+  // customer, the customer only appeared at first send, and first send needed
+  // a destination. The row must land unregistered instead.
+  it('persists an unregistered row when the sender has no Bridge customer yet', async () => {
+    const users = chain({ data: { kyc_status: 'approved', bridge_customer_id: null } })
+    const recipients = chain({ data: recipientRow })
+    const insert = chain({ data: { ...destinationRow, provider_account_ref: null } })
+    from.mockReturnValueOnce(users).mockReturnValueOnce(recipients).mockReturnValueOnce(insert)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post(`/v1/recipients/${RECIPIENT_ID}/destinations`)
+      .set('Authorization', 'Bearer test-token')
+      .send(validBody)
+
+    expect(res.status).toBe(201)
+    // Nothing was asked of Bridge — there is no customer to ask about.
+    expect(createExternalAccount).not.toHaveBeenCalled()
+
+    const inserted = (insert['insert'] as ReturnType<typeof vi.fn>).mock.calls[0]![0] as {
+      provider_account_ref: string | null
+      details: { clabe_ciphertext: string }
+    }
+    // Unregistered, but the CLABE is still encrypted at rest so the deferred
+    // registration has something to send later.
+    expect(inserted.provider_account_ref).toBeNull()
+    expect(decryptString(inserted.details.clabe_ciphertext, RECIPIENT_ID)).toBe(CLABE)
+    await app.close()
+  })
+
   it('registers with Bridge then persists an encrypted row (happy path)', async () => {
     const users = chain({ data: approvedUser })
     const recipients = chain({ data: recipientRow })
@@ -159,8 +191,18 @@ describe('POST /v1/recipients/:id/destinations', () => {
     await app.close()
   })
 
-  it('403s before Bridge when the user has no bridge_customer_id', async () => {
-    from.mockReturnValueOnce(chain({ data: { kyc_status: 'approved', bridge_customer_id: null } }))
+  // SUPERSEDED by the deferred-registration test at the top of this block.
+  // This used to 403 when the sender had no bridge_customer_id, which was
+  // correct while KYC happened in onboarding — every sender who could reach
+  // this route already had a customer. Under KYC-at-first-send that
+  // precondition is gone and the 403 deadlocked the product, so a missing
+  // customer now defers registration instead of refusing the destination.
+  // What still must never happen is a Bridge call without a customer.
+  it('never calls Bridge when the sender has no bridge_customer_id', async () => {
+    const users = chain({ data: { kyc_status: 'approved', bridge_customer_id: null } })
+    const recipients = chain({ data: recipientRow })
+    const insert = chain({ data: { ...destinationRow, provider_account_ref: null } })
+    from.mockReturnValueOnce(users).mockReturnValueOnce(recipients).mockReturnValueOnce(insert)
     const app = await buildApp()
 
     const res = await supertest(app.server)
@@ -168,7 +210,7 @@ describe('POST /v1/recipients/:id/destinations', () => {
       .set('Authorization', 'Bearer test-token')
       .send(validBody)
 
-    expect(res.status).toBe(403)
+    expect(res.status).toBe(201)
     expect(createExternalAccount).not.toHaveBeenCalled()
     await app.close()
   })

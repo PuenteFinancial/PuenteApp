@@ -68,21 +68,25 @@ const getPaymentStatus = vi.fn()
 // exactly the branch that matters.
 vi.mock('../../services/funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../services/funding/index.js')>()
+  const fakeProcessor = () => ({
+    provider: 'mock',
+    signatureHeader: 'funding-signature',
+    isConfigured: () => isConfigured(),
+    // K4: flipped true by the deferred-initiation tests; read at call time.
+    deferredInitiation: deferredInitiation(),
+    initiateFunding,
+    voidFunding,
+    getClientSession,
+    // Present only on the deferred rail, like the real registry (K5): the
+    // funding-session route feature-detects this method.
+    ...(deferredInitiation() ? { getDeferredClientBootstrap, getPaymentStatus } : {}),
+  })
   return {
     ...actual,
-    getFundingProcessor: () => ({
-      provider: 'mock',
-      signatureHeader: 'funding-signature',
-      isConfigured: () => isConfigured(),
-      // K4: flipped true by the deferred-initiation tests; read at call time.
-      deferredInitiation: deferredInitiation(),
-      initiateFunding,
-      voidFunding,
-      getClientSession,
-      // Present only on the deferred rail, like the real registry (K5): the
-      // funding-session route feature-detects this method.
-      ...(deferredInitiation() ? { getDeferredClientBootstrap, getPaymentStatus } : {}),
-    }),
+    getFundingProcessor: fakeProcessor,
+    // Per-row accessor (audit corner 1): rows in this suite are unstamped,
+    // so it resolves to the same fake the process would.
+    processorFor: fakeProcessor,
   }
 })
 

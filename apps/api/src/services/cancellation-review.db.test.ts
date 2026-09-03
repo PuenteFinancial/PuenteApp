@@ -44,18 +44,23 @@ import { refundCancellation, denyCancellation } from './cancellation-review.js'
 const refundCalls: unknown[] = []
 vi.mock('./funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./funding/index.js')>()
+  const spied = () =>
+    new Proxy(actual.getFundingProcessor(), {
+      get(target, prop, recv) {
+        if (prop !== 'refund') return Reflect.get(target, prop, recv)
+        return (input: unknown) => {
+          refundCalls.push(input)
+          return (target as { refund: (i: unknown) => unknown }).refund(input)
+        }
+      },
+    })
   return {
     ...actual,
-    getFundingProcessor: () =>
-      new Proxy(actual.getFundingProcessor(), {
-        get(target, prop, recv) {
-          if (prop !== 'refund') return Reflect.get(target, prop, recv)
-          return (input: unknown) => {
-            refundCalls.push(input)
-            return (target as { refund: (i: unknown) => unknown }).refund(input)
-          }
-        },
-      }),
+    getFundingProcessor: spied,
+    // The refund paths resolve the processor per ROW (transfers.funding_processor,
+    // audit corner 1). Rows seeded here carry no stamp, so the accessor must
+    // hand back the same spied instance the process would.
+    processorFor: spied,
   }
 })
 

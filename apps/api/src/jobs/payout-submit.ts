@@ -14,6 +14,7 @@ import {
 import { createBridgePayout, getExchangeRate, BridgeApiError } from '../services/bridge.js'
 import { enqueuePaymentEventProcess } from '../services/queue.js'
 import { assessTransferRisk, assessUnclearedCap, hasClearedHistory } from '../services/risk.js'
+import { registerPendingDestinations } from '../services/destination-registration.js'
 
 // The payout submission job (`payout.submit`) — the ONLY code path that asks
 // Bridge to move money. Ordering is load → cheap gates → claim → Bridge POST →
@@ -59,7 +60,7 @@ const holdFingerprint = (reason: string) => ['payout-hold', reason]
 // existing hold and never touches a row that has already moved on.
 async function placeHold(
   transferId: string,
-  reason: 'fx_drift' | 'payability' | 'submit_error' | 'velocity_review',
+  reason: 'fx_drift' | 'payability' | 'submit_error' | 'velocity_review' | 'sender_kyc_pending',
   context: Record<string, unknown>,
 ): Promise<void> {
   const { data, error } = await supabaseAdmin
@@ -120,6 +121,9 @@ export async function submitPayout(transferId: string): Promise<number> {
 
   let providerAccountRef: string
   let driftBps: number | undefined
+  // Filled by the non-recovery branch's single sender read; the recovery path
+  // loads it at submission time instead (its guards are skipped, not its data).
+  let bridgeCustomerId: string | null = null
 
   if (!isRecovery) {
     // funding_cleared gate — config-off pass-through (recorded, not gated on
@@ -140,7 +144,48 @@ export async function submitPayout(transferId: string): Promise<number> {
       return 0
     }
 
-    const payability = await checkPayability(transfer.payout_destination_id)
+    // K6 decision 8: never submit on behalf of a sender whose Bridge customer
+    // is not approved. Under KYC-at-first-send the pay step waits for approval
+    // before collecting payment, so this is the backstop for the gaps — an
+    // approval that regressed to review after payment, a missed webhook, a
+    // stale sandbox customer. Placed BEFORE payability so the #269 self-heal
+    // only runs for senders it can actually succeed for. The system's first
+    // auto-released hold: the approval webhook clears it and re-enqueues
+    // (services/payout-holds.ts) — no human in the loop, so it stays out of
+    // reconciliation's HUMAN_ACTIONED_HOLD_REASONS on purpose.
+    const sender = await loadSender(transfer.user_id)
+    bridgeCustomerId = sender.bridgeCustomerId
+    if (sender.kycStatus !== 'approved') {
+      await placeHold(transfer.id, 'sender_kyc_pending', { kycStatus: sender.kycStatus })
+      return 0
+    }
+
+    let payability = await checkPayability(transfer.payout_destination_id)
+
+    // Self-heal the deferred-registration window. A sender who added their
+    // recipient before verifying (the normal path under KYC-at-first-send)
+    // has destinations whose Bridge account is registered when their customer
+    // is created — but that backfill is best-effort, and a Bridge hiccup there
+    // would otherwise strand this payout on a hold no retry could clear.
+    // Registering here closes that gap: it is the same call the backfill makes,
+    // and it runs ONLY for the one reason it can fix, never as a blanket retry.
+    if (!payability.payable && payability.reason === 'provider_account_ref_missing') {
+      // Swallowed on purpose: a sender with no Bridge customer yet, or a
+      // Bridge outage, must fall through to the ordinary payability hold —
+      // never throw, or pg-boss would retry a money job over a condition
+      // retrying cannot fix.
+      try {
+        if (!bridgeCustomerId) throw new Error('payout-submit: user has no bridge_customer_id')
+        await registerPendingDestinations(transfer.user_id, bridgeCustomerId)
+        payability = await checkPayability(transfer.payout_destination_id)
+      } catch {
+        // Fall through to the hold below, which already carries the Sentry
+        // signal. No event of its own: a sender with no Bridge customer yet
+        // is the ORDINARY pre-verification state, not an anomaly, and paging
+        // on it would bury the holds that do need a human.
+      }
+    }
+
     if (!payability.payable) {
       await placeHold(transfer.id, 'payability', { reason: payability.reason })
       return 0
@@ -262,7 +307,7 @@ export async function submitPayout(transferId: string): Promise<number> {
     result = await createBridgePayout({
       idempotencyKey: transfer.idempotency_key,
       clientReferenceId: transfer.id,
-      onBehalfOf: await loadBridgeCustomerId(transfer.user_id),
+      onBehalfOf: bridgeCustomerId ?? (await loadSender(transfer.user_id)).bridgeCustomerId ?? missingBridgeCustomer(),
       sourceWalletId: env.BRIDGE_TREASURY_WALLET_ID,
       destinationExternalAccountId: providerAccountRef,
       destinationAmountMxn: minorToDecimal(transfer.receive_amount_minor),
@@ -272,7 +317,31 @@ export async function submitPayout(transferId: string): Promise<number> {
       if (err.statusCode === 400) {
         // Sandbox-verified: sync 400 = wallet drained or concurrent-payout
         // serialization — NO Bridge transfer was created, so retry is safe.
-        throw err
+        //
+        // Safe, but not safe FOREVER. The self-heal premise is that the blocker
+        // drains on its own; a treasury simply too small for the payout never
+        // refills, so the 1-min sweep re-enters the recovery path indefinitely
+        // and every pass captures an exception with no hold for ops to act on.
+        // Staging 2026-08-25: one $100 test send against a 47 USDC sandbox
+        // wallet looped 23.5h — 1,378 Sentry events, ended only by a manual
+        // unwind. Past the ceiling, treat it like every other 4xx: hold, and
+        // let the runbook own it.
+        //
+        // Measured from submit_attempted_at (the FIRST claim, never cleared),
+        // so this bounds the whole episode, not one attempt. It is null on the
+        // first pass — claimForSubmission stamps the row after this snapshot
+        // was read — so a first-attempt 400 always retries.
+        const attemptingSince = transfer.submit_attempted_at
+          ? Date.parse(transfer.submit_attempted_at)
+          : null
+        const attemptingForMs = attemptingSince === null ? 0 : Date.now() - attemptingSince
+        if (attemptingForMs < env.SUBMIT_RETRY_CEILING_MINUTES * 60_000) throw err
+        await placeHold(transfer.id, 'submit_error', {
+          statusCode: 400,
+          cause: 'retry_ceiling_exhausted',
+          attemptingForMinutes: Math.round(attemptingForMs / 60_000),
+        })
+        return 0
       }
       // 422 (idempotency mismatch) or other 4xx: an engineering incident, not
       // a transient — hold for the runbook.
@@ -371,14 +440,27 @@ export async function submitPayout(transferId: string): Promise<number> {
   return 1
 }
 
-async function loadBridgeCustomerId(userId: string): Promise<string> {
+// One read serves the K6 KYC gate, the destination self-heal and
+// on_behalf_of. A null customer id is not an error here — the gate decides
+// what it means; only the submission itself insists on one.
+async function loadSender(
+  userId: string,
+): Promise<{ bridgeCustomerId: string | null; kycStatus: string }> {
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select('bridge_customer_id')
+    .select('bridge_customer_id, kyc_status')
     .eq('id', userId)
     .maybeSingle()
   if (error) throw new Error(`payout-submit user load failed: ${error.message}`)
-  const customerId = (data as { bridge_customer_id: string | null } | null)?.bridge_customer_id
-  if (!customerId) throw new Error('payout-submit: user has no bridge_customer_id')
-  return customerId
+  const row = data as { bridge_customer_id: string | null; kyc_status: string | null } | null
+  return {
+    bridgeCustomerId: row?.bridge_customer_id ?? null,
+    kycStatus: row?.kyc_status ?? 'not_started',
+  }
+}
+
+// Submitting with no customer is impossible; throwing sends the job into
+// pg-boss retry exactly as the old loader did.
+function missingBridgeCustomer(): never {
+  throw new Error('payout-submit: user has no bridge_customer_id')
 }

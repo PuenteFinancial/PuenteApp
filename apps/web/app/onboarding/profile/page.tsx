@@ -41,9 +41,23 @@ export default async function ProfilePage() {
     }
   }
 
+  // K6b: the publishable key mounts Stripe's AddressElement. Any failure
+  // here (older API without the route, key unset, network) means plain
+  // inputs — the page never blocks on it.
+  let publishableKey: string | null = null
+  try {
+    const cfg = await apiFetch('/v1/config/web', token)
+    if (cfg.ok) {
+      const body = (await cfg.json()) as { stripePublishableKey?: unknown }
+      publishableKey = typeof body.stripePublishableKey === 'string' ? body.stripePublishableKey : null
+    }
+  } catch {
+    publishableKey = null
+  }
+
   return (
     <OnboardingShell>
-      <ProfileForm initial={initial} />
+      <ProfileForm initial={initial} publishableKey={publishableKey} />
     </OnboardingShell>
   )
 }
