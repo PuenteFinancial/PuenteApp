@@ -6,6 +6,32 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-09-03 · K6b: the web half of the relay — where the identity values live between the form
+and the POST, and why the return leg stops diverting rejected senders.** Three choices that are not
+obvious from the code. (1) The DOB + tax ID sit in exactly ONE reducer field, `ctx.relayValues`,
+rather than in a component ref: the relay decision is made three events after `KYC_SUBMIT`
+(submit → poll → verified → route), the file's charter is "every transition is reducer data", and
+the guard test gets *stronger* for it — part (f) of the K6 invariant now asserts that exactly two
+effects (`sdk_submit_kyc`, `relay`) and one ctx field carry the values, that every capture and view
+is clean, and that the field is null after `RELAY_OK`, `RELAY_ERROR`, a Stripe rejection, and
+`RETRY`. (2) `resolveKycReturnPath` now lets a valid `kyc_next` win unconditionally. K5 diverted a
+`rejected` status to `/onboarding/rejected`, whose retry leads back into the flag-OFF onboarding,
+not the transfer; under K6 the machine owns the rejection (`bridge_rejection` → reasons →
+Persona offer or terminal), so the return page's only job is to get the sender back to the
+transfer. The tos-return page is the same story: with the cookie it records the consent via
+`POST /users/me/bridge-tos` and redirects to the transfer whether or not the write landed (server
+truth decides; a failed write just shows the ToS card again). Without the cookie both pages are
+byte-for-byte the flag-OFF onboarding legs. (3) The come-back-later card (`bridge_wait`, shown
+past the ~2-minute poll bound or on `manual_review`) promises no email and no timeframe. The 9/2
+grill phrased decision 3 as "we'll email you", but no approval email exists in the system today —
+the card says what the page actually does (the draft persists, the page updates when Bridge
+finishes) and adding the email is a separate, honest change. Also: the ITIN rides Stripe's
+`us_ssn` field (the SDK declares no other type) and every form capture carries `taxIdType` so the
+pilot can tell the cohorts apart; the `send_bridge_fallback_started` / `send_bridge_tos_accepted`
+funnel events are gone (`send_bridge_tos_viewed/started`, `send_bridge_relay_started`,
+`send_bridge_customer_created`, `send_bridge_relay_failed`, `send_bridge_wait`,
+`send_bridge_persona_offered/started` replace them). **Status: active** (K6b).
+
 **2026-09-03 · `transfers.funding_processor`: the rail is a property of the ROW, not the process
 (audit 2026-09-02 corner 1).** Every job that acted on a transfer read `env.FUNDING_PROCESSOR` to
 decide its rail: the reconcile-pending abandonment clock (30 min vs hours vs days), which adapter
