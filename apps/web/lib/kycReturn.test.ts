@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { resolveKycReturnPath } from './kycReturn'
+import { resolveKycReturnPath, validKycLocale, validKycNext } from './kycReturn'
 
 const TRANSFER_PATH = '/dashboard/send/aaaaaaaa-1111-4222-8333-444444444444'
 
@@ -11,8 +11,11 @@ describe('resolveKycReturnPath', () => {
     expect(resolveKycReturnPath(TRANSFER_PATH, 'not_started')).toBe(TRANSFER_PATH)
   })
 
-  it('rejection always keeps the dedicated page — it explains and offers the retry', () => {
-    expect(resolveKycReturnPath(TRANSFER_PATH, 'rejected')).toBe('/onboarding/rejected')
+  it('a valid next wins even for rejected — the pay-step machine owns the rejection branch (K6)', () => {
+    // K5 diverted rejected senders to /onboarding/rejected, whose retry leads
+    // back into onboarding rather than the transfer. The machine's
+    // bridge_rejection → Persona offer is the send-flow answer.
+    expect(resolveKycReturnPath(TRANSFER_PATH, 'rejected')).toBe(TRANSFER_PATH)
   })
 
   it('no cookie → the pre-K5 onboarding routing', () => {
@@ -32,6 +35,18 @@ describe('resolveKycReturnPath', () => {
       '',
     ]) {
       expect(resolveKycReturnPath(evil, 'approved')).toBe('/dashboard')
+      expect(validKycNext(evil)).toBeNull()
     }
+    expect(validKycNext(TRANSFER_PATH)).toBe(TRANSFER_PATH)
+  })
+})
+
+describe('validKycLocale', () => {
+  it('accepts exactly the two UI languages and defaults to en', () => {
+    expect(validKycLocale('es')).toBe('es')
+    expect(validKycLocale('en')).toBe('en')
+    expect(validKycLocale('fr')).toBe('en')
+    expect(validKycLocale('')).toBe('en')
+    expect(validKycLocale(undefined)).toBe('en')
   })
 })
