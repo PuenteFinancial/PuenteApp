@@ -224,6 +224,28 @@ describe('agingFindings', () => {
     expect(keys).not.toContain('aging:funded-held-overdue:t-1')
   })
 
+  // K6: the auto-released hold is NOT human-actioned — a 24h page would fire
+  // on every ordinary Bridge review. The 8-day bound still re-raises it.
+  it('keeps the 8-day bound for the auto-released sender_kyc_pending hold', () => {
+    const reviewing = row({
+      id: 't-1',
+      payment_at: daysAgo(5),
+      funding_cleared: true,
+      payout_hold_reason: 'sender_kyc_pending',
+      payout_held_at: daysAgo(5),
+    })
+    const abandoned = row({
+      id: 't-2',
+      payment_at: daysAgo(9),
+      funding_cleared: true,
+      payout_hold_reason: 'sender_kyc_pending',
+      payout_held_at: daysAgo(9),
+    })
+    const keys = agingFindings([reviewing, abandoned], nowMs).map((f) => f.key)
+    expect(keys).not.toContain('aging:funded-held-overdue:t-1')
+    expect(keys).toContain('aging:funded-held-overdue:t-2')
+  })
+
   it('keeps the clearing bound for a hold reason outside the ops set', () => {
     const policy = row({
       id: 't-1',

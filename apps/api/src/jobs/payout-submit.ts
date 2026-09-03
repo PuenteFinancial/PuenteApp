@@ -60,7 +60,7 @@ const holdFingerprint = (reason: string) => ['payout-hold', reason]
 // existing hold and never touches a row that has already moved on.
 async function placeHold(
   transferId: string,
-  reason: 'fx_drift' | 'payability' | 'submit_error' | 'velocity_review',
+  reason: 'fx_drift' | 'payability' | 'submit_error' | 'velocity_review' | 'sender_kyc_pending',
   context: Record<string, unknown>,
 ): Promise<void> {
   const { data, error } = await supabaseAdmin
@@ -121,6 +121,9 @@ export async function submitPayout(transferId: string): Promise<number> {
 
   let providerAccountRef: string
   let driftBps: number | undefined
+  // Filled by the non-recovery branch's single sender read; the recovery path
+  // loads it at submission time instead (its guards are skipped, not its data).
+  let bridgeCustomerId: string | null = null
 
   if (!isRecovery) {
     // funding_cleared gate — config-off pass-through (recorded, not gated on
@@ -141,6 +144,22 @@ export async function submitPayout(transferId: string): Promise<number> {
       return 0
     }
 
+    // K6 decision 8: never submit on behalf of a sender whose Bridge customer
+    // is not approved. Under KYC-at-first-send the pay step waits for approval
+    // before collecting payment, so this is the backstop for the gaps — an
+    // approval that regressed to review after payment, a missed webhook, a
+    // stale sandbox customer. Placed BEFORE payability so the #269 self-heal
+    // only runs for senders it can actually succeed for. The system's first
+    // auto-released hold: the approval webhook clears it and re-enqueues
+    // (services/payout-holds.ts) — no human in the loop, so it stays out of
+    // reconciliation's HUMAN_ACTIONED_HOLD_REASONS on purpose.
+    const sender = await loadSender(transfer.user_id)
+    bridgeCustomerId = sender.bridgeCustomerId
+    if (sender.kycStatus !== 'approved') {
+      await placeHold(transfer.id, 'sender_kyc_pending', { kycStatus: sender.kycStatus })
+      return 0
+    }
+
     let payability = await checkPayability(transfer.payout_destination_id)
 
     // Self-heal the deferred-registration window. A sender who added their
@@ -156,8 +175,8 @@ export async function submitPayout(transferId: string): Promise<number> {
       // never throw, or pg-boss would retry a money job over a condition
       // retrying cannot fix.
       try {
-        const customerId = await loadBridgeCustomerId(transfer.user_id)
-        await registerPendingDestinations(transfer.user_id, customerId)
+        if (!bridgeCustomerId) throw new Error('payout-submit: user has no bridge_customer_id')
+        await registerPendingDestinations(transfer.user_id, bridgeCustomerId)
         payability = await checkPayability(transfer.payout_destination_id)
       } catch {
         // Fall through to the hold below, which already carries the Sentry
@@ -288,7 +307,7 @@ export async function submitPayout(transferId: string): Promise<number> {
     result = await createBridgePayout({
       idempotencyKey: transfer.idempotency_key,
       clientReferenceId: transfer.id,
-      onBehalfOf: await loadBridgeCustomerId(transfer.user_id),
+      onBehalfOf: bridgeCustomerId ?? (await loadSender(transfer.user_id)).bridgeCustomerId ?? missingBridgeCustomer(),
       sourceWalletId: env.BRIDGE_TREASURY_WALLET_ID,
       destinationExternalAccountId: providerAccountRef,
       destinationAmountMxn: minorToDecimal(transfer.receive_amount_minor),
@@ -421,14 +440,27 @@ export async function submitPayout(transferId: string): Promise<number> {
   return 1
 }
 
-async function loadBridgeCustomerId(userId: string): Promise<string> {
+// One read serves the K6 KYC gate, the destination self-heal and
+// on_behalf_of. A null customer id is not an error here — the gate decides
+// what it means; only the submission itself insists on one.
+async function loadSender(
+  userId: string,
+): Promise<{ bridgeCustomerId: string | null; kycStatus: string }> {
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select('bridge_customer_id')
+    .select('bridge_customer_id, kyc_status')
     .eq('id', userId)
     .maybeSingle()
   if (error) throw new Error(`payout-submit user load failed: ${error.message}`)
-  const customerId = (data as { bridge_customer_id: string | null } | null)?.bridge_customer_id
-  if (!customerId) throw new Error('payout-submit: user has no bridge_customer_id')
-  return customerId
+  const row = data as { bridge_customer_id: string | null; kyc_status: string | null } | null
+  return {
+    bridgeCustomerId: row?.bridge_customer_id ?? null,
+    kycStatus: row?.kyc_status ?? 'not_started',
+  }
+}
+
+// Submitting with no customer is impossible; throwing sends the job into
+// pg-boss retry exactly as the old loader did.
+function missingBridgeCustomer(): never {
+  throw new Error('payout-submit: user has no bridge_customer_id')
 }

@@ -82,6 +82,11 @@ const FUNDING_UNCLEARED_STALE_MS = 8 * 24 * 60 * 60_000 // ACH T+4 business days
 //
 // A reason OUTSIDE this set keeps the clearing-window bound: a policy-shaped
 // hold that legitimately dwells until funding clears is not overdue at 24h.
+// 'sender_kyc_pending' (K6) is the deliberate exception: it is auto-released
+// by the Bridge approval webhook and nobody owes an action while Bridge
+// reviews, so a 24h page would fire on every ordinary manual review. Money
+// FUNDED for the full 8-day window with KYC still unresolved IS a human's
+// problem, and that bound re-raises it (runbooks/payout-holds.md).
 const HUMAN_ACTIONED_HOLD_REASONS = new Set([
   'fx_drift',
   'payability',
