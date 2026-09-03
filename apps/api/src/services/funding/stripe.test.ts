@@ -115,8 +115,10 @@ describe('stripe initiateFunding', () => {
       provider: 'stripe',
       method: 'ach',
       paymentRef: 'pi_123',
-      clientFields: { client_secret: 'pi_123_secret_x' },
     })
+    // #243: the client_secret is served live by getClientSession, never
+    // returned from initiation — confirm's response has no consumer for it.
+    expect(initiation).not.toHaveProperty('clientFields')
   })
 
   it('throws when Stripe returns no client_secret instead of confirming a dead transfer', async () => {

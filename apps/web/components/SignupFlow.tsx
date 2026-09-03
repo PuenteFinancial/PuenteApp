@@ -125,7 +125,11 @@ export default function SignupFlow() {
         return
       }
 
-      posthog.identify(phone, { first_name: name, language_preference: lang })
+      // No client-side identify. It used the RAW PHONE as the person's
+      // distinct_id — PII into PostHog, against the rule the server route
+      // states ("No phone or email in PostHog"). The server already identifies
+      // this browser's anonymous distinct_id (sent in X-POSTHOG-DISTINCT-ID)
+      // with the same first_name + language_preference, so nothing is lost.
       posthog.capture('waitlist_form_submitted', {
         destination_country: country,
         referral_source: referralSource,

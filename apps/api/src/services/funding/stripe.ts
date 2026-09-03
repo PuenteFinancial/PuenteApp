@@ -102,7 +102,6 @@ export class StripeFundingProcessor implements FundingProcessor {
       provider: this.provider,
       method: 'ach',
       paymentRef: intent.id,
-      clientFields: { client_secret: intent.client_secret },
     }
   }
 

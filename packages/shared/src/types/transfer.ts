@@ -28,13 +28,13 @@ export interface DisclosureSummary {
   presentedAt: string
 }
 
-// Processor-neutral funding instructions returned by confirm. clientFields
-// carries whatever the active processor's client SDK needs (Stripe: a
-// client_secret; mock: empty).
+// Processor-neutral funding summary returned by confirm: which processor and
+// how the sender pays. Carries NO processor secrets (#243) — the pay step
+// bootstraps from GET /transfers/:id/funding-session, which serves the
+// client_secret live and on demand.
 export interface FundingDetails {
   provider: string
-  method: 'ach'
-  clientFields: Record<string, string>
+  method: 'ach' | 'onramp'
 }
 
 // A transfer's terms are snapshots copied from the quote at creation and are

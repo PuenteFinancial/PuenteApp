@@ -424,6 +424,26 @@ function fromByTable(tables: Record<string, unknown>) {
 }
 
 describe('GET /v1/users/me', () => {
+  // `users.phone` holds GoTrue's shape — bare digits, no `+` (the signup
+  // trigger copies auth.users.phone verbatim). The contract says E.164, and
+  // the K5 Link sign-up 400s on the bare form, so the API normalizes at its
+  // boundary rather than rewriting the column into a second format.
+  it('returns the login phone as E.164 even when the row holds the bare GoTrue shape', async () => {
+    fromByTable({
+      users: selectResult({ data: { ...userRow, phone: '12125551234' }, error: null }),
+      consents: consentsSelect([]),
+    })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .get('/v1/users/me')
+      .set('Authorization', 'Bearer test-token')
+
+    expect(res.status).toBe(200)
+    expect(res.body.phone).toBe('+12125551234')
+    await app.close()
+  })
+
   it('returns the current user in camelCase', async () => {
     fromByTable({
       users: selectResult({ data: userRow, error: null }),

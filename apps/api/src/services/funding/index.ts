@@ -70,8 +70,10 @@ export interface FundingInitiation {
   method: 'ach' | 'onramp'
   /** Persisted to transfers.funding_payment_ref. */
   paymentRef: string
-  /** Processor-specific fields the client needs (Stripe: client_secret). */
-  clientFields: Record<string, string>
+  // No client fields here (#243). A client_secret is served LIVE by
+  // getClientSession for the pay-step bootstrap and is never returned from
+  // initiation — the confirm response used to carry a second copy that no
+  // client read, through one proxy hop more than necessary.
 }
 
 // Moved to errors.ts: a leaf module so processor files can import it by

@@ -169,8 +169,8 @@ describe('onramp initiateFunding', () => {
       provider: 'stripe_onramp',
       method: 'onramp',
       paymentRef: 'cos_1',
-      clientFields: { client_secret: 'cos_1_secret_x' },
     })
+    expect(initiation).not.toHaveProperty('clientFields')
   })
 
   it('omits ip and prefill params when absent rather than sending empties', async () => {

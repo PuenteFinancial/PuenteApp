@@ -726,7 +726,10 @@ const en: Translations = {
     cta1: 'Join the Waitlist',
     cta2: 'See how it works',
     elig: 'Works with your ITIN or SSN.',
-    pills: ['Reports to all 3 credit bureaus', 'Set up in minutes', 'No credit card needed'],
+    // Credit reporting is not built (no furnisher code exists) — copy must not
+    // claim it. Forward-looking wording pending counsel review of the
+    // replacement (audit 2026-09-02, UDAAP). NEEDS LEGAL REVIEW (EN + ES)
+    pills: ['Credit building coming soon', 'Set up in minutes', 'No credit card needed'],
     notes: ['Real exchange rate', 'Built for newcomers'],
   },
   phone: {
@@ -736,7 +739,7 @@ const en: Translations = {
     delta: '▲ +132',
     remitLabel: 'Your remittances',
     remitNote: 'Each one counts ↑',
-    reported: 'Reported on time · bureau',
+    reported: 'Paid on time',
     onTime: '✓ on time',
     sends: [
       { who: 'To Rosa Santos', amt: '−$200' },
@@ -768,8 +771,9 @@ const en: Translations = {
         d: 'Send like you always do. Transparent pricing. International transfers in minutes.',
       },
       {
-        t: 'We report your on-time payments',
-        d: 'Puente reports payments on your account to the 3 major U.S. credit bureaus.',
+        // NEEDS LEGAL REVIEW (EN + ES) — see hero.pills
+        t: 'Your on-time payments will count',
+        d: 'We are building credit reporting so on-time payments through Puente can count toward your U.S. credit history. Coming soon.',
       },
       {
         t: 'Your credit history grows',
@@ -1540,7 +1544,8 @@ const es: Translations = {
     cta2: 'Mira cómo funciona',
     elig: 'Funciona con tu ITIN o SSN.',
     pills: [
-      'Reporta a los 3 burós de crédito',
+      // NEEDS LEGAL REVIEW (EN + ES) — see the en block
+      'Construcción de crédito, próximamente',
       'Configúralo en minutos',
       'No necesitas tarjeta de crédito',
     ],
@@ -1553,7 +1558,7 @@ const es: Translations = {
     delta: '▲ +132',
     remitLabel: 'Tus remesas',
     remitNote: 'Cada una suma ↑',
-    reported: 'Reportada a tiempo · buró',
+    reported: 'Pagada a tiempo',
     onTime: '✓ a tiempo',
     sends: [
       { who: 'Para Rosa Santos', amt: '−$200' },
@@ -1585,8 +1590,9 @@ const es: Translations = {
         d: 'Envía como siempre. Precios transparentes. Transferencias internacionales en minutos.',
       },
       {
-        t: 'Reportamos tus pagos a tiempo',
-        d: 'Puente reporta los pagos de tu cuenta a los 3 principales burós de crédito de EE. UU.',
+        // NEEDS LEGAL REVIEW (EN + ES) — see hero.pills
+        t: 'Tus pagos a tiempo contarán',
+        d: 'Estamos construyendo el reporte de crédito para que tus pagos a tiempo con Puente cuenten en tu historial crediticio en EE. UU. Próximamente.',
       },
       {
         t: 'Tu historial de crédito crece',

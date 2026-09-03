@@ -88,7 +88,7 @@ App-level user record; `auth.users` (Supabase-managed) holds the auth identity. 
   relayed once to Bridge (K6, `POST /v1/users/me/bridge-customer`) and never stored —
   `apps/api/src/routes/schema-pii.test.ts` scans every migration to pin that.
 - `address_country` TEXT NOT NULL default `'US'` (CHECK `'US'` — widening is a deliberate migration)
-- **RLS:** owner reads/updates own row.
+- **RLS:** owner reads own row. **No client UPDATE** — `users_update_own` was dropped 2026-09-03 (K7a; audit 2026-09-02): every write is the API on service_role, and the policy had no WITH CHECK, so a user JWT could have rewritten any column of its own row.
 - *`risk_tier` is NOT a column yet* — earlier versions listed it; it arrives with the risk engine.
 
 ### consents  *(append-only — built 2026-08-27, K1)*
@@ -358,6 +358,15 @@ summarizes the whole book, not one entity.
   refused attempts are not recorded. Backs the NANP allowlist + per-phone budget (#188)
 - **RLS deny-all**; service-role gets SELECT/INSERT/DELETE only (no UPDATE; DELETE = retention prune).
 
+### otp_verify_attempts  (brute-force bound on code verification — append-only; K7a)
+- Same shape and posture as `otp_send_attempts`: identity PK, peppered `phone_hash`, `created_at`,
+  RLS deny-all, service-role SELECT/INSERT/DELETE, the same two-day prune.
+- Admission goes through `otp_verify_admit(phone_hash, window_seconds, max_window, max_day)` —
+  no cooldown (a user types the code straight away); the window bounds guesses per code, the day
+  bounds guesses across re-sends. Recorded on admission, before GoTrue is asked, so a parallel
+  burst of guesses cannot multiply the cap. Its own table rather than a `kind` column so the
+  proven send path is untouched.
+
 ### user_limits  *(deferred — not built)*
 There is no `user_limits` table. The AML launch limits are **env-config constants** read by
 `services/risk.ts` (`RISK_PER_TXN_MAX_MINOR`, `RISK_DAILY_MAX_MINOR`, `RISK_MONTHLY_MAX_MINOR`,
@@ -401,8 +410,8 @@ A queryable audit table remains the future shape if log retention stops being en
 
 | Access tier | Tables |
 |---|---|
-| **Owner-scoped** (owner SELECTs own; writes via API service role) | `users` (also updates own), `recipients`, `payout_destinations`, `quotes`, `transfers`, `disclosures`, `disputes`, `cancellation_requests`, `deposit_instructions` |
-| **Deny-all policy** (explicit `USING (false)`) | `sign_in_events`, `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `reconciliation_runs`, `worker_heartbeat`, `otp_send_attempts` |
+| **Owner-scoped** (owner SELECTs own; writes via API service role) | `users`, `recipients`, `payout_destinations`, `quotes`, `transfers`, `disclosures`, `disputes`, `cancellation_requests`, `deposit_instructions` |
+| **Deny-all policy** (explicit `USING (false)`) | `sign_in_events`, `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `reconciliation_runs`, `worker_heartbeat`, `otp_send_attempts`, `otp_verify_attempts` |
 | **RLS on, zero policies** (equivalent deny; deliberate) | `transfer_transitions`, `idempotency_keys`, `payment_events` |
 | **Insert-only grant** | `waitlist` (service-role INSERT) |
 
@@ -410,6 +419,6 @@ Every table has RLS enabled and denies by default; the policies above are the ex
 Every schema function is `REVOKE ... FROM public, anon, authenticated` + `GRANT EXECUTE TO
 service_role` — including `transition_transfer` (the ONLY transfer-state write path, v3 makes
 `completed_at` write-once), `post_ledger_transaction` (the ONLY ledger write path),
-`cancel_transfer`, `record_cancellation_request`, `otp_attempt_admit`, and
+`cancel_transfer`, `record_cancellation_request`, `otp_attempt_admit`, `otp_verify_admit`, and
 `ops_transfer_state_counts()` — a set-returning **function**, not a view or table, backing
 `GET /v1/ops/overview` (a GROUP BY can never silently uncount a future state).

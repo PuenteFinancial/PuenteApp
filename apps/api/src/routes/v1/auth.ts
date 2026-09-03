@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import { admitOtpSend } from '../../services/otp-rate-limit.js'
+import { admitOtpSend, admitOtpVerify } from '../../services/otp-rate-limit.js'
 import { supabaseAdmin, supabaseAuth } from '../../services/supabase.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
@@ -126,10 +126,27 @@ export async function authRoute(server: FastifyInstance) {
               userId: { type: 'string' },
             },
           },
+          429: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
+      // The brute-force bound (K7a). Admitted — and counted — BEFORE GoTrue is
+      // asked, so a refused guess never reaches the provider; see
+      // services/otp-rate-limit.ts for why admission rather than failure is
+      // what gets counted. Same 429 shape as the send leg; the clients already
+      // render it.
+      const admission = await admitOtpVerify(request.body.phone)
+      if (!admission.allowed) {
+        void reply.header('Retry-After', String(admission.retryAfterSeconds))
+        return sendError(
+          reply,
+          429,
+          'rate_limited',
+          'Too many attempts. Wait a moment and try again.',
+        )
+      }
+
       const { data, error } = await supabaseAuth.auth.verifyOtp({
         phone: request.body.phone,
         token: request.body.token,
@@ -145,6 +162,10 @@ export async function authRoute(server: FastifyInstance) {
       // profile save 500ing. Self-heal here. ignoreDuplicates is load-bearing:
       // an existing row must never have its kyc_status or profile reset.
       // Non-fatal — a failed write must not block sign-in.
+      // `phone` is stored in GoTrue's shape (bare digits, no `+`) — the same
+      // shape the signup trigger copies from auth.users. The API normalizes to
+      // E.164 at its read boundary (routes/v1/users.ts) rather than holding the
+      // one identity in two formats across two tables.
       const { error: upsertError } = await supabaseAdmin.from('users').upsert(
         { id: data.user.id, phone: data.user.phone, kyc_status: 'not_started' },
         { onConflict: 'id', ignoreDuplicates: true },

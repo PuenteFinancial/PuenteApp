@@ -425,7 +425,8 @@ export async function transfersRoute(server: FastifyInstance) {
                 properties: {
                   provider: { type: 'string' },
                   method: { type: 'string' },
-                  clientFields: { type: 'object', additionalProperties: { type: 'string' } },
+                  // No clientFields (#243): confirm hands out no processor
+                  // secrets. The pay step bootstraps from funding-session.
                 },
               },
             },
@@ -585,7 +586,7 @@ export async function transfersRoute(server: FastifyInstance) {
           id: transfer.id,
           state: transfer.state,
           disclosureAcceptedAt: acceptedAt,
-          funding: { provider: processor.provider, method: 'onramp', clientFields: {} },
+          funding: { provider: processor.provider, method: 'onramp' },
         }
       }
 
@@ -660,7 +661,6 @@ export async function transfersRoute(server: FastifyInstance) {
         funding: {
           provider: funding.provider,
           method: funding.method,
-          clientFields: funding.clientFields,
         },
       }
     },

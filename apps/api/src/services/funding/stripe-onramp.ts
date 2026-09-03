@@ -278,7 +278,6 @@ export class StripeOnrampFundingProcessor implements FundingProcessor {
       provider: this.provider,
       method: 'onramp',
       paymentRef: session.id,
-      clientFields: { client_secret: session.client_secret },
     }
   }
 

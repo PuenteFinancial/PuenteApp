@@ -41,7 +41,6 @@ export class MockFundingProcessor implements FundingProcessor {
       provider: this.provider,
       method: 'ach',
       paymentRef: `mockpay_${crypto.randomUUID()}`,
-      clientFields: {},
     }
   }
 

@@ -181,6 +181,19 @@ PAYOUT_FAILED → REFUNDED  (undo mode VOIDED — PR-S2. Under real ACH timing t
    credit cash_clearing $100 that never left and strand funding_receivable open forever —
    the mode branch in services/refunds.ts exists for exactly this.)
 
+PAYOUT_FAILED → REFUNDED  (BEFORE SUBMITTED — #254. The submit never reached Bridge, or the
+  funded sender was rejected by Bridge (K6). No principal ever left, so there is NO bridge_return
+  batch: posting one would credit due_from_bridge for a return that never happened — that
+  account is only opened by the SUBMITTED batch — and claim cash we do not hold.
+  services/refunds.ts skips it whenever provider_transfer_ref is null; the operator CLI's
+  interlock passes on `not_submitted` and verifies the REFUNDED batch alone.)
+  1) — nothing to book: nothing left —
+  2) Settle REFUNDED exactly as above, by undo mode: REFUNDED-mode books the cash refund
+     (DR transfer_payable 98 / DR fee_revenue 2 / CR cash_clearing 100); VOIDED-mode reverses
+     the FUNDED batch (DR transfer_payable 98 / DR fee_revenue 2 / CR funding_receivable 100).
+  (End state: the submitted case minus the bridge_return pair — due_from_bridge was never
+   opened, so it never needs closing. The sender is made whole identically.)
+
 FUNDING_REVERSED  (ACH return after COMPLETED — money already delivered, irreversible)
   DR loss_funding_reversed  100
   CR cash_clearing          100

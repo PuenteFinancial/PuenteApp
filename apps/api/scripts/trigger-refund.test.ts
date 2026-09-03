@@ -163,6 +163,29 @@ describe('trigger', () => {
     expect(refundPayoutFailure).not.toHaveBeenCalled()
   })
 
+  // #254: a row that never reached SUBMITTED has nothing at Bridge to return.
+  // The interlock's `not_submitted` used to be a refusal ("wrong runbook"),
+  // which stranded exactly the rows that needed this runbook most.
+  it('a never-submitted row (#254) passes the interlock and verifies only the REFUNDED batch', async () => {
+    verifyPrincipalReturned.mockResolvedValue({ returned: false, reason: 'not_submitted' })
+    refundLedgerBatches.mockResolvedValue([
+      { transition: 'REFUNDED', idempotency_key: `${ID}:REFUNDED` },
+    ])
+
+    await expect(trigger(ID, 'jphelps', true)).resolves.toBeUndefined()
+
+    expect(refundPayoutFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ transferId: ID, actor: 'ops:jphelps' }),
+    )
+  })
+
+  it('a never-submitted row still fails when REFUNDED itself is missing', async () => {
+    verifyPrincipalReturned.mockResolvedValue({ returned: false, reason: 'not_submitted' })
+    refundLedgerBatches.mockResolvedValue([])
+
+    await expect(trigger(ID, 'jphelps', true)).rejects.toThrow(/missing ledger batch .*:REFUNDED/)
+  })
+
   it('names the escalation, not a retry, when the principal is stuck at Bridge', async () => {
     verifyPrincipalReturned.mockResolvedValue({
       returned: false,

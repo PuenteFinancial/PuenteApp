@@ -56,38 +56,79 @@ interface AdmitRow {
   retry_after_seconds: number
 }
 
+// Retry-After hint when the VERIFY limiter itself fails. Not the window: a
+// database blip should not tell a legitimate user to wait fifteen minutes.
+const VERIFY_FAIL_CLOSED_RETRY_SECONDS = 60
+
 /**
- * May this number be sent an OTP right now, and record it if so.
+ * One atomic check-and-record call. The check and the insert happen in one
+ * statement inside the database because check-then-insert is a
+ * time-of-check/time-of-use race: two concurrent requests for the same number
+ * would both read "under the limit" and both be admitted.
  *
- * The check and the insert happen in one statement inside the database
- * (otp_attempt_admit) because check-then-insert is a time-of-check/time-of-use
- * race: two concurrent requests for the same number would both read "under the
- * limit" and both send, which is precisely the burst the cooldown exists to
- * prevent.
- *
- * FAILS CLOSED. An error refuses the send. This is the opposite of the usual
+ * FAILS CLOSED. An error refuses the attempt. This is the opposite of the usual
  * advice for a login path — where failing open avoids locking everyone out
- * during an outage — and deliberately so: the downside here is a bill, not an
- * inconvenience, and a limiter that opens under load is no limiter at all.
+ * during an outage — and deliberately so: on the send leg the downside is a
+ * bill, on the verify leg it is an unbounded guess rate, and a limiter that
+ * opens under load is no limiter at all.
  */
-export async function admitOtpSend(phone: string): Promise<OtpAdmission> {
-  const { data, error } = await supabaseAdmin.rpc('otp_attempt_admit', {
-    p_phone_hash: phoneBucketKey(phone),
-    p_cooldown_seconds: env.OTP_COOLDOWN_SECONDS,
-    p_max_hour: env.OTP_MAX_PER_HOUR,
-    p_max_day: env.OTP_MAX_PER_DAY,
-  })
+async function admit(
+  fn: 'otp_attempt_admit' | 'otp_verify_admit',
+  params: Record<string, string | number>,
+  failClosedRetrySeconds: number,
+): Promise<OtpAdmission> {
+  const { data, error } = await supabaseAdmin.rpc(fn, params)
 
   // `returns table` comes back as an array of rows; anything else means the
   // function did not run as expected and there is no verdict to trust.
   const row = (Array.isArray(data) ? data[0] : data) as AdmitRow | undefined
 
   if (error || !row || typeof row.allowed !== 'boolean') {
-    return { allowed: false, retryAfterSeconds: env.OTP_COOLDOWN_SECONDS }
+    return { allowed: false, retryAfterSeconds: failClosedRetrySeconds }
   }
 
   return {
     allowed: row.allowed,
     retryAfterSeconds: row.retry_after_seconds,
   }
+}
+
+/**
+ * May this number be sent an OTP right now, and record it if so. The burst a
+ * cooldown exists to prevent is exactly what the atomic admit rules out.
+ */
+export async function admitOtpSend(phone: string): Promise<OtpAdmission> {
+  return admit(
+    'otp_attempt_admit',
+    {
+      p_phone_hash: phoneBucketKey(phone),
+      p_cooldown_seconds: env.OTP_COOLDOWN_SECONDS,
+      p_max_hour: env.OTP_MAX_PER_HOUR,
+      p_max_day: env.OTP_MAX_PER_DAY,
+    },
+    env.OTP_COOLDOWN_SECONDS,
+  )
+}
+
+/**
+ * May this number have a code checked right now, and record it if so.
+ *
+ * The brute-force bound on a six-digit code (K7a). Counted on ADMISSION,
+ * before GoTrue is asked — counting only failures would leave the
+ * check-then-verify gap open to a burst of parallel guesses, which is the whole
+ * attack. No cooldown: a user types the code straight after it arrives. What
+ * bounds a brute force is guesses per code (the window) and guesses across
+ * re-sends (the day).
+ */
+export async function admitOtpVerify(phone: string): Promise<OtpAdmission> {
+  return admit(
+    'otp_verify_admit',
+    {
+      p_phone_hash: phoneBucketKey(phone),
+      p_window_seconds: env.OTP_VERIFY_WINDOW_SECONDS,
+      p_max_window: env.OTP_VERIFY_MAX_PER_WINDOW,
+      p_max_day: env.OTP_VERIFY_MAX_PER_DAY,
+    },
+    VERIFY_FAIL_CLOSED_RETRY_SECONDS,
+  )
 }
