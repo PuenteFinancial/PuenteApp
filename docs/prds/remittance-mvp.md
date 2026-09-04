@@ -69,9 +69,13 @@ The design docs predate the onboarding build. Deltas, so nobody re-litigates the
   `first_name`/`last_name` (not `full_name`), `preferred_language` (not `preferred_locale`),
   `bridge_customer_id` (the ERD's `provider_customer_ref`). `risk_tier` doesn't exist yet — add it
   only when something reads it.
-- **KYC is Bridge-hosted, not Sumsub.** Users are already KYC-approved through Bridge
-  (`users.kyc_status`). The ERD's `kyc_records` table and the api-contract's `/v1/kyc/*` + Sumsub
-  webhook are **deferred**. `IdentityVerifier` remains the abstraction if a second provider arrives.
+- **KYC is Bridge-hosted, not Sumsub** *(true when written; superseded 2026-08/09 by the K lane —
+  verification now runs on Stripe embedded components at first send with a one-time relay to Bridge,
+  see `../plans/kyc-at-first-send.md`)*. This PRD's premise — that senders arrive already
+  KYC-approved — is exactly what the K lane changed, so read §1's "KYC-approved users" as a
+  statement about the pilot cohort, not the product. The ERD's `kyc_records` table and the
+  api-contract's `/v1/kyc/*` + Sumsub webhook were never built; `kyc_verifications` (K6a) shipped
+  in their place. `IdentityVerifier` remains the abstraction if another provider arrives.
 - **Auth endpoints exist** (`/v1/auth/*`), as do the audit plugin, rate limiting
   (`TRUST_PROXY_HOPS`), and consent timestamps on `users`. The ERD's append-only `consents` table
   is deferred until a consent needs versioning we don't have.

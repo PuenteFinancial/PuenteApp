@@ -28,7 +28,7 @@ real ledger. Total runtime ≈ 6 minutes at a comfortable pace.
 | Beat | Do | Say |
 |---|---|---|
 | Sign in | 500 555 0006 → 123456 | "Phone-first, SMS OTP. Spanish is the default — our users are Spanish-speaking." |
-| Dashboard | — | "This account is verified; KYC ran through Bridge." |
+| Dashboard | — | "This account is already verified." *(The seeded demo user is pre-verified. Don't narrate HOW — the mechanism changed with the K lane: verification now happens at first send in our own UI, and this script's pre-seeded account skips it entirely. See flows.md §1d.)* |
 | Quote | Rosa Santos, **$5** → Obtener cotización | "That rate is live from Bridge, right now. The fee and the rate lock for 15 minutes." |
 | Disclosure | Continuar | "This is the federally required pre-payment disclosure. Rendered in Spanish, with the exact rate — not a rounded one." |
 | Confirm | tick box → Confirmar | "They have to actively accept it. That acceptance is recorded." |

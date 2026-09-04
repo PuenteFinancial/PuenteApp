@@ -215,7 +215,7 @@ Assemble before outreach, not during. Banks request most of this in early dilige
 - [ ] **CMS summary** — named compliance officer, reporting lines, board-approved policies
 - [ ] **BSA/AML program** — CIP and CDD procedures **specifically addressing ITIN verification**. This will get the most scrutiny of anything in the package. Do not gloss it.
 - [ ] Sanctions/OFAC screening, SAR procedures, transaction monitoring approach
-- [ ] Vendor management — Sumsub, Bridge, Stripe, furnishing vendor: diligence records, audit rights, monitoring
+- [ ] Vendor management — Bridge (MTL, FX, payout, identity), Stripe (USD intake + identity verification), Persona (via Bridge, fallback identity), Twilio (via Supabase), furnishing vendor when one exists: diligence records, audit rights, monitoring. *(Sumsub was named here historically and was never integrated — see decisions.md.)*
 - [ ] Formal risk assessment — ML, fraud, credit, reputational, concentration
 - [ ] Training program and independent testing plan
 - [ ] BCP / incident response

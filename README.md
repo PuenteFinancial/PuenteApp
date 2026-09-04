@@ -5,7 +5,7 @@ Puente is a credit-building remittance app for LATAM immigrants in the US. Live 
 literacy content. In progress: the USD → MXN remittance MVP — pure money movement on top of Bridge
 (the licensed money transmitter), with Stripe collecting USD. Lending is a separate future stack.
 
-**New here? Read [docs/onboarding.md](docs/onboarding.md)** for the access checklist and your
+**New here? Read [docs/engineer-onboarding.md](docs/engineer-onboarding.md)** for the access checklist and your
 first-week plan. Jargon you don't recognize is probably in the [glossary](docs/glossary.md);
 the reasons behind non-obvious choices are in the [decision log](docs/decisions.md).
 
@@ -52,7 +52,9 @@ and `apps/web` throws without `INTERNAL_API_URL` in `.env.local`.
    (`docs/runbooks/proposals/` are unadopted drafts — don't treat them as policy.)
 
 Also: [docs/pre-implementation-todo.md](docs/pre-implementation-todo.md) is the gate list for the
-remittance MVP, and [docs/prds/](docs/prds) holds the feature PRDs.
+remittance MVP, [docs/plans/kyc-at-first-send.md](docs/plans/kyc-at-first-send.md) is the current
+identity-verification design (it supersedes the onboarding-KYC PRD), and [docs/prds/](docs/prds)
+holds the feature PRDs — read their banners first, several are history rather than plans.
 
 ## Working here
 
