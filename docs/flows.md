@@ -29,7 +29,7 @@ sequenceDiagram
 
     S->>API: POST /v1/quotes {destination, total_amount}
     API->>BR: GET /v0/exchange_rates (indicative buy_rate)
-    API->>DB: insert quote (margin folded INTO the displayed rate — #193; fee = 0, take = margin_minor)
+    API->>DB: insert quote (margin folded INTO the displayed rate per #193 — fee = 0, take = margin_minor)
     API-->>S: quote {send amount, ONE fx_rate, receive amount}
 
     S->>API: POST /v1/transfers {quote_id} (Idempotency-Key)
@@ -142,14 +142,14 @@ sequenceDiagram
     S->>API: POST /v1/crypto/link-auth-intent/exchange → POST /v1/crypto/customer {crc_}
 
     Note over S,ST: DOB + tax ID go CLIENT → SDK ONLY here. They never reach us on this leg.
-    S->>ST: submitKycInfo (L0/L1; address prefilled from the profile via AddressElement)
+    S->>ST: submitKycInfo (L0/L1 — address prefilled from the profile via AddressElement)
     S->>API: poll GET /v1/crypto/kyc-status every 2–3s until L1 is verified
 
     Note over S,BR: the relay (K6) — the ONE place these values cross our server
     S->>API: POST /v1/users/me/bridge-customer {dob, taxId}
     Note over API: memory only — never persisted, never logged (schema-pii.test.ts pins that)
     API->>BR: create identity (per-user + body-hash idempotency key)
-    API->>DB: append kyc_verifications; hold the payout on sender_kyc_pending
+    API->>DB: append kyc_verifications, then hold the payout on sender_kyc_pending
     BR-->>API: webhook customer.updated → approved
     API->>DB: release the hold, log the verdict, register pending payout destinations
 
@@ -298,7 +298,7 @@ sequenceDiagram
             API-->>S: 200 canceled — transfer RESTS at CANCELED until an operator disburses (manual-refund runbook)
         end
     else already claimed / SUBMITTED / IN_FLIGHT
-        API-->>S: 202 — cancellation request RECORDED (state-keyed refund path; timely Reg E cancel → full refund; see below)
+        API-->>S: 202 — cancellation request RECORDED (state-keyed refund path, timely Reg E cancel → full refund — see below)
     end
 ```
 
