@@ -40,6 +40,10 @@ export interface OpsOpenTransfer {
   feeAmountMinor?: number
   fundingInitiated?: boolean
   onrampRef?: string | null
+  // #244 — the rail that funded this ROW (audit corner 1's column). Every
+  // action below is out-of-band-only, so this decides whether any render.
+  // Optional with the same deploy-skew semantics: absent = pre-#244 API.
+  fundingProcessor?: string
   // Slice 4 — same optional deploy-skew semantics: an older API omits it and
   // the row simply shows no claim annotation.
   paymentClaimedAt?: string | null
@@ -231,6 +235,12 @@ export type OpsTransferAction = 'attach' | 'release' | 'depositLanded'
  */
 export function transferActions(tr: OpsOpenTransfer): OpsTransferAction[] {
   if (tr.feeAmountMinor === undefined || tr.fundingInitiated === undefined) return []
+  // All three actions are the out-of-band rail's: the server refuses each one
+  // with processor_not_manual on any other rail (#244), so rendering them
+  // elsewhere only produces a guaranteed 409 — and an attach that "succeeds"
+  // would write deposit coordinates no surface ever shows. Absent (older API)
+  // keeps the previous behaviour; the server remains the real guard.
+  if (tr.fundingProcessor !== undefined && tr.fundingProcessor !== 'manual') return []
   if (tr.state === 'PENDING_PAYMENT') {
     return tr.fundingInitiated ? ['attach', 'release'] : []
   }

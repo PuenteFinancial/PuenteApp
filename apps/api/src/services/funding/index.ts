@@ -334,6 +334,63 @@ export function processorNameFor(row: RailRow): string {
   return row.funding_processor ?? env.FUNDING_PROCESSOR
 }
 
+// ── how long a PENDING_PAYMENT row may legitimately sit, per rail ──────────
+//
+// ONE definition, consulted by BOTH the reaper (jobs/reconcile-pending.ts,
+// which acts on it) and reconciliation's `pending-payment-autofail-dead`
+// bucket (which alerts when the reaper looks broken). They lived apart until
+// #242 and drifted: the reaper gained the onramp branch below and the alert
+// did not, so every ordinary slow sender on the onramp rails produced a
+// "reaper is dead" finding at 40 minutes while the reaper was correctly
+// waiting hours. A shared function is the fix — the two clocks cannot
+// disagree again without changing this one place.
+//
+// Keyed on the ROW's rail, not the process's (audit corner 1): a row keeps
+// the window of the rail that funded it across a FUNDING_PROCESSOR flip.
+const WEBHOOK_PENDING_WINDOW_MS = 30 * 60_000
+
+/**
+ * The abandonment window: past this, funding never arrived.
+ *
+ * - **manual** — days. An out-of-band sender holds deposit instructions and
+ *   wires on their own schedule, so "no funding yet" is NORMAL for
+ *   hours-to-days. The 30-minute rule killed exactly such a transfer on the
+ *   2026-08-18 staging dry run.
+ * - **onramp rails** (`stripe_onramp`, `stripe_crypto`) — hours. A first-time
+ *   sender walks Link OTP, our KYC form, the Bridge relay and Bridge's review
+ *   before they can pay; 30 minutes races a slow but perfectly normal pass,
+ *   and a sweep-then-pay race puts real money against a PAYMENT_FAILED row.
+ *   Not days: an abandoned session leaves no instructions in anyone's bank app.
+ * - **everything else** — the 30-minute webhook rule. Payment either happened
+ *   or it didn't.
+ */
+export function pendingFundingWindowMs(row: RailRow): number {
+  const rail = processorNameFor(row)
+  if (rail === 'manual') return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60_000
+  if (isOnrampSessionRail(rail)) return env.ONRAMP_PENDING_MAX_AGE_HOURS * 60 * 60_000
+  return WEBHOOK_PENDING_WINDOW_MS
+}
+
+// Grace on top of the window before a still-pending row means the REAPER is
+// broken rather than merely between runs (it sweeps on a minutes-scale cron).
+// Scaled to the window on purpose: 10 minutes of grace on a 7-day window is
+// noise, and 6 hours on a 30-minute window would hide a dead reaper for most
+// of a shift.
+function reaperGraceMs(rail: string): number {
+  if (rail === 'manual') return 6 * 60 * 60_000
+  if (isOnrampSessionRail(rail)) return 60 * 60_000
+  return 10 * 60_000
+}
+
+/**
+ * Past this age, a PENDING_PAYMENT row should have been reaped and wasn't —
+ * the signal that `reconcile-pending` itself is dead. Alerting bound only;
+ * the reaper acts on `pendingFundingWindowMs`.
+ */
+export function pendingReaperDeadAfterMs(row: RailRow): number {
+  return pendingFundingWindowMs(row) + reaperGraceMs(processorNameFor(row))
+}
+
 const byName = new Map<string, FundingProcessor>()
 
 export function processorFor(row: RailRow): FundingProcessor {

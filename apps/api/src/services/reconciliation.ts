@@ -2,7 +2,7 @@ import { env } from '../config/env.js'
 import { supabaseAdmin } from './supabase.js'
 import { getAccountBalance } from './ledger.js'
 import { getBridgeWalletBalances, listBridgeTransfers } from './bridge.js'
-import { getFundingProcessor, processorNameFor, type RailRow } from './funding/index.js'
+import { getFundingProcessor, pendingReaperDeadAfterMs } from './funding/index.js'
 import { pollPayouts } from '../jobs/payout-poll.js'
 
 // The reconciliation checks registry (slice-8 O2, docs/runbooks/reconciliation.md).
@@ -52,23 +52,13 @@ const RUNBOOK = 'docs/runbooks/reconciliation.md'
 // purpose — at daily cadence a weekend false-positive costs one glance.
 // (PENDING_PAYMENT is the one rail-aware bound: it mirrors whatever clock
 // reconcile-pending itself runs on, which IS env under the manual rail.)
-const PENDING_PAYMENT_STALE_WEBHOOK_MS = 40 * 60_000 // 30-min auto-fail + grace
-// The reaper sweeps on a minutes-scale cron; hours of grace means a hit is
-// the reaper being broken, never the reaper being between runs.
-const PENDING_PAYMENT_REAPER_GRACE_MS = 6 * 60 * 60_000
-
-// Rail-aware bound for the pending-payment-autofail-dead bucket (#216, the
-// #205 fix mirrored): under the manual rail a sender legitimately holds
-// deposit instructions for hours-to-days, and reconcile-pending waits
-// MANUAL_PENDING_MAX_AGE_DAYS before reaping — so only past THAT clock (plus
-// grace) does a PENDING_PAYMENT row mean the reaper is dead. Webhook rails
-// keep the 40-minute bound.
-// Per ROW since audit corner 1 (same rule as reconcile-pending's clock): a
-// null funding_processor falls back to the process rail.
-function pendingPaymentStaleMs(row: RailRow): number {
-  if (processorNameFor(row) !== 'manual') return PENDING_PAYMENT_STALE_WEBHOOK_MS
-  return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60_000 + PENDING_PAYMENT_REAPER_GRACE_MS
-}
+// Bound for the pending-payment-autofail-dead bucket: the row should have
+// been reaped by now, so the REAPER is what looks broken. Rail-aware, per
+// ROW, and — since #242 — computed from the same definition the reaper acts
+// on (services/funding/index.ts). It used to hard-code 40 minutes for every
+// non-manual rail, which paged on every ordinary slow sender the moment the
+// reaper grew its hours-scale onramp branch.
+const pendingPaymentStaleMs = pendingReaperDeadAfterMs
 const FUNDED_UNHELD_STALE_MS = 2 * 60 * 60_000 // sweep enqueues every minute; hours stuck = pipeline down
 const SUBMITTED_STALE_MS = 24 * 60 * 60_000 // SPEI settles in seconds; a day in transit is stuck
 const PAYOUT_FAILED_UNREFUNDED_STALE_MS = 24 * 60 * 60_000 // sender owed, nothing in motion
