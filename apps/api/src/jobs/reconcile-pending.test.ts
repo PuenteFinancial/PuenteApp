@@ -38,10 +38,12 @@ const processorMock = vi.hoisted(() => ({
 vi.mock('../services/funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/funding/index.js')>()
   return {
-    // Real rail classifiers (pure; processorNameFor reads the mocked env);
-    // only the processor registry is faked.
-    isOnrampSessionRail: actual.isOnrampSessionRail,
-    processorNameFor: actual.processorNameFor,
+    // Spread, NOT an enumerated list: everything pure stays real (the rail
+    // classifiers, the per-rail pending window — processorNameFor reads the
+    // mocked env) and only the processor registry is faked. Enumerating meant
+    // every new export used by the job under test broke this file with a
+    // "No X export is defined on the mock" suite error.
+    ...actual,
     getFundingProcessor: () => processorMock.current,
   }
 })

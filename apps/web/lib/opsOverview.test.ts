@@ -241,6 +241,34 @@ describe('transferActions (funding-ops-automation slice 1)', () => {
   const actionable = (over: Partial<OpsOpenTransfer> = {}): OpsOpenTransfer =>
     openTransfer({ feeAmountMinor: 500, fundingInitiated: true, onrampRef: null, ...over })
 
+  // #244: every action here is an OUT-OF-BAND funding action — the server
+  // refuses all three unless the ROW's rail is manual (recordManualFunding →
+  // processor_not_manual). Offering them on any other rail is a button whose
+  // only possible outcome is a 409, and on the crypto rail the K lane ships
+  // that is every row an operator will be looking at during the pilot.
+  it('offers nothing on a non-manual rail — the server refuses all three', () => {
+    for (const rail of ['stripe', 'stripe_onramp', 'stripe_crypto', 'mock']) {
+      expect(transferActions(actionable({ state: 'PENDING_PAYMENT', fundingProcessor: rail }))).toEqual([])
+      expect(transferActions(actionable({ state: 'FUNDED', fundingProcessor: rail }))).toEqual([])
+    }
+  })
+
+  it('still offers them when the row says manual', () => {
+    expect(
+      transferActions(actionable({ state: 'PENDING_PAYMENT', fundingProcessor: 'manual' })),
+    ).toEqual(['attach', 'release'])
+    expect(transferActions(actionable({ state: 'FUNDED', fundingProcessor: 'manual' }))).toEqual([
+      'depositLanded',
+    ])
+  })
+
+  // Deploy skew, same posture as the other optional fields: an older API omits
+  // the rail. Keep the pre-#244 behaviour rather than blanking the board of a
+  // manual-rail operator mid-deploy — the server is the real guard either way.
+  it('falls back to offering actions when the API omits the rail', () => {
+    expect(transferActions(actionable({ state: 'PENDING_PAYMENT' }))).toEqual(['attach', 'release'])
+  })
+
   it('returns [] on deploy skew — an older API omits the action fields', () => {
     expect(transferActions(openTransfer())).toEqual([])
     expect(transferActions(openTransfer({ state: 'PENDING_PAYMENT' }))).toEqual([])

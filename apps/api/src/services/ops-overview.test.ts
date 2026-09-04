@@ -22,6 +22,8 @@ const envMock = vi.hoisted(() => ({
   STUCK_UNDER_REVIEW_AFTER_HOURS: 24,
   MANUAL_PENDING_MAX_AGE_DAYS: 7,
   FLOAT_CEILING_MINOR: undefined as number | undefined,
+  // processorNameFor's fallback for a pre-K6a null funding_processor.
+  FUNDING_PROCESSOR: 'manual' as string,
 }))
 vi.mock('../config/env.js', () => ({ env: envMock }))
 
@@ -75,6 +77,7 @@ const openRow = (over: Record<string, unknown> = {}) => ({
   cancellation_requested_at: null,
   created_at: minutesAgo(95),
   funding_payment_ref: 'manualpay_ref-1',
+  funding_processor: 'manual',
   payment_claimed_at: null,
   ...over,
 })
@@ -192,6 +195,7 @@ describe('buildOpsOverview', () => {
       submitAttempted: false,
       cancellationRequested: true,
       fundingInitiated: true,
+      fundingProcessor: 'manual',
       onrampRef: null,
       paymentClaimedAt: null,
     })
@@ -277,6 +281,26 @@ describe('buildOpsOverview', () => {
       fundingInitiated: true,
     })
     expect(byId.get('t-bare')).toMatchObject({ onrampRef: null, fundingInitiated: false })
+  })
+
+  // #244: the board's three funding actions are out-of-band-only, so the row
+  // has to say which rail funded it or the client offers a guaranteed 409.
+  // Resolved through processorNameFor, so a pre-K6a null column falls back to
+  // the process rail rather than shipping null to the client.
+  it('carries the row rail through, falling back to the process rail on a null column', async () => {
+    transfersResult = {
+      data: [
+        openRow({ id: 't-crypto', funding_processor: 'stripe_crypto' }),
+        openRow({ id: 't-legacy', funding_processor: null }),
+      ],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+    const byId = new Map(overview.openTransfers.map((t) => [t.transferId, t]))
+
+    expect(byId.get('t-crypto')).toMatchObject({ fundingProcessor: 'stripe_crypto' })
+    expect(byId.get('t-legacy')).toMatchObject({ fundingProcessor: 'manual' })
   })
 
   it('carries the sender payment claim timestamp through to the row (slice 4)', async () => {

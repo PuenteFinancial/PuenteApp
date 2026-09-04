@@ -19,6 +19,7 @@ const envMock = vi.hoisted(() => ({
   BRIDGE_TREASURY_WALLET_ID: 'wallet-1' as string | undefined,
   FUNDING_PROCESSOR: 'mock' as string,
   MANUAL_PENDING_MAX_AGE_DAYS: 7,
+  ONRAMP_PENDING_MAX_AGE_HOURS: 4,
 }))
 vi.mock('../config/env.js', () => ({ env: envMock }))
 
@@ -85,6 +86,7 @@ beforeEach(() => {
   envMock.BRIDGE_TREASURY_WALLET_ID = 'wallet-1'
   envMock.FUNDING_PROCESSOR = 'mock'
   envMock.MANUAL_PENDING_MAX_AGE_DAYS = 7
+  envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 4
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(NOW)
 })
@@ -179,6 +181,69 @@ describe('agingFindings', () => {
     })
     const keys = agingFindings([pastSmallerWindow, insideSmallerWindow], nowMs).map((f) => f.key)
     expect(keys).toEqual(['aging:pending-payment-autofail-dead:t-2d'])
+  })
+
+  // #242: the reaper gained an onramp branch (4h — a first-time sender walks
+  // Link OTP, our KYC form, the Bridge relay and its review before paying)
+  // but this bucket never mirrored it, so every ordinary slow sender on the
+  // rail the K lane ships produced a "reconcile-pending is dead" finding at
+  // 40 minutes. The reaper was never dead; the clocks had diverged.
+  it.each(['stripe_onramp', 'stripe_crypto'])(
+    '%s: leaves a mid-KYC PENDING_PAYMENT alone inside the reaper window',
+    (rail) => {
+      envMock.FUNDING_PROCESSOR = rail
+      const midKyc = row({ state: 'PENDING_PAYMENT', created_at: hoursAgo(1), payment_at: null })
+      expect(agingFindings([midKyc], nowMs)).toHaveLength(0)
+    },
+  )
+
+  it.each(['stripe_onramp', 'stripe_crypto'])(
+    '%s: flags PENDING_PAYMENT past the reaper window + grace (reaper is dead)',
+    (rail) => {
+      envMock.FUNDING_PROCESSOR = rail
+      const reaperDead = row({
+        id: 't-onramp-dead',
+        state: 'PENDING_PAYMENT',
+        created_at: hoursAgo(4 + 2), // 4h window + 1h grace, exceeded
+        payment_at: null,
+      })
+      const keys = agingFindings([reaperDead], nowMs).map((f) => f.key)
+      expect(keys).toEqual(['aging:pending-payment-autofail-dead:t-onramp-dead'])
+    },
+  )
+
+  it('onramp rail: the bound tracks ONRAMP_PENDING_MAX_AGE_HOURS', () => {
+    envMock.FUNDING_PROCESSOR = 'stripe_crypto'
+    envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 12
+    const insideBiggerWindow = row({
+      id: 't-ok',
+      state: 'PENDING_PAYMENT',
+      created_at: hoursAgo(6),
+      payment_at: null,
+    })
+    expect(agingFindings([insideBiggerWindow], nowMs)).toHaveLength(0)
+  })
+
+  // audit corner 1: the clock belongs to the rail that funded the ROW, not to
+  // whatever FUNDING_PROCESSOR says today. A crypto row surviving a flip back
+  // to a webhook rail must keep its hours-scale window.
+  it('per-row rail wins over the process rail', () => {
+    envMock.FUNDING_PROCESSOR = 'stripe'
+    const cryptoRow = row({
+      state: 'PENDING_PAYMENT',
+      created_at: hoursAgo(1),
+      payment_at: null,
+      funding_processor: 'stripe_crypto',
+    })
+    expect(agingFindings([cryptoRow], nowMs)).toHaveLength(0)
+  })
+
+  it('webhook rails keep the tight 40-minute bound', () => {
+    envMock.FUNDING_PROCESSOR = 'stripe'
+    const inside = row({ id: 't-in', state: 'PENDING_PAYMENT', created_at: hoursAgo(0.5), payment_at: null })
+    const past = row({ id: 't-past', state: 'PENDING_PAYMENT', created_at: hoursAgo(1), payment_at: null })
+    const keys = agingFindings([inside, past], nowMs).map((f) => f.key)
+    expect(keys).toEqual(['aging:pending-payment-autofail-dead:t-past'])
   })
 
   it('flags unheld FUNDED past 2h but leaves held FUNDED alone until the clearing window', () => {

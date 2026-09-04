@@ -91,6 +91,7 @@ const overviewResponseSchema = {
           submitAttempted: { type: 'boolean' },
           cancellationRequested: { type: 'boolean' },
           fundingInitiated: { type: 'boolean' },
+          fundingProcessor: { type: 'string' },
           onrampRef: { type: ['string', 'null'] },
           paymentClaimedAt: { type: ['string', 'null'] },
         },

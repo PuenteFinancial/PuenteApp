@@ -9,6 +9,11 @@ First written 2026-08-18 after the staging dry run (transfer `56750902`, onramp 
 proved each step as a CLI run; the commands survive in the break-glass appendix — the recovery
 path when the web is what's broken (decisions.md 2026-07-27).
 
+**Since #244 the three buttons render only on rows whose rail is `manual`.** Every action here is
+out-of-band-only and the server refuses each one on any other rail, so a row funded through
+Stripe or the crypto rail now shows no funding actions instead of a button that could only 409.
+If you expected a button and see none, check the row's rail before anything else.
+
 ---
 
 ## 0. Pre-flight (once per environment)

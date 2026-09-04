@@ -4,6 +4,7 @@ import { listPendingReviews } from './cancellation-review.js'
 import { isFloatCeilingTripped } from './payouts.js'
 import { getAccountBalance } from './ledger.js'
 import { coarseAnchor, thresholdMs, WATCHED_STATES } from '../jobs/stuck-watch.js'
+import { processorNameFor } from './funding/index.js'
 
 // The 8.5-v1 ops overview (GET /v1/ops/overview, docs/api-contract.md): one
 // read-only aggregate the admin page renders in a single pass. Panels are all
@@ -58,6 +59,12 @@ export interface OpsOpenTransfer {
   // funding_payment_ref non-null — the sender confirmed; actions render only
   // on confirmed rows (before confirm there is nothing to attach or release).
   fundingInitiated: boolean
+  // The rail that funded THIS row (audit corner 1's column, resolved through
+  // processorNameFor so a pre-K6a null falls back to the process rail). The
+  // board's three funding actions are out-of-band-only and the server refuses
+  // them on every other rail, so the client needs this to stop offering a
+  // guaranteed 409 (#244).
+  fundingProcessor: string
   // The Bridge onramp id from deposit_instructions, when attached: prefills
   // the deposit-landed ref and marks PENDING_PAYMENT rows that still need the
   // attach step. Provider id, not PII (refundPaymentRef precedent).
@@ -130,6 +137,7 @@ interface OpenRow {
   cancellation_requested_at: string | null
   created_at: string
   funding_payment_ref: string | null
+  funding_processor: string | null
   payment_claimed_at: string | null
 }
 
@@ -153,7 +161,7 @@ async function readOpenTransfers(nowMs: number): Promise<OpsOpenTransfer[]> {
   const { data, error } = await supabaseAdmin
     .from('transfers')
     .select(
-      'id, user_id, state, send_amount_minor, fee_amount_minor, funding_cleared, payout_hold_reason, disclosure_accepted_at, payment_at, submit_attempted_at, cancellation_requested_at, created_at, funding_payment_ref, payment_claimed_at',
+      'id, user_id, state, send_amount_minor, fee_amount_minor, funding_cleared, payout_hold_reason, disclosure_accepted_at, payment_at, submit_attempted_at, cancellation_requested_at, created_at, funding_payment_ref, funding_processor, payment_claimed_at',
     )
     .in('state', [...OVERVIEW_STATES])
     .limit(ROW_BOUND)
@@ -211,6 +219,7 @@ async function readOpenTransfers(nowMs: number): Promise<OpsOpenTransfer[]> {
         submitAttempted: row.submit_attempted_at != null,
         cancellationRequested: row.cancellation_requested_at != null,
         fundingInitiated: row.funding_payment_ref != null,
+        fundingProcessor: processorNameFor(row),
         onrampRef: onrampRefs.get(row.id) ?? null,
         paymentClaimedAt: row.payment_claimed_at,
       }
