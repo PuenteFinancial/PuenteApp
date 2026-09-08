@@ -208,6 +208,11 @@ async function rejectsEmptyJsonBody(req, res) {
 const OPS_HELD_1 = '4e1d0001-0000-4000-8000-000000000003'
 const OPS_FAILED_1 = 'fa11ed01-0000-4000-8000-000000000005'
 const OPS_FAILED_ABANDONED = 'fa11ed02-0000-4000-8000-000000000006'
+// O-B action fixtures — reachable by URL only (not in the board's backlog, so
+// the board's counts stay as they are). Their DETAIL passes preflight; their
+// POST refuses, standing in for "the row moved after the page loaded".
+const OPS_FAILED_RACED = 'fa11ed03-0000-4000-8000-000000000007' // POST → 409 claim_abandoned
+const OPS_FAILED_STUCK = 'fa11ed04-0000-4000-8000-000000000008' // POST → 409 principal_not_returned
 
 function opsDetailBase(id, over = {}) {
   return {
@@ -311,7 +316,7 @@ function opsDetailFixture(id) {
       transfer: { payoutHoldReason: 'velocity_review', payoutHeldAt: '2026-08-01T08:01:00.000Z' },
     })
   }
-  if (id === OPS_FAILED_1) {
+  if (id === OPS_FAILED_1 || id === OPS_FAILED_RACED || id === OPS_FAILED_STUCK) {
     return opsDetailBase(id, {
       transfer: {
         state: 'PAYOUT_FAILED',
@@ -600,6 +605,85 @@ const server = createServer(async (req, res) => {
           refundPaymentRef: null,
         },
       ],
+    })
+  }
+
+  // O-B: the two detail-page writes. Same governing rule as the resolve mock —
+  // MIRRORS the real API's preconditions (Idempotency-Key required; the hold
+  // reason enum EXCLUDES sender_kyc_pending; note 10–500 chars after trim) so
+  // a refactor that drops any of them cannot ship green. Outcomes keyed on the
+  // fixture rows; refusals carry the API's own codes so the client's danger
+  // branches are exercised end to end.
+  const OPS_RELEASABLE = ['fx_drift', 'payability', 'velocity_review', 'submit_error']
+  const opsNoteOk = (note) => typeof note === 'string' && note.trim().length >= 10 && note.trim().length <= 500
+  if (method === 'POST' && pathname === '/v1/ops/transfers/hold-release') {
+    const body = await readBody(req)
+    if (!req.headers['idempotency-key']) {
+      return json(res, 400, {
+        error: { code: 'validation_error', message: 'mock: Idempotency-Key header is required', requestId: 'mock' },
+      })
+    }
+    if (typeof body?.transferId !== 'string' || !OPS_RELEASABLE.includes(body?.reason) || !opsNoteOk(body?.note)) {
+      return json(res, 400, {
+        error: { code: 'validation_error', message: 'mock: transferId, a releasable reason, and a 10–500 char note are required', requestId: 'mock' },
+      })
+    }
+    if (body.transferId !== OPS_HELD_1) {
+      return json(res, 404, { error: { code: 'not_found', message: 'mock: Transfer not found', requestId: 'mock' } })
+    }
+    if (body.reason !== 'velocity_review') {
+      return json(res, 409, {
+        error: {
+          code: 'conflict',
+          message: 'mock: The hold changed underneath you',
+          requestId: 'mock',
+          details: [{ path: 'reason', issue: 'hold is velocity_review' }],
+        },
+      })
+    }
+    return json(res, 200, { transferId: body.transferId, outcome: 'released', enqueued: true })
+  }
+
+  if (method === 'POST' && pathname === '/v1/ops/transfers/refund') {
+    const body = await readBody(req)
+    if (!req.headers['idempotency-key']) {
+      return json(res, 400, {
+        error: { code: 'validation_error', message: 'mock: Idempotency-Key header is required', requestId: 'mock' },
+      })
+    }
+    if (typeof body?.transferId !== 'string' || !opsNoteOk(body?.note) || body?.reclaim !== undefined) {
+      return json(res, 400, {
+        error: { code: 'validation_error', message: 'mock: transferId and a 10–500 char note are required; no reclaim', requestId: 'mock' },
+      })
+    }
+    const id = body.transferId
+    if (id === OPS_FAILED_RACED || id === OPS_FAILED_ABANDONED) {
+      return json(res, 409, {
+        error: {
+          code: 'claim_abandoned',
+          message: 'mock: A prior refund run abandoned its claim — follow the manual-refund runbook',
+          requestId: 'mock',
+        },
+      })
+    }
+    if (id === OPS_FAILED_STUCK) {
+      return json(res, 409, {
+        error: {
+          code: 'principal_not_returned',
+          message: 'mock: Bridge reports refund_failed — the principal is stuck AT Bridge',
+          requestId: 'mock',
+          details: [{ path: 'transferId', issue: 'bridge_disagrees; bridge=refund_failed; event=returned' }],
+        },
+      })
+    }
+    if (id !== OPS_FAILED_1) {
+      return json(res, 404, { error: { code: 'not_found', message: 'mock: Transfer not found', requestId: 'mock' } })
+    }
+    return json(res, 200, {
+      transferId: id,
+      outcome: 'refunded',
+      ledgerComplete: true,
+      ledgerKeys: [`${id}:bridge_return`, `${id}:REFUNDED`],
     })
   }
 

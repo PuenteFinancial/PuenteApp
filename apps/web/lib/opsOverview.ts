@@ -193,9 +193,11 @@ export function isOpsResolveSuccessShape(v: unknown): v is OpsResolveSuccess {
 
 // The UI branches the component switches on — each refusal demands DIFFERENT
 // operator behavior (claim_abandoned → runbook, never retry; refund_owed →
-// permanent legal refusal; evidence_conflict → correct the input in place).
+// permanent legal refusal; evidence_conflict → correct the input in place;
+// principal_not_returned → read the Bridge dashboard, never retry from here).
 export type ResolveErrorKind =
   | 'claim_abandoned'
+  | 'principal_not_returned'
   | 'refund_owed'
   | 'evidence_conflict'
   | 'conflict'
@@ -207,6 +209,7 @@ export function resolveErrorKind(status: number, body: unknown): ResolveErrorKin
   const code = parseApiError(body)?.code ?? null
   if (status === 409) {
     if (code === 'claim_abandoned') return 'claim_abandoned'
+    if (code === 'principal_not_returned') return 'principal_not_returned'
     if (code === 'refund_owed') return 'refund_owed'
     if (code === 'deposit_evidence_conflict') return 'evidence_conflict'
     if (code === 'conflict' || code === 'idempotency_conflict') return 'conflict'
