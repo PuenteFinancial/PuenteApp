@@ -60,7 +60,10 @@ doppler run -- pnpm exec tsx scripts/trigger-refund.ts --list
 ```
 
 Read-only. Prints every transfer at `PAYOUT_FAILED` — ids, amounts and timestamps only, never
-recipient details. This is the whole human backlog. A row marked **`◦ PRE-SUBMIT — never reached
+recipient details. This is the whole human backlog. The same read is on the ops board as the
+**Refund backlog** panel (`/dashboard/ops`, ops board slice 1), oldest first, each row linking to
+`/dashboard/ops/transfers/<id>` where the claim status, the recorded return event, and which refund
+batches posted are shown — the dry run's facts, without the terminal. A row marked **`◦ PRE-SUBMIT — never reached
 Bridge`** failed before submission (#254): no principal left, so the tail posts no `bridge_return`
 and the interlock passes on `not_submitted`. It is refunded with the same `--confirm`.
 

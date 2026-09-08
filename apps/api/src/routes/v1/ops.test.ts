@@ -127,6 +127,21 @@ const OVERVIEW = {
   workerHeartbeats: [
     { worker: 'worker', beatAt: '2026-08-01T11:58:00.000Z', ageSeconds: 120, stale: false },
   ],
+  // Ops board slice 1: the refund backlog rides the overview wire. Listed in
+  // the fixture so the 200 test proves the schema passes it through intact.
+  refundBacklog: [
+    {
+      transferId: 'dddddddd-1111-4222-8333-444444444444',
+      sendAmountMinor: 19_801,
+      feeAmountMinor: 199,
+      createdAt: '2026-07-27T00:00:00.000Z',
+      claimStatus: 'abandoned',
+      claimedAt: '2026-08-01T11:00:00.000Z',
+      claimedBy: 'ops:x',
+      providerTransferRef: null,
+      refundPaymentRef: null,
+    },
+  ],
 }
 
 beforeEach(() => {

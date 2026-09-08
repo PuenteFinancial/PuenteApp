@@ -33,9 +33,12 @@ send by the same user; note the OLDER blocker itself **does** page if it exceeds
 dwell, which is exactly what you want to look at). O2's daily 8-day uncleared audit bounds
 all of these.
 
-The read-only ops page at `/dashboard/ops` (8.5-v1, admin-allowlisted) lists every open
-transfer with dwell, threshold, and wait annotations — the same clocks as this cron, but as a
-board, not a pager.
+The ops board at `/dashboard/ops` (8.5-v1, admin-allowlisted) lists every open transfer with
+dwell, threshold, and wait annotations — the same clocks as this cron, but as a board, not a
+pager. Each card's id opens `/dashboard/ops/transfers/<id>` (ops board slice 1): the full
+`transfer_transitions` timeline with actors, every `payment_events` row matched to the transfer
+(did we receive the webhook?), the ledger batches with a per-batch net, holds, cancellation
+requests, and provider refs — steps 1–2 of "Diagnose, don't touch" below without the terminal.
 
 **Overlapping alerts are separate questions, deliberately not deduped:** this cron = "is OUR
 pipeline stuck"; payout-poll's `payout-in-review-stale` = "is Bridge holding it >1h"; O2's

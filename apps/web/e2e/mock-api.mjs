@@ -204,6 +204,162 @@ async function rejectsEmptyJsonBody(req, res) {
   return false
 }
 
+// ── Ops board slice 1 detail fixtures ────────────────────────────────────────
+const OPS_HELD_1 = '4e1d0001-0000-4000-8000-000000000003'
+const OPS_FAILED_1 = 'fa11ed01-0000-4000-8000-000000000005'
+const OPS_FAILED_ABANDONED = 'fa11ed02-0000-4000-8000-000000000006'
+
+function opsDetailBase(id, over = {}) {
+  return {
+    generatedAt: '2026-08-01T12:00:00.000Z',
+    actionsEnabled: true,
+    transfer: {
+      transferId: id,
+      state: 'FUNDED',
+      sendAmountMinor: 30_000,
+      sendCurrency: 'USD',
+      receiveAmountMinor: 540_000,
+      receiveCurrency: 'MXN',
+      feeAmountMinor: 500,
+      marginMinor: 0,
+      fxRate: 18,
+      fundingSourceType: 'ach',
+      fundingProcessor: 'stripe_crypto',
+      fundingCleared: false,
+      fundingPaymentRef: 'cos_e2e_1',
+      providerTransferRef: null,
+      refundPaymentRef: null,
+      payoutHoldReason: null,
+      payoutHeldAt: null,
+      submitAttemptedAt: null,
+      cancellationRequestedAt: null,
+      paymentClaimedAt: null,
+      disclosureAcceptedAt: '2026-08-01T07:50:00.000Z',
+      paymentAt: '2026-08-01T08:00:00.000Z',
+      cancelableUntil: '2026-08-01T08:30:00.000Z',
+      completedAt: null,
+      refundedAt: null,
+      createdAt: '2026-08-01T07:45:00.000Z',
+      dwell: {
+        enteredStateAt: '2026-08-01T08:00:00.000Z',
+        dwellMinutes: 240,
+        thresholdMinutes: 15,
+        overThreshold: true,
+      },
+      ...over.transfer,
+    },
+    quote: {
+      fxRate: 18,
+      sourceRate: 18.21,
+      marginMinor: 0,
+      fxRateAt: '2026-08-01T07:44:00.000Z',
+      expiresAt: '2026-08-01T08:14:00.000Z',
+      createdAt: '2026-08-01T07:44:00.000Z',
+      status: 'accepted',
+    },
+    destination: { status: 'active', hasProviderAccountRef: true, recipientStatus: 'active' },
+    refund: {
+      claimStatus: 'unclaimed',
+      claimedAt: null,
+      claimedBy: null,
+      returnEventType: null,
+      ledgerKeys: { bridgeReturn: false, refunded: false },
+      ...over.refund,
+    },
+    transitions: [
+      { fromState: null, toState: 'PENDING_PAYMENT', actor: 'user', reason: null, createdAt: '2026-08-01T07:45:00.000Z' },
+      { fromState: 'PENDING_PAYMENT', toState: 'FUNDED', actor: 'webhook:funding', reason: null, createdAt: '2026-08-01T08:00:00.000Z' },
+      ...(over.transitions ?? []),
+    ],
+    ledger: [
+      {
+        transition: 'FUNDED',
+        idempotencyKey: `${id}:FUNDED`,
+        description: 'funded',
+        postedAt: '2026-08-01T08:00:00.000Z',
+        netMinor: 0,
+        entries: [
+          { accountCode: 'funding_receivable', direction: 'debit', amountMinor: 30_500, currency: 'USD' },
+          { accountCode: 'transfer_payable', direction: 'credit', amountMinor: 30_000, currency: 'USD' },
+          { accountCode: 'fee_revenue', direction: 'credit', amountMinor: 500, currency: 'USD' },
+        ],
+      },
+      ...(over.ledger ?? []),
+    ],
+    paymentEvents: [
+      {
+        id: 'ev-e2e-1',
+        source: 'funding',
+        eventType: 'funding_succeeded',
+        status: 'processed',
+        receivedAt: '2026-08-01T08:00:00.000Z',
+        processedAt: '2026-08-01T08:00:01.000Z',
+        providerRef: 'cos_e2e_1',
+        hasError: false,
+      },
+      ...(over.paymentEvents ?? []),
+    ],
+    cancellationRequests: [],
+    depositInstructions: null,
+    disclosures: [{ type: 'prepayment', locale: 'es', presentedAt: '2026-08-01T07:46:00.000Z' }],
+  }
+}
+
+function opsDetailFixture(id) {
+  if (id === OPS_HELD_1) {
+    return opsDetailBase(id, {
+      transfer: { payoutHoldReason: 'velocity_review', payoutHeldAt: '2026-08-01T08:01:00.000Z' },
+    })
+  }
+  if (id === OPS_FAILED_1) {
+    return opsDetailBase(id, {
+      transfer: {
+        state: 'PAYOUT_FAILED',
+        sendAmountMinor: 19_801,
+        feeAmountMinor: 199,
+        receiveAmountMinor: 356_418,
+        providerTransferRef: 'bridge_tr_failed_1',
+        submitAttemptedAt: '2026-08-01T08:05:00.000Z',
+        dwell: null,
+      },
+      refund: { returnEventType: 'returned' },
+      transitions: [
+        { fromState: 'FUNDED', toState: 'SUBMITTED', actor: 'worker:payout', reason: null, createdAt: '2026-08-01T08:05:00.000Z' },
+        { fromState: 'SUBMITTED', toState: 'PAYOUT_FAILED', actor: 'worker:payment-event', reason: 'bridge:returned', createdAt: '2026-08-01T09:00:00.000Z' },
+      ],
+      paymentEvents: [
+        {
+          id: 'ev-e2e-2',
+          source: 'bridge',
+          eventType: 'returned',
+          status: 'processed',
+          receivedAt: '2026-08-01T09:00:00.000Z',
+          processedAt: '2026-08-01T09:00:01.000Z',
+          providerRef: 'bridge_tr_failed_1',
+          hasError: false,
+        },
+      ],
+    })
+  }
+  if (id === OPS_FAILED_ABANDONED) {
+    return opsDetailBase(id, {
+      transfer: {
+        state: 'PAYOUT_FAILED',
+        sendAmountMinor: 8_000,
+        feeAmountMinor: 149,
+        receiveAmountMinor: 144_000,
+        dwell: null,
+      },
+      refund: {
+        claimStatus: 'abandoned',
+        claimedAt: '2026-08-01T10:00:00.000Z',
+        claimedBy: 'ops:aaaaaaaa-1111-4222-8333-444444444444',
+      },
+    })
+  }
+  return null
+}
+
 const server = createServer(async (req, res) => {
   const { pathname } = new URL(req.url, `http://localhost:${PORT}`)
   const method = req.method
@@ -304,7 +460,7 @@ const server = createServer(async (req, res) => {
       })
     }
 
-    if (body.transferId === 'transfer-e2e-cancel-2' && body.decision === 'deny') {
+    if (body.transferId === 'ca000002-0000-4000-8000-000000000002' && body.decision === 'deny') {
       return json(res, 409, {
         error: {
           code: 'refund_owed',
@@ -313,7 +469,7 @@ const server = createServer(async (req, res) => {
         },
       })
     }
-    if (body.transferId === 'transfer-e2e-cancel-1' || body.transferId === 'transfer-e2e-cancel-2') {
+    if (body.transferId === 'ca000001-0000-4000-8000-000000000001' || body.transferId === 'ca000002-0000-4000-8000-000000000002') {
       return json(res, 200, {
         transferId: body.transferId,
         outcome: body.decision === 'refund' ? 'refunded' : 'denied',
@@ -337,7 +493,7 @@ const server = createServer(async (req, res) => {
       actionsEnabled: true,
       pendingCancellations: [
         {
-          transferId: 'transfer-e2e-cancel-1',
+          transferId: 'ca000001-0000-4000-8000-000000000001',
           state: 'UNDER_REVIEW',
           sendAmountMinor: 50_000,
           feeAmountMinor: 550,
@@ -346,7 +502,7 @@ const server = createServer(async (req, res) => {
           refundPaymentRef: null,
         },
         {
-          transferId: 'transfer-e2e-cancel-2',
+          transferId: 'ca000002-0000-4000-8000-000000000002',
           state: 'UNDER_REVIEW',
           sendAmountMinor: 20_000,
           feeAmountMinor: 300,
@@ -357,7 +513,7 @@ const server = createServer(async (req, res) => {
       ],
       openTransfers: [
         {
-          transferId: 'transfer-e2e-held-1',
+          transferId: '4e1d0001-0000-4000-8000-000000000003',
           state: 'FUNDED',
           sendAmountMinor: 30_000,
           enteredStateAt: '2026-08-01T08:00:00.000Z',
@@ -370,7 +526,7 @@ const server = createServer(async (req, res) => {
           cancellationRequested: false,
         },
         {
-          transferId: 'transfer-e2e-quiet-1',
+          transferId: '0a1e0001-0000-4000-8000-000000000004',
           state: 'SUBMITTED',
           sendAmountMinor: 12_000,
           enteredStateAt: '2026-08-01T11:55:00.000Z',
@@ -418,7 +574,47 @@ const server = createServer(async (req, res) => {
           stale: false,
         },
       ],
+      // Ops board slice 1: PAYOUT_FAILED rows awaiting refund — one unclaimed
+      // submitted row, one with an abandoned claim (the STOP state).
+      refundBacklog: [
+        {
+          transferId: OPS_FAILED_1,
+          sendAmountMinor: 19_801,
+          feeAmountMinor: 199,
+          createdAt: '2026-07-27T00:00:00.000Z',
+          claimStatus: 'unclaimed',
+          claimedAt: null,
+          claimedBy: null,
+          providerTransferRef: 'bridge_tr_failed_1',
+          refundPaymentRef: null,
+        },
+        {
+          transferId: OPS_FAILED_ABANDONED,
+          sendAmountMinor: 8_000,
+          feeAmountMinor: 149,
+          createdAt: '2026-07-29T00:00:00.000Z',
+          claimStatus: 'abandoned',
+          claimedAt: '2026-08-01T10:00:00.000Z',
+          claimedBy: 'ops:aaaaaaaa-1111-4222-8333-444444444444',
+          providerTransferRef: null,
+          refundPaymentRef: null,
+        },
+      ],
     })
+  }
+
+  // Ops board slice 1: the per-transfer detail read. Same governing rule as the
+  // overview mock — auth/gate posture is covered by API route tests; this
+  // serves render fixtures keyed on the board's own ids, and 404s the rest.
+  if (method === 'GET' && /^\/v1\/ops\/transfers\/[^/]+$/.test(pathname)) {
+    const id = pathname.split('/')[4]
+    const detail = opsDetailFixture(id)
+    if (detail == null) {
+      return json(res, 404, {
+        error: { code: 'not_found', message: 'mock: Transfer not found', requestId: 'mock' },
+      })
+    }
+    return json(res, 200, detail)
   }
 
   if (method === 'GET' && pathname === '/v1/users/me') {

@@ -16,6 +16,8 @@ import {
   firstDetailIssue,
   workerHeartbeatAlarm,
   stalestHeartbeat,
+  refundBacklogRows,
+  opsTransferHref,
   type OpsOverview,
   type OpsOpenTransfer,
   type OpsWorkerHeartbeat,
@@ -83,6 +85,38 @@ describe('isOpsOverviewShape', () => {
     expect(isOpsOverviewShape(overview())).toBe(true)
     expect(isOpsOverviewShape(overview({ workerHeartbeats: [] }))).toBe(true)
     expect(isOpsOverviewShape(overview({ workerHeartbeats: [beat()] }))).toBe(true)
+  })
+
+  // Ops board slice 1: same deploy-skew posture for the refund backlog.
+  it('tolerates refundBacklog being absent, and rejects a non-array', () => {
+    expect(isOpsOverviewShape(overview({ refundBacklog: [] }))).toBe(true)
+    expect(isOpsOverviewShape({ ...overview(), refundBacklog: 'nope' })).toBe(false)
+    expect(refundBacklogRows(overview())).toEqual([])
+    expect(
+      refundBacklogRows(
+        overview({
+          refundBacklog: [
+            {
+              transferId: 't-f',
+              sendAmountMinor: 1,
+              feeAmountMinor: 1,
+              createdAt: 'x',
+              claimStatus: 'unclaimed',
+              claimedAt: null,
+              claimedBy: null,
+              providerTransferRef: null,
+              refundPaymentRef: null,
+            },
+          ],
+        }),
+      ),
+    ).toHaveLength(1)
+  })
+
+  it('builds the detail href with only the transfer id in the path', () => {
+    expect(opsTransferHref('aaaaaaaa-0000-4000-8000-000000000001')).toBe(
+      '/dashboard/ops/transfers/aaaaaaaa-0000-4000-8000-000000000001',
+    )
   })
 })
 

@@ -13,14 +13,15 @@ async function signIn(context: BrowserContext) {
   ])
 }
 
-// The two pending-cancellation cards are distinguished by their window pill
-// (every fixture id shortens to the same 'transfer' prefix on screen).
+// The two pending-cancellation cards are distinguished by their window
+// annotation, whose parent element IS the card. Anchoring on the annotation
+// (not on a Refund button) matters: once Deny is clicked the trigger buttons
+// are replaced by the confirm panel, and a button-based filter fell through to
+// the whole board — which, since the float top-up card (#222) always renders
+// its inputs, made `getByRole('textbox')` ambiguous. That is why the deny
+// specs had been failing since 2026-08-20 (e2e is not in CI).
 function pendingCard(page: Page, windowText: RegExp) {
-  return page
-    .locator('div')
-    .filter({ has: page.getByText(windowText) })
-    .filter({ has: page.getByRole('button', { name: /^(refund|reembolsar)$/i }) })
-    .last()
+  return page.getByText(windowText).locator('..')
 }
 
 const IN_WINDOW = /within window|dentro del plazo/i

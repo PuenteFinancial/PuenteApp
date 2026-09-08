@@ -596,6 +596,7 @@ export type Translations = {
       payability: string
       submit_error: string
       velocity_review: string
+      sender_kyc_pending: string
     }
     waitClaimed: string
     waitUncleared: string
@@ -630,6 +631,118 @@ export type Translations = {
     heartbeatLive: string
     heartbeatStale: string
     heartbeatDead: string
+    // Ops board slice 1: the refund backlog panel (PAYOUT_FAILED rows awaiting
+    // refund) and the per-transfer detail page. Operator jargon, same posture.
+    refundBacklog: string
+    refundBacklogEmpty: string
+    refundBacklogNote: string
+    claimStatus: { unclaimed: string; claimed: string; abandoned: string }
+    preSubmit: string
+    disbursedUnsettled: string
+    detail: {
+      title: string
+      backToBoard: string
+      sections: {
+        hold: string
+        refund: string
+        timeline: string
+        ledger: string
+        paymentEvents: string
+        cancellations: string
+        depositInstructions: string
+        quote: string
+        destination: string
+        disclosures: string
+      }
+      labels: {
+        total: string
+        send: string
+        fee: string
+        margin: string
+        receive: string
+        fxRate: string
+        sourceRate: string
+        quoteAt: string
+        quoteExpires: string
+        quoteStatus: string
+        fundingProcessor: string
+        fundingSource: string
+        fundingCleared: string
+        fundingRef: string
+        providerRef: string
+        refundRef: string
+        paymentAt: string
+        cancelableUntil: string
+        submitAttemptedAt: string
+        completedAt: string
+        refundedAt: string
+        createdAt: string
+        disclosureAcceptedAt: string
+        paymentClaimedAt: string
+        cancellationRequestedAt: string
+        heldAt: string
+        holdReason: string
+        claimStatus: string
+        claimedAt: string
+        claimedBy: string
+        returnEvent: string
+        returnEventNone: string
+        ledgerNet: string
+        ledgerBalanced: string
+        ledgerUnbalanced: string
+        ledgerKeys: string
+        destinationStatus: string
+        recipientStatus: string
+        providerAccountRef: string
+        present: string
+        missing: string
+        attachedBy: string
+        attachedBySystem: string
+        depositRail: string
+        depositMessage: string
+        depositAmount: string
+        onrampRef: string
+        yes: string
+        no: string
+        status: string
+        hasError: string
+        requestedAt: string
+        requestedState: string
+        withinWindow: string
+        resolvedAt: string
+        resolvedBy: string
+        dwell: string
+      }
+      empty: {
+        transitions: string
+        ledger: string
+        events: string
+        cancellations: string
+        depositInstructions: string
+        quote: string
+        destination: string
+        disclosures: string
+      }
+      holdNone: string
+      holdGuidanceTitle: string
+      // The runbook's own per-reason guidance (docs/runbooks/payout-holds.md),
+      // rendered beside the hold so the operator reads it before acting.
+      holdGuidance: {
+        fx_drift: string
+        payability: string
+        velocity_review: string
+        submit_error: string
+      }
+      releaseNotAvailableKyc: string
+      refundPreflightTitle: string
+      refundReady: string
+      refundBlocked: {
+        not_payout_failed: string
+        claim_abandoned: string
+        claim_live: string
+        no_return_event: string
+      }
+    }
     // v1.1 resolve-cancellation actions. Operator jargon, not consumer copy —
     // no legal-review markers needed (the consumer-facing Reg E strings live
     // in send.*; these render only on the admin-gated ops board).
@@ -1481,6 +1594,7 @@ const en: Translations = {
       payability: 'Payability',
       submit_error: 'Submit error',
       velocity_review: 'Velocity review',
+      sender_kyc_pending: 'Sender KYC pending',
     },
     waitClaimed: 'claimed (crash recovery)',
     waitUncleared: 'awaiting ACH clearing',
@@ -1512,6 +1626,127 @@ const en: Translations = {
     heartbeatLive: 'beating',
     heartbeatStale: 'no beat in 15+ min',
     heartbeatDead: 'Worker heartbeat stopped — scheduled jobs are probably not running',
+    refundBacklog: 'Refund backlog (payout failed)',
+    refundBacklogEmpty: 'No failed payouts awaiting refund.',
+    refundBacklogNote:
+      'PAYOUT_FAILED never appears under open transfers — every row here is a sender who is owed money. Oldest first.',
+    claimStatus: {
+      unclaimed: 'unclaimed',
+      claimed: 'refund in progress',
+      abandoned: 'claim abandoned',
+    },
+    preSubmit: 'pre-submit — never reached Bridge',
+    disbursedUnsettled: 'disbursed, not settled',
+    detail: {
+      title: 'Transfer',
+      backToBoard: 'Back to the board',
+      sections: {
+        hold: 'Payout hold',
+        refund: 'Refund',
+        timeline: 'Timeline',
+        ledger: 'Ledger postings',
+        paymentEvents: 'Provider events',
+        cancellations: 'Cancellation',
+        depositInstructions: 'Funding',
+        quote: 'Quote',
+        destination: 'Destination (statuses only)',
+        disclosures: 'Reg E disclosures',
+      },
+      labels: {
+        total: 'Total (send + fee)',
+        send: 'Send',
+        fee: 'Fee',
+        margin: 'Margin',
+        receive: 'Recipient gets',
+        fxRate: 'Customer FX rate',
+        sourceRate: 'Bridge buy rate at quote',
+        quoteAt: 'Rate taken',
+        quoteExpires: 'Quote expires',
+        quoteStatus: 'Quote status',
+        fundingProcessor: 'Funding rail',
+        fundingSource: 'Funding source type',
+        fundingCleared: 'Funding cleared',
+        fundingRef: 'Funding ref',
+        providerRef: 'Bridge payout ref',
+        refundRef: 'Refund ref',
+        paymentAt: 'Funded at',
+        cancelableUntil: 'Cancelable until',
+        submitAttemptedAt: 'Submit claimed at',
+        completedAt: 'Completed at',
+        refundedAt: 'Refunded at',
+        createdAt: 'Created at',
+        disclosureAcceptedAt: 'Disclosure accepted at',
+        paymentClaimedAt: 'Sender claimed payment at',
+        cancellationRequestedAt: 'Cancellation requested at',
+        heldAt: 'Held since',
+        holdReason: 'Reason',
+        claimStatus: 'Refund claim',
+        claimedAt: 'Claimed at',
+        claimedBy: 'Claimed by',
+        returnEvent: 'Recorded return event',
+        returnEventNone: 'none recorded',
+        ledgerNet: 'Net (debits − credits)',
+        ledgerBalanced: 'Every batch nets to zero.',
+        ledgerUnbalanced: 'A batch does NOT net to zero — the read is wrong or the ledger is; stop and check.',
+        ledgerKeys: 'Refund batches posted',
+        destinationStatus: 'Destination status',
+        recipientStatus: 'Recipient status',
+        providerAccountRef: 'Bridge external account',
+        present: 'registered',
+        missing: 'MISSING — payability will re-hold',
+        attachedBy: 'Attached by',
+        attachedBySystem: 'system (at confirm)',
+        depositRail: 'Deposit rail',
+        depositMessage: 'Deposit message',
+        depositAmount: 'Deposit amount',
+        onrampRef: 'Bridge onramp ref',
+        yes: 'yes',
+        no: 'no',
+        status: 'Status',
+        hasError: 'error recorded',
+        requestedAt: 'Requested at',
+        requestedState: 'State when requested',
+        withinWindow: 'Window',
+        resolvedAt: 'Resolved at',
+        resolvedBy: 'Resolved by',
+        dwell: 'Dwell',
+      },
+      empty: {
+        transitions: 'No transitions recorded.',
+        ledger: 'No ledger postings yet.',
+        events: 'No provider events matched this transfer.',
+        cancellations: 'No cancellation request.',
+        depositInstructions: 'No deposit instructions attached (not a manual-rail transfer, or not yet).',
+        quote: 'Quote not found.',
+        destination: 'Destination not found.',
+        disclosures: 'No disclosures recorded.',
+      },
+      holdNone: 'No payout hold on this transfer.',
+      holdGuidanceTitle: 'Before releasing (runbooks/payout-holds.md)',
+      holdGuidance: {
+        fx_drift:
+          'Compare the Bridge buy rate at quote (Quote section) and its age with the live Bridge buy rate. Tolerable drift → release; the difference lands on fx_slippage. A genuine dislocation → get Joshua’s sign-off first. Merely stale → find out why the transfer was stuck before releasing. Never re-quote: the customer amount is a firm Reg E commitment.',
+        payability:
+          'Release only once the destination is active, the recipient is active, and the Bridge external account is registered (Destination section). Otherwise the submit job re-holds within a minute. Fix the record first — re-activate, or register the external account.',
+        velocity_review:
+          'Check the sender’s other in-window sends. A legitimate burst → release. An error or anything suspicious → do NOT release; cancel and refund instead. If this sender will routinely exceed the caps, raise RISK_* with Joshua’s sign-off rather than releasing repeatedly.',
+        submit_error:
+          'Never routine. Read the Sentry payout_hold context first. A 422 idempotency mismatch is an engineering incident, not a release. cause: recovery_missing_account_ref → restore the Bridge external account, then release. cause: source_amount_parse → NEVER release: money moved with no matching posting; escalate.',
+      },
+      releaseNotAvailableKyc:
+        'Auto-released by Bridge’s approval webhook — no button by design. Never release while the customer is unverified: Bridge refuses the payout and the row re-holds as submit_error.',
+      refundPreflightTitle: 'Refund preflight',
+      refundReady:
+        'Recorded checks pass. The live Bridge check runs when the refund is triggered.',
+      refundBlocked: {
+        not_payout_failed: 'Refund applies only to a PAYOUT_FAILED transfer.',
+        claim_abandoned:
+          'DANGER: a prior refund run abandoned its claim and may have disbursed without recording it. No button by design — check the funding processor, then follow runbooks/manual-refund.md (abandoned claims).',
+        claim_live: 'A refund run holds the claim right now — wait for it to finish, then refresh.',
+        no_return_event:
+          'No return event from Bridge is recorded yet — the principal must be back before a refund can post. Check the Bridge dashboard.',
+      },
+    },
   },
   /* eslint-enable no-restricted-syntax */
   mobile: {
@@ -2260,6 +2495,7 @@ const es: Translations = {
       payability: 'Cuenta no pagable',
       submit_error: 'Error de env\u00edo',
       velocity_review: 'Revisi\u00f3n de velocidad',
+      sender_kyc_pending: 'KYC del remitente pendiente',
     },
     waitClaimed: 'reclamada (recuperaci\u00f3n tras fallo)',
     waitUncleared: 'esperando liquidaci\u00f3n ACH',
@@ -2293,6 +2529,130 @@ const es: Translations = {
     heartbeatStale: 'sin latido hace 15+ min',
     heartbeatDead:
       'El latido del worker se detuvo \u2014 es probable que los trabajos programados no se est\u00e9n ejecutando',
+    refundBacklog: 'Reembolsos pendientes (payout fallido)',
+    refundBacklogEmpty: 'No hay payouts fallidos esperando reembolso.',
+    refundBacklogNote:
+      'PAYOUT_FAILED nunca aparece en transferencias abiertas \u2014 cada fila aqu\u00ed es un remitente al que se le debe dinero. Las m\u00e1s antiguas primero.',
+    claimStatus: {
+      unclaimed: 'sin claim',
+      claimed: 'reembolso en curso',
+      abandoned: 'claim abandonado',
+    },
+    preSubmit: 'pre-env\u00edo \u2014 nunca lleg\u00f3 a Bridge',
+    disbursedUnsettled: 'desembolsado, no asentado',
+    detail: {
+      title: 'Transferencia',
+      backToBoard: 'Volver al tablero',
+      sections: {
+        hold: 'Retenci\u00f3n del payout',
+        refund: 'Reembolso',
+        timeline: 'L\u00ednea de tiempo',
+        ledger: 'Asientos del libro',
+        paymentEvents: 'Eventos del proveedor',
+        cancellations: 'Cancelaci\u00f3n',
+        depositInstructions: 'Fondeo',
+        quote: 'Cotizaci\u00f3n',
+        destination: 'Destino (solo estados)',
+        disclosures: 'Divulgaciones Reg E',
+      },
+      labels: {
+        total: 'Total (env\u00edo + comisi\u00f3n)',
+        send: 'Env\u00edo',
+        fee: 'Comisi\u00f3n',
+        margin: 'Margen',
+        receive: 'Recibe el destinatario',
+        fxRate: 'Tipo de cambio al cliente',
+        sourceRate: 'Tasa de compra de Bridge al cotizar',
+        quoteAt: 'Tasa tomada',
+        quoteExpires: 'Cotizaci\u00f3n vence',
+        quoteStatus: 'Estado de la cotizaci\u00f3n',
+        fundingProcessor: 'Rail de fondeo',
+        fundingSource: 'Tipo de fuente de fondeo',
+        fundingCleared: 'Fondeo liquidado',
+        fundingRef: 'Ref. de fondeo',
+        providerRef: 'Ref. del payout en Bridge',
+        refundRef: 'Ref. del reembolso',
+        paymentAt: 'Fondeada',
+        cancelableUntil: 'Cancelable hasta',
+        submitAttemptedAt: 'Env\u00edo reclamado',
+        completedAt: 'Completada',
+        refundedAt: 'Reembolsada',
+        createdAt: 'Creada',
+        disclosureAcceptedAt: 'Divulgaci\u00f3n aceptada',
+        paymentClaimedAt: 'Remitente declar\u00f3 pago',
+        cancellationRequestedAt: 'Cancelaci\u00f3n solicitada',
+        heldAt: 'Retenida desde',
+        holdReason: 'Motivo',
+        claimStatus: 'Claim de reembolso',
+        claimedAt: 'Reclamado',
+        claimedBy: 'Reclamado por',
+        returnEvent: 'Evento de retorno registrado',
+        returnEventNone: 'ninguno registrado',
+        ledgerNet: 'Neto (d\u00e9bitos \u2212 cr\u00e9ditos)',
+        ledgerBalanced: 'Cada lote suma cero.',
+        ledgerUnbalanced:
+          'Un lote NO suma cero \u2014 la lectura est\u00e1 mal o el libro lo est\u00e1; det\u00e9nte y revisa.',
+        ledgerKeys: 'Lotes de reembolso asentados',
+        destinationStatus: 'Estado del destino',
+        recipientStatus: 'Estado del destinatario',
+        providerAccountRef: 'Cuenta externa en Bridge',
+        present: 'registrada',
+        missing: 'FALTA \u2014 payability volver\u00e1 a retener',
+        attachedBy: 'Adjuntado por',
+        attachedBySystem: 'sistema (al confirmar)',
+        depositRail: 'Rail del dep\u00f3sito',
+        depositMessage: 'Mensaje del dep\u00f3sito',
+        depositAmount: 'Monto del dep\u00f3sito',
+        onrampRef: 'Ref. del onramp en Bridge',
+        yes: 's\u00ed',
+        no: 'no',
+        status: 'Estado',
+        hasError: 'error registrado',
+        requestedAt: 'Solicitada',
+        requestedState: 'Estado al solicitar',
+        withinWindow: 'Plazo',
+        resolvedAt: 'Resuelta',
+        resolvedBy: 'Resuelta por',
+        dwell: 'Tiempo en estado',
+      },
+      empty: {
+        transitions: 'No hay transiciones registradas.',
+        ledger: 'A\u00fan no hay asientos.',
+        events: 'Ning\u00fan evento del proveedor coincide con esta transferencia.',
+        cancellations: 'Sin solicitud de cancelaci\u00f3n.',
+        depositInstructions:
+          'Sin instrucciones de dep\u00f3sito adjuntas (no es del rail manual, o a\u00fan no).',
+        quote: 'Cotizaci\u00f3n no encontrada.',
+        destination: 'Destino no encontrado.',
+        disclosures: 'Sin divulgaciones registradas.',
+      },
+      holdNone: 'Esta transferencia no tiene retenci\u00f3n de payout.',
+      holdGuidanceTitle: 'Antes de liberar (runbooks/payout-holds.md)',
+      holdGuidance: {
+        fx_drift:
+          'Compara la tasa de compra de Bridge al cotizar (secci\u00f3n Cotizaci\u00f3n) y su antig\u00fcedad con la tasa de compra actual de Bridge. Deriva tolerable \u2192 libera; la diferencia cae en fx_slippage. Dislocaci\u00f3n real \u2192 primero la aprobaci\u00f3n de Joshua. Solo antigua \u2192 averigua por qu\u00e9 se atasc\u00f3 antes de liberar. Nunca recotices: el monto al cliente es un compromiso firme bajo Reg E.',
+        payability:
+          'Libera solo cuando el destino est\u00e9 activo, el destinatario est\u00e9 activo y la cuenta externa en Bridge est\u00e9 registrada (secci\u00f3n Destino). Si no, el job de env\u00edo vuelve a retener en un minuto. Corrige el registro primero: reactiva, o registra la cuenta externa.',
+        velocity_review:
+          'Revisa los otros env\u00edos del remitente dentro de la ventana. Una r\u00e1faga leg\u00edtima \u2192 libera. Un error o algo sospechoso \u2192 NO liberes; cancela y reembolsa. Si este remitente superar\u00e1 los l\u00edmites con frecuencia, sube RISK_* con la aprobaci\u00f3n de Joshua en vez de liberar repetidamente.',
+        submit_error:
+          'Nunca es rutina. Lee primero el contexto payout_hold en Sentry. Un 422 por idempotencia es un incidente de ingenier\u00eda, no una liberaci\u00f3n. cause: recovery_missing_account_ref \u2192 restaura la cuenta externa en Bridge y luego libera. cause: source_amount_parse \u2192 NUNCA liberes: se movi\u00f3 dinero sin asiento correspondiente; escala.',
+      },
+      releaseNotAvailableKyc:
+        'Se libera sola con el webhook de aprobaci\u00f3n de Bridge \u2014 sin bot\u00f3n por dise\u00f1o. Nunca liberes con el cliente sin verificar: Bridge rechaza el payout y la fila vuelve a retenerse como submit_error.',
+      refundPreflightTitle: 'Verificaci\u00f3n previa al reembolso',
+      refundReady:
+        'Las verificaciones registradas pasan. La verificaci\u00f3n en vivo contra Bridge corre al disparar el reembolso.',
+      refundBlocked: {
+        not_payout_failed: 'El reembolso aplica solo a transferencias en PAYOUT_FAILED.',
+        claim_abandoned:
+          'PELIGRO: una ejecuci\u00f3n anterior abandon\u00f3 su claim de reembolso y pudo haber desembolsado sin registrarlo. Sin bot\u00f3n por dise\u00f1o \u2014 revisa el procesador de fondeo y sigue runbooks/manual-refund.md (claims abandonados).',
+        claim_live:
+          'Una ejecuci\u00f3n de reembolso tiene el claim ahora mismo \u2014 espera a que termine y actualiza.',
+        no_return_event:
+          'A\u00fan no hay evento de retorno de Bridge registrado \u2014 el principal debe haber regresado antes de asentar un reembolso. Revisa el panel de Bridge.',
+      },
+    },
   },
   /* eslint-enable no-restricted-syntax */
   mobile: {

@@ -1,6 +1,10 @@
 # Runbook — Payout Holds
 
-Held rows are listed with their reasons on the read-only ops page at `/dashboard/ops` (8.5-v1).
+Held rows are listed with their reasons on the ops board at `/dashboard/ops` (8.5-v1); each card's id
+opens `/dashboard/ops/transfers/<id>` (ops board slice 1), which shows the hold, this runbook's
+per-reason guidance inline, the quote's Bridge buy rate (for `fx_drift`), the destination and
+recipient statuses (for `payability`), the full transition timeline, ledger postings, and provider
+events — the investigation inputs below, on one page. Release itself is still SQL until slice O-B.
 
 **Date:** 2026-07-20 · **Status:** live process (slice 5)
 

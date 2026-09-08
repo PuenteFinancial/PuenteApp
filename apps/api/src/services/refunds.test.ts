@@ -963,6 +963,18 @@ describe('listRefundBacklog', () => {
     q('transfers', { data: null, error: { message: 'db down' } })
     await expect(listRefundBacklog()).rejects.toThrow(/refund backlog query failed/)
   })
+
+  // PostgREST caps a page at max-rows (1000 by default). Before this bound the
+  // backlog rode that cap silently, which for a list of senders who are OWED
+  // MONEY means an under-count nobody notices. Loud, like ops-overview.
+  it('bounds the read and throws at the PostgREST cap rather than under-counting', async () => {
+    q('transfers', {
+      data: Array.from({ length: 1000 }, (_, i) => parkedRow({ id: `t-${i}` })),
+      error: null,
+    })
+    await expect(listRefundBacklog()).rejects.toThrow(/1000-row PostgREST cap/)
+    expect(filtersFor('transfers', 'limit')).toContainEqual([1000])
+  })
 })
 
 describe('refundClaimStatus', () => {

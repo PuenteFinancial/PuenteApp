@@ -343,7 +343,7 @@ guard + the ledger's `(transfer_id, transition)` uniqueness; `payment_events` de
 worker + the 30-min stale-`PENDING_PAYMENT` sweep arrive in slice 5 (a stuck `PENDING_PAYMENT`
 row has no postings and no funds moved — a dead row, not lost money).
 
-## Ops (admin overview + resolve-cancellation — slices 8.5-v1/v1.1)
+## Ops (admin overview + resolve-cancellation — slices 8.5-v1/v1.1; transfer detail — ops board slice 1)
 
 | Method | Path | Auth | Idempotent | Notes |
 |---|---|---|---|---|
@@ -352,6 +352,7 @@ row has no postings and no funds moved — a dead row, not lost money).
 | POST | `/v1/ops/transfers/funding` | double control | `Idempotency-Key` required | Out-of-band funding assertion (#190): `kind: funded` releases the payout (`PENDING_PAYMENT → FUNDED`), `kind: cleared` settles the receivable when the deposit lands. Body: `{ transferId, kind, externalRef, amountMinor, currency }` — amount checked to the cent (409 `conflict` on mismatch). CLI `record-manual-funding.ts` is break-glass. |
 | POST | `/v1/ops/transfers/deposit-instructions` | double control | naturally idempotent (no key) | Attach (#203, for #199): pulls the deposit coordinates off a Bridge onramp and upserts them onto the transfer. Body: `{ transferId, bridgeTransferId }`. Re-attach overwrites. Since funding-ops slice 3 attach is **automatic at confirm** (the `funding.onramp_prepare` job, `attached_by` null = system) — this route and CLI `attach-deposit-instructions.ts` are the break-glass for the job's dead ends (Sentry `onramp-prepare-*`). |
 | POST | `/v1/ops/transfers/deposit-landed` | double control | naturally idempotent (no key) | Slice 1, funding-ops-automation: one action, both books — `recordManualFunding(kind: cleared)` then `recordFloatTopUp`, idempotent on the shared onramp ref (cleared replays as `cleared_skipped`; ledger key `float_topup:<ref>`). Ordering invariant: cleared FIRST, and the top-up runs on `cleared_skipped` too, so a re-tap after a mid-action crash heals. When instructions are attached, `externalRef` MUST match `deposit_instructions.bridge_transfer_ref` (409 `conflict` otherwise) — the ledger key is global, so a cross-transfer ref typo would silently consume another transfer's top-up. Body: `{ transferId, externalRef, amountMinor, currency }` → 200 `{ transferId, outcome: cleared \| cleared_skipped }`. |
+| GET | `/v1/ops/transfers/:id` | bearer + allowlist | read-only | **Ops board slice 1.** One transfer, the whole story: the row, dwell, quote, destination **statuses**, refund claim + recorded return event + which refund batches posted, `transfer_transitions` (no `metadata`), ledger batches with entries and a per-batch net, `payment_events` (no `payload`, error reduced to a boolean), cancellation requests, deposit instructions (no bank coordinates), disclosures. Gate runs as an `onRequest` hook BEFORE params validation — a non-admin with a malformed id gets the same 404 as a missing route, never a 400. Admins get an honest 404 `not_found` for an unknown id. Response schema is the output allowlist. Never calls Bridge (the live interlock half runs only in the refund action, slice O-B). |
 | POST | `/v1/ops/treasury/float-topup` | double control | `Idempotency-Key` required | Slice 2, funding-ops-automation: ad-hoc treasury top-up (`DR bridge_wallet_float / CR cash_clearing` via `recordFloatTopUp`; CLI `record-float-topup.ts` is break-glass). Body `{ amountMinor, currency: 'USD', externalRef? }` — blank/absent ref derives `adhoc:<Idempotency-Key>` so the HTTP and ledger layers agree on booking identity (held key → replay; same ref → ledger no-op; fresh key + blank ref → new booking). → 200 `{ amountMinor, externalRef, floatBalanceMinor }` (balance after the post; replays echo the original). No transferId — a transfer's own deposit goes through `deposit-landed`, not here. |
 
 One aggregate for the ops page (`/dashboard/ops`, no nav entry — direct URL).
@@ -395,7 +396,48 @@ timestamps, states, hold reasons, booleans; never names, destinations, or user i
   "workerHeartbeats": [            // one row per logical worker service; [] before the first beat
     { "worker": "worker", "beatAt": "2026-08-01T11:58:00Z",
       "ageSeconds": 120,           // age at generatedAt
-      "stale": false } ]           // no beat in 15 min — same threshold as the Sentry cron monitor
+      "stale": false } ],          // no beat in 15 min — same threshold as the Sentry cron monitor
+  "refundBacklog": [               // ops board slice 1: PAYOUT_FAILED rows awaiting refund (listRefundBacklog, bounded 1000, loud at cap), oldest first
+    { "transferId": "…", "sendAmountMinor": 19801, "feeAmountMinor": 199, "createdAt": "…",
+      "claimStatus": "unclaimed",  // unclaimed | claimed | abandoned — abandoned is the STOP state (manual-refund.md)
+      "claimedAt": null, "claimedBy": null,
+      "providerTransferRef": null, // null = pre-submit (#254): never reached Bridge, no bridge_return batch
+      "refundPaymentRef": null } ] // non-null = disbursed but never settled; needs finishing, not disbursing
+}
+```
+
+### GET /v1/ops/transfers/:id (ops board slice 1)
+
+The per-transfer page's one read (`/dashboard/ops/transfers/[id]`, reached from any board card —
+the transfer id is the only thing that ever goes in that URL). Same PII rule as the overview,
+enforced twice: the service's column lists never select `user_id`, `bank_*`, `payload`,
+`metadata`, names, or destination details (pinned in `ops-transfer-detail.test.ts`), and the
+route's response schema enumerates every field. Joined rows contribute statuses only.
+
+```jsonc
+// GET /v1/ops/transfers/:id → 200 (abridged)
+{
+  "generatedAt": "…", "actionsEnabled": true,
+  "transfer": { "transferId": "…", "state": "FUNDED", "sendAmountMinor": 30000, "sendCurrency": "USD",
+    "receiveAmountMinor": 540000, "receiveCurrency": "MXN", "feeAmountMinor": 500, "marginMinor": 0,
+    "fxRate": 18, "fundingSourceType": "ach", "fundingProcessor": "stripe_crypto",   // processorNameFor(row)
+    "fundingCleared": false, "fundingPaymentRef": "cos_…", "providerTransferRef": null, "refundPaymentRef": null,
+    "payoutHoldReason": "velocity_review", "payoutHeldAt": "…", "submitAttemptedAt": null,
+    "cancellationRequestedAt": null, "paymentClaimedAt": null, "disclosureAcceptedAt": "…", "paymentAt": "…",
+    "cancelableUntil": "…", "completedAt": null, "refundedAt": null, "createdAt": "…",
+    "dwell": { "enteredStateAt": "…", "dwellMinutes": 90, "thresholdMinutes": 15, "overThreshold": true } }, // null outside the board's states
+  "quote": { "fxRate": 18, "sourceRate": 18.2, "marginMinor": 0, "fxRateAt": "…", "expiresAt": "…", "createdAt": "…", "status": "accepted" },
+  "destination": { "status": "active", "hasProviderAccountRef": true, "recipientStatus": "active" },  // statuses; never the ref value, never who
+  "refund": { "claimStatus": "unclaimed", "claimedAt": null, "claimedBy": null,
+    "returnEventType": null,        // recorded payment_events return row; DB only — no Bridge call on a read
+    "ledgerKeys": { "bridgeReturn": false, "refunded": false } },
+  "transitions": [ { "fromState": "PENDING_PAYMENT", "toState": "FUNDED", "actor": "webhook:funding", "reason": null, "createdAt": "…" } ],
+  "ledger": [ { "transition": "FUNDED", "idempotencyKey": "<id>:FUNDED", "description": "…", "postedAt": "…",
+    "netMinor": 0,                  // Σdebit − Σcredit per batch; must be 0 (rendered, not asserted)
+    "entries": [ { "accountCode": "funding_receivable", "direction": "debit", "amountMinor": 30500, "currency": "USD" } ] } ],
+  "paymentEvents": [ { "id": "…", "source": "funding", "eventType": "funding_succeeded", "status": "processed",
+    "receivedAt": "…", "processedAt": "…", "providerRef": "cos_…", "hasError": false } ],  // no payload, no error text
+  "cancellationRequests": [], "depositInstructions": null, "disclosures": [ { "type": "prepayment", "locale": "es", "presentedAt": "…" } ]
 }
 ```
 

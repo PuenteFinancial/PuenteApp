@@ -25,6 +25,7 @@ import {
   isOpsFloatTopUpSuccessShape,
   type ResolveErrorKind,
 } from '@/lib/opsOverview'
+import { buttonStyle } from '@/components/ops/opsStyles'
 
 type Phase =
   | { kind: 'idle' }
@@ -221,19 +222,5 @@ function inputStyle(invalid: boolean): React.CSSProperties {
     borderRadius: 'var(--r-sm)',
     background: 'var(--surface)',
     color: 'inherit',
-  }
-}
-
-function buttonStyle(variant: 'primary' | 'secondary', disabled = false): React.CSSProperties {
-  return {
-    fontSize: 13,
-    fontWeight: 600,
-    padding: '6px 14px',
-    borderRadius: 'var(--r-sm)',
-    cursor: disabled ? 'not-allowed' : 'pointer',
-    opacity: disabled ? 0.6 : 1,
-    border: variant === 'primary' ? '1px solid var(--hero)' : '1px solid var(--line-2)',
-    background: variant === 'primary' ? 'var(--hero)' : 'transparent',
-    color: variant === 'primary' ? 'var(--surface)' : 'inherit',
   }
 }
