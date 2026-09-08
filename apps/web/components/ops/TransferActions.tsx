@@ -18,6 +18,8 @@ import { useRouter } from 'next/navigation'
 import { useLanguage } from '@/components/LanguageProvider'
 import { useIdempotencyKey } from '@/lib/idempotency'
 import { formatUsd } from '@/lib/sendFormat'
+import { UUID_RE } from '@/lib/uuid'
+import { buttonStyle, inputStyle } from '@/components/ops/opsStyles'
 import {
   resolveErrorKind,
   firstDetailIssue,
@@ -28,8 +30,6 @@ import {
   type OpsTransferAction,
   type ResolveErrorKind,
 } from '@/lib/opsOverview'
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 type Phase =
   | { kind: 'idle' }
@@ -213,18 +213,7 @@ export default function TransferActions({ tr }: { tr: OpsOpenTransfer }) {
                 type="text"
                 value={refValue}
                 onChange={(e) => setRefValue(e.target.value)}
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  marginTop: 4,
-                  padding: '6px 8px',
-                  fontFamily: 'var(--mono)',
-                  fontSize: 13,
-                  border: `1px solid ${refInvalid ? 'var(--color-error)' : 'var(--line-2)'}`,
-                  borderRadius: 'var(--r-sm)',
-                  background: 'var(--surface-2)',
-                  color: 'inherit',
-                }}
+                style={inputStyle(refInvalid)}
               />
             </label>
             {refInvalid && (
@@ -266,18 +255,4 @@ export default function TransferActions({ tr }: { tr: OpsOpenTransfer }) {
       )}
     </div>
   )
-}
-
-function buttonStyle(variant: 'primary' | 'secondary', disabled = false): React.CSSProperties {
-  return {
-    fontSize: 13,
-    fontWeight: 600,
-    padding: '6px 14px',
-    borderRadius: 'var(--r-sm)',
-    cursor: disabled ? 'not-allowed' : 'pointer',
-    opacity: disabled ? 0.6 : 1,
-    border: variant === 'primary' ? '1px solid var(--hero)' : '1px solid var(--line-2)',
-    background: variant === 'primary' ? 'var(--hero)' : 'transparent',
-    color: variant === 'primary' ? 'var(--surface)' : 'inherit',
-  }
 }

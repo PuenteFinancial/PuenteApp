@@ -6,6 +6,43 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-09-08 · Ops board slice 1: a per-transfer detail page, a refund backlog panel, and the
+PII rule restated for the wire that carries the most.** The board listed transfers as cards with no
+way in; "what happened to this transfer" was answered from the terminal plus the Supabase and Bridge
+dashboards (both August prod sends were diagnosed that way, #215). `GET /v1/ops/transfers/:id` now
+returns the whole story in one read and `/dashboard/ops/transfers/[id]` renders it. Four choices
+that are not obvious from the code. (1) **The gate runs as an `onRequest` hook, before params
+validation.** `GET /ops/overview` gets away with a handler-only check because it validates no
+input; this route has a `:id` params schema, and a non-admin sending a malformed id would otherwise
+receive a 400 from the validator and learn the route exists. Same body as the router's not-found,
+never 403 — and the six inline gate copies in `ops.ts` moved to `routes/v1/ops-gate.ts` so there is
+one gate to drift. Security review then found that `GET /ops/overview`, gated only in its handler,
+leaked existence through rate limiting: `@fastify/rate-limit` attaches per route after route-level
+`onRequest` hooks and the 404 context carries no limit, so a non-admin who exhausted the per-IP bucket
+got 429 on the real route and 404 on a bogus one. Every ops route now carries the hook. (2) **The read never calls Bridge.** The refund interlock has a live half
+(`getBridgeTransfer`) that the CLI runs; the detail page shows only the RECORDED half (the
+`payment_events` return row, the claim status, which refund batches posted) — a page load must not
+block on a provider for up to `BRIDGE_TIMEOUT_SECONDS`. The live check belongs to the refund action
+(slice O-B). (3) **PII is enforced at the query, not only at the schema.** The service's column
+lists are single string literals that never name `user_id`, `bank_*`, `payload`, `metadata`,
+`resolution`, or any name/destination column, and a test asserts on the select strings themselves;
+the route's response schema enumerates every field on top. Joined rows (destination, recipient)
+contribute statuses only; the Bridge external account ref is reported as present/absent, never its
+value. Actor strings (`ops:<admin id>`, `worker:payout`, `refund_claimed_by`) ride the wire as
+attribution, not PII — the CLI already prints them. (4) **`PAYOUT_FAILED` rows get a card via a
+refund backlog panel**, because the open-transfers panel deliberately lists only the pager's states
+plus `PENDING_PAYMENT` — a failed payout had no card to reach its detail from. The panel is
+`listRefundBacklog()` on the overview wire (now bounded, loud at the PostgREST cap), oldest first,
+tagged pre-submit (#254) and disbursed-unsettled. Also in this slice: the five ops action components
+share `OpsPrimitives`/`opsStyles` instead of triplicated style helpers; the web `UUID_RE` lives in
+`lib/uuid.ts` and the detail page validates its param BEFORE fetching; the e2e ops fixture ids became
+UUIDs with distinct prefixes (the page rejects non-UUIDs and cards show the first 8 chars). Found
+along the way: the two deny-path ops e2e specs had been failing since the float top-up card landed
+(2026-08-20) because their card locator required a Refund button that the deny panel replaces, and
+e2e is not in CI — the locator now anchors on the card's own annotation. Hold-release and refund
+buttons, and the `ops_actions` table, are slice O-B (same plan, `~/.claude/plans/joyful-discovering-gem.md`).
+**Status: active** (O-A).
+
 **2026-09-03 · trustProxy moves from hop count to connecting-address trust (`TRUST_PROXY_SOURCES`),
 forced by fastify 5.12.1.** Fastify disabled numeric `trustProxy` (GHSA: "X-Forwarded-* spoofing
 under trustProxy hop-count" — a hop count never inspects WHO is connecting, so anyone reaching the

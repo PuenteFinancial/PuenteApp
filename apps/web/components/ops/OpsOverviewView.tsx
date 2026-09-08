@@ -6,13 +6,16 @@
 // rendered ONLY when the API reports actionsEnabled (its double-control env
 // gate — OPS_ADMIN_USER_IDS × OPS_WRITE_ENABLED — is live), so a read-only
 // deployment shows no dead buttons and the page never probes the POST.
-// Everything else stays read-only; trigger-refund for PAYOUT_FAILED is v1.2.
+// Slice 1 (ops board): every card id links to /dashboard/ops/transfers/[id],
+// and the refund backlog panel lists PAYOUT_FAILED rows (never in
+// openTransfers) so a failed payout has a card to reach its detail from.
+import Link from 'next/link'
 import { useLanguage } from '@/components/LanguageProvider'
 import CancellationActions from '@/components/ops/CancellationActions'
 import TransferActions from '@/components/ops/TransferActions'
 import FloatTopUpCard from '@/components/ops/FloatTopUpCard'
+import { Pill, Section, Card, shortId } from '@/components/ops/OpsPrimitives'
 import { badgeTone, type TransferState } from '@/lib/transferState'
-import type { BadgeTone } from '@/lib/transferState'
 import { formatUsd, formatDate } from '@/lib/sendFormat'
 import {
   heldTransfers,
@@ -22,63 +25,22 @@ import {
   latestSkipped,
   formatBalance,
   workerHeartbeatAlarm,
+  refundBacklogRows,
+  opsTransferHref,
   type OpsOverview,
   type OpsOpenTransfer,
 } from '@/lib/opsOverview'
 
-// Same tone → CSS-var map as TransferHistory's pill (kept local there too —
-// lifting it is a broader refactor this admin page shouldn't drive).
-const TONE_COLOR: Record<BadgeTone, string> = {
-  success: 'var(--hero)',
-  progress: 'var(--accent-2)',
-  neutral: 'var(--muted)',
-  error: 'var(--color-error)',
-}
-
-function Pill({ label, tone }: { label: string; tone: BadgeTone }) {
-  return (
-    <span
-      style={{
-        fontSize: 12,
-        fontWeight: 600,
-        color: TONE_COLOR[tone],
-        border: `1px solid ${TONE_COLOR[tone]}`,
-        borderRadius: 999,
-        padding: '2px 10px',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {label}
-    </span>
-  )
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section style={{ marginBottom: 24 }}>
-      <h2 style={{ fontSize: 15, fontWeight: 700, margin: '0 0 10px' }}>{title}</h2>
-      {children}
-    </section>
-  )
-}
-
-function Card({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        background: 'var(--surface-2)',
-        border: '1px solid var(--line-2)',
-        borderRadius: 'var(--r-sm)',
-        padding: '12px 14px',
-        marginBottom: 8,
-      }}
-    >
-      {children}
-    </div>
-  )
-}
-
-const shortId = (id: string) => id.slice(0, 8)
+// Slice 1: ids on every card link to the per-transfer detail page. The id is
+// the only thing that ever goes in that URL (#215).
+const IdLink = ({ id }: { id: string }) => (
+  <Link
+    href={opsTransferHref(id)}
+    style={{ fontFamily: 'var(--mono)', fontSize: 13, color: 'inherit', textDecorationColor: 'var(--muted)' }}
+  >
+    {shortId(id)}
+  </Link>
+)
 
 export default function OpsOverviewView({ overview }: { overview: OpsOverview }) {
   const { lang, t } = useLanguage()
@@ -89,6 +51,7 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
   const findings = latestFindings(overview)
   const skipped = latestSkipped(overview)
   const run = latestRun(overview)
+  const backlog = refundBacklogRows(overview)
   const attention = overview.openTransfers.filter((tr) => tr.overThreshold || tr.holdReason != null)
   const quiet = overview.openTransfers.filter((tr) => !tr.overThreshold && tr.holdReason == null)
 
@@ -120,7 +83,7 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
   const transferRow = (tr: OpsOpenTransfer) => (
     <Card key={`${tr.transferId}:${tr.state}`}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{shortId(tr.transferId)}</span>
+        <IdLink id={tr.transferId} />
         <Pill label={tr.state} tone={badgeTone(tr.state as TransferState)} />
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 13 }}>
@@ -153,11 +116,15 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
       {/* === Needs you === */}
       <h2 style={{ fontSize: 13, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', margin: '0 0 12px' }}>
         {s.needsYou}
-        {(held.length > 0 || aging.length > 0) && (
+        {(held.length > 0 || aging.length > 0 || backlog.length > 0) && (
           <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, marginLeft: 8 }}>
-            {held.length > 0 && `${s.holdLabel} (${held.length})`}
-            {held.length > 0 && aging.length > 0 && ' · '}
-            {aging.length > 0 && `UNDER_REVIEW (${aging.length})`}
+            {[
+              held.length > 0 ? `${s.holdLabel} (${held.length})` : null,
+              aging.length > 0 ? `UNDER_REVIEW (${aging.length})` : null,
+              backlog.length > 0 ? `PAYOUT_FAILED (${backlog.length})` : null,
+            ]
+              .filter((x) => x != null)
+              .join(' · ')}
           </span>
         )}
       </h2>
@@ -213,7 +180,7 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
           overview.pendingCancellations.map((req) => (
             <Card key={req.transferId}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>{shortId(req.transferId)}</span>
+                <IdLink id={req.transferId} />
                 <Pill label={req.state} tone={badgeTone(req.state as TransferState)} />
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 13 }}>
@@ -231,6 +198,53 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
           ))
         )}
       </Section>
+
+      {/* Slice 1: PAYOUT_FAILED rows awaiting refund. Rendered only when the
+          API ships the panel (deploy skew: absent = not reported, not empty). */}
+      {overview.refundBacklog !== undefined && (
+        <Section title={s.refundBacklog}>
+          {backlog.length === 0 ? (
+            <p style={{ fontSize: 13, color: 'var(--muted)' }}>{s.refundBacklogEmpty}</p>
+          ) : (
+            <>
+              <p style={{ fontSize: 12, color: 'var(--muted)', margin: '0 0 8px' }}>{s.refundBacklogNote}</p>
+              {backlog.map((row) => (
+                <Card key={row.transferId}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                    <IdLink id={row.transferId} />
+                    <Pill
+                      label={s.claimStatus[row.claimStatus]}
+                      tone={
+                        row.claimStatus === 'abandoned'
+                          ? 'error'
+                          : row.claimStatus === 'claimed'
+                            ? 'progress'
+                            : 'neutral'
+                      }
+                    />
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 13 }}>
+                    <span style={{ color: 'var(--muted)' }}>
+                      {formatUsd(row.sendAmountMinor + row.feeAmountMinor)}
+                    </span>
+                    <span style={{ color: 'var(--muted)' }}>{formatDate(row.createdAt, lang)}</span>
+                  </div>
+                  {(row.providerTransferRef == null || row.refundPaymentRef != null) && (
+                    <div style={{ marginTop: 6, fontSize: 12, color: 'var(--muted)' }}>
+                      {[
+                        row.providerTransferRef == null ? s.preSubmit : null,
+                        row.refundPaymentRef != null ? s.disbursedUnsettled : null,
+                      ]
+                        .filter((x) => x != null)
+                        .join(' · ')}
+                    </div>
+                  )}
+                </Card>
+              ))}
+            </>
+          )}
+        </Section>
+      )}
 
       <Section title={s.latestFindings}>
         {run == null ? (

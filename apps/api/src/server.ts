@@ -26,6 +26,7 @@ import { transfersRoute } from './routes/v1/transfers.js'
 import { webhooksRoute } from './routes/v1/webhooks.js'
 import { devRoute, devEndpointsEnabled } from './routes/v1/dev.js'
 import { opsRoute } from './routes/v1/ops.js'
+import { opsTransfersRoute } from './routes/v1/ops-transfers.js'
 
 // Fail boot on a bad DETAILS_ENCRYPTION_KEY — otherwise a wrong key stays
 // invisible until the first payout decrypt.
@@ -121,11 +122,13 @@ await server.register(webhooksRoute, { prefix: '/v1' })
 if (devEndpointsEnabled()) {
   await server.register(devRoute, { prefix: '/v1' })
 }
-// Read-only ops overview (slice 8.5-v1): registered only when an allowlist
-// exists (fail closed — unset means the route 404s from the router); the
-// handler re-checks membership independently, dev-route posture.
+// Ops surfaces (8.5-v1 board, ops board slice 1 transfer detail): registered
+// only when an allowlist exists (fail closed — unset means the routes 404 from
+// the router); every handler re-checks membership independently, dev-route
+// posture (routes/v1/ops-gate.ts).
 if (env.OPS_ADMIN_USER_IDS.size > 0) {
   await server.register(opsRoute, { prefix: '/v1' })
+  await server.register(opsTransfersRoute, { prefix: '/v1' })
 }
 
 try {

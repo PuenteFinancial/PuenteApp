@@ -42,6 +42,13 @@ vi.mock('./ledger.js', () => ({
   getAccountBalance: (...args: unknown[]) => getAccountBalance(...args),
 }))
 
+// Ops board slice 1: the refund backlog rides the overview. The read itself
+// (scope, cap, claim classification) is pinned in refunds.test.ts.
+const listRefundBacklog = vi.hoisted(() => vi.fn())
+vi.mock('./refunds.js', () => ({
+  listRefundBacklog: (...args: unknown[]) => listRefundBacklog(...args),
+}))
+
 const { buildOpsOverview } = await import('./ops-overview.js')
 
 const NOW = new Date('2026-08-01T12:00:00.000Z')
@@ -104,6 +111,7 @@ beforeEach(() => {
   listPendingReviews.mockReset().mockResolvedValue([])
   isFloatCeilingTripped.mockReset().mockResolvedValue({ tripped: false, balanceMinor: 0, ceilingMinor: 100 })
   getAccountBalance.mockReset().mockResolvedValue({ amountMinor: 0, currency: 'USD' })
+  listRefundBacklog.mockReset().mockResolvedValue([])
   envMock.FLOAT_CEILING_MINOR = undefined
   transfersResult = { data: [], error: null }
   instructionsResult = { data: [], error: null }
@@ -146,6 +154,7 @@ describe('buildOpsOverview', () => {
     expect(rpc).toHaveBeenCalledWith('ops_transfer_state_counts')
     expect(overview.ledgerBalances).toBeNull()
     expect(overview.reconciliationRuns).toEqual([])
+    expect(overview.refundBacklog).toEqual([])
     // The open-transfers select sweeps the pager's states PLUS
     // PENDING_PAYMENT (board-only — the pager itself stays untouched).
     expect(transfersIn).toHaveBeenCalledWith('state', [
@@ -364,6 +373,71 @@ describe('buildOpsOverview', () => {
         refundPaymentRef: null,
       },
     ])
+  })
+
+  // Ops board slice 1: PAYOUT_FAILED never appears in openTransfers (terminal
+  // for the pager), so the backlog is how a failed payout gets a card at all.
+  it('maps the refund backlog to the wire shape, oldest first', async () => {
+    listRefundBacklog.mockResolvedValue([
+      {
+        id: 't-newer',
+        send_amount_minor: 10_000,
+        fee_amount_minor: 199,
+        margin_minor: 0,
+        provider_transfer_ref: 'bridge_tr_2',
+        refund_payment_ref: null,
+        created_at: minutesAgo(60),
+        refund_claimed_at: minutesAgo(40),
+        refund_claimed_by: 'ops:x',
+        claimStatus: 'abandoned',
+      },
+      {
+        id: 't-older',
+        send_amount_minor: 20_000,
+        fee_amount_minor: 299,
+        margin_minor: 0,
+        provider_transfer_ref: null, // pre-submit (#254)
+        refund_payment_ref: null,
+        created_at: minutesAgo(600),
+        refund_claimed_at: null,
+        refund_claimed_by: null,
+        claimStatus: 'unclaimed',
+      },
+    ])
+
+    const overview = await buildOpsOverview()
+
+    expect(overview.refundBacklog).toEqual([
+      {
+        transferId: 't-older',
+        sendAmountMinor: 20_000,
+        feeAmountMinor: 299,
+        createdAt: minutesAgo(600),
+        claimStatus: 'unclaimed',
+        claimedAt: null,
+        claimedBy: null,
+        providerTransferRef: null,
+        refundPaymentRef: null,
+      },
+      {
+        transferId: 't-newer',
+        sendAmountMinor: 10_000,
+        feeAmountMinor: 199,
+        createdAt: minutesAgo(60),
+        claimStatus: 'abandoned',
+        claimedAt: minutesAgo(40),
+        claimedBy: 'ops:x',
+        providerTransferRef: 'bridge_tr_2',
+        refundPaymentRef: null,
+      },
+    ])
+    // margin_minor is a service-side field; the wire carries send + fee only.
+    expect(JSON.stringify(overview.refundBacklog)).not.toContain('margin')
+  })
+
+  it('fails closed when the refund backlog read breaks', async () => {
+    listRefundBacklog.mockRejectedValue(new Error('refund backlog query failed: db down'))
+    await expect(buildOpsOverview()).rejects.toThrow(/refund backlog query failed/)
   })
 
   it('uses the real float check when the ceiling is configured', async () => {

@@ -557,14 +557,34 @@ export async function listRefundBacklog(): Promise<ParkedRefund[]> {
     .from('transfers')
     .select(PARKED_COLUMNS)
     .eq('state', 'PAYOUT_FAILED')
+    .limit(BACKLOG_ROW_BOUND)
   // Fail closed: an empty backlog and a broken read must never look the same.
   if (error || data == null) {
     throw new Error(`refund backlog query failed: ${error?.message ?? 'no rows returned'}`)
+  }
+  // Loud, not silent: PostgREST caps a page at max-rows (1000 by default) and
+  // a truncated backlog would read as "fewer senders are owed" — the exact
+  // under-count the ops board exists to prevent. Same posture as ops-overview.
+  if (data.length >= BACKLOG_ROW_BOUND) {
+    throw new Error(
+      `refund backlog hit the ${BACKLOG_ROW_BOUND}-row PostgREST cap — results may be silently truncated`,
+    )
   }
   return (data as Omit<ParkedRefund, 'claimStatus'>[]).map((row) => ({
     ...row,
     claimStatus: classifyClaim(row.refund_claimed_at),
   }))
+}
+
+const BACKLOG_ROW_BOUND = 1000
+
+/**
+ * The claim classification, for readers that already hold the row (the ops
+ * transfer detail selects refund_claimed_at itself and must not re-query).
+ * Same window, same function — CLAIM_STALE_AFTER_MS stays in one place.
+ */
+export function classifyRefundClaim(claimedAt: string | null): ClaimStatus {
+  return classifyClaim(claimedAt)
 }
 
 /**
@@ -706,4 +726,19 @@ async function findReturnEvent(
   }
   const rows = data as Array<{ event_type: string }>
   return rows[0]?.event_type ?? null
+}
+
+/**
+ * Read-only view of the recorded half of the principal-returned interlock, for
+ * the ops transfer detail: which terminal return event (if any) we have on
+ * file for this payout. Deliberately does NOT call Bridge — a page load must
+ * never block on a provider; the live half runs only inside the refund action.
+ * `null` provider ref = never submitted, so there is nothing to have returned.
+ */
+export async function recordedReturnEvent(
+  transferId: string,
+  providerTransferRef: string | null,
+): Promise<string | null> {
+  if (providerTransferRef == null) return null
+  return findReturnEvent(transferId, providerTransferRef)
 }

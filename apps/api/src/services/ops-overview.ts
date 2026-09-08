@@ -5,6 +5,7 @@ import { isFloatCeilingTripped } from './payouts.js'
 import { getAccountBalance } from './ledger.js'
 import { coarseAnchor, thresholdMs, WATCHED_STATES } from '../jobs/stuck-watch.js'
 import { processorNameFor } from './funding/index.js'
+import { listRefundBacklog, type ClaimStatus } from './refunds.js'
 
 // The 8.5-v1 ops overview (GET /v1/ops/overview, docs/api-contract.md): one
 // read-only aggregate the admin page renders in a single pass. Panels are all
@@ -38,8 +39,78 @@ export interface OpsPendingCancellation {
 // WATCHED_STATES itself is shared with the stuck-watch pager, and a days-scale
 // PENDING_PAYMENT dwell is NORMAL under the manual rail (the sender's ACH is
 // in flight), so widening the pager would only teach it to cry wolf.
-const OVERVIEW_STATES = ['PENDING_PAYMENT', ...WATCHED_STATES] as const
+export const OVERVIEW_STATES = ['PENDING_PAYMENT', ...WATCHED_STATES] as const
 export type OpsOverviewState = (typeof OVERVIEW_STATES)[number]
+
+export function isOverviewState(state: string): state is OpsOverviewState {
+  return (OVERVIEW_STATES as readonly string[]).includes(state)
+}
+
+// The dwell block every board surface renders for a watched row. Null when
+// the state is terminal or otherwise outside the board's clocks — the transfer
+// detail shows COMPLETED/REFUNDED rows too, and a dwell there would be noise.
+export interface OpsDwell {
+  enteredStateAt: string
+  dwellMinutes: number
+  thresholdMinutes: number
+  overThreshold: boolean
+}
+
+// The columns dwellFor reads — a subset of stuck-watch's WatchRow. `id` and
+// `user_id` are NOT here on purpose: coarseAnchor's row type carries them for
+// the pager's own Sentry context, but the anchor arithmetic never reads them,
+// and the ops transfer detail must not select user_id at all (PII rule).
+export interface DwellRow {
+  state: string
+  funding_cleared: boolean
+  payout_hold_reason: string | null
+  disclosure_accepted_at: string | null
+  payment_at: string | null
+  submit_attempted_at: string | null
+  cancellation_requested_at: string | null
+  created_at: string
+}
+
+export function dwellFor(row: DwellRow, nowMs: number): OpsDwell | null {
+  if (!isOverviewState(row.state)) return null
+  const state = row.state
+  // coarseAnchor may predate the current stay after a state round trip — the
+  // page over-states age in that rare case; the stuck-watch pager owns exact
+  // verdicts (its page carries the transitions-log entry time).
+  const enteredStateAt =
+    state === 'PENDING_PAYMENT'
+      ? row.created_at
+      : coarseAnchor({ ...row, state, id: '', user_id: '' })
+  const dwellMs = nowMs - new Date(enteredStateAt).getTime()
+  const threshold = overviewThresholdMs(state)
+  return {
+    enteredStateAt,
+    dwellMinutes: Math.max(0, Math.round(dwellMs / 60_000)),
+    thresholdMinutes: Math.round(threshold / 60_000),
+    overThreshold: dwellMs > threshold,
+  }
+}
+
+// A PAYOUT_FAILED row waiting on a refund (refunds.ts listRefundBacklog — the
+// CLI's `--list`, on the wire). The overview's open-transfers panel never
+// lists terminal states, so without this panel a failed payout has no card to
+// reach the detail page from. Ids, amounts, timestamps, the claim state, and
+// opaque provider refs only.
+export interface OpsParkedRefund {
+  transferId: string
+  sendAmountMinor: number
+  feeAmountMinor: number
+  createdAt: string
+  claimStatus: ClaimStatus
+  claimedAt: string | null
+  claimedBy: string | null
+  // Null = never reached Bridge (#254 pre-submit): the refund posts no
+  // bridge_return batch. The board labels these rows.
+  providerTransferRef: string | null
+  // Non-null = the sender was already paid but the state never settled; the
+  // row needs finishing, not disbursing.
+  refundPaymentRef: string | null
+}
 
 export interface OpsOpenTransfer {
   transferId: string
@@ -117,6 +188,7 @@ export interface OpsOverview {
   ledgerBalances: OpsLedgerBalances | null
   reconciliationRuns: OpsReconciliationRun[]
   workerHeartbeats: OpsWorkerHeartbeat[]
+  refundBacklog: OpsParkedRefund[]
 }
 
 // Row shape for the open-transfers select — a superset of stuck-watch's
@@ -142,13 +214,8 @@ interface OpenRow {
 }
 
 // PENDING_PAYMENT precedes every lifecycle stamp coarseAnchor folds in, so its
-// dwell runs from creation; every other state keeps the pager's own anchor.
-function overviewAnchor(row: OpenRow): string {
-  if (row.state === 'PENDING_PAYMENT') return row.created_at
-  return coarseAnchor({ ...row, state: row.state })
-}
-
-// PENDING_PAYMENT's threshold mirrors the reconcile-pending sweep's
+// dwell runs from creation (see dwellFor); every other state keeps the pager's
+// own anchor. PENDING_PAYMENT's threshold mirrors the reconcile-pending sweep's
 // abandonment window (MANUAL_PENDING_MAX_AGE_DAYS) the same way the other
 // states mirror the stuck-watch pager — the board must tick with the clock
 // that actually acts on the row.
@@ -199,21 +266,18 @@ async function readOpenTransfers(nowMs: number): Promise<OpsOpenTransfer[]> {
 
   return rows
     .map((row) => {
-      // coarseAnchor may predate the current stay after a state round trip —
-      // the page over-states age in that rare case; the stuck-watch pager owns
-      // exact verdicts (its page carries the transitions-log entry time).
-      const enteredStateAt = overviewAnchor(row)
-      const dwellMs = nowMs - new Date(enteredStateAt).getTime()
-      const threshold = overviewThresholdMs(row.state)
+      const dwell = dwellFor(row, nowMs)
+      // Unreachable: the select is bounded to OVERVIEW_STATES. Fail closed
+      // rather than fabricate a dwell if that ever stops being true.
+      if (dwell == null) {
+        throw new Error(`ops open-transfers row ${row.id} is in unwatched state ${row.state}`)
+      }
       return {
         transferId: row.id,
         state: row.state,
         sendAmountMinor: row.send_amount_minor,
         feeAmountMinor: row.fee_amount_minor,
-        enteredStateAt,
-        dwellMinutes: Math.max(0, Math.round(dwellMs / 60_000)),
-        thresholdMinutes: Math.round(threshold / 60_000),
-        overThreshold: dwellMs > threshold,
+        ...dwell,
         holdReason: row.payout_hold_reason,
         fundingCleared: row.funding_cleared,
         submitAttempted: row.submit_attempted_at != null,
@@ -349,9 +413,27 @@ async function readWorkerHeartbeats(nowMs: number): Promise<OpsWorkerHeartbeat[]
   })
 }
 
+async function readRefundBacklog(): Promise<OpsParkedRefund[]> {
+  const rows = await listRefundBacklog()
+  return rows
+    .map((row) => ({
+      transferId: row.id,
+      sendAmountMinor: row.send_amount_minor,
+      feeAmountMinor: row.fee_amount_minor,
+      createdAt: row.created_at,
+      claimStatus: row.claimStatus,
+      claimedAt: row.refund_claimed_at,
+      claimedBy: row.refund_claimed_by,
+      providerTransferRef: row.provider_transfer_ref,
+      refundPaymentRef: row.refund_payment_ref,
+    }))
+    // Oldest first: the sender who has waited longest is owed first.
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+}
+
 export async function buildOpsOverview(): Promise<OpsOverview> {
   const nowMs = Date.now()
-  const [pending, openTransfers, floatCeiling, transferCounts, recon, workerHeartbeats] =
+  const [pending, openTransfers, floatCeiling, transferCounts, recon, workerHeartbeats, refundBacklog] =
     await Promise.all([
       listPendingReviews(),
       readOpenTransfers(nowMs),
@@ -359,6 +441,7 @@ export async function buildOpsOverview(): Promise<OpsOverview> {
       readTransferCounts(),
       readReconciliationRuns(),
       readWorkerHeartbeats(nowMs),
+      readRefundBacklog(),
     ])
   return {
     generatedAt: new Date(nowMs).toISOString(),
@@ -377,5 +460,6 @@ export async function buildOpsOverview(): Promise<OpsOverview> {
     ledgerBalances: recon.ledgerBalances,
     reconciliationRuns: recon.runs,
     workerHeartbeats,
+    refundBacklog,
   }
 }

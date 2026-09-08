@@ -82,6 +82,25 @@ export interface OpsWorkerHeartbeat {
   stale: boolean
 }
 
+// Ops board slice 1: a PAYOUT_FAILED row awaiting refund. Terminal states
+// never appear in openTransfers, so this panel is how a failed payout gets a
+// card (and a link to its detail page) at all.
+export type OpsClaimStatus = 'unclaimed' | 'claimed' | 'abandoned'
+
+export interface OpsParkedRefund {
+  transferId: string
+  sendAmountMinor: number
+  feeAmountMinor: number
+  createdAt: string
+  claimStatus: OpsClaimStatus
+  claimedAt: string | null
+  claimedBy: string | null
+  // Null = never reached Bridge (#254 pre-submit).
+  providerTransferRef: string | null
+  // Non-null = disbursed but the state never settled; needs finishing.
+  refundPaymentRef: string | null
+}
+
 export interface OpsOverview {
   generatedAt: string
   // v1.1: whether the API's write capability (double-control env gate) is live.
@@ -100,6 +119,9 @@ export interface OpsOverview {
   // make isOpsOverviewShape reject an older API's payload and blank the whole
   // board over a missing panel.
   workerHeartbeats?: OpsWorkerHeartbeat[]
+  // Ops board slice 1 — same optional deploy-skew semantics: an API predating
+  // the panel omits it and the panel simply doesn't render.
+  refundBacklog?: OpsParkedRefund[]
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
@@ -118,7 +140,18 @@ export function isOpsOverviewShape(v: unknown): v is OpsOverview {
   if (v.ledgerBalances !== null && !isRecord(v.ledgerBalances)) return false
   if (v.actionsEnabled !== undefined && typeof v.actionsEnabled !== 'boolean') return false
   if (v.workerHeartbeats !== undefined && !Array.isArray(v.workerHeartbeats)) return false
+  if (v.refundBacklog !== undefined && !Array.isArray(v.refundBacklog)) return false
   return true
+}
+
+/** The refund backlog rows, or none when the API predates the panel. */
+export function refundBacklogRows(overview: OpsOverview): OpsParkedRefund[] {
+  return overview.refundBacklog ?? []
+}
+
+/** The detail page for one transfer — the only place a transfer id goes in a URL. */
+export function opsTransferHref(transferId: string): string {
+  return `/dashboard/ops/transfers/${encodeURIComponent(transferId)}`
 }
 
 /**

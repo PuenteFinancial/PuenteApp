@@ -1,5 +1,4 @@
 import type { FastifyPluginAsync } from 'fastify'
-import { env } from '../../config/env.js'
 import { buildOpsOverview } from '../../services/ops-overview.js'
 import { refundCancellation, denyCancellation } from '../../services/cancellation-review.js'
 import { recordManualFunding } from '../../services/funding-apply.js'
@@ -10,6 +9,14 @@ import {
   getDepositInstructions,
 } from '../../services/deposit-instructions.js'
 import { errorResponseSchema, sendError } from '../../utils/errors.js'
+import {
+  opsWriteEnabled,
+  opsReadAllowed,
+  opsWriteAllowed,
+  opsReadOnRequest,
+  opsWriteOnRequest,
+  denyAsNotFound,
+} from './ops-gate.js'
 
 // The money-ops surface (slices 8.5-v1 + v1.1, docs/api-contract.md).
 //
@@ -34,11 +41,9 @@ import { errorResponseSchema, sendError } from '../../utils/errors.js'
 // widened service read) cannot leak new fields onto this wire without a
 // deliberate schema change here.
 
-// Both controls positively set, or the write surface does not exist. Exported
-// for tests and any future ops write route; mirrors devEndpointsEnabled().
-export function opsWriteEnabled(): boolean {
-  return env.OPS_WRITE_ENABLED && env.OPS_ADMIN_USER_IDS.size > 0
-}
+// The gate itself lives in ops-gate.ts (shared with ops-transfers.ts); kept
+// re-exported here so existing imports of opsWriteEnabled do not move.
+export { opsWriteEnabled } from './ops-gate.js'
 
 const moneyPanelSchema = {
   type: 'object',
@@ -157,6 +162,26 @@ const overviewResponseSchema = {
           beatAt: { type: 'string' },
           ageSeconds: { type: 'number' },
           stale: { type: 'boolean' },
+        },
+      },
+    },
+    // Ops board slice 1: PAYOUT_FAILED rows awaiting refund. The open-transfers
+    // panel never lists terminal states, so this is how a failed payout gets a
+    // card — and a link to its detail page.
+    refundBacklog: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          transferId: { type: 'string' },
+          sendAmountMinor: { type: 'number' },
+          feeAmountMinor: { type: 'number' },
+          createdAt: { type: 'string' },
+          claimStatus: { type: 'string', enum: ['unclaimed', 'claimed', 'abandoned'] },
+          claimedAt: { type: ['string', 'null'] },
+          claimedBy: { type: ['string', 'null'] },
+          providerTransferRef: { type: ['string', 'null'] },
+          refundPaymentRef: { type: ['string', 'null'] },
         },
       },
     },
@@ -279,6 +304,12 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
   server.get(
     '/ops/overview',
     {
+      // Route-level gate too, not only the handler check below: @fastify/rate-limit
+      // attaches per route AFTER route-level onRequest hooks, and Fastify's 404
+      // context carries no rate limit at all — so without this hook a non-admin
+      // who has exhausted the shared per-IP bucket gets 429 here but 404 on a
+      // bogus path, an existence oracle (security review, ops board slice 1).
+      onRequest: opsReadOnRequest,
       schema: {
         response: {
           200: overviewResponseSchema,
@@ -290,9 +321,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
     async (request, reply) => {
       // Allowlist check FIRST — before any read. 404 with the router's own
       // not-found body, never 403: a non-admin must not learn this exists.
-      if (!env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-        return sendError(reply, 404, 'not_found', 'Route not found')
-      }
+      if (!opsReadAllowed(request)) return denyAsNotFound(reply)
 
       try {
         return { ...(await buildOpsOverview()), actionsEnabled: opsWriteEnabled() }
@@ -323,11 +352,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
       // Idempotency-Key (or with a garbage body) would get their 400 and learn
       // the route exists; the 404 posture must win every race. Runs after the
       // global auth hook, so request.user is set. The handler re-checks too.
-      onRequest: async (request, reply) => {
-        if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-          return sendError(reply, 404, 'not_found', 'Route not found')
-        }
-      },
+      onRequest: opsWriteOnRequest,
       schema: {
         body: resolveBodySchema,
         response: {
@@ -343,9 +368,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
       // Gate FIRST — both controls plus membership, before validation details
       // or any read. Same 404-never-403 body as the read route: env can drift
       // after registration, and the surface must not confirm it exists.
-      if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-        return sendError(reply, 404, 'not_found', 'Route not found')
-      }
+      if (!opsWriteAllowed(request)) return denyAsNotFound(reply)
 
       const { transferId, decision, depositedAt } = request.body
 
@@ -459,11 +482,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
     '/ops/transfers/funding',
     {
       config: { idempotency: true },
-      onRequest: async (request, reply) => {
-        if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-          return sendError(reply, 404, 'not_found', 'Route not found')
-        }
-      },
+      onRequest: opsWriteOnRequest,
       schema: {
         body: manualFundingBodySchema,
         response: {
@@ -476,9 +495,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
       },
     },
     async (request, reply) => {
-      if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-        return sendError(reply, 404, 'not_found', 'Route not found')
-      }
+      if (!opsWriteAllowed(request)) return denyAsNotFound(reply)
 
       const { transferId, kind, externalRef, amountMinor } = request.body
 
@@ -562,11 +579,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
   server.post<{ Body: { transferId: string; bridgeTransferId: string } }>(
     '/ops/transfers/deposit-instructions',
     {
-      onRequest: async (request, reply) => {
-        if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-          return sendError(reply, 404, 'not_found', 'Route not found')
-        }
-      },
+      onRequest: opsWriteOnRequest,
       schema: {
         body: {
           type: 'object',
@@ -594,9 +607,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
       },
     },
     async (request, reply) => {
-      if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-        return sendError(reply, 404, 'not_found', 'Route not found')
-      }
+      if (!opsWriteAllowed(request)) return denyAsNotFound(reply)
 
       try {
         const result = await attachDepositInstructions({
@@ -664,11 +675,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
   }>(
     '/ops/transfers/deposit-landed',
     {
-      onRequest: async (request, reply) => {
-        if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-          return sendError(reply, 404, 'not_found', 'Route not found')
-        }
-      },
+      onRequest: opsWriteOnRequest,
       schema: {
         body: depositLandedBodySchema,
         response: {
@@ -681,9 +688,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
       },
     },
     async (request, reply) => {
-      if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-        return sendError(reply, 404, 'not_found', 'Route not found')
-      }
+      if (!opsWriteAllowed(request)) return denyAsNotFound(reply)
 
       const { transferId, amountMinor } = request.body
       // Trimmed once and used for BOTH legs, so the cleared assertion and the
@@ -802,11 +807,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
     '/ops/treasury/float-topup',
     {
       config: { idempotency: true },
-      onRequest: async (request, reply) => {
-        if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-          return sendError(reply, 404, 'not_found', 'Route not found')
-        }
-      },
+      onRequest: opsWriteOnRequest,
       schema: {
         body: floatTopUpBodySchema,
         response: {
@@ -819,9 +820,7 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
       },
     },
     async (request, reply) => {
-      if (!opsWriteEnabled() || !env.OPS_ADMIN_USER_IDS.has(request.user!.id)) {
-        return sendError(reply, 404, 'not_found', 'Route not found')
-      }
+      if (!opsWriteAllowed(request)) return denyAsNotFound(reply)
 
       const { amountMinor } = request.body
       // The idempotency preHandler already validated the header exists.
