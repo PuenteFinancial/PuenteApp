@@ -1,9 +1,13 @@
 # Transfer State Machine — USD → MXN Remittance
 
-**Date:** 2026-06-25 · **Updated:** 2026-08-26 (de-stale pass: the four funding rails + five doors
-into `FUNDED`, rail-aware pending-payment clocks, `CANCELED` as a resting state on human-disbursement
-rails, payment claim, the onramp amount guard, and the honest `FUNDING_REVERSED` status)
-**Status:** v3 — matches the implementation through funding-ops slices 1–4 + the onramp rail
+**Date:** 2026-06-25 · **Updated:** 2026-09-08 (the K lane: `sender_kyc_pending`, and
+`stripe_crypto` added to the rail list) · 2026-08-26 (de-stale pass: the four funding
+rails + five doors into `FUNDED`, rail-aware pending-payment clocks, `CANCELED` as a resting state
+on human-disbursement rails, payment claim, the onramp amount guard, and the honest
+`FUNDING_REVERSED` status)
+**Status:** v3 — matches the implementation through funding-ops slices 1–4, the onramp rail, and
+the K lane (K1–K6). The K lane changed WHO creates a funding session and added one hold; it did
+not add or remove a transfer state, which is why this doc needed only the two edits above.
 
 The lifecycle of a single remittance transfer, from an accepted quote to delivery (or refund).
 This is the spine of the system — the queue drives these transitions, the ledger posts on them,
@@ -106,7 +110,11 @@ payment* (new debit against Puente), not a reversal of the original entries. The
 `PENDING_PAYMENT → FUNDED` has ONE implementation — `applyFundingSucceeded` in
 `services/funding-apply.ts` (ledger batch + `payment_at`/`cancelable_until` + enqueue
 `payout.submit`) — and five callers, selected by `FUNDING_PROCESSOR` (`mock | stripe | manual |
-stripe_onramp`):
+stripe_onramp | stripe_crypto`). Five DOORS, not five rails: `stripe_crypto` (the K lane's
+embedded-components rail) rides the onramp webhook door below unchanged — it subclasses the widget
+processor and inherits the same event, the same status map and the same amount guard. What differs
+is who creates the session and when: the widget rail creates it at confirm, the embedded rail at
+the pay step under the sender's own Link token, after the SDK has minted a payment token.
 
 | Door | Rail | Trigger |
 |---|---|---|
@@ -229,9 +237,10 @@ first and the other matches 0 rows — so a Bridge-payout-exists-but-`CANCELED` 
 ### Payout holds
 
 A hold is not a state: it is `FUNDED` plus a `payout_hold_reason` (`fx_drift`, `payability`,
-`submit_error`, or `velocity_review`) and `payout_held_at`. The submit job sets a hold and stops; the sweep skips held
+`submit_error`, `velocity_review`, or `sender_kyc_pending`) and `payout_held_at`. The submit job sets a hold and stops; the sweep skips held
 rows; ops investigates and releases via [runbooks/payout-holds.md](runbooks/payout-holds.md)
-(clear the column; the sweep resubmits within a minute).
+(clear the column; the sweep resubmits within a minute) — except `sender_kyc_pending`, which
+releases itself (see below).
 
 - **`fx_drift`** — the FX submission backstop tripped: live Bridge buy rate drifted more than
   `FX_MAX_DRIFT_BPS` from the quote's `source_rate`, or the quote is older than
@@ -243,6 +252,18 @@ rows; ops investigates and releases via [runbooks/payout-holds.md](runbooks/payo
   same-instant commit race slipped the confirm-time cap. Deliberately a hold, **not** a self-heal —
   a per-user velocity count doesn't drain on its own (a completed send keeps counting for the whole
   window), so ops must release (if legitimate) or cancel + refund rather than let it strand.
+- **`sender_kyc_pending`** (K6a) — the sender's own Bridge KYC (`users.kyc_status`) isn't
+  `approved` yet at payout time — expected under the embedded rail (`stripe_crypto`), where the
+  sender verifies with Stripe inside OUR pay step and their Bridge identity is created from the
+  relay moments later, so a funded transfer can legitimately reach payout while Bridge is still
+  reviewing. **Auto-released**: Bridge's
+  `customer.updated` webhook writing `kyc_status = 'approved'` clears the hold and re-enqueues the
+  submit (`services/payout-holds.ts`) — the one hold that resolves on a provider's own signal
+  rather than an ops action. Because of that it is also the one hold reconciliation does NOT flag
+  at 24h: nobody owes an action while Bridge reviews, so a day-scale page would fire on every
+  ordinary manual review. It re-raises at the 8-day clearing bound instead — money funded that
+  long with KYC still unresolved IS a human's problem.
+  See [runbooks/payout-holds.md](runbooks/payout-holds.md).
 
 A float-ceiling trip is deliberately **not** a hold (self-healing — see the gate section above).
 
