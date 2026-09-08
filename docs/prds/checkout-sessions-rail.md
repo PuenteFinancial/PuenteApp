@@ -54,6 +54,67 @@ for an unverified consumer. A bank or card charge needs none of that. Bridge is 
 actually requires the identity, because Bridge makes the payout — and the Bridge half is already
 built and has never cared how money moves.
 
+### The integration, verified against Stripe's docs (2026-09-08)
+
+Read before building C1 — the event model is the part that decides how this rail maps onto our
+existing states, and it maps almost exactly.
+
+**Creating the session.** `checkout.sessions.create` with `ui_mode: 'elements'`, `mode: 'payment'`,
+a `line_items[].price_data` entry (name, currency, `unit_amount` — no Product object needed) and a
+`return_url`. It returns a `client_secret`. Client side: `CheckoutElementsProvider` from
+`@stripe/react-stripe-js/checkout`, the Payment Element, and `checkout.confirm()`.
+
+**Which payment methods appear is Dashboard configuration, not code.** This is the concrete win
+over the Payment Intents rail, where `payment_method_types: ['us_bank_account']` is hard-coded and
+adding debit means a deploy.
+
+**The three events, and how they land on our states:**
+
+| Stripe event | When | Our funding event |
+|---|---|---|
+| `checkout.session.completed` | the sender finishes checkout | `funding_succeeded` → FUNDED |
+| `checkout.session.async_payment_succeeded` | a delayed method actually settles | `funding_cleared` |
+| `checkout.session.async_payment_failed` | a delayed method fails | `funding_failed` |
+
+That is a near 1:1 replacement for the Payment Intents rail's existing map
+(`payment_intent.processing` → succeeded, `.succeeded` → cleared, `.payment_failed` → failed), which
+is why C1 is smaller than it looks: the funding-apply layer underneath does not change at all.
+
+**One real difference C1 must handle — cards and bank debits complete differently.** For ACH the
+`completed` event arrives with `payment_status: 'unpaid'` and the PaymentIntent still processing;
+clearing comes later on the async event. For a card, `completed` arrives already `paid` and **no
+async event ever fires**. So the handler cannot map `completed` to "funded, clearing later"
+unconditionally — on a card that would leave `funding_cleared` false forever and strand
+`funding_receivable` open, which reconciliation would eventually flag. Read `payment_status`:
+`paid` means funded *and* cleared in one event, `unpaid` means funded with clearing still to come.
+
+**⚠ Measured 2026-09-08 with `scripts/smoke-stripe-checkout.ts`, and it is not what we want yet.**
+The methods a sender would actually be offered today:
+
+| Account | Payment methods returned | ACH? |
+|---|---|---|
+| Staging (test) | card, klarna, link, cashapp, amazon_pay | **no** |
+| **Live** | card, link | **no** |
+
+Two problems, both invisible from the repository, which is exactly why the smoke exists.
+
+**ACH is not enabled on either account.** The Payment Intents rail hard-codes
+`payment_method_types: ['us_bank_account']` and accepts *only* bank debit; this rail would accept
+only cards. That inverts the economics of the product — bank debit is roughly 0.8% capped, cards
+are ~2.9% + 30¢ on a remittance whose whole margin is about 100bps. **Enabling ACH in the Dashboard
+is a prerequisite for C1, not a detail**, and it is a Joshua action, not a code change.
+
+**Staging currently offers Klarna, Cash App and Amazon Pay.** Funding an outbound international
+money transfer with buy-now-pay-later is a risk and compliance question nobody has asked, and
+cards already carry chargeback exposure this rail did not have (see §5.2). Whatever is enabled
+should be a deliberate list, and the Dashboard is where that decision now lives. Live is already
+narrower than staging, which is its own reason to check both.
+
+**Fulfillment must be idempotent and webhook-driven.** Stripe is explicit that the handler can be
+called multiple times, concurrently, for the same session, and that the landing page is not a
+reliable trigger because the sender may never load it. Both are properties our
+`applyFundingSucceeded` path already has.
+
 ## 3. Code inventory
 
 | | Detail |
@@ -156,8 +217,14 @@ and most drive-proven code in the repo.
 ## 7. What would make us not do this
 
 - Counsel says no to §5.1. **Then the crypto rail is the only path and this PRD is dead.**
-- Stripe confirms crypto onramp for live mode AND the crypto leak turns out not to bother real
-  senders — which the pilot is about to tell us. Ship what is already built.
+- ~~Stripe confirms crypto onramp for live mode~~ — **answered 2026-09-08: it IS provisioned.**
+  `scripts/smoke-stripe-crypto.ts` against `prd_main` returned a real $25 USDC-on-Base quote from
+  the live API with the beta header. So the crypto rail is a genuine production fallback rather
+  than a hope, which *lowers* the risk of building this one: if gate 5.1 goes against us, there is
+  something working to fall back to. It stays inert until `FUNDING_PROCESSOR` selects it.
+  (The Link OAuth leg of that smoke is still ambiguous — it 404s identically for "probe email has
+  no Link account" and "unrecognized OAuth client". Rerun with `SMOKE_PROBE_EMAIL` set to an email
+  that has a Link account to settle it. Irrelevant to this rail, which uses no Link.)
 - The pilot surfaces enough identity-flow problems that rebuilding the payment half on top of an
   unsettled identity flow is obviously the wrong order.
 
