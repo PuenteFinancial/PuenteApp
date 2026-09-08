@@ -25,6 +25,24 @@ export const JOB_LEDGER_RECONCILE = 'ledger.reconcile'
 export const JOB_STUCK_WATCH = 'transfers.stuck-watch'
 export const JOB_WORKER_HEARTBEAT = 'worker.heartbeat'
 
+// Every Contract A queue, in one place. Used by ensureQueues to turn NOTIFY on
+// for rows that already exist; a new queue added above and forgotten here just
+// keeps polling at the old 2-second cadence, so keep the two in step.
+export const ALL_QUEUES = [
+  JOB_PAYOUT_SUBMIT,
+  JOB_PAYMENT_EVENT_PROCESS,
+  JOB_FUNDING_ONRAMP_PREPARE,
+  JOB_PAYOUT_SWEEP,
+  JOB_PAYOUT_POLL,
+  JOB_RECONCILE_PENDING,
+  JOB_IDEMPOTENCY_PURGE,
+  JOB_OTP_ATTEMPT_PURGE,
+  JOB_LOSS_CORRECTION_WATCH,
+  JOB_LEDGER_RECONCILE,
+  JOB_STUCK_WATCH,
+  JOB_WORKER_HEARTBEAT,
+] as const
+
 // The heartbeat cadence, exported because TWO places must agree on it:
 // boss.schedule() in worker.ts, and the Sentry cron monitor's crontab in
 // jobs/worker-heartbeat.ts. A monitor whose schedule disagrees with the real
@@ -61,6 +79,10 @@ const ONRAMP_PREPARE_RETRY = { retryLimit: 10, retryBackoff: true, retryDelay: 3
 const SINGLETON_POLICY = { policy: 'stately' } as const
 // Cron jobs never retry — the next tick is the retry.
 const CRON_RETRY = { retryLimit: 0 } as const
+// Wake workers on job creation rather than making them poll for it. Set on
+// creation for fresh environments; ensureQueues additionally UPDATEs every
+// queue, because createQueue does not touch rows that already exist.
+const NOTIFY = { notify: true } as const
 
 let bossPromise: Promise<PgBoss> | undefined
 
@@ -70,8 +92,32 @@ let bossPromise: Promise<PgBoss> | undefined
 // light instance — no maintenance supervisor, no cron timekeeper, small pool.
 // bossPromise is memoized per-process (API and worker are separate Railway
 // processes), so only the first caller's role actually takes effect.
+// LISTEN/NOTIFY (2026-09-08): the worker is woken the moment a job is created
+// instead of waiting out its poll, so the idle poll drops from every 2s to
+// every 30s (pg-boss's notifyPollingIntervalSeconds default) while job latency
+// gets BETTER, not worse. Measured motivation: the shared pooler was 96.7% of
+// Supabase egress — 354 MB/day against 12 MB/day for every PostgREST query the
+// app makes — because 12 queues × a 2-second poll is ~518k round trips a day
+// that almost always return nothing.
+//
+// Worker only. `useListenNotify` establishes the LISTENER; the API never works
+// a queue, it only sends, and NOTIFY is emitted by the queue on job creation
+// regardless of who sent it. Giving the API a listener would buy nothing and
+// cost it a held connection.
+//
+// COSTS ONE DEDICATED CONNECTION, held open for listening — worker pool goes
+// from 4 to effectively 5. Sized deliberately after #134's connection-budget
+// incident; if Supabase connection counts get tight again, this is one of the
+// five.
+//
+// Fails safe: it needs a session-pinned connection (Supabase's session-mode
+// pooler on 5432 — the same requirement DATABASE_URL already documents below,
+// and it will NOT work in transaction pooling mode). When it cannot be
+// established pg-boss emits a `warning` and keeps polling, which is why the
+// warning listener in getBoss is not optional — a silent fallback would leave
+// us paying the old egress and believing we had fixed it.
 const ROLE_OPTIONS = {
-  worker: { max: 4 },
+  worker: { max: 4, useListenNotify: true },
   api: { max: 2, supervise: false, schedule: false },
 } as const
 
@@ -92,6 +138,16 @@ export async function getBoss(role: 'api' | 'worker'): Promise<PgBoss> {
     // pg-boss emits 'error' for background maintenance failures; without a
     // listener that crashes the process (EventEmitter semantics).
     boss.on('error', (err) => Sentry.captureException(err))
+    // 'warning' is where a failed LISTEN/NOTIFY setup surfaces. pg-boss falls
+    // back to plain polling and carries on, so without this the only symptom
+    // is an egress bill that never went down. Not an exception — the system is
+    // correct, just slower and chattier than intended.
+    boss.on('warning', (warning: unknown) => {
+      Sentry.captureMessage(
+        `pg-boss warning: ${warning instanceof Error ? warning.message : JSON.stringify(warning)}`,
+        'warning',
+      )
+    })
     bossPromise = boss.start().catch((err: unknown) => {
       bossPromise = undefined
       throw err
@@ -109,24 +165,41 @@ export async function ensureQueues(role: 'api' | 'worker'): Promise<void> {
   if (!queuesPromise) {
     queuesPromise = (async () => {
       const boss = await getBoss(role)
-      await boss.createQueue(JOB_PAYOUT_SUBMIT, { ...SINGLETON_POLICY, ...PAYOUT_SUBMIT_RETRY })
+      await boss.createQueue(JOB_PAYOUT_SUBMIT, {
+        ...SINGLETON_POLICY,
+        ...PAYOUT_SUBMIT_RETRY,
+        ...NOTIFY,
+      })
       await boss.createQueue(JOB_PAYMENT_EVENT_PROCESS, {
         ...SINGLETON_POLICY,
         ...PAYMENT_EVENT_RETRY,
+        ...NOTIFY,
       })
       await boss.createQueue(JOB_FUNDING_ONRAMP_PREPARE, {
         ...SINGLETON_POLICY,
         ...ONRAMP_PREPARE_RETRY,
+        ...NOTIFY,
       })
-      await boss.createQueue(JOB_PAYOUT_SWEEP, CRON_RETRY)
-      await boss.createQueue(JOB_PAYOUT_POLL, CRON_RETRY)
-      await boss.createQueue(JOB_RECONCILE_PENDING, CRON_RETRY)
-      await boss.createQueue(JOB_IDEMPOTENCY_PURGE, CRON_RETRY)
-      await boss.createQueue(JOB_OTP_ATTEMPT_PURGE, CRON_RETRY)
-      await boss.createQueue(JOB_LOSS_CORRECTION_WATCH, CRON_RETRY)
-      await boss.createQueue(JOB_LEDGER_RECONCILE, CRON_RETRY)
-      await boss.createQueue(JOB_STUCK_WATCH, CRON_RETRY)
-      await boss.createQueue(JOB_WORKER_HEARTBEAT, CRON_RETRY)
+      await boss.createQueue(JOB_PAYOUT_SWEEP, { ...CRON_RETRY, ...NOTIFY })
+      await boss.createQueue(JOB_PAYOUT_POLL, { ...CRON_RETRY, ...NOTIFY })
+      await boss.createQueue(JOB_RECONCILE_PENDING, { ...CRON_RETRY, ...NOTIFY })
+      await boss.createQueue(JOB_IDEMPOTENCY_PURGE, { ...CRON_RETRY, ...NOTIFY })
+      await boss.createQueue(JOB_OTP_ATTEMPT_PURGE, { ...CRON_RETRY, ...NOTIFY })
+      await boss.createQueue(JOB_LOSS_CORRECTION_WATCH, { ...CRON_RETRY, ...NOTIFY })
+      await boss.createQueue(JOB_LEDGER_RECONCILE, { ...CRON_RETRY, ...NOTIFY })
+      await boss.createQueue(JOB_STUCK_WATCH, { ...CRON_RETRY, ...NOTIFY })
+      await boss.createQueue(JOB_WORKER_HEARTBEAT, { ...CRON_RETRY, ...NOTIFY })
+
+      // NOTIFY has to be turned on for EXISTING queues too, and createQueue
+      // cannot do it: it is ON CONFLICT DO NOTHING (see the header), so on
+      // staging and production — where every queue row already exists — the
+      // `notify` flag above would be silently ignored and the egress would not
+      // move. updateQueue is the only path that reaches an existing row.
+      //
+      // Idempotent and cheap: twelve one-row updates once per process start.
+      // Deliberately AFTER creation so a brand-new environment takes the same
+      // path as an established one.
+      await Promise.all(ALL_QUEUES.map((name) => boss.updateQueue(name, { notify: true })))
     })().catch((err: unknown) => {
       queuesPromise = undefined
       throw err

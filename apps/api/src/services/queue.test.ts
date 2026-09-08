@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 const stop = vi.fn().mockResolvedValue(undefined)
 const send = vi.fn().mockResolvedValue('job-1')
 const createQueue = vi.fn().mockResolvedValue(undefined)
+const updateQueue = vi.fn().mockResolvedValue(undefined)
 const constructed = vi.fn()
 
 vi.mock('pg-boss', () => ({
@@ -22,6 +23,7 @@ vi.mock('pg-boss', () => ({
     stop = stop
     send = send
     createQueue = createQueue
+    updateQueue = updateQueue
   },
 }))
 
@@ -31,7 +33,7 @@ vi.mock('../config/env.js', () => ({
 
 vi.mock('@sentry/node', () => ({ captureException: vi.fn() }))
 
-const { stopBoss, enqueuePayoutSubmit } = await import('./queue.js')
+const { stopBoss, enqueuePayoutSubmit, ALL_QUEUES } = await import('./queue.js')
 
 beforeEach(() => {
   constructed.mockClear()
@@ -62,5 +64,47 @@ describe('stopBoss', () => {
 
     expect(constructed).toHaveBeenCalledTimes(1)
     expect(createQueue).toHaveBeenCalled()
+  })
+})
+
+describe('LISTEN/NOTIFY wiring (Supabase egress — 96.7% of it was queue polling)', () => {
+  // Last in the file on purpose: these enqueue, which constructs and memoizes
+  // an instance, and the stopBoss cases above assert against a process that
+  // has never started one.
+  it('turns NOTIFY on for EVERY queue via updateQueue, not just at creation', async () => {
+    await stopBoss()
+    updateQueue.mockClear()
+
+    await enqueuePayoutSubmit('t-notify-1', 'worker')
+
+    // createQueue is ON CONFLICT DO NOTHING, so on staging and production —
+    // where every queue row already exists — passing `notify` at creation is
+    // silently ignored. updateQueue is the only call that reaches an existing
+    // row. Without this the change ships, looks correct, and moves no egress
+    // whatsoever; that failure mode is invisible, which is why it is pinned.
+    const updated = updateQueue.mock.calls.map((c) => c[0] as string)
+    expect(new Set(updated)).toEqual(new Set(ALL_QUEUES))
+    for (const call of updateQueue.mock.calls) {
+      expect(call[1]).toMatchObject({ notify: true })
+    }
+  })
+
+  it('gives the worker a listener and the send-only API none', async () => {
+    // `useListenNotify` holds a dedicated connection open for LISTEN. The
+    // worker needs it — it is the process being woken. The API never works a
+    // queue (NOTIFY is emitted by the queue on job creation regardless of who
+    // sent it), so a listener there would cost a connection and buy nothing.
+    await stopBoss()
+    constructed.mockClear()
+    await enqueuePayoutSubmit('t-notify-worker', 'worker')
+    const workerOpts = constructed.mock.calls.at(-1)?.[0] as Record<string, unknown>
+    expect(workerOpts.useListenNotify).toBe(true)
+
+    await stopBoss()
+    constructed.mockClear()
+    await enqueuePayoutSubmit('t-notify-api', 'api')
+    const apiOpts = constructed.mock.calls.at(-1)?.[0] as Record<string, unknown>
+    expect(apiOpts.supervise).toBe(false)
+    expect(apiOpts.useListenNotify).toBeUndefined()
   })
 })
