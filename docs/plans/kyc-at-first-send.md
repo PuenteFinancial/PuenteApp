@@ -63,6 +63,14 @@ entries. The ones most likely to be broken by accident:
   customer is created.
 - **A duplicate tax ID is a hard stop**, not a retry — the collision is a real person.
 
+## A live proposal to change the rail underneath this
+
+[`../prds/checkout-sessions-rail.md`](../prds/checkout-sessions-rail.md) (2026-09-08) proposes
+moving the funding rail to Stripe Checkout Sessions to take crypto off the sender's path. It keeps
+K1, K2 and K6 whole — the terms gate, the relay, the hold, the verification log — and discards
+K3–K5. It is a decision doc, not a build order, and one of its gates (whether Puente may hold
+sender funds) can kill it outright. Read it before building anything on K3–K5.
+
 ## What K7b still owes
 
 Human-shaped, and none of it is code:
