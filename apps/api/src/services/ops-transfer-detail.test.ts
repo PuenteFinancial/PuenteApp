@@ -350,7 +350,7 @@ describe('buildOpsTransferDetail', () => {
     expect(JSON.stringify(detail)).not.toContain('J. Doe')
   })
 
-  it('matches payment events on the transfer id, adding the provider ref only when it is charset-safe', async () => {
+  it('matches payment events on the transfer id, adding the provider ref when present', async () => {
     await buildOpsTransferDetail(T)
     expect(ors).toEqual([`transfer_id.eq.${T}`])
 
@@ -358,11 +358,25 @@ describe('buildOpsTransferDetail', () => {
     results['transfers'] = { data: transferRow({ provider_transfer_ref: 'br_ok-1' }), error: null }
     await buildOpsTransferDetail(T)
     expect(ors).toEqual([`transfer_id.eq.${T},provider_ref.eq.br_ok-1`])
+  })
 
-    ors = []
+  // Unlike refunds.ts findReturnEvent (where dropping a bad ref only tightens a
+  // verdict), a display read must not silently narrow — it throws.
+  it('refuses a malformed provider ref rather than silently dropping it from the predicate', async () => {
     results['transfers'] = { data: transferRow({ provider_transfer_ref: 'x),or(1.eq.1' }), error: null }
-    await buildOpsTransferDetail(T)
-    expect(ors).toEqual([`transfer_id.eq.${T}`])
+    await expect(buildOpsTransferDetail(T)).rejects.toThrow(/malformed provider ref/)
+    expect(ors).toEqual([])
+  })
+
+  it('bounds transition reasons — the one provider-sourced string on the wire', async () => {
+    results['transfer_transitions'] = {
+      data: [
+        { from_state: 'PENDING_PAYMENT', to_state: 'PAYMENT_FAILED', actor: 'webhook:funding', reason: 'x'.repeat(500), created_at: minutesAgo(1) },
+      ],
+      error: null,
+    }
+    const detail = await buildOpsTransferDetail(T)
+    expect(detail?.transitions[0]?.reason).toHaveLength(200)
   })
 
   it('refuses a malformed transfer id before it can reach the or() filter string', async () => {
@@ -424,12 +438,25 @@ describe('buildOpsTransferDetail', () => {
     ])
   })
 
-  it('handles a missing destination and quote as null panels, not a 500', async () => {
-    results['payout_destinations'] = { data: null, error: null }
+  // transfers.quote_id and transfers.payout_destination_id are NOT NULL FKs, so
+  // a missing row on either join is a broken read, not an absent panel — the
+  // service must fail closed rather than render "no quote on file".
+  it('fails closed when the quote or destination join returns no row', async () => {
     results['quotes'] = { data: null, error: null }
+    await expect(buildOpsTransferDetail(T)).rejects.toThrow(/quote select failed: no row/)
+
+    results['quotes'] = {
+      data: { fx_rate: 18, source_rate: 18.2, margin_minor: 0, fx_rate_at: minutesAgo(1), expires_at: minutesAgo(1), status: 'accepted', created_at: minutesAgo(1) },
+      error: null,
+    }
+    results['payout_destinations'] = { data: null, error: null }
+    await expect(buildOpsTransferDetail(T)).rejects.toThrow(/destination select failed: no row/)
+  })
+
+  it('treats missing deposit instructions as genuinely absent (the one optional join)', async () => {
+    results['deposit_instructions'] = { data: null, error: null }
     const detail = await buildOpsTransferDetail(T)
-    expect(detail?.destination).toBeNull()
-    expect(detail?.quote).toBeNull()
+    expect(detail?.depositInstructions).toBeNull()
   })
 
   it('throws loudly when a list read hits the PostgREST row cap', async () => {

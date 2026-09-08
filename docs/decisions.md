@@ -16,7 +16,10 @@ validation.** `GET /ops/overview` gets away with a handler-only check because it
 input; this route has a `:id` params schema, and a non-admin sending a malformed id would otherwise
 receive a 400 from the validator and learn the route exists. Same body as the router's not-found,
 never 403 — and the six inline gate copies in `ops.ts` moved to `routes/v1/ops-gate.ts` so there is
-one gate to drift. (2) **The read never calls Bridge.** The refund interlock has a live half
+one gate to drift. Security review then found that `GET /ops/overview`, gated only in its handler,
+leaked existence through rate limiting: `@fastify/rate-limit` attaches per route after route-level
+`onRequest` hooks and the 404 context carries no limit, so a non-admin who exhausted the per-IP bucket
+got 429 on the real route and 404 on a bogus one. Every ops route now carries the hook. (2) **The read never calls Bridge.** The refund interlock has a live half
 (`getBridgeTransfer`) that the CLI runs; the detail page shows only the RECORDED half (the
 `payment_events` return row, the claim status, which refund batches posted) — a page load must not
 block on a provider for up to `BRIDGE_TIMEOUT_SECONDS`. The live check belongs to the refund action

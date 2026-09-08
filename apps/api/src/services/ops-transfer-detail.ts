@@ -17,8 +17,17 @@ import { classifyRefundClaim, recordedReturnEvent, type ClaimStatus } from './re
 //
 // Every list read is bounded and fails CLOSED (ops-overview posture): a broken
 // read 500s the route — an empty timeline and a broken read must never look
-// the same. No provider is ever called from this path: a page load must not
-// block on Bridge; the live half of the refund interlock runs in the action.
+// the same. The quote and destination joins fail closed too: both FKs are NOT
+// NULL on transfers, so a missing row there is a broken read, never an absent
+// panel (only deposit_instructions is genuinely optional). No provider is ever
+// called from this path: a page load must not block on Bridge; the live half of
+// the refund interlock runs in the action.
+//
+// One admitted exception to "never provider text": transfer_transitions.reason.
+// Most writers use a literal, but two carry a short provider string verbatim
+// (a Stripe last_error on the reaper path, a decline/failure code on the
+// funding webhook). It is the operator's diagnostic and rides this admin-only
+// wire deliberately, length-bounded; nothing else provider-authored does.
 
 const ROW_BOUND = 1000
 
@@ -295,7 +304,8 @@ async function readQuote(quoteId: string): Promise<OpsTransferDetail['quote']> {
     'quote',
     supabaseAdmin.from('quotes').select(QUOTE_COLUMNS).eq('id', quoteId).maybeSingle(),
   )
-  if (row == null) return null
+  // transfers.quote_id is NOT NULL + FK: no row means the read is broken.
+  if (row == null) throw new Error('ops transfer-detail quote select failed: no row for a required join')
   return {
     fxRate: row.fx_rate,
     sourceRate: row.source_rate,
@@ -316,7 +326,10 @@ async function readDestination(destinationId: string): Promise<OpsTransferDetail
       .eq('id', destinationId)
       .maybeSingle(),
   )
-  if (row == null) return null
+  // transfers.payout_destination_id is NOT NULL + FK: same rule as the quote.
+  if (row == null) {
+    throw new Error('ops transfer-detail destination select failed: no row for a required join')
+  }
   return {
     status: row.status,
     // The ref's PRESENCE is what payability needs; the value is an opaque
@@ -340,10 +353,13 @@ async function readTransitions(transferId: string): Promise<OpsTransferDetail['t
     fromState: row.from_state,
     toState: row.to_state,
     actor: row.actor,
-    reason: row.reason,
+    // Provider-sourced on two write paths (see header) — bounded here.
+    reason: row.reason == null ? null : row.reason.slice(0, REASON_MAX_CHARS),
     createdAt: row.created_at,
   }))
 }
+
+const REASON_MAX_CHARS = 200
 
 async function readLedger(transferId: string): Promise<OpsTransferDetail['ledger']> {
   const rows = await readList<LedgerTransactionRow>(
@@ -388,11 +404,17 @@ async function readPaymentEvents(
   // Ingest does not always resolve transfer_id (see payment-events.ts), so
   // match on either key — the refunds.ts findReturnEvent predicate. Both
   // interpolated values are charset-checked: the `or` filter is a STRING.
+  // Unlike findReturnEvent, a malformed ref THROWS rather than being dropped:
+  // there narrowing only makes a verdict stricter; here it would silently hide
+  // the very events the second clause exists to find (security review).
   if (!UUID_RE.test(transferId)) {
     throw new Error('ops transfer-detail payment-events select failed: malformed transfer id')
   }
   const clauses = [`transfer_id.eq.${transferId}`]
-  if (providerTransferRef != null && /^[A-Za-z0-9_-]+$/.test(providerTransferRef)) {
+  if (providerTransferRef != null) {
+    if (!/^[A-Za-z0-9_-]+$/.test(providerTransferRef)) {
+      throw new Error('ops transfer-detail payment-events select failed: malformed provider ref')
+    }
     clauses.push(`provider_ref.eq.${providerTransferRef}`)
   }
   const rows = await readList<EventRow>(

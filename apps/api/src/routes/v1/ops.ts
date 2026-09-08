@@ -13,6 +13,7 @@ import {
   opsWriteEnabled,
   opsReadAllowed,
   opsWriteAllowed,
+  opsReadOnRequest,
   opsWriteOnRequest,
   denyAsNotFound,
 } from './ops-gate.js'
@@ -303,6 +304,12 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
   server.get(
     '/ops/overview',
     {
+      // Route-level gate too, not only the handler check below: @fastify/rate-limit
+      // attaches per route AFTER route-level onRequest hooks, and Fastify's 404
+      // context carries no rate limit at all — so without this hook a non-admin
+      // who has exhausted the shared per-IP bucket gets 429 here but 404 on a
+      // bogus path, an existence oracle (security review, ops board slice 1).
+      onRequest: opsReadOnRequest,
       schema: {
         response: {
           200: overviewResponseSchema,
