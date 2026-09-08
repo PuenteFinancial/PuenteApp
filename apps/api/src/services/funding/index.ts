@@ -5,6 +5,7 @@ import { StripeFundingProcessor } from './stripe.js'
 import { ManualFundingProcessor } from './manual.js'
 import { StripeOnrampFundingProcessor } from './stripe-onramp.js'
 import { StripeCryptoFundingProcessor } from './stripe-crypto.js'
+import { StripeCheckoutFundingProcessor } from './stripe-checkout.js'
 
 export type FundingEventType =
   | 'funding_succeeded'
@@ -309,6 +310,7 @@ const processors: Record<typeof env.FUNDING_PROCESSOR, () => FundingProcessor> =
   manual: () => new ManualFundingProcessor(),
   stripe_onramp: () => new StripeOnrampFundingProcessor(),
   stripe_crypto: () => new StripeCryptoFundingProcessor(),
+  stripe_checkout: () => new StripeCheckoutFundingProcessor(),
 }
 
 let instance: FundingProcessor | undefined
