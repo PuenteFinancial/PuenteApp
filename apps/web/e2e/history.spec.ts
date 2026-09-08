@@ -60,10 +60,14 @@ test('shows an empty state when there are no transfers', async ({ context, page 
   await signIn(context, 'e2e-empty')
   await page.goto('/dashboard/transfers')
 
-  await expect(
-    page.getByText(/haven.t sent any transfers|no has enviado ninguna transferencia/i),
-  ).toBeVisible()
-  await expect(page.getByRole('link', { name: /send money|enviar dinero/i })).toBeVisible()
+  const empty = page.getByText(/haven.t sent any transfers|no has enviado ninguna transferencia/i)
+  await expect(empty).toBeVisible()
+  // Scope to the empty-state card: since the persistent dashboard nav (#202)
+  // the page carries a second "Send money" link, so an unscoped role query is
+  // a strict-mode violation. The card's own CTA is the one under test.
+  const cta = empty.locator('..').getByRole('link', { name: /send money|enviar dinero/i })
+  await expect(cta).toBeVisible()
+  await expect(cta).toHaveAttribute('href', '/dashboard/send')
 })
 
 test('a failed first-page load shows a retryable error, not an empty state', async ({ context, page }) => {
