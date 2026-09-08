@@ -30,10 +30,15 @@ const BENIGN_CODES = new Set(['transition_conflict', 'transfer_not_found'])
 
 // ── Onramp rejected-session poll (#213, added after the 2026-08-26 KYC
 // drill) ────────────────────────────────────────────────────────────────────
-// Stripe emits NO webhook when an onramp session is rejected at verify
-// (contradicting their docs; confirmed against the account event stream), so
-// rejected transfers would otherwise sit PENDING_PAYMENT for the full
-// abandonment window with the sender staring at "waiting for payment". Each
+// In Stripe TEST MODE no webhook fires when an onramp session is rejected at
+// verify (contradicting their docs; confirmed against that account's event
+// stream), so rejected transfers would otherwise sit PENDING_PAYMENT for the
+// full abandonment window with the sender staring at "waiting for payment".
+// TEST MODE IS THE WHOLE SCOPE OF THAT FINDING (corrected 2026-09-08):
+// production had no Stripe secret key until 2026-09-08, so the drill could
+// not have observed live. Unverified in live; the pilot checks it. The poll
+// is correct either way — see the long note on getPaymentStatus in
+// services/funding/stripe-onramp.ts. Each
 // sweep tick (*/5) polls every pending cos_ session and fails rejected ones
 // NOW, with the session's own reason. Fail-safe by construction: the only
 // transition this can drive is PENDING_PAYMENT → PAYMENT_FAILED (no money
