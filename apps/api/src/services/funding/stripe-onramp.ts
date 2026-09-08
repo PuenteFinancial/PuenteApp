@@ -308,12 +308,24 @@ export class StripeOnrampFundingProcessor implements FundingProcessor {
   }
 
   /**
-   * Live session status — the poll the KYC-reject drill proved necessary
-   * (2026-08-26): Stripe emits NO webhook when a session is rejected at
-   * verify (contradicting their docs' "every status change" claim; confirmed
-   * against the account event stream), so the reconcile sweep polls pending
-   * sessions through this read and fails rejected ones immediately instead
-   * of waiting out the abandonment window. Also serves the recon seam's
+   * Live session status — the poll the KYC-reject drill made necessary
+   * (2026-08-26): in Stripe TEST MODE, no webhook fires when a session is
+   * rejected at verify (contradicting their docs' "every status change"
+   * claim; confirmed against that account's event stream), so the reconcile
+   * sweep polls pending sessions through this read and fails rejected ones
+   * immediately instead of waiting out the abandonment window.
+   *
+   * SCOPE OF THAT FINDING, corrected 2026-09-08: it is a TEST-MODE
+   * observation and nothing more. Production held no Stripe secret key at all
+   * until 2026-09-08, so no code of ours had ever called Stripe outside test
+   * mode when the drill ran — the claim could not have been about live even
+   * in principle. Whether live emits the rejection event is UNVERIFIED, and
+   * beta products differing between modes is common enough not to assume
+   * either way. The pilot checks it (docs/plans/kyc-pilot.md).
+   *
+   * This poll stays correct regardless: it is a backstop that can only drive
+   * the no-ledger PENDING_PAYMENT → PAYMENT_FAILED transition, so if live
+   * does emit the webhook the poll simply finds nothing to do. Also serves the recon seam's
    * getPaymentStatus contract. listRecentPayments stays unimplemented —
    * orphan detection remains an honest `skipped` until the recon fast-follow.
    */
