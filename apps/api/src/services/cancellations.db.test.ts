@@ -117,6 +117,27 @@ describe.skipIf(!runDb)('cancellation_requests (integration, local Supabase)', (
   })
 
   afterAll(async () => {
+    // Clean up after ourselves. Until 2026-09-08 this only closed the
+    // connection, so every run left 11 transfers plus their users, recipients,
+    // destinations and quotes in the local database forever. That residue is
+    // not harmless: reconciliation's checks read GLOBAL state, so orphaned
+    // transfers with no ledger batches make `state_postings` — a fatal check —
+    // report findings against a developer's machine. It also grows without
+    // bound, and reconciliation fails loud at ROW_BOUND = 1000 rows, which is
+    // a plausible mechanism behind the "~1-in-12 full-suite failure, never
+    // reproducible in isolation" watch item.
+    const users = [USER, OTHER_USER]
+    await db.query('delete from public.cancellation_requests where user_id = any($1)', [users])
+    await db.query('delete from public.transfers where user_id = any($1)', [users])
+    await db.query('delete from public.quotes where user_id = any($1)', [users])
+    await db.query(
+      `delete from public.payout_destinations where recipient_id in
+         (select id from public.recipients where user_id = any($1))`,
+      [users],
+    )
+    await db.query('delete from public.recipients where user_id = any($1)', [users])
+    await db.query('delete from public.users where id = any($1)', [users])
+    await db.query('delete from auth.users where id = any($1)', [users])
     await db.end()
   })
 

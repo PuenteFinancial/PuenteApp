@@ -41,12 +41,17 @@ const RECEIVE_MINOR = 1_999_970
 // the control missing — and that fail-closed behaviour is worth keeping for
 // every other suite. This one needs payouts to actually run, so it opts in
 // explicitly: $10,000 against $2,000 of draw (20 sends × $100) is headroom, and
-// whether the ceiling TRIPS is the last test's job, not this file's default.
-process.env.FLOAT_CEILING_MINOR ??= '1000000'
+// whether the ceiling TRIPS is float-ceiling-concurrency.db.test.ts's job.
+//
+// Plain `=`, not `??=`: vitest isolates the module registry per file but NOT
+// process.env, so a sibling db file that ran first would otherwise pin this
+// suite's ceiling to ITS value. Each file declares its own; order stops
+// mattering.
+process.env.FLOAT_CEILING_MINOR = '1000000'
 // Same reasoning: submitPayout refuses outright without a treasury wallet
 // rather than guessing one. Mocked Bridge never reads it, but the guard is
 // real and this suite has to satisfy it like production does.
-process.env.BRIDGE_TREASURY_WALLET_ID ??= 'wallet_load_test'
+process.env.BRIDGE_TREASURY_WALLET_ID = 'wallet_load_test'
 
 // ── the two external providers, and only those ──────────────────────────────
 // Bridge accepts every payout and draws the source amount 1% over the send —
@@ -86,6 +91,20 @@ const { submitPayout } = await import('../jobs/payout-submit.js')
 const { buildChecks } = await import('./reconciliation.js')
 const { recordFloatTopUp } = await import('./payouts.js')
 
+// Reconciliation checks read GLOBAL state, so asserting "the database is
+// clean" makes this suite hostage to every other suite's residue — which is
+// exactly how it first failed (cancellations.db.test.ts was leaking 11
+// transfers per run). The honest claim is narrower and more useful: OUR
+// activity introduced no findings. Snapshot before, compare after.
+const fatalFindingKeys = async (): Promise<string[]> => {
+  const keys: string[] = []
+  for (const check of buildChecks().filter((c) => c.severity === 'fatal')) {
+    const { findings } = await check.run()
+    keys.push(...findings.map((f) => `${check.name}:${f.key}`))
+  }
+  return keys
+}
+
 interface Sender {
   userId: string
   destinationId: string
@@ -101,6 +120,7 @@ const phoneFor = (u: number) => `1555${RUN}${String(u).padStart(3, '0')}`
 
 describe.skipIf(!runDb)('multi-user volume: the books still reconcile (integration)', () => {
   let db: Client
+  let baselineFindings: string[] = []
   const senders: Sender[] = []
 
   const seedPendingTransfer = async (sender: Sender, n: number): Promise<string> => {
@@ -224,6 +244,10 @@ describe.skipIf(!runDb)('multi-user volume: the books still reconcile (integrati
       }
       senders.push(sender)
     }
+
+    // Taken AFTER seeding and BEFORE any money moves: anything already flagged
+    // belongs to someone else and is not this suite's to fix.
+    baselineFindings = await fatalFindingKeys()
   })
 
   afterAll(async () => {
@@ -276,18 +300,9 @@ describe.skipIf(!runDb)('multi-user volume: the books still reconcile (integrati
     // Fatal checks are the money-correctness ones: every batch nets zero, no
     // batch is a single dangling entry, every state posted what its transition
     // owes, and the account balances hold their invariants.
-    const fatal = buildChecks().filter((c) => c.severity === 'fatal')
-    expect(fatal.length).toBeGreaterThanOrEqual(4)
-
-    for (const check of fatal) {
-      const result = await check.run()
-      expect(
-        result.findings,
-        `recon check "${check.name}" found ${result.findings.length}: ` +
-          JSON.stringify(result.findings.slice(0, 3)),
-      ).toEqual([])
-      expect(result.status, `recon check "${check.name}" status`).toBe('pass')
-    }
+    expect(buildChecks().filter((c) => c.severity === 'fatal').length).toBeGreaterThanOrEqual(4)
+    const introduced = (await fatalFindingKeys()).filter((k) => !baselineFindings.includes(k))
+    expect(introduced, `20 completed sends introduced reconciliation findings`).toEqual([])
   })
 
   it('is replay-safe at volume: re-driving every funded transfer posts nothing new', async () => {
@@ -316,10 +331,7 @@ describe.skipIf(!runDb)('multi-user volume: the books still reconcile (integrati
     expect(after.rows[0].n).toBe(before.rows[0].n)
     expect(bridgeCalls.length).toBe(bridgeBefore)
 
-    for (const check of buildChecks().filter((c) => c.severity === 'fatal')) {
-      const result = await check.run()
-      expect(result.findings, `recon check "${check.name}" after replay`).toEqual([])
-      expect(result.status, `recon check "${check.name}" after replay`).toBe('pass')
-    }
+    const introduced = (await fatalFindingKeys()).filter((k) => !baselineFindings.includes(k))
+    expect(introduced, 'the replay storm introduced reconciliation findings').toEqual([])
   })
 })
