@@ -35,9 +35,14 @@ const REFUND_ENVELOPE_TYPES: ReadonlySet<string> = new Set([
 ])
 
 export class StripeFundingProcessor implements FundingProcessor {
-  readonly provider = 'stripe'
+  // Widened, matching stripe-onramp: the Checkout Sessions rail subclasses
+  // this one, and a literal type would refuse the override.
+  readonly provider: string = 'stripe'
   readonly signatureHeader = 'stripe-signature'
-  private readonly client: Stripe
+  // protected, not private: stripe-checkout.ts extends this class to reuse the
+  // settlement-aware void/refund logic, and needs the same client to resolve a
+  // Checkout Session to its PaymentIntent first.
+  protected readonly client: Stripe
 
   constructor(client?: Stripe) {
     if (!client && !env.STRIPE_SECRET_KEY) {

@@ -119,7 +119,9 @@ const envSchema = z.object({
   // webhook/session machinery as stripe_onramp, but sessions are created at
   // the PAY STEP (deferred initiation: the SDK must mint a payment token
   // first), authenticated per-user via Link OAuth.
-  FUNDING_PROCESSOR: z.enum(['mock', 'stripe', 'manual', 'stripe_onramp', 'stripe_crypto']).default('mock'),
+  FUNDING_PROCESSOR: z
+    .enum(['mock', 'stripe', 'manual', 'stripe_onramp', 'stripe_crypto', 'stripe_checkout'])
+    .default('mock'),
   // How long a CONFIRMED transfer may sit in PENDING_PAYMENT under the manual
   // processor before the reconcile sweep declares it abandoned. Webhook-driven
   // processors keep the 30-minute rule (payment either happened or it didn't);
@@ -178,6 +180,12 @@ const envSchema = z.object({
   // LinkAuthIntent creation; the secret is used ONLY in the refresh-token
   // grant. Optional: absent means the crypto surface answers 503
   // not_configured instead of refusing boot — the K-lane ships dark.
+  // Where Stripe sends a sender back if a payment method redirects away (3DS,
+  // some wallets). Required by the Checkout Sessions API even in elements
+  // mode, where most senders never leave our page — so it is a real URL that
+  // has to render something, not a placeholder. A full URL rather than a path
+  // because the API and the web app are different origins.
+  CHECKOUT_RETURN_URL_BASE: z.string().url().optional(),
   STRIPE_CRYPTO_OAUTH_CLIENT_ID: z.string().min(1).optional(),
   STRIPE_CRYPTO_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
   // Base URLs are knobs only so the smoke script / tests can point at a
@@ -402,6 +410,25 @@ export const envSchemaWithRules = envSchema.superRefine((value, ctx) => {
   // The embedded-components rail (K4) needs everything the widget rail needs
   // PLUS the Link OAuth pair — sessions are minted under the user's OAuth
   // token, so a selection without the pair could never create one.
+  // Everything the PI rail needs (same keys, same webhook secret) plus the
+  // return URL the Checkout Sessions API requires. Same fail-at-boot posture:
+  // a selection that cannot create a session should never accept a confirm.
+  if (value.FUNDING_PROCESSOR === 'stripe_checkout') {
+    for (const key of [
+      'STRIPE_SECRET_KEY',
+      'STRIPE_WEBHOOK_SECRET',
+      'STRIPE_PUBLISHABLE_KEY',
+      'CHECKOUT_RETURN_URL_BASE',
+    ] as const) {
+      if (!value[key]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is required when FUNDING_PROCESSOR=stripe_checkout`,
+        })
+      }
+    }
+  }
   if (value.FUNDING_PROCESSOR === 'stripe_crypto') {
     for (const key of [
       'STRIPE_SECRET_KEY',
