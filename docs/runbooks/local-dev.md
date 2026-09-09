@@ -60,7 +60,10 @@ waitlist entry, confirm the row lands in **puente-staging**.
    docker exec supabase_db_goyfagidfkjyhyepsaup psql -U postgres -d postgres \
      -c "grant select, insert, update, delete on all tables in schema public to service_role, authenticated, anon;"
    ```
-   Without it, the API gets `permission denied (42501)` on every table.
+   Without it, the API gets `permission denied (42501)` on every table. **Re-run it after every
+   migration that creates a table** — the grant covers tables that exist at the time, so a new one
+   starts with no client grants. Symptom to recognize: a best-effort writer (e.g. `ops_actions`)
+   silently drops its rows locally while the route still answers 200 (seen 2026-09-09).
 3. API env: local `SUPABASE_URL`/keys from `supabase start` output — must use the **legacy
    service-role JWT** (the newer `sb_secret_…` keys also 42501 locally), plus
    `SUPABASE_JWKS_URL=http://127.0.0.1:54321/auth/v1/.well-known/jwks.json`, `HOST=::`, `PORT=3001`.

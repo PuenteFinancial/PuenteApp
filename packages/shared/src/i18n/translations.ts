@@ -794,6 +794,7 @@ export type Translations = {
       errors: {
         claim_abandoned: string
         principal_not_returned: string
+        provider_unavailable: string
         refund_owed: string
         evidence_conflict: string
         conflict: string
@@ -1556,6 +1557,8 @@ const en: Translations = {
           'DANGER: a prior refund run abandoned its claim and may have disbursed without recording it. Do NOT retry — follow runbooks/manual-refund.md (abandoned claims).',
         principal_not_returned:
           'STOP: the principal is not confirmed back from Bridge — the recorded return event and Bridge’s live state must agree before a refund can post. Do NOT retry from here: read the Bridge dashboard, then follow runbooks/manual-refund.md.',
+        provider_unavailable:
+          'Bridge is unreachable — the check did not run and nothing was changed. Try again in a minute.',
         refund_owed:
           'This request met both cancellation conditions — a refund is owed and it cannot be denied by any tool. Refund it instead.',
         evidence_conflict: 'The cited deposit time conflicts with recorded evidence:',
@@ -1787,7 +1790,7 @@ const en: Translations = {
           released: 'Released — payout submission queued.',
           releasedNotEnqueued:
             'Released — the direct enqueue failed; the sweep resubmits within a minute. Watch the Timeline for FUNDED → SUBMITTED.',
-          refunded: 'Refunded — correction payment sent, both ledger batches posted.',
+          refunded: 'Refunded — correction payment sent; the expected ledger batches posted.',
           already_disbursed: 'Settled — a prior run had already paid; the ledger is now complete. No money moved now.',
           already_settled: 'Already refunded — nothing to do; no money moved now.',
         },
@@ -2481,6 +2484,8 @@ const es: Translations = {
           'PELIGRO: una ejecuci\u00f3n anterior abandon\u00f3 su claim de reembolso y pudo haber desembolsado sin registrarlo. NO reintentes \u2014 sigue runbooks/manual-refund.md (claims abandonados).',
         principal_not_returned:
           'ALTO: no est\u00e1 confirmado que el principal haya regresado de Bridge \u2014 el evento de retorno registrado y el estado en vivo de Bridge deben coincidir antes de asentar un reembolso. NO reintentes desde aqu\u00ed: revisa el panel de Bridge y sigue runbooks/manual-refund.md.',
+        provider_unavailable:
+          'Bridge no responde \u2014 la verificaci\u00f3n no corri\u00f3 y nada cambi\u00f3. Intenta de nuevo en un minuto.',
         refund_owed:
           'La solicitud cumpli\u00f3 ambas condiciones de cancelaci\u00f3n \u2014 se debe un reembolso y ninguna herramienta puede denegarla. Reemb\u00f3lsala.',
         evidence_conflict: 'La hora de dep\u00f3sito citada contradice la evidencia registrada:',
@@ -2720,7 +2725,7 @@ const es: Translations = {
           released: 'Liberada \u2014 env\u00edo del payout en cola.',
           releasedNotEnqueued:
             'Liberada \u2014 fall\u00f3 el encolado directo; el barrido reenv\u00eda en menos de un minuto. Observa la l\u00ednea de tiempo hasta ver FUNDED \u2192 SUBMITTED.',
-          refunded: 'Reembolsada \u2014 pago de correcci\u00f3n enviado, ambos lotes asentados.',
+          refunded: 'Reembolsada \u2014 pago de correcci\u00f3n enviado; los lotes esperados quedaron asentados.',
           already_disbursed:
             'Asentado \u2014 una ejecuci\u00f3n anterior ya hab\u00eda pagado; el libro ahora est\u00e1 completo. Ahora no se movi\u00f3 dinero.',
           already_settled: 'Ya reembolsada \u2014 nada que hacer; ahora no se movi\u00f3 dinero.',

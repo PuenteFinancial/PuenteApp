@@ -42,6 +42,23 @@ export class BridgeApiError extends Error {
   }
 }
 
+/**
+ * "Bridge could not be asked" — as opposed to "Bridge answered no". True for
+ * the two non-BridgeApiError shapes bridgeFetch can reject with (undici's
+ * TypeError('fetch failed') and the timeout signal's DOMException
+ * 'TimeoutError' / 'AbortError') and for a Bridge 5xx. False for a Bridge 4xx,
+ * which is an answer about OUR request (unknown id, bad key) that a retry will
+ * not change, and for anything that is not a transport error at all (a
+ * database read failing inside the same call must stay a 500). Routes map
+ * true → 502 provider_unavailable.
+ */
+export function isBridgeUnreachable(err: unknown): boolean {
+  if (err instanceof BridgeApiError) return err.status >= 500
+  if (err instanceof TypeError) return true
+  const name = (err as { name?: unknown } | null)?.name
+  return name === 'TimeoutError' || name === 'AbortError'
+}
+
 async function bridgeFetch(path: string, init: RequestInit = {}): Promise<unknown> {
   const res = await fetch(`${env.BRIDGE_API_BASE}${path}`, {
     ...init,

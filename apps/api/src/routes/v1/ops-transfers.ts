@@ -7,7 +7,9 @@ import {
   refundClaimStatus,
   refundPayoutFailure,
   refundLedgerBatches,
+  type PrincipalVerdict,
 } from '../../services/refunds.js'
+import { BridgeApiError, isBridgeUnreachable } from '../../services/bridge.js'
 import { recordOpsAction } from '../../services/ops-actions.js'
 import { errorResponseSchema, sendError } from '../../utils/errors.js'
 import {
@@ -424,8 +426,45 @@ export const opsTransfersRoute: FastifyPluginAsync = async (server) => {
       const actor = `ops:${request.user!.id}`
       try {
         // 1) Interlock. bridge_return ASSERTS Bridge sent our cash back; two
-        //    independent sources must agree before it may post.
-        const verdict = await verifyPrincipalReturned(transferId)
+        //    independent sources must agree before it may post. Bridge not
+        //    reachable (transport error, timeout, 5xx) → 502: the check did
+        //    not run, nothing was written, try again shortly — never a 500,
+        //    which reads as "something broke" and hides that a retry is the
+        //    right move. A Bridge 4xx is an ANSWER (it does not know our ref):
+        //    not transient, so it takes the STOP code with the status in
+        //    details. Anything else (the DB read inside) stays a 500.
+        let verdict: PrincipalVerdict
+        try {
+          verdict = await verifyPrincipalReturned(transferId)
+        } catch (err) {
+          const bridgeStatus = err instanceof BridgeApiError ? err.status : null
+          if (isBridgeUnreachable(err)) {
+            request.log.error(
+              { route: 'ops/transfers/refund', transferId, bridgeStatus },
+              'ops refund: Bridge unreachable during the principal interlock — nothing written',
+            )
+            return sendError(
+              reply,
+              502,
+              'provider_unavailable',
+              'Bridge is unreachable — the principal check did not run and nothing was changed. Try again shortly.',
+            )
+          }
+          if (err instanceof BridgeApiError) {
+            request.log.error(
+              { route: 'ops/transfers/refund', transferId, bridgeStatus },
+              'ops refund: Bridge rejected the interlock lookup',
+            )
+            return sendError(
+              reply,
+              409,
+              'principal_not_returned',
+              'Bridge did not recognize this transfer — the principal check could not run. Read the Bridge dashboard, then follow runbooks/manual-refund.md.',
+              [{ path: 'transferId', issue: `bridge_lookup_failed; bridge=http_${err.status}; event=unknown` }],
+            )
+          }
+          throw err
+        }
         let preSubmit = false
         if (!verdict.returned) {
           if (verdict.reason === 'transfer_not_found') {
