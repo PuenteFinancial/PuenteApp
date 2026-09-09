@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import supertest from 'supertest'
 import Fastify from 'fastify'
 import fp from 'fastify-plugin'
+import { REQUIRED_CONSENTS } from '@puente/shared'
 
 const from = vi.fn()
 vi.mock('../../services/supabase.js', () => ({
@@ -26,6 +27,44 @@ vi.mock('@sentry/node', () => ({
   captureMessage: (...args: unknown[]) => captureMessage(...args),
   captureException: (...args: unknown[]) => captureException(...args),
 }))
+
+// C3: the relay's precondition now depends on the funding rail — the Stripe
+// crypto rail verifies first (stripe_kyc_tier), every other rail cannot and
+// gates on consents instead. Default TRUE so every pre-C3 case below keeps
+// exercising the rail it was written for; the checkout-rail describe flips it.
+const verifiesIdentity = { current: true }
+vi.mock('../../services/funding/index.js', async () => {
+  const actual =
+    await vi.importActual<typeof import('../../services/funding/index.js')>(
+      '../../services/funding/index.js',
+    )
+  return {
+    ...actual,
+    getFundingProcessor: () =>
+      ({
+        ...actual.getFundingProcessor(),
+        providerVerifiesIdentity: verifiesIdentity.current,
+      }) as ReturnType<typeof actual.getFundingProcessor>,
+  }
+})
+
+// The consents read the non-crypto branch performs. 'all' = every required
+// consent granted (the branch is transparent); an array = exactly those;
+// null = the read FAILED, which is a distinct outcome the route must not
+// confuse with "none granted".
+const grantedConsents = {
+  current: 'all' as 'all' | { type: string; version: string }[] | null,
+}
+vi.mock('./consents.js', async () => {
+  const actual = await vi.importActual<typeof import('./consents.js')>('./consents.js')
+  return {
+    ...actual,
+    fetchGrantedConsents: async () =>
+      grantedConsents.current === 'all'
+        ? REQUIRED_CONSENTS.map((d) => ({ type: d.type, version: d.version }))
+        : grantedConsents.current,
+  }
+})
 
 const { bridgeCustomerRoute, normalizeResidentialAddress, RELAY_RATE_LIMIT } = await import(
   './bridge-customer.js'
@@ -244,6 +283,99 @@ describe('POST /v1/users/me/bridge-customer — preconditions', () => {
     expect(res.status).toBe(409)
     expect(res.body.error.code).toBe('conflict')
     expect(res.body.error.details).toEqual([{ path: 'bridge_tos', issue: 'required' }])
+    expect(createBridgeCustomerWithIdentity).not.toHaveBeenCalled()
+    await app.close()
+  })
+})
+
+describe('POST /v1/users/me/bridge-customer — preconditions on a rail Stripe does not verify (C3)', () => {
+  // The Checkout rail (and manual, and mock): nothing writes stripe_kyc_tier,
+  // so keeping the tier gate would make the relay permanently unreachable and
+  // no sender could ever get a Bridge customer — no customer, no payout.
+  beforeEach(() => {
+    verifiesIdentity.current = false
+    grantedConsents.current = 'all'
+  })
+  afterEach(() => {
+    verifiesIdentity.current = true
+  })
+
+  it('relays with NO stripe_kyc_tier at all — the tier gate does not apply here', async () => {
+    fromByTable(usersTable({ row: { ...baseUser, stripe_kyc_tier: null } }))
+    createBridgeCustomerWithIdentity.mockResolvedValue({ id: 'cust_new', status: 'active' })
+    const app = await buildApp()
+
+    const res = await relay(app)
+
+    expect(res.status).toBe(200)
+    expect(createBridgeCustomerWithIdentity).toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('403 until every required consent is granted — we do not hand Bridge an identity first', async () => {
+    grantedConsents.current = []
+    fromByTable(usersTable({ row: { ...baseUser, stripe_kyc_tier: null } }))
+    const app = await buildApp()
+
+    const res = await relay(app)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('forbidden')
+    expect(createBridgeCustomerWithIdentity).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('500 rather than relaying when the consent read FAILS — unknown is not granted', async () => {
+    // fetchGrantedConsents returns null on a DB error. That is a third
+    // outcome, distinct from "none granted", and the one place this branch
+    // could fail open if it were collapsed into the empty-array case.
+    grantedConsents.current = null
+    fromByTable(usersTable({ row: { ...baseUser, stripe_kyc_tier: null } }))
+    const app = await buildApp()
+
+    const res = await relay(app)
+
+    expect(res.status).toBe(500)
+    expect(createBridgeCustomerWithIdentity).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('still requires a complete profile and the Bridge ToS — the rest of the ladder is unchanged', async () => {
+    fromByTable(usersTable({ row: { ...baseUser, stripe_kyc_tier: null, email: null } }))
+    let app = await buildApp()
+    let res = await relay(app)
+    expect(res.status).toBe(403)
+    await app.close()
+
+    fromByTable(
+      usersTable({ row: { ...baseUser, stripe_kyc_tier: null, bridge_signed_agreement_id: null } }),
+    )
+    app = await buildApp()
+    res = await relay(app)
+    expect(res.status).toBe(409)
+    expect(res.body.error.details).toEqual([{ path: 'bridge_tos', issue: 'required' }])
+    await app.close()
+
+    expect(createBridgeCustomerWithIdentity).not.toHaveBeenCalled()
+  })
+
+  it('still no-ops when a Bridge customer already exists — one KYC per sender, every rail', async () => {
+    fromByTable(
+      usersTable({
+        row: {
+          ...baseUser,
+          stripe_kyc_tier: null,
+          bridge_customer_id: 'cust_old',
+          kyc_status: 'approved',
+        },
+      }),
+    )
+    const app = await buildApp()
+
+    const res = await relay(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ bridgeCustomerId: 'cust_old', status: 'approved' })
     expect(createBridgeCustomerWithIdentity).not.toHaveBeenCalled()
     await app.close()
   })

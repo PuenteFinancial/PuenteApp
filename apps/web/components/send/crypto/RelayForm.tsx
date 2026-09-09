@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useLanguage } from '@/components/LanguageProvider'
 import type { IdentityFormValues } from '@/lib/cryptoPayStep'
-import IdentityFields from './IdentityFields'
+import IdentityFields from '@/components/send/bridge/IdentityFields'
 
 // The two-field re-entry form (K6 decision 12): Stripe has verified the
 // sender, but the values Bridge needs are not in hand — either the page was
@@ -51,7 +51,10 @@ export default function RelayForm({
         {reason === 'correction' ? c.formHintCorrection : c.formHintReload}
       </p>
 
-      <IdentityFields values={values} onChange={(key, value) => setValues((v) => ({ ...v, [key]: value }))} />
+      <IdentityFields
+        values={values}
+        privacyNote={t.send.track.crypto.kyc.ssnPrivacyNote}
+        onChange={(key, value) => setValues((v) => ({ ...v, [key]: value }))} />
 
       {invalid && (
         <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '0 0 8px' }}>

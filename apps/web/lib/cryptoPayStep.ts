@@ -18,6 +18,35 @@
 //   • buildRelayBody → the `relay` effect → POST /api/users/me/bridge-customer
 // The values live in exactly one ctx field (`relayValues`) between the form
 // and the relay, and are nulled the moment the relay answers.
+//
+// C3: the identity VALUES and their normalization moved to lib/bridgeIdentity
+// so the Checkout rail can reach Bridge with the same contract. They are
+// re-exported below, so this module's public surface is unchanged and every
+// existing importer (and the PII-guard test) still sees them here.
+
+import {
+  BRIDGE_POLL_MS,
+  BRIDGE_POLL_TIMEOUT_TICKS,
+  buildRelayBody,
+  invalidIdentityFields,
+  relayValuesFrom,
+  type IdentityFormValues,
+  type RelayBody,
+  type RelayValues,
+  type TaxIdType,
+} from './bridgeIdentity'
+
+export {
+  BRIDGE_POLL_MS,
+  BRIDGE_POLL_TIMEOUT_TICKS,
+  buildRelayBody,
+  invalidIdentityFields,
+  relayValuesFrom,
+  type IdentityFormValues,
+  type RelayBody,
+  type RelayValues,
+  type TaxIdType,
+}
 
 import { toE164Nanp } from '@puente/shared'
 
@@ -50,18 +79,6 @@ export interface CryptoVerification {
   status: string
 }
 
-export type TaxIdType = 'ssn' | 'itin'
-
-/** The two values Bridge needs that Stripe does not share: DOB and the tax
- *  ID. Rendered by the KYC form (first pass) and by the two-field re-entry
- *  form (reload edge / Bridge correction, K6 decision 12). */
-export interface IdentityFormValues {
-  dobMonth: string
-  dobDay: string
-  dobYear: string
-  taxId: string
-  taxIdType: TaxIdType
-}
 
 export interface KycFormValues extends IdentityFormValues {
   firstName: string
@@ -76,20 +93,6 @@ export interface KycFormValues extends IdentityFormValues {
 /** Normalized identity values held between the KYC form and the relay. THE
  *  ONE PII-carrying context field; nulled after RELAY_OK/RELAY_ERROR, on a
  *  Stripe rejection, and by RETRY (fresh initial state). */
-export interface RelayValues {
-  /** YYYY-MM-DD */
-  dob: string
-  taxIdType: TaxIdType
-  /** 9 digits, dashes stripped. */
-  taxId: string
-}
-
-/** Wire body of POST /api/users/me/bridge-customer (mirrors the API's
- *  relayBodySchema — the only route schema that names these fields). */
-export interface RelayBody {
-  dob: string
-  taxId: { type: TaxIdType; number: string }
-}
 
 /** l0 = minimum identity (name + address); l1 = adds DOB + tax ID. The first
  *  pass renders the combined l1 form (solution-plan Option A — one
@@ -306,11 +309,6 @@ export type CryptoPayEvent =
 export const KYC_POLL_MS = 2_500
 /** Ticks before the polling view flips to its soft-timeout copy (~90s). */
 export const KYC_POLL_TIMEOUT_TICKS = 36
-export const BRIDGE_POLL_MS = 3_000
-/** Ticks before the Bridge poll gives up on the in-place update and shows the
- *  come-back-later card (~2 min; sandbox approvals land in seconds, live
- *  database lookups in well under this). The draft persists either way. */
-export const BRIDGE_POLL_TIMEOUT_TICKS = 40
 
 // ── Verification readers (defensive: preview API vocabulary is unpinned) ────
 
@@ -395,23 +393,6 @@ export function buildCheckoutBody(
   return { sessionId, paymentMethodType }
 }
 
-/** Normalize the identity fields for the relay: ISO date (zero-padded),
- *  digits-only tax ID. Same normalization the SDK builder applies, so the
- *  two providers see identical values. */
-export function relayValuesFrom(values: IdentityFormValues): RelayValues {
-  const pad = (part: string) => part.trim().padStart(2, '0')
-  return {
-    dob: `${values.dobYear.trim()}-${pad(values.dobMonth)}-${pad(values.dobDay)}`,
-    taxIdType: values.taxIdType,
-    taxId: digitsOnly(values.taxId),
-  }
-}
-
-/** Sanctioned PII carrier #2 (see header). The ONLY builder whose output
- *  reaches our API with identity numbers in it. */
-export function buildRelayBody(values: RelayValues): RelayBody {
-  return { dob: values.dob, taxId: { type: values.taxIdType, number: values.taxId } }
-}
 
 function digitsOnly(value: string): string {
   return value.replace(/[^0-9]/g, '')
@@ -468,21 +449,6 @@ export function buildKycInfo(values: KycFormValues, mode: KycFormMode): SdkKycIn
 
 // ── Form validation (sanity only — Stripe and Bridge are the authorities) ──
 
-/** DOB + tax ID. An ITIN is nine digits starting with 9 (IRS format); an SSN
- *  is any nine digits — the sandbox's canonical 000000000 must pass. */
-export function invalidIdentityFields(values: IdentityFormValues): string[] {
-  const bad: string[] = []
-  const month = Number(values.dobMonth)
-  const day = Number(values.dobDay)
-  const year = Number(values.dobYear)
-  if (!Number.isInteger(month) || month < 1 || month > 12) bad.push('dobMonth')
-  if (!Number.isInteger(day) || day < 1 || day > 31) bad.push('dobDay')
-  if (!Number.isInteger(year) || year < 1900 || year > 2100) bad.push('dobYear')
-  const digits = values.taxId.replace(/-/g, '')
-  const shape = values.taxIdType === 'itin' ? /^9[0-9]{8}$/ : /^[0-9]{9}$/
-  if (!shape.test(digits)) bad.push('taxId')
-  return bad
-}
 
 export function invalidKycFields(values: KycFormValues, mode: KycFormMode): string[] {
   const bad: string[] = []

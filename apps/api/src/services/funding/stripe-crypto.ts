@@ -25,6 +25,10 @@ export class StripeCryptoFundingProcessor extends StripeOnrampFundingProcessor {
   // step creates a session; the existing null-ref abandonment sweep already
   // treats such rows as dead (no ledger postings, no funds).
   readonly deferredInitiation = true as const
+  // Stripe's onramp will not create a session for an unverified consumer, so
+  // by the time the relay runs this rail has an L1/L2 `stripe_kyc_tier` on the
+  // row. That column is this rail's alone — see the relay's precondition.
+  readonly providerVerifiesIdentity = true as const
 
   override isConfigured(): boolean {
     return Boolean(

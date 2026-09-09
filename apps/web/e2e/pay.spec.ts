@@ -7,9 +7,9 @@ import { test, expect, type BrowserContext } from '@playwright/test'
 // fails into the error card instead of a hung form. The Element's real mount is
 // a close-out-session item against the Stripe sandbox.
 
-async function signIn(context: BrowserContext) {
+async function signIn(context: BrowserContext, token = 'e2e-token') {
   await context.addCookies([
-    { name: 'puente_session', value: 'e2e-token', url: 'http://localhost:3100' },
+    { name: 'puente_session', value: token, url: 'http://localhost:3100' },
   ])
 }
 
@@ -61,14 +61,36 @@ test('a blocked Stripe loader fails into the error card — the dynamic-import s
   await expect(page.getByRole('button', { name: /simulate payment|simular pago/i })).toHaveCount(0)
 })
 
-test('the Checkout rail fails into the error card when js.stripe.com is blocked', async ({
+test('the Checkout rail opens on the Bridge terms, not on a payment form', async ({
   context,
   page,
 }) => {
   await signIn(context)
-  // Same contract as the Payment Intents rail: CI never depends on that
-  // origin, and a load failure is the retryable card rather than a form that
-  // hangs forever with no way to pay.
+  // js.stripe.com is aborted as an ASSERTION (C3): a sender who has not been
+  // verified by Bridge yet may be minutes from paying, or may never pay at
+  // all, so the payment SDK must not be fetched — and a blocked script must
+  // not turn their terms card into "we could not load the payment form".
+  await page.route('**/js.stripe.com/**', (route) => route.abort())
+  await page.goto('/dashboard/send/transfer-e2e-checkout-1')
+
+  await expect(page.getByText(/before you verify|antes de verificar/i)).toBeVisible()
+  await expect(page.getByRole('button', { name: /review bridge|revisar los términos/i })).toBeVisible()
+  await expect(
+    page.getByText(/could not load the payment form|no pudimos cargar el formulario/i),
+  ).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^pay \$|^pagar \$/i })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /simulate payment|simular pago/i })).toHaveCount(0)
+})
+
+test('only once Bridge has approved does the rail reach the payment SDK', async ({
+  context,
+  page,
+}) => {
+  // The other side of the same gate. This sender HAS an approved Bridge
+  // customer, so the identity leg hands over — and now a blocked
+  // js.stripe.com is the retryable card, which is the right error at the
+  // right moment.
+  await signIn(context, 'e2e-bridge-approved')
   await page.route('**/js.stripe.com/**', (route) => route.abort())
   await page.goto('/dashboard/send/transfer-e2e-checkout-1')
 
@@ -76,7 +98,8 @@ test('the Checkout rail fails into the error card when js.stripe.com is blocked'
     page.getByText(/could not load the payment form|no pudimos cargar el formulario/i),
   ).toBeVisible()
   await expect(page.getByRole('button', { name: /retry|reintentar/i })).toBeVisible()
-  await expect(page.getByRole('button', { name: /simulate payment|simular pago/i })).toHaveCount(0)
+  // And it never asked an already-verified sender for their tax ID again.
+  await expect(page.getByText(/verify your identity|verifica tu identidad/i)).toHaveCount(0)
 })
 
 test('a Checkout session that already took the money shows submitted, never a payable form', async ({

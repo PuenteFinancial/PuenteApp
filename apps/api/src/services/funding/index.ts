@@ -228,6 +228,19 @@ export interface FundingProcessor {
    */
   readonly deferredInitiation?: boolean
   /**
+   * C3: whether this processor verifies the sender's identity BEFORE the
+   * Bridge relay runs. True only on the Stripe crypto rail, whose onramp
+   * refuses a session for an unverified consumer and so leaves an L1/L2
+   * `stripe_kyc_tier` behind — which the relay uses as its precondition.
+   *
+   * No other rail produces that column, so on every other rail the relay has
+   * to gate on something it can actually observe (see bridge-customer.ts).
+   * A card or bank charge needs no identity check of Stripe's, which is
+   * exactly why the Checkout rail's flow is shorter — Bridge becomes the sole
+   * verifier, and it already runs its own sanctions, PEP and database checks.
+   */
+  readonly providerVerifiesIdentity?: boolean
+  /**
    * Whether this processor can actually run here: its secrets are present.
    * The route 503s the funding webhook and confirm gates on this — for the
    * mock that check IS the production lock (the mock secret is never set in

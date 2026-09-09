@@ -14,8 +14,9 @@ export type BridgeKycVariant =
   /** Bridge already holds this identity (decision 9): support only. */
   | 'duplicate'
 
-// The Bridge leg of the pay step. One card, five moments; each promises only
-// what the page actually does (the polling variants update in place, the
+// The Bridge leg of the pay step, on EITHER funding rail (moved out of crypto/
+// in C3 — every word of this copy is about Bridge, none of it about crypto).
+// One card, five moments; each promises only what the page actually does (the polling variants update in place, the
 // wait variant keeps the draft, nothing claims a timeframe or a charge).
 export default function BridgeKycCard({
   variant,

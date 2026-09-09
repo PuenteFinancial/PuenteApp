@@ -12,6 +12,8 @@ import {
   recordKycVerification,
 } from '../../services/kyc-verifications.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
+import { getFundingProcessor } from '../../services/funding/index.js'
+import { fetchGrantedConsents, missingConsents } from './consents.js'
 import { isProfileComplete, type UserRow } from './users.js'
 
 /**
@@ -158,16 +160,50 @@ export async function bridgeCustomerRoute(server: FastifyInstance) {
           return { bridgeCustomerId: user.bridge_customer_id, status: user.kyc_status }
         }
 
-        // Decision 2: sequential, after Stripe L1. stripe_kyc_tier is the
-        // column derived only from `verified` entries (stripe_kyc_tier_status
-        // is whatever verification happens to be listed first).
-        if (user.stripe_kyc_tier !== 'L1' && user.stripe_kyc_tier !== 'L2') {
-          return sendError(
-            reply,
-            403,
-            'kyc_required',
-            'Identity verification must complete before this step',
-          )
+        // The precondition depends on WHO verifies first, which is a property
+        // of the funding rail (C3).
+        //
+        // On the Stripe crypto rail, decision 2: sequential, after Stripe L1.
+        // stripe_kyc_tier is the column derived only from `verified` entries
+        // (stripe_kyc_tier_status is whatever verification happens to be
+        // listed first).
+        //
+        // On every other rail nothing writes that column, so keeping the check
+        // would make the relay permanently unreachable — no Bridge customer,
+        // no payout, for anyone. Bridge becomes the SOLE verifier there, which
+        // it is competent to be (its own sanctions, PEP, blocklist and
+        // database checks, plus the document fallback). What we owe in
+        // exchange is that we do not hand a third party someone's identity
+        // before they have agreed to the terms that say we might: hence
+        // consents, checked here rather than assumed from the send gate,
+        // because this route can be called directly.
+        //
+        // The rest of the ladder does the bounding that the tier check used to
+        // help with: profile-complete above, ToS below, the no-op when a
+        // customer already exists, and RELAY_RATE_LIMIT (5 per 15 min) — so a
+        // sender costs Bridge at most five KYC attempts, ever.
+        if (getFundingProcessor().providerVerifiesIdentity) {
+          if (user.stripe_kyc_tier !== 'L1' && user.stripe_kyc_tier !== 'L2') {
+            return sendError(
+              reply,
+              403,
+              'kyc_required',
+              'Identity verification must complete before this step',
+            )
+          }
+        } else {
+          const granted = await fetchGrantedConsents(userId)
+          if (granted === null) {
+            return sendError(reply, 500, 'internal_error', 'Failed to load consents')
+          }
+          if (missingConsents(granted).length > 0) {
+            return sendError(
+              reply,
+              403,
+              'forbidden',
+              'Review and accept the required agreements first',
+            )
+          }
         }
 
         // Decision 1: ToS first. The pointer is the latest unconsumed

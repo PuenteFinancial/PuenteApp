@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import posthog from 'posthog-js'
 import type { Stripe } from '@stripe/stripe-js'
 import {
@@ -11,6 +11,8 @@ import {
 import { useLanguage } from '@/components/LanguageProvider'
 import { formatUsd } from '@/lib/sendFormat'
 import { classifyCheckoutConfirmError } from '@/lib/payStep'
+import { getStripe } from '@/lib/stripe'
+import CheckoutIdentityStep from './CheckoutIdentityStep'
 
 // The Checkout Sessions pay surface (C2 — docs/prds/checkout-sessions-rail.md).
 //
@@ -32,20 +34,29 @@ import { classifyCheckoutConfirmError } from '@/lib/payStep'
 //   3. LOCALE IS FIXED AT loadStripe(), not per mount. PayStep resolves the
 //      Stripe object with the sender's language; see lib/stripe.ts.
 //
+// IDENTITY COMES FIRST (C3). Bridge makes the payout, so Bridge must hold an
+// APPROVED customer before this surface will take a payment — otherwise we
+// charge a sender for a payout Bridge may refuse to make, and the undo is a
+// refund that costs us the ACH return window. On the crypto rail Stripe
+// verified the sender as a side effect of its onramp; here nothing does, so
+// CheckoutIdentityStep runs the Bridge leg (terms, DOB + tax ID, its verdict)
+// and the Payment Element does not mount until it reports ready.
+//
 // Mount discipline, same as every other live surface here: the tracker's 5 s
 // poll re-renders PayStep, and this subtree is preserved by position and type.
 // `options` is memoized and the provider is keyed so a half-filled card form
 // is never wiped by a background refresh.
 export default function CheckoutPayStep({
-  stripe,
+  publishableKey,
   clientSecret,
   transferId,
   totalAmountMinor,
   onSubmitted,
   onReload,
 }: {
-  /** Already resolved by PayStep — a failed js.stripe.com load never gets here. */
-  stripe: Stripe
+  /** Resolved into a Stripe object HERE, not by PayStep — see the note on the
+   *  identity gate below for why the load waits. */
+  publishableKey: string
   clientSecret: string
   transferId: string
   /** USD minor units — the pay button restates the total (Money convention). */
@@ -55,7 +66,7 @@ export default function CheckoutPayStep({
   /** Re-read the funding session — a dead session must re-resolve, not re-mount. */
   onReload: () => void
 }) {
-  const { t } = useLanguage()
+  const { t, lang } = useLanguage()
   const s = t.send.track
 
   // Bumped by the retry affordance. It is part of the provider's key because
@@ -65,18 +76,94 @@ export default function CheckoutPayStep({
   // button that does nothing.
   const [attempt, setAttempt] = useState(0)
 
+  // Flipped once, by the identity machine, when Bridge holds an approved
+  // customer. One-way on purpose: a background /users/me blip must never pull
+  // a mounted Payment Element out from under a sender mid-payment, and the
+  // machine only reaches `ready` from an approved status in the first place.
+  const [identityReady, setIdentityReady] = useState(false)
+  const handleReady = useCallback(() => setIdentityReady(true), [])
+
+  // js.stripe.com is fetched only once Bridge has approved the sender: before
+  // that they may still be minutes from paying, or about to be rejected and
+  // never pay at all. `null` = not resolved yet, and the load is kept
+  // loader-first — the provider never renders without a real Stripe object,
+  // so a blocked script is the retryable card and never a form that hangs.
+  const [stripe, setStripe] = useState<Stripe | null>(null)
+  const [stripeFailed, setStripeFailed] = useState(false)
+
+  useEffect(() => {
+    if (!identityReady) return
+    let cancelled = false
+    void (async () => {
+      let loaded: Stripe | null = null
+      try {
+        // Locale rides on the loader: the Checkout SDK options carry no
+        // locale field, so this is the only place to set it.
+        loaded = await getStripe(publishableKey, lang)
+      } catch {
+        loaded = null
+      }
+      if (cancelled) return
+      if (!loaded) {
+        setStripeFailed(true)
+        return
+      }
+      setStripe(loaded)
+    })()
+    return () => {
+      cancelled = true
+    }
+    // `lang` is deliberately absent: the locale is fixed at load time, so a
+    // mid-payment language switch has nothing to re-do — and re-running this
+    // would swap the Stripe object under a mounted Payment Element.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identityReady, publishableKey, attempt])
+
   // A fresh object every render would re-run the provider's init effect on
   // every tracker poll. Harmless today (the init is ref-guarded) but this is a
   // live payment surface, so it does not get to depend on that.
   const options = useMemo(() => ({ clientSecret }), [clientSecret])
 
   const handleRetry = () => {
+    setStripeFailed(false)
     // Both halves matter. The remount re-runs the SDK handshake in case the
     // failure was transient; the refetch re-reads the session, so one that is
     // genuinely complete or expired comes back as the submitted panel or the
     // error card instead of a form that can never be confirmed.
     setAttempt((n) => n + 1)
     onReload()
+  }
+
+  // The identity leg owns the whole panel until Bridge approves. It renders
+  // its own frame and its own error/retry affordances, so there is no pay
+  // chrome above it promising a payment that cannot happen yet.
+  if (!identityReady) {
+    return <CheckoutIdentityStep transferId={transferId} onReady={handleReady} />
+  }
+
+  const frame = (children: React.ReactNode) => (
+    <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
+      {children}
+    </div>
+  )
+
+  if (stripeFailed) {
+    return frame(
+      <>
+        <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '0 0 8px' }}>
+          {s.pay.sessionError}
+        </p>
+        <button type="button" className="btn btn--ghost btn--sm" onClick={handleRetry}>
+          {s.retry}
+        </button>
+      </>,
+    )
+  }
+
+  if (!stripe) {
+    return frame(
+      <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0 }}>{s.pay.checkout.loading}</p>,
+    )
   }
 
   return (
