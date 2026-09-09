@@ -52,6 +52,14 @@ const ACCEPT_TOS = process.argv.includes('--accept-tos')
 const APPROVE = process.argv.includes('--approve')
 const PAY = process.argv.includes('--pay')
 const FRESH = process.argv.includes('--fresh')
+// Bank debit instead of card. The economically important rail (roughly 0.8%
+// capped vs ~2.9% + 30c on a remittance whose whole margin is ~100bps) and a
+// genuinely different event shape: `completed` arrives payment_status=unpaid
+// with the PI still processing, and clearing comes later on
+// `checkout.session.async_payment_succeeded` — never the card's
+// `payment_intent.succeeded`. Verification is instant-only (Financial
+// Connections), so this walks Stripe's test institution.
+const ACH = process.argv.includes('--ach')
 
 const url = process.env.SUPABASE_URL
 const anon = process.env.SUPABASE_PUBLISHABLE_KEY
@@ -303,6 +311,98 @@ async function dumpFields(page) {
   }
 }
 
+/** Bank debit via Financial Connections. Stripe's test mode exposes a "Test
+ *  Institution" that connects without real credentials; the flow opens in a
+ *  nested frame or a popup, so this handles both. Best effort by nature — the
+ *  screens are Stripe's and they move. */
+async function fillAndSubmitBank(page, frame) {
+  await frame.getByText(/US bank account/i).first().click()
+  console.log('selected: US bank account')
+  await page.waitForTimeout(2500)
+
+  // The two fields Stripe actually renders, learned from dumping the frame:
+  // "First and last name" and "Search for your bank". The first --ach run
+  // clicked buttons blindly and confirm refused with "Please provide your full
+  // name."
+  const name = frame.getByPlaceholder('First and last name').first()
+  if (await name.isVisible({ timeout: 4000 }).catch(() => false)) {
+    await name.fill('ZZ-TEST C5-CHECKOUT-SYNTHETIC')
+    console.log('  bank: account holder name filled')
+  }
+
+  const search = frame.getByPlaceholder('Search for your bank').first()
+  if (await search.isVisible({ timeout: 4000 }).catch(() => false)) {
+    await search.click()
+    // The sandbox institutions are named "Test (Non-OAuth)" / "Test (OAuth)"
+    // (docs.stripe.com/financial-connections/testing) — NOT "Test Institution",
+    // which is what the first attempts searched for and never matched. Non-OAuth
+    // is the one that stays in the modal; OAuth opens a popup.
+    await search.fill('Test')
+    console.log('  bank: searching for a sandbox test institution')
+    await page.waitForTimeout(3500)
+    if (process.env.DRIVE_DUMP_FIELDS) {
+      console.log('  --- frames after opening the bank search ---')
+      for (const sf of page.frames()) {
+        if (sf === page.mainFrame()) continue
+        const t = (await sf.locator('body').innerText().catch(() => '')).replace(/\n+/g, ' | ').trim()
+        if (t) console.log(`    [${(sf.name() || 'anon').slice(0, 26)}] ${t.slice(0, 300)}`)
+      }
+      for (const pp of page.context().pages()) {
+        if (pp === page) continue
+        const t = (await pp.locator('body').innerText().catch(() => '')).replace(/\n+/g, ' | ').trim()
+        console.log(`    [POPUP ${new URL(pp.url()).host}] ${t.slice(0, 300)}`)
+      }
+    }
+    let picked = false
+    for (const label of [/Test \(Non-OAuth\)/i, /Bank \(Non-OAuth\)/i, /Test \(OAuth\)/i]) {
+      for (const sf of [frame, ...page.frames()]) {
+        const hit = sf.getByText(label).first()
+        if (await hit.isVisible({ timeout: 1200 }).catch(() => false)) {
+          await hit.click()
+          console.log(`  bank: picked ${String(label)}`)
+          picked = true
+          break
+        }
+      }
+      if (picked) break
+    }
+    if (!picked) {
+      console.log('  bank: no sandbox institution matched — dumping what IS on screen')
+      for (const sf of page.frames()) {
+        if (sf === page.mainFrame()) continue
+        const t = (await sf.locator('body').innerText().catch(() => '')).replace(/\n+/g, ' | ').trim()
+        if (t) console.log(`    [${(sf.name() || 'anon').slice(0, 24)}] ${t.slice(0, 260)}`)
+      }
+    }
+  }
+  await page.waitForTimeout(3000)
+
+  // Financial Connections then runs its own screens, in this frame, a nested
+  // one, or a popup. Walk whatever "agree / continue / connect / done" it
+  // offers until nothing is left. Best effort by nature: they are Stripe's
+  // screens and they move.
+  for (let step = 0; step < 10; step++) {
+    let clicked = false
+    const surfaces = [frame, ...page.frames(), ...page.context().pages().filter((p) => p !== page)]
+    for (const sf of surfaces) {
+      const next = sf
+        .getByRole('button', { name: /agree and continue|^continue$|^connect|^done$|^next$|link account|allow/i })
+        .first()
+      if (await next.isVisible({ timeout: 800 }).catch(() => false)) {
+        const label = (await next.innerText().catch(() => '')).trim().slice(0, 40)
+        await next.click().catch(() => {})
+        console.log(`  bank: "${label}"`)
+        clicked = true
+        await page.waitForTimeout(2500)
+        break
+      }
+    }
+    if (!clicked) break
+  }
+  await page.waitForTimeout(2000)
+  console.log('  bank: connection flow finished')
+}
+
 async function fillAndSubmitCard(page, frame) {
   await frame.getByText('Card', { exact: true }).first().click()
   await frame.getByPlaceholder('1234 1234 1234 1234').fill('4242424242424242')
@@ -460,7 +560,16 @@ async function main() {
     return
   }
 
-  await fillAndSubmitCard(page, frame)
+  if (ACH) {
+    await fillAndSubmitBank(page, frame)
+    if (process.env.DRIVE_DUMP_FIELDS) await dumpFields(page)
+    const pay = page.getByRole('button', { name: /^pay \$/i }).first()
+    await pay.waitFor({ state: 'visible', timeout: 10000 })
+    await pay.click()
+    console.log('PAY CLICKED (bank debit)')
+  } else {
+    await fillAndSubmitCard(page, frame)
+  }
   const submitted = await waitForStep(page, ['Payment submitted', 'went wrong', "couldn't"], 60000)
   console.log('after confirm:', submitted ?? '(timeout)', '|', await stepText(page))
 
