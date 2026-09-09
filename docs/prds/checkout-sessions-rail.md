@@ -211,6 +211,20 @@ Only if §5.1 clears.
 | **C4** | Send gate, env, config, docs — the new rail means profile + consents, never `kyc_status = approved` |
 | **C5** | Staging drive end to end, then a real send |
 
+**Build log.** C1 (2026-09-08, #294 + the join fix #296) and C2 (2026-09-09) are merged, and the
+rail is still INERT: `FUNDING_PROCESSOR` selects it nowhere, so no sender can reach it and §5.1 is
+not yet spent. Two things C2 measured that this document had wrong or could not know:
+
+- **Staging now offers card, US bank account and Klarna** (2026-09-09, real elements-mode session).
+  ACH landed — the §2 table's "no" is stale. Klarna arrives through **Link**, which is why the
+  session's own `payment_method_types` does not list it and the API-level smoke could not see it.
+  Reading `payment_method_types` is therefore NOT sufficient to know what a sender is offered; the
+  rendered element is. Funding an outbound international transfer with buy-now-pay-later is the
+  §5.2 question in a sharper form, and it is a Dashboard decision.
+- **Locale is fixed at `loadStripe()` on this rail.** The Checkout SDK options carry no `locale`
+  field, unlike `<Elements>`. Spanish senders get an English form unless the key is loaded with the
+  locale, so `getStripe()` now caches on (key, locale).
+
 Five to eight focused sessions plus the drive. C3 is the risky one: that machine is the most tested
 and most drive-proven code in the repo.
 
