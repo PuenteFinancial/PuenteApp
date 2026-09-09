@@ -57,6 +57,13 @@ test('board card id links to the detail page, which shows the hold guidance', as
   await expect(page.getByText(/velocity review|revisión de velocidad/i)).toBeVisible()
   await expect(page.getByText(/cancel and refund instead|cancela y reembolsa/i)).toBeVisible()
 
+  // Slice 2: the Activity section shows the earlier release with its note,
+  // the derived change lines, and the request id.
+  await expect(page.getByText(/^(hold released|retención liberada)$/i)).toBeVisible()
+  await expect(page.getByText(/tolerable, released/i)).toBeVisible()
+  await expect(page.getByText('payoutHoldReason: fx_drift → —')).toBeVisible()
+  await expect(page.getByText(/req-e2e-1/)).toBeVisible()
+
   // Timeline + ledger render, and the ledger is balanced.
   await expect(page.getByText('PENDING_PAYMENT → FUNDED')).toBeVisible()
   await expect(page.getByText(/every batch nets to zero|cada lote suma cero/i)).toBeVisible()

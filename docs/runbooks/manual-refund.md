@@ -216,7 +216,9 @@ script checks that both **keys** are present and exits non-zero if either is mis
 `ledger_entries`, so the net-zero check is this query's job. (The board's refund does the same key
 check and reports `ledgerComplete`; a pre-submit row expects only `{id}:REFUNDED`.)
 
-A refund triggered from the board also left its provenance row — who, when, what they typed, and
+A refund triggered from the board shows up first in the detail page's **Activity** section (slice 2):
+the actor, the note, and `state: PAYOUT_FAILED → REFUNDED` / `ledgerComplete: — → true` as change
+lines. The same row is on the board's **Recent activity** feed. Underneath, it is a provenance row — who, when, what they typed, and
 what the API saw before and after:
 
 ```sql

@@ -80,6 +80,25 @@ An abandoned claim is the STOP state: the detail page shows the runbook path and
 claim goes abandoned between page load and click the refusal renders as a red panel with Close only.
 Reclaiming stays a CLI act with the runbook open. **Status: active.**
 
+**2026-09-09 · Ops board slice 2: the `ops_actions` record read back — a feed on the board, a
+history on the transfer.** Every ops write appended a row and nothing displayed one; "who released
+this hold and why" was still a SQL query. Both existing GETs now carry `activity`; no new route, no
+new gate, no migration. Three choices. (1) **Two shapes, not one.** The board feed row has six
+fields and NO note: it is a one-line log across transfers, and the operator's free text belongs on
+the transfer it was written about — the feed's column literal simply does not select `note`, so
+nothing downstream can leak it. The detail history carries the note, the derived changes, and the
+request id. (2) **`before`/`after` never cross the wire as objects.** The service derives
+`changes: {key, before, after}[]` with string values, so both response schemas stay strict
+allowlists (`additionalProperties` never true anywhere on the ops wire); a free-shaped jsonb would
+have required exactly the exception the allowlist rule exists to forbid. Unchanged keys are omitted;
+a non-object side reads as empty rather than failing a whole history on one malformed row.
+(3) **Placement follows the operator's reading order.** Board: after what needs a human (Needs you,
+Refund backlog) and before what the system found (Latest findings). Detail: between what is blocking
+the transfer (Hold, Refund) and what happened to it (Timeline). Feed length is a fixed newest-25 (a
+`?since=` cursor is additive if ever needed); the detail history is bounded at the PostgREST cap and
+fails loud there like every other panel. Not in this slice: filters, pagination, CLI-driven actions
+(still visible only as `transfer_transitions`). **Status: active.**
+
 **2026-09-03 · trustProxy moves from hop count to connecting-address trust (`TRUST_PROXY_SOURCES`),
 forced by fastify 5.12.1.** Fastify disabled numeric `trustProxy` (GHSA: "X-Forwarded-* spoofing
 under trustProxy hop-count" — a hop count never inspects WHO is connecting, so anyone reaching the

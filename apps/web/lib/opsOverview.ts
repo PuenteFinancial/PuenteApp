@@ -1,5 +1,6 @@
 import { formatUsd, formatMxn } from './sendFormat'
 import { parseApiError } from './apiError'
+import { isOpsActivityFeedRowShape, type OpsActivityFeedRow } from './opsActivity'
 
 // Pure types + guards + derivations for the 8.5-v1 ops page (extract-to-lib
 // convention: logic out of .tsx so it unit-tests without a DOM). Types are
@@ -122,6 +123,8 @@ export interface OpsOverview {
   // Ops board slice 1 — same optional deploy-skew semantics: an API predating
   // the panel omits it and the panel simply doesn't render.
   refundBacklog?: OpsParkedRefund[]
+  // Ops board slice 2 — the Recent activity feed; same optional semantics.
+  activity?: OpsActivityFeedRow[]
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
@@ -141,12 +144,20 @@ export function isOpsOverviewShape(v: unknown): v is OpsOverview {
   if (v.actionsEnabled !== undefined && typeof v.actionsEnabled !== 'boolean') return false
   if (v.workerHeartbeats !== undefined && !Array.isArray(v.workerHeartbeats)) return false
   if (v.refundBacklog !== undefined && !Array.isArray(v.refundBacklog)) return false
+  if (v.activity !== undefined && !(Array.isArray(v.activity) && v.activity.every(isOpsActivityFeedRowShape))) {
+    return false
+  }
   return true
 }
 
 /** The refund backlog rows, or none when the API predates the panel. */
 export function refundBacklogRows(overview: OpsOverview): OpsParkedRefund[] {
   return overview.refundBacklog ?? []
+}
+
+/** Slice 2: the feed as the API sent it (newest first); empty when not reported. */
+export function activityFeedRows(overview: OpsOverview): OpsActivityFeedRow[] {
+  return overview.activity ?? []
 }
 
 /** The detail page for one transfer — the only place a transfer id goes in a URL. */

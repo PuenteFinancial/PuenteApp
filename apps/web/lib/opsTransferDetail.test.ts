@@ -10,6 +10,7 @@ import {
   opsNoteValid,
   isOpsHoldReleaseSuccessShape,
   isOpsRefundSuccessShape,
+  activityRows,
   type OpsTransferDetail,
 } from './opsTransferDetail'
 
@@ -230,5 +231,33 @@ describe('formatOpsTimestamp', () => {
     expect(en).toMatch(/UTC/)
     expect(es).toMatch(/2026/)
     expect(formatOpsTimestamp('not a date', 'en')).toBe('not a date')
+  })
+})
+
+// Slice 2: the transfer's history is optional (deploy skew) but well-formed
+// when present; the note and the derived changes ride here and only here.
+describe('activity history tolerance (slice 2)', () => {
+  const row = {
+    id: 'act-1',
+    createdAt: '2026-09-09T12:00:00.000Z',
+    actor: 'ops:u1',
+    action: 'refund',
+    transferId: T,
+    reason: 'refunded',
+    note: 'Verified by phone.',
+    changes: [{ key: 'state', before: 'PAYOUT_FAILED', after: 'REFUNDED' }],
+    requestId: 'req-1',
+  }
+
+  it('accepts an absent history and an empty one', () => {
+    expect(isOpsTransferDetailShape(detail())).toBe(true)
+    expect(isOpsTransferDetailShape(detail({ activity: [] }))).toBe(true)
+    expect(activityRows(detail())).toEqual([])
+  })
+
+  it('passes well-formed rows through and rejects malformed ones', () => {
+    expect(isOpsTransferDetailShape(detail({ activity: [row] }))).toBe(true)
+    expect(activityRows(detail({ activity: [row] }))).toEqual([row])
+    expect(isOpsTransferDetailShape({ ...detail(), activity: [{ ...row, changes: [{ key: 1 }] }] })).toBe(false)
   })
 })

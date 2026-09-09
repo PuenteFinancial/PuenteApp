@@ -2,6 +2,7 @@ import { supabaseAdmin } from './supabase.js'
 import { processorNameFor } from './funding/index.js'
 import { dwellFor, type OpsDwell } from './ops-overview.js'
 import { classifyRefundClaim, recordedReturnEvent, type ClaimStatus } from './refunds.js'
+import { listOpsActionsForTransfer, type OpsActivityRow } from './ops-actions.js'
 
 // One transfer, the whole story (ops board slice 1, GET /v1/ops/transfers/:id,
 // docs/api-contract.md). Everything an operator used to assemble from the
@@ -131,6 +132,9 @@ export interface OpsTransferDetail {
     attachedBy: string | null
   } | null
   disclosures: Array<{ type: string; locale: string; presentedAt: string }>
+  // Slice 2: every ops action taken on this transfer, newest first, with the
+  // operator's note and the key-by-key changes (never the raw jsonb).
+  activity: OpsActivityRow[]
 }
 
 // One string literal each (supabase-js parses the column list at the type
@@ -513,6 +517,7 @@ export async function buildOpsTransferDetail(transferId: string): Promise<OpsTra
     depositInstructions,
     disclosures,
     returnEventType,
+    activity,
   ] = await Promise.all([
     readQuote(transfer.quote_id),
     readDestination(transfer.payout_destination_id),
@@ -523,12 +528,14 @@ export async function buildOpsTransferDetail(transferId: string): Promise<OpsTra
     readDepositInstructions(transfer.id),
     readDisclosures(transfer.id),
     recordedReturnEvent(transfer.id, transfer.provider_transfer_ref),
+    listOpsActionsForTransfer(transfer.id),
   ])
 
   const ledgerKeySet = new Set(ledger.map((batch) => batch.idempotencyKey))
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
+    activity,
     transfer: {
       transferId: transfer.id,
       state: transfer.state,

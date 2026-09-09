@@ -101,3 +101,114 @@ describe('recordOpsAction', () => {
     )
   })
 })
+
+// ── Slice 2: reading the record back ─────────────────────────────────────────
+
+const { deriveChanges, listRecentOpsActions, listOpsActionsForTransfer, ACTIVITY_FEED_LIMIT } = await import('./ops-actions.js')
+
+// from('ops_actions').select().eq()?.order().limit() → thenable result
+function readChain(result: { data?: unknown; error?: unknown }) {
+  const resolved = { data: result.data ?? null, error: result.error ?? null }
+  const b: Record<string, ReturnType<typeof vi.fn>> & { then?: (resolve: (v: unknown) => void) => void } = {} as never
+  for (const m of ['select', 'eq', 'order', 'limit'] as const) b[m] = vi.fn(() => b)
+  b.then = (resolve) => resolve(resolved)
+  from.mockReturnValue(b)
+  return b
+}
+
+const RAW = {
+  id: 'act-1',
+  created_at: '2026-09-09T12:00:00.000Z',
+  actor: 'ops:u1',
+  action: 'hold_release',
+  transfer_id: 'cccccccc-1111-4222-8333-444444444444',
+  reason: 'velocity_review',
+}
+
+describe('deriveChanges', () => {
+  it('lists changed keys in first-seen order, strings raw, other values as JSON, null for absent', () => {
+    expect(
+      deriveChanges(
+        { payoutHoldReason: 'velocity_review', payoutHeldAt: '2026-09-09T11:00:00.000Z', same: 1 },
+        { payoutHoldReason: null, payoutHeldAt: null, same: 1, ledgerComplete: true, nested: { a: 1 } },
+      ),
+    ).toEqual([
+      { key: 'payoutHoldReason', before: 'velocity_review', after: null },
+      { key: 'payoutHeldAt', before: '2026-09-09T11:00:00.000Z', after: null },
+      { key: 'ledgerComplete', before: null, after: 'true' },
+      { key: 'nested', before: null, after: '{"a":1}' },
+    ])
+  })
+
+  it('treats a non-object side as empty instead of throwing', () => {
+    expect(deriveChanges(null, { outcome: 'refunded' })).toEqual([{ key: 'outcome', before: null, after: 'refunded' }])
+    expect(deriveChanges(['x'], 'nope')).toEqual([])
+    expect(deriveChanges({}, {})).toEqual([])
+  })
+})
+
+describe('listRecentOpsActions', () => {
+  it('selects ONLY the six feed columns, newest first, bounded by the limit', async () => {
+    const c = readChain({ data: [RAW] })
+    const rows = await listRecentOpsActions()
+    expect(from).toHaveBeenCalledWith('ops_actions')
+    expect(c.select).toHaveBeenCalledWith('id, created_at, actor, action, transfer_id, reason')
+    expect(c.order).toHaveBeenCalledWith('created_at', { ascending: false })
+    expect(c.limit).toHaveBeenCalledWith(ACTIVITY_FEED_LIMIT)
+    expect(c.eq).not.toHaveBeenCalled()
+    expect(rows).toEqual([
+      { id: 'act-1', createdAt: RAW.created_at, actor: 'ops:u1', action: 'hold_release', transferId: RAW.transfer_id, reason: 'velocity_review' },
+    ])
+    // What is not selected cannot leak: no note/before/after key on a feed row.
+    expect(Object.keys(rows[0]!).sort()).toEqual(['action', 'actor', 'createdAt', 'id', 'reason', 'transferId'])
+  })
+
+  it('fails closed on a read error', async () => {
+    readChain({ error: { message: 'db down' } })
+    await expect(listRecentOpsActions()).rejects.toThrow('ops activity feed select failed: db down')
+  })
+})
+
+describe('listOpsActionsForTransfer', () => {
+  it('reads the history with note + before/after, scoped to the transfer, and derives the changes', async () => {
+    const c = readChain({
+      data: [
+        {
+          ...RAW,
+          note: 'Verified by phone.',
+          before: { payoutHoldReason: 'velocity_review', payoutHeldAt: '2026-09-09T11:00:00.000Z' },
+          after: { payoutHoldReason: null, payoutHeldAt: null },
+          request_id: 'req-1',
+        },
+      ],
+    })
+    const rows = await listOpsActionsForTransfer(RAW.transfer_id)
+    expect(c.select).toHaveBeenCalledWith('id, created_at, actor, action, transfer_id, reason, note, before, after, request_id')
+    expect(c.eq).toHaveBeenCalledWith('transfer_id', RAW.transfer_id)
+    expect(c.order).toHaveBeenCalledWith('created_at', { ascending: false })
+    expect(c.limit).toHaveBeenCalledWith(1000)
+    expect(rows).toEqual([
+      {
+        id: 'act-1',
+        createdAt: RAW.created_at,
+        actor: 'ops:u1',
+        action: 'hold_release',
+        transferId: RAW.transfer_id,
+        reason: 'velocity_review',
+        note: 'Verified by phone.',
+        changes: [
+          { key: 'payoutHoldReason', before: 'velocity_review', after: null },
+          { key: 'payoutHeldAt', before: '2026-09-09T11:00:00.000Z', after: null },
+        ],
+        requestId: 'req-1',
+      },
+    ])
+    // The raw jsonb never reaches the caller.
+    expect('before' in rows[0]!).toBe(false)
+  })
+
+  it('throws at the PostgREST cap rather than presenting a truncated history as complete', async () => {
+    readChain({ data: Array.from({ length: 1000 }, (_, i) => ({ ...RAW, id: `a${i}`, note: null, before: {}, after: {}, request_id: null })) })
+    await expect(listOpsActionsForTransfer(RAW.transfer_id)).rejects.toThrow(/1000-row PostgREST cap/)
+  })
+})

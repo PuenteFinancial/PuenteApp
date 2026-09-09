@@ -307,6 +307,8 @@ function opsDetailBase(id, over = {}) {
     cancellationRequests: [],
     depositInstructions: null,
     disclosures: [{ type: 'prepayment', locale: 'es', presentedAt: '2026-08-01T07:46:00.000Z' }],
+    // Slice 2: the transfer's ops history (note + derived changes ride here).
+    activity: over.activity ?? [],
   }
 }
 
@@ -314,6 +316,24 @@ function opsDetailFixture(id) {
   if (id === OPS_HELD_1) {
     return opsDetailBase(id, {
       transfer: { payoutHoldReason: 'velocity_review', payoutHeldAt: '2026-08-01T08:01:00.000Z' },
+      // An earlier hold on the same row was released from the board — the
+      // history shows the note and the before → after the operator saw.
+      activity: [
+        {
+          id: 'act-e2e-1',
+          createdAt: '2026-08-01T09:30:00.000Z',
+          actor: 'ops:aaaaaaaa-1111-4222-8333-444444444444',
+          action: 'hold_release',
+          transferId: id,
+          reason: 'fx_drift',
+          note: 'Drift was 40 bps against a stale quote; tolerable, released.',
+          changes: [
+            { key: 'payoutHoldReason', before: 'fx_drift', after: null },
+            { key: 'payoutHeldAt', before: '2026-08-01T08:00:00.000Z', after: null },
+          ],
+          requestId: 'req-e2e-1',
+        },
+      ],
     })
   }
   if (id === OPS_FAILED_1 || id === OPS_FAILED_RACED || id === OPS_FAILED_STUCK) {
@@ -603,6 +623,26 @@ const server = createServer(async (req, res) => {
           claimedBy: 'ops:aaaaaaaa-1111-4222-8333-444444444444',
           providerTransferRef: null,
           refundPaymentRef: null,
+        },
+      ],
+      // Slice 2: the Recent activity feed — one line per ops action, newest
+      // first, no note. A treasury row has no transfer.
+      activity: [
+        {
+          id: 'act-e2e-2',
+          createdAt: '2026-08-01T11:30:00.000Z',
+          actor: 'ops:aaaaaaaa-1111-4222-8333-444444444444',
+          action: 'float_topup',
+          transferId: null,
+          reason: null,
+        },
+        {
+          id: 'act-e2e-1',
+          createdAt: '2026-08-01T09:30:00.000Z',
+          actor: 'ops:aaaaaaaa-1111-4222-8333-444444444444',
+          action: 'hold_release',
+          transferId: OPS_HELD_1,
+          reason: 'fx_drift',
         },
       ],
     })
