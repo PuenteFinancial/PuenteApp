@@ -30,7 +30,7 @@ import { KYC_LOCALE_COOKIE, KYC_NEXT_COOKIE } from '@/lib/kycReturn'
 import KycForm from './KycForm'
 import RelayForm from './RelayForm'
 import PayIntro from './PayIntro'
-import BridgeKycCard from './BridgeKycCard'
+import BridgeKycCard from '@/components/send/bridge/BridgeKycCard'
 import SdkElementHost from './SdkElementHost'
 
 // Thin host for the K5 crypto pay machine (lib/cryptoPayStep.ts): dispatches

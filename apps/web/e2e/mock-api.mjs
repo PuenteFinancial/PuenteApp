@@ -742,13 +742,19 @@ const server = createServer(async (req, res) => {
   }
 
   if (method === 'GET' && pathname === '/v1/users/me') {
+    // Sentinel session token: a sender Bridge has already verified. The
+    // Checkout rail's identity leg (C3) boots off this shape, and only an
+    // APPROVED customer lets it hand over to the Payment Element — so the
+    // two tokens are the two sides of that gate.
+    const bridgeApproved = (req.headers['authorization'] || '') === 'Bearer e2e-bridge-approved'
     return json(res, 200, {
       id: 'user-e2e-1',
       firstName: 'Test',
       lastName: 'User',
       email: 'test@example.com',
       kycStatus: 'approved',
-      bridgeCustomerId: null,
+      bridgeCustomerId: bridgeApproved ? 'cust_e2e_1' : null,
+      bridgeTosAccepted: bridgeApproved,
     })
   }
 

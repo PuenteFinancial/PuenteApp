@@ -353,6 +353,22 @@ export type Translations = {
           // fallback at pilot), but unlike `bankNote` above an unconnectable
           // bank is not the end of the road: cards are enabled on this rail.
           bankNote: string
+          // The Bridge identity leg (C3). On this rail Stripe verifies
+          // nobody, so Bridge is the SOLE verifier and this form is the whole
+          // of identity: DOB + tax ID, once, before any money moves. The DOB
+          // and tax-ID field labels themselves are reused from crypto.kyc —
+          // same inputs, same component.
+          identityTitle: string
+          identityHint: string
+          // Bridge refused the create; exactly one correction is offered.
+          identityHintCorrection: string
+          // Where the two values go. Deliberately a narrowing of the crypto
+          // rail's ssnPrivacyNote, which also names Stripe: on this rail they
+          // reach ONLY Bridge, and saying so is both simpler and truer.
+          // NEEDS LEGAL REVIEW (EN + ES)
+          identityPrivacyNote: string
+          identitySubmit: string
+          identitySubmitting: string
         }
         // Out-of-band funding (FUNDING_PROCESSOR=manual): the sender pays by a
         // rail Puente does not operate, so there is nothing to click here. The
@@ -1311,6 +1327,22 @@ const en: Translations = {
           loading: 'Loading payment options…',
           bankNote:
             "If your bank isn't in the list, we can't connect to it yet. You can still pay by card, and you haven't been charged.",
+          identityTitle: 'Verify your identity',
+          identityHint:
+            'Bridge, the licensed money transmitter that delivers your money, needs these to verify you. You only do this once.',
+          // NOT "try once more": the machine has no correction counter, so a
+          // second refusal returns here too. The real bound is the relay's
+          // rate limit (5 per 15 min), which is not a number to put in copy.
+          identityHintCorrection:
+            "Bridge couldn't verify those details. Check them and try again.",
+          // NEEDS LEGAL REVIEW (EN + ES). Says where the values go, WHY they
+          // are needed, and that they are required to send — the purpose and
+          // required-to-proceed disclosures compliance review asked for
+          // 2026-09-09 on top of the where-they-go sentence.
+          identityPrivacyNote:
+            'Your date of birth and tax ID go once to Bridge, the licensed money transmitter that delivers your money. Bridge is required by law to verify who you are, so you need to provide these to send this transfer. Puente passes them along without storing them.',
+          identitySubmit: 'Continue',
+          identitySubmitting: 'Verifying…',
         },
         offlineTitle: 'Waiting for your deposit',
         // The deposit instructions live with the ops team, not in the app —
@@ -2288,6 +2320,16 @@ const es: Translations = {
           loading: 'Cargando las opciones de pago…',
           bankNote:
             'Si tu banco no aparece en la lista, aún no podemos conectarnos con él; puedes pagar con tarjeta. No se te ha cobrado.',
+          identityTitle: 'Verifica tu identidad',
+          identityHint:
+            'Bridge, el transmisor de dinero con licencia que entrega tu dinero, necesita estos datos para verificarte. Solo lo haces una vez.',
+          identityHintCorrection:
+            'Bridge no pudo verificar esos datos. Revísalos e inténtalo de nuevo.',
+          // NEEDS LEGAL REVIEW (ES)
+          identityPrivacyNote:
+            'Tu fecha de nacimiento y tu número de identificación fiscal van una sola vez a Bridge, el transmisor de dinero con licencia que entrega tu dinero. La ley exige que Bridge verifique quién eres, así que necesitas proporcionarlos para enviar esta transferencia. Puente los transmite sin guardarlos.',
+          identitySubmit: 'Continuar',
+          identitySubmitting: 'Verificando…',
         },
         offlineTitle: 'Esperando tu depósito',
         offlineBody:

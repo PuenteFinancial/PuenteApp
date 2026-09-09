@@ -1,18 +1,31 @@
 'use client'
 
 import { useLanguage } from '@/components/LanguageProvider'
-import type { IdentityFormValues } from '@/lib/cryptoPayStep'
+import type { IdentityFormValues } from '@/lib/bridgeIdentity'
 
-// The DOB + tax ID inputs, shared by the full KYC form (first pass) and the
-// two-field re-entry form (reload edge / Bridge correction, K6 decision 12).
+// The DOB + tax ID inputs. Shared by the crypto rail's full KYC form (first
+// pass) and its two-field re-entry form (reload edge / Bridge correction, K6
+// decision 12), and by the Checkout rail's identity form (C3) — which is why
+// this moved out of crypto/ and reads its types from lib/bridgeIdentity.
 // These values ONLY ever reach the reducer's KYC_SUBMIT / RELAY_FORM_SUBMIT
 // events; the PII-guard test in lib/cryptoPayStep.test.ts pins which two
 // effects may carry them. Dispatch-only: zero fetches here.
 export default function IdentityFields({
   values,
+  privacyNote,
   onChange,
 }: {
   values: IdentityFormValues
+  /**
+   * Where these two values go, in this rail's words. REQUIRED, and a prop
+   * rather than a constant, because the answer differs by rail and getting it
+   * wrong is a false statement about someone's SSN: the crypto rail sends them
+   * to Stripe AND Bridge, the Checkout rail only to Bridge. This component
+   * used to hardcode the crypto sentence, which the Checkout form then
+   * double-printed with a contradicting one (caught in compliance review,
+   * 2026-09-09). No default — every caller states its own truth.
+   */
+  privacyNote: string
   onChange: (key: keyof IdentityFormValues, value: string) => void
 }) {
   const { t } = useLanguage()
@@ -60,7 +73,7 @@ export default function IdentityFields({
         <input id="kyc-taxid" value={values.taxId} onChange={set('taxId')} inputMode="numeric" autoComplete="off" />
       </div>
       <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 10px', lineHeight: 1.5 }}>
-        {c.ssnPrivacyNote}
+        {privacyNote}
       </p>
     </>
   )

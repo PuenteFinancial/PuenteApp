@@ -10,7 +10,7 @@ import {
   type KycFormMode,
   type KycFormValues,
 } from '@/lib/cryptoPayStep'
-import IdentityFields from './IdentityFields'
+import IdentityFields from '@/components/send/bridge/IdentityFields'
 
 // The K5 identity form — OUR UI, prefilled from the profile. The tax ID and
 // DOB are rendered here but their values ONLY ever reach the reducer's
@@ -114,7 +114,10 @@ export default function KycForm({
         </div>
       </div>
 
-      {mode === 'l1' && <IdentityFields values={values} onChange={setIdentity} />}
+      {mode === 'l1' && <IdentityFields
+        values={values}
+        privacyNote={t.send.track.crypto.kyc.ssnPrivacyNote}
+        onChange={setIdentity} />}
 
       {invalid && (
         <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '0 0 8px' }}>
