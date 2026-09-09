@@ -153,6 +153,83 @@ export function isOnrampSessionRail(provider: string): boolean {
 }
 
 /**
+ * WHO establishes the sender's identity, and WHEN — the one fact both the send
+ * gate and the Bridge relay's precondition are derived from.
+ *
+ * ONE field with three values rather than two booleans ("does the provider
+ * verify" + "does the pay step verify"), because that pair has a fourth,
+ * incoherent state — provider-verifies-but-pay-step-does-not — that nothing
+ * would stop someone writing. These three are the only shapes that exist.
+ */
+export type IdentityFlow =
+  /**
+   * Nobody, inside the send. The sender must ALREADY be `kyc_status =
+   * approved` before they can start one — verification happened during
+   * onboarding, via Bridge's hosted link. The pre-K-lane shape, and still
+   * right for any rail with no identity surface of its own.
+   */
+  | 'none'
+  /**
+   * The funding provider verifies first, and the Bridge relay runs after it,
+   * gated on the tier that verification leaves behind (`stripe_kyc_tier`).
+   * Stripe's crypto onramp only: it refuses a session for an unverified
+   * consumer, so identity is a by-product of taking the payment.
+   */
+  | 'provider_then_bridge'
+  /**
+   * Bridge is the SOLE verifier, inside the pay step. No provider tier exists
+   * to gate on — a card or bank charge needs no identity check of Stripe's —
+   * so the relay gates on consents instead, and Bridge's own sanctions, PEP,
+   * blocklist and database checks are the verification.
+   */
+  | 'bridge_only'
+
+/**
+ * Keyed on the RAIL NAME, not read off the live processor, for the same reason
+ * pendingFundingWindowMs is: a persisted row keeps the semantics of the rail
+ * that created it across a FUNDING_PROCESSOR flip. The processors below each
+ * declare the same value on themselves, and a test pins the two in agreement.
+ *
+ * Unknown rails fall to 'none' — the strictest answer, which refuses a send
+ * rather than waving one through.
+ */
+const IDENTITY_FLOW_BY_RAIL: Record<string, IdentityFlow> = {
+  mock: 'none',
+  manual: 'none',
+  stripe: 'none',
+  // Its widget does run Stripe identity, but this rail has never been wired to
+  // the Bridge relay — it still requires an onboarding-approved sender, and
+  // changing that is not this slice's business.
+  stripe_onramp: 'none',
+  stripe_crypto: 'provider_then_bridge',
+  stripe_checkout: 'bridge_only',
+}
+
+export function identityFlowFor(rail: string): IdentityFlow {
+  return IDENTITY_FLOW_BY_RAIL[rail] ?? 'none'
+}
+
+/**
+ * The SELECTED rail's identity flow, normalized — what the send gate and the
+ * Bridge relay both read.
+ *
+ * The field is required on the interface, but this reads it defensively and
+ * falls back to the rail-name map and then to 'none', because THE FALLBACK
+ * DIRECTION IS A SAFETY PROPERTY. 'none' is the strict answer (the sender must
+ * already be approved); every other value opens the door for an unverified
+ * sender on the promise that something downstream will verify them. A
+ * processor that reaches runtime without the field — a test double, a
+ * hand-rolled adapter, a bad merge — must not get the permissive gate by
+ * omission. Found exactly that way: fakes without the field took the open
+ * branch.
+ */
+export function currentIdentityFlow(): IdentityFlow {
+  const processor = getFundingProcessor()
+  const declared = (processor as { identityFlow?: IdentityFlow }).identityFlow
+  return declared ?? identityFlowFor(processor.provider)
+}
+
+/**
  * Recover a persisted undo's mode from its ref alone — the crash-recovery
  * counterpart to FundingUndo.mode. The `already_disbursed` replay paths
  * (services/refunds.ts, services/cancellation-review.ts) reach the REFUNDED
@@ -228,18 +305,13 @@ export interface FundingProcessor {
    */
   readonly deferredInitiation?: boolean
   /**
-   * C3: whether this processor verifies the sender's identity BEFORE the
-   * Bridge relay runs. True only on the Stripe crypto rail, whose onramp
-   * refuses a session for an unverified consumer and so leaves an L1/L2
-   * `stripe_kyc_tier` behind — which the relay uses as its precondition.
-   *
-   * No other rail produces that column, so on every other rail the relay has
-   * to gate on something it can actually observe (see bridge-customer.ts).
-   * A card or bank charge needs no identity check of Stripe's, which is
-   * exactly why the Checkout rail's flow is shorter — Bridge becomes the sole
-   * verifier, and it already runs its own sanctions, PEP and database checks.
+   * WHO establishes the sender's identity on this rail, and WHEN (C3/C4).
+   * See IdentityFlow. Required — a new processor must state this rather than
+   * inherit a default, because both the send gate and the Bridge relay's
+   * precondition are derived from it and a wrong silent default either
+   * strands every sender or lets one through unverified.
    */
-  readonly providerVerifiesIdentity?: boolean
+  readonly identityFlow: IdentityFlow
   /**
    * Whether this processor can actually run here: its secrets are present.
    * The route 503s the funding webhook and confirm gates on this — for the
@@ -403,10 +475,29 @@ const WEBHOOK_PENDING_WINDOW_MS = 30 * 60_000
  * - **everything else** — the 30-minute webhook rule. Payment either happened
  *   or it didn't.
  */
+/**
+ * Rails whose pay step puts an INTERACTIVE leg in front of the actual payment
+ * — a hosted widget, or (C3) the Bridge identity machine: terms on Bridge's
+ * own page, DOB + tax ID, then Bridge's verdict, which can land in manual
+ * review and tell the sender in as many words to come back later.
+ *
+ * Minutes are the wrong unit for these. A sender at 31 minutes is mid-flow,
+ * not gone, and reaping them kills a transfer for doing exactly what the page
+ * asked. Deliberately NOT folded into isOnrampSessionRail, which means
+ * something narrower ("has a provider session object to re-read") and gates
+ * real webhook and reconcile behaviour.
+ */
+function hasInteractivePayStep(rail: string): boolean {
+  return isOnrampSessionRail(rail) || rail === 'stripe_checkout'
+}
+
 export function pendingFundingWindowMs(row: RailRow): number {
   const rail = processorNameFor(row)
   if (rail === 'manual') return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60_000
-  if (isOnrampSessionRail(rail)) return env.ONRAMP_PENDING_MAX_AGE_HOURS * 60 * 60_000
+  // The env var's name predates the generalization: it is the clock for every
+  // interactive pay step, not just the onramp ones. (A Checkout Session lives
+  // 24h at Stripe, so this ceiling is ours, not theirs.)
+  if (hasInteractivePayStep(rail)) return env.ONRAMP_PENDING_MAX_AGE_HOURS * 60 * 60_000
   return WEBHOOK_PENDING_WINDOW_MS
 }
 
@@ -417,7 +508,10 @@ export function pendingFundingWindowMs(row: RailRow): number {
 // of a shift.
 function reaperGraceMs(rail: string): number {
   if (rail === 'manual') return 6 * 60 * 60_000
-  if (isOnrampSessionRail(rail)) return 60 * 60_000
+  // Must use the SAME predicate as the window above — #242 was exactly this
+  // pair drifting apart, and a Checkout row on an hours-long window with a
+  // 10-minute grace would page "the reaper is dead" for every ordinary sender.
+  if (hasInteractivePayStep(rail)) return 60 * 60_000
   return 10 * 60_000
 }
 

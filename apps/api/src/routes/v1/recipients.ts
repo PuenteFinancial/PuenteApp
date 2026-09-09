@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { supabaseAdmin } from '../../services/supabase.js'
-import { getFundingProcessor } from '../../services/funding/index.js'
+import { currentIdentityFlow } from '../../services/funding/index.js'
 import { fetchGrantedConsents, missingConsents } from './consents.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
@@ -100,7 +100,23 @@ export async function requireOnboardedUser(
     address_postal_code: string | null
   }
 
-  if (getFundingProcessor().deferredInitiation) {
+  // WHAT "ONBOARDED" MEANS DEPENDS ON THE RAIL (C4).
+  //
+  // Historically it meant `kyc_status = 'approved'`: identity was established
+  // during onboarding, before the sender had decided to send anything, and the
+  // whole K lane existed to move it OFF that path. On any rail that verifies
+  // inside the pay step, demanding approval here would refuse the sender at
+  // the door for not yet having done the thing the pay step is about to ask
+  // them to do — so the gate is profile + consents, and identity is the pay
+  // step's business.
+  //
+  // Keyed on `identityFlow`, NOT on `deferredInitiation` as it was before:
+  // that flag means "don't create the payment object at confirm", which the
+  // Checkout rail does not want (it initiates eagerly) while still doing
+  // identity at the pay step. The two happened to coincide when the crypto
+  // rail was the only one; they don't any more, and reading the wrong one
+  // makes every fresh sender on the Checkout rail a 403 at transfer creation.
+  if (currentIdentityFlow() !== 'none') {
     const profileComplete = Boolean(
       user.first_name &&
         user.last_name &&
@@ -124,6 +140,8 @@ export async function requireOnboardedUser(
       return null
     }
   } else if (user.kyc_status !== 'approved') {
+    // 'none' rails only: nothing downstream will verify this sender, so an
+    // approved status from onboarding is the only evidence there will ever be.
     await sendError(reply, 403, 'kyc_required', 'Complete identity verification first')
     return null
   }

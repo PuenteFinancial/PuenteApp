@@ -9,6 +9,9 @@ const envMock = vi.hoisted(() => ({
   STRIPE_WEBHOOK_SECRET: undefined as string | undefined,
   STRIPE_PUBLISHABLE_KEY: undefined as string | undefined,
   MOCK_FUNDING_WEBHOOK_SECRET: 'x',
+  // Read by pendingFundingWindowMs for every interactive pay step (C4).
+  ONRAMP_PENDING_MAX_AGE_HOURS: 4,
+  MANUAL_PENDING_MAX_AGE_DAYS: 7,
 }))
 vi.mock('../../config/env.js', () => ({ env: envMock }))
 
@@ -20,7 +23,15 @@ vi.mock('@sentry/node', () => ({
   captureException: vi.fn(),
 }))
 
-const { getFundingProcessor, processorFor, processorNameFor } = await import('./index.js')
+const {
+  currentIdentityFlow,
+  getFundingProcessor,
+  identityFlowFor,
+  pendingFundingWindowMs,
+  pendingReaperDeadAfterMs,
+  processorFor,
+  processorNameFor,
+} = await import('./index.js')
 
 beforeEach(() => {
   envMock.FUNDING_PROCESSOR = 'mock'
@@ -61,5 +72,91 @@ describe('processorFor', () => {
     processorFor({ funding_processor: 'manual' })
     processorFor({ funding_processor: null })
     expect(captureMessage).not.toHaveBeenCalled()
+  })
+})
+
+// ── C4: who verifies the sender, and when ──────────────────────────────────
+
+describe('identityFlow', () => {
+  it('every real processor DECLARES the same flow the rail map reports', async () => {
+    // The two exist for different reasons — the instance answers for the
+    // SELECTED rail, the map answers for a persisted row whose rail may no
+    // longer be selected — so they have to agree, or a row silently changes
+    // meaning when FUNDING_PROCESSOR flips.
+    //
+    // Constructed directly rather than through getFundingProcessor, which
+    // memoizes one instance for the life of the process and so cannot be
+    // walked across rails in a loop.
+    // The Stripe constructors refuse to build without a key (they guard direct
+    // construction); only the flag is under test, so a fake key is enough.
+    envMock.STRIPE_SECRET_KEY = 'sk_test_x'
+    envMock.STRIPE_WEBHOOK_SECRET = 'whsec_x'
+    envMock.STRIPE_PUBLISHABLE_KEY = 'pk_test_x'
+    const [mock, stripe, manual, onramp, crypto, checkout] = await Promise.all([
+      import('./mock.js'),
+      import('./stripe.js'),
+      import('./manual.js'),
+      import('./stripe-onramp.js'),
+      import('./stripe-crypto.js'),
+      import('./stripe-checkout.js'),
+    ])
+    const built = {
+      mock: new mock.MockFundingProcessor(),
+      stripe: new stripe.StripeFundingProcessor(),
+      manual: new manual.ManualFundingProcessor(),
+      stripe_onramp: new onramp.StripeOnrampFundingProcessor(),
+      stripe_crypto: new crypto.StripeCryptoFundingProcessor(),
+      stripe_checkout: new checkout.StripeCheckoutFundingProcessor(),
+    }
+    for (const [rail, processor] of Object.entries(built)) {
+      expect(processor.provider, rail).toBe(rail)
+      expect(processor.identityFlow, rail).toBe(identityFlowFor(rail))
+    }
+  })
+
+  it('only the two K-lane rails verify inside the send; everything else needs a pre-approved sender', () => {
+    expect(identityFlowFor('stripe_crypto')).toBe('provider_then_bridge')
+    expect(identityFlowFor('stripe_checkout')).toBe('bridge_only')
+    for (const rail of ['mock', 'manual', 'stripe', 'stripe_onramp']) {
+      expect(identityFlowFor(rail), rail).toBe('none')
+    }
+  })
+
+  it('an unknown rail is none — the STRICT answer, never the open one', () => {
+    // The direction of this fallback is the safety property: 'none' refuses
+    // a sender who is not already approved; any other value lets them start
+    // a send on the promise that something downstream will verify them.
+    expect(identityFlowFor('some_future_rail')).toBe('none')
+    expect(identityFlowFor('')).toBe('none')
+  })
+
+  it('currentIdentityFlow falls back to none when a processor omits the field', () => {
+    // A test double or a hand-rolled adapter must not get the permissive send
+    // gate by omission — this is how the C4 test failures surfaced.
+    envMock.FUNDING_PROCESSOR = 'mock'
+    expect(currentIdentityFlow()).toBe('none')
+  })
+})
+
+describe('the abandonment clock covers the Checkout rail (C4)', () => {
+  const row = (rail: string) => ({ funding_processor: rail })
+
+  it('gives it hours, not the 30-minute webhook rule', () => {
+    // C3 put a Bridge identity leg in front of payment — hosted terms, DOB and
+    // tax ID, then a verdict that can go to manual review and tell the sender
+    // to come back later. At 31 minutes that sender is mid-flow, not gone, and
+    // reaping them kills a transfer for doing what the page asked.
+    expect(pendingFundingWindowMs(row('stripe_checkout'))).toBeGreaterThan(
+      pendingFundingWindowMs(row('stripe')),
+    )
+    expect(pendingFundingWindowMs(row('stripe_checkout'))).toBe(
+      pendingFundingWindowMs(row('stripe_crypto')),
+    )
+  })
+
+  it('and the reaper-dead alert moves with it — the #242 drift, which was this exact pair', () => {
+    expect(pendingReaperDeadAfterMs(row('stripe_checkout'))).toBe(
+      pendingReaperDeadAfterMs(row('stripe_crypto')),
+    )
   })
 })

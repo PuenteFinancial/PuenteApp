@@ -28,10 +28,11 @@ vi.mock('@sentry/node', () => ({
   captureException: (...args: unknown[]) => captureException(...args),
 }))
 
-// C3: the relay's precondition now depends on the funding rail — the Stripe
-// crypto rail verifies first (stripe_kyc_tier), every other rail cannot and
-// gates on consents instead. Default TRUE so every pre-C3 case below keeps
-// exercising the rail it was written for; the checkout-rail describe flips it.
+// C3/C4: the relay's precondition depends on the rail's identityFlow — the
+// Stripe crypto rail verifies first (stripe_kyc_tier), every other rail cannot
+// and gates on consents instead. Default to the crypto rail so every pre-C3
+// case below keeps exercising the rail it was written for; the checkout-rail
+// describe flips it.
 const verifiesIdentity = { current: true }
 vi.mock('../../services/funding/index.js', async () => {
   const actual =
@@ -40,11 +41,8 @@ vi.mock('../../services/funding/index.js', async () => {
     )
   return {
     ...actual,
-    getFundingProcessor: () =>
-      ({
-        ...actual.getFundingProcessor(),
-        providerVerifiesIdentity: verifiesIdentity.current,
-      }) as ReturnType<typeof actual.getFundingProcessor>,
+    currentIdentityFlow: () =>
+      verifiesIdentity.current ? 'provider_then_bridge' : 'bridge_only',
   }
 })
 

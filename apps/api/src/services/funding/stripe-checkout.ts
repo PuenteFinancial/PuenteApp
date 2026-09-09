@@ -47,6 +47,10 @@ const LINE_ITEM_NAME = 'Puente transfer'
 
 export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
   override readonly provider = 'stripe_checkout'
+  // Bridge is the sole verifier here: a card or bank charge needs no identity
+  // check of Stripe's, so no `stripe_kyc_tier` is ever written and the pay
+  // step runs the Bridge leg itself (C3).
+  override readonly identityFlow = 'bridge_only' as const
 
   override isConfigured(): boolean {
     return Boolean(

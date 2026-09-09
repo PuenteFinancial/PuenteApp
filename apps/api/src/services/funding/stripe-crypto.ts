@@ -28,7 +28,7 @@ export class StripeCryptoFundingProcessor extends StripeOnrampFundingProcessor {
   // Stripe's onramp will not create a session for an unverified consumer, so
   // by the time the relay runs this rail has an L1/L2 `stripe_kyc_tier` on the
   // row. That column is this rail's alone — see the relay's precondition.
-  readonly providerVerifiesIdentity = true as const
+  override readonly identityFlow = 'provider_then_bridge' as const
 
   override isConfigured(): boolean {
     return Boolean(
