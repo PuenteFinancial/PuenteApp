@@ -83,6 +83,31 @@ describe('StripeCheckoutFundingProcessor — event mapping', () => {
     expect(result.event.transferRef).toBe(TRANSFER_ID)
   })
 
+  // The reachability question this rail's own PRD flags: funding_payment_ref
+  // stores the SESSION id (cs_…), but a payment_intent.* event's paymentRef is
+  // the PaymentIntent id (pi_…) — a different id space. IF a metadata-less
+  // payment_intent.succeeded/payment_failed ever fell through to the parent
+  // parser, a route-level fallback join on funding_payment_ref would compare
+  // across those spaces and always miss. Confirmed unreachable instead
+  // (stripe.ts parseEvent, researched 2026-09-09): the parser classifies this
+  // as `unhandled` before any join is attempted, for both PI event types.
+  it('a metadata-less PI event falls through to unhandled, not a mismatched fallback join', () => {
+    for (const type of ['payment_intent.succeeded', 'payment_intent.payment_failed']) {
+      const piEvent = Buffer.from(
+        JSON.stringify({
+          id: 'evt_pi_no_meta',
+          type,
+          data: { object: { id: 'pi_orphan', metadata: {} } },
+        }),
+      )
+      expect(make().parseEvent(piEvent)).toEqual({
+        outcome: 'unhandled',
+        eventId: 'evt_pi_no_meta',
+        eventType: type,
+      })
+    }
+  })
+
   it('acks a session we did not create rather than 400ing into a redelivery loop', () => {
     const orphan = Buffer.from(
       JSON.stringify({
@@ -234,6 +259,34 @@ describe('StripeCheckoutFundingProcessor — undos resolve the session first', (
         idempotencyKey: 'k',
       }),
     ).rejects.toThrow(/no payment_intent/)
+  })
+})
+
+describe('StripeCheckoutFundingProcessor — resolveAlternateFundingRef', () => {
+  // The route's fallback join (charge.dispute.created / a dashboard-issued
+  // refund) compares funding_payment_ref against a PaymentIntent id — a miss
+  // on this rail, since funding_payment_ref holds the Session id. This is the
+  // reverse lookup that closes it: Stripe's List Checkout Sessions endpoint
+  // supports filtering by payment_intent.
+  it('resolves the Session id behind a PaymentIntent id', async () => {
+    const list = vi.fn().mockResolvedValue({ data: [{ id: SESSION_ID }] })
+    const processor = make({ checkout: { sessions: { create: vi.fn(), retrieve: vi.fn(), list } } })
+    const result = await processor.resolveAlternateFundingRef('pi_resolved')
+    expect(list).toHaveBeenCalledWith({ payment_intent: 'pi_resolved', limit: 1 })
+    expect(result).toBe(SESSION_ID)
+  })
+
+  it('returns null for a ref that is not a PaymentIntent id, without calling Stripe', async () => {
+    const list = vi.fn()
+    const processor = make({ checkout: { sessions: { create: vi.fn(), retrieve: vi.fn(), list } } })
+    expect(await processor.resolveAlternateFundingRef('cs_not_a_pi')).toBeNull()
+    expect(list).not.toHaveBeenCalled()
+  })
+
+  it('returns null when no Session matches the PaymentIntent', async () => {
+    const list = vi.fn().mockResolvedValue({ data: [] })
+    const processor = make({ checkout: { sessions: { create: vi.fn(), retrieve: vi.fn(), list } } })
+    expect(await processor.resolveAlternateFundingRef('pi_orphan')).toBeNull()
   })
 })
 

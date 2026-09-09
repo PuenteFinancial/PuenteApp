@@ -238,6 +238,27 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
   }
 
   /**
+   * The route's fallback-join escape hatch (FundingProcessor doc comment):
+   * charge.dispute.created and a dashboard-issued refund carry the underlying
+   * PaymentIntent id as paymentRef, but funding_payment_ref on THIS rail's
+   * rows holds the Session id — the direct join always misses. Stripe's List
+   * Checkout Sessions endpoint supports filtering by `payment_intent`
+   * (docs.stripe.com/api/checkout/sessions/list), which is exactly the
+   * reverse lookup needed: PaymentIntent id → the Session that created it.
+   * One Session per PI (this rail creates at most one Checkout Session per
+   * transfer, ever — the confirm-time idempotency key), so `limit: 1` is
+   * exact, not a truncation risk.
+   */
+  async resolveAlternateFundingRef(paymentIntentId: string): Promise<string | null> {
+    if (!paymentIntentId.startsWith('pi_')) return null
+    const sessions = await this.client.checkout.sessions.list({
+      payment_intent: paymentIntentId,
+      limit: 1,
+    })
+    return sessions.data[0]?.id ?? null
+  }
+
+  /**
    * The PaymentIntent behind a Checkout Session.
    *
    * THROWS when there isn't one, and that is deliberate. Both undo paths are
