@@ -208,6 +208,37 @@ export class StripeFundingProcessor implements FundingProcessor {
       if (typeof transferRef !== 'string' || transferRef === '') {
         // Signed, well-formed, but not a PI we created (no transfer echo) —
         // ack rather than 400 into a redelivery loop.
+        //
+        // Deliberately `unhandled`, NOT `event` with `transferRef: null` — this
+        // event never reaches the route's funding_payment_ref fallback join at
+        // all (unlike charge.dispute.created / refund.* below, where Stripe's
+        // payload structurally cannot carry our echo and the join is the only
+        // resolution path). Researched 2026-09-09 for the Checkout rail, where
+        // funding_payment_ref stores the SESSION id (cs_…) while a PI event's
+        // paymentRef is the PaymentIntent id (pi_…) — a fallback join here
+        // would compare across id spaces and always miss:
+        //   - We stamp metadata.transfer_id on every PI this code creates,
+        //     unconditionally (initiateFunding above; stripe-checkout.ts sets
+        //     the SAME echo via payment_intent_data.metadata at Session
+        //     creation, since Stripe does NOT auto-copy Session metadata onto
+        //     the PI it creates — that's why the explicit stamp exists at all).
+        //   - Metadata size limits (50 keys / 40-char keys / 500-char values,
+        //     docs.stripe.com/api/metadata) are nowhere near binding for a
+        //     single ~40-char UUID value — truncation is not a plausible cause.
+        //   - Classic webhook deliveries (this endpoint: `stripe-signature` +
+        //     `webhooks.constructEvent`) are always full object snapshots.
+        //     Stripe's metadata-less "thin" events are a distinct, opt-in v2
+        //     Event Destinations mechanism requiring its own signing secret —
+        //     this endpoint cannot silently receive them.
+        // So a metadata-less payment_intent.* event here means either a PI
+        // genuinely outside our rails (Dashboard/API activity on the same
+        // account — legitimately unhandled) or out-of-band tampering with a
+        // PI's metadata after we created it — which no join key defends
+        // against, since the tamperer could as easily clear a stored PI-ref
+        // column as our metadata. Alerting on every metadata-less PI event
+        // would page on the former (routine, harmless) to maybe catch the
+        // latter (unobserved so far). See stripe.test.ts "acks-as-unhandled"
+        // and stripe-checkout.test.ts for the pinned behavior.
         return unhandled
       }
       const lastError = object['last_payment_error'] as Record<string, unknown> | null | undefined

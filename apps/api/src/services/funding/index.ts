@@ -273,6 +273,30 @@ export interface FundingProcessor {
    */
   getPaymentStatus?(input: { paymentRef: string }): Promise<FundingPaymentStatus>
   listRecentPayments?(input: { createdAfter: Date; limit: number }): Promise<FundingPaymentListItem[]>
+  /**
+   * OPTIONAL — only rails whose persisted funding_payment_ref can diverge
+   * from what an echo-less event's paymentRef carries need to implement this.
+   *
+   * The webhooks route's fallback join (charge.dispute.created and a
+   * dashboard-issued refund — the two event shapes that can't carry our
+   * metadata echo) resolves the transfer via
+   * `funding_payment_ref = event.paymentRef`. That works for rails whose ref
+   * IS what those events carry (the base PI rail: both are the PaymentIntent
+   * id) but misses for the Checkout Sessions rail, which persists the
+   * SESSION id while a dispute/refund's paymentRef is the underlying
+   * PaymentIntent id — a different id space, always a miss on the direct
+   * join. When the direct join fails, the route calls this (if implemented)
+   * with the event's paymentRef and retries the join with whatever it
+   * returns. Return null for a legitimate "nothing to resolve" (wrong ref
+   * shape, no matching object) — an unresolvable ref still falls through to
+   * the route's "unmatched to any transfer" ack. A genuine processor-call
+   * failure (e.g. a Stripe API error) should THROW rather than return null:
+   * the route has no try/catch around this call, so it 500s and the provider
+   * redelivers — the same posture as every other transient failure in this
+   * handler. Swallowing it to null would misclassify a retryable failure as
+   * a permanent "unmatched", acking a delivery the next retry could resolve.
+   */
+  resolveAlternateFundingRef?(paymentRef: string): Promise<string | null>
   // The two funding-undo ops (slice 6), mirroring the initiateFunding seam.
   // Distinct money movements → distinct ledger batches: voidFunding cancels an
   // UNCLEARED pull (Stripe: cancel the PaymentIntent) so nothing ever settled —

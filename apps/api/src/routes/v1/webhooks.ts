@@ -421,15 +421,39 @@ export async function webhooksRoute(server: FastifyInstance) {
 
       // Resolve the transfer: PI events echo transfers.id via metadata;
       // Stripe dispute events can't (transferRef null) and join through the
-      // funding_payment_ref persisted at confirm instead.
+      // funding_payment_ref persisted at confirm instead. Same for refund.*
+      // envelope types when the refund carries no metadata echo (a
+      // dashboard-issued refund — see stripe.ts parseEvent).
+      //
+      // payment_intent.succeeded / payment_intent.payment_failed never reach
+      // this branch with transferRef null: the processor classifies a
+      // metadata-less PI event as `unhandled` upstream instead (researched and
+      // documented in stripe.ts, next to the check that produces it) — the
+      // fallback join is reserved for event shapes that structurally cannot
+      // carry our echo, not PI events, which always carry it when the PI is
+      // one of ours.
+      //
+      // The direct join can still miss on a rail whose persisted ref is a
+      // DIFFERENT id space than what these events carry — the Checkout
+      // Sessions rail persists the Session id but disputes/refunds carry the
+      // PaymentIntent id (see FundingProcessor.resolveAlternateFundingRef).
+      // When it does, ask the processor for an alternate ref and retry once
+      // before giving up.
       let transferId = event.transferRef
       if (transferId === null) {
-        const { data: match } = await supabaseAdmin
-          .from('transfers')
-          .select('id')
-          .eq('funding_payment_ref', event.paymentRef)
-          .maybeSingle()
-        transferId = (match as { id: string } | null)?.id ?? null
+        const findByRef = async (ref: string) => {
+          const { data: match } = await supabaseAdmin
+            .from('transfers')
+            .select('id')
+            .eq('funding_payment_ref', ref)
+            .maybeSingle()
+          return (match as { id: string } | null)?.id ?? null
+        }
+        transferId = await findByRef(event.paymentRef)
+        if (!transferId && processor.resolveAlternateFundingRef) {
+          const alternateRef = await processor.resolveAlternateFundingRef(event.paymentRef)
+          if (alternateRef) transferId = await findByRef(alternateRef)
+        }
         if (!transferId) {
           // Signature was valid, so this is our processor talking about a
           // payment we never recorded — ack (a retry cannot fix it), log loud.

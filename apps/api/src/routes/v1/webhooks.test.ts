@@ -870,6 +870,52 @@ describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
     expect(transitionTransfer).not.toHaveBeenCalled()
     await app.close()
   })
+
+  // The Checkout rail's id-space mismatch: funding_payment_ref holds the
+  // Session id, but a dispute/refund's paymentRef is the PaymentIntent id, so
+  // the direct join misses even for a transfer that rail funded. When the
+  // processor implements resolveAlternateFundingRef (StripeCheckoutFundingProcessor
+  // does; the base fakeStripeProcessor above does not), the route retries the
+  // join with whatever it resolves before giving up.
+  it('retries the join via resolveAlternateFundingRef when the direct funding_payment_ref join misses', async () => {
+    const missLookup = selectChain({ data: null })
+    const hitLookup = selectChain({ data: { id: TRANSFER_ID } })
+    from.mockReturnValueOnce(missLookup).mockReturnValueOnce(hitLookup)
+    const resolveAlternateFundingRef = vi.fn(async () => 'cs_test_123')
+    processorOverride.current = fakeStripeProcessor({ resolveAlternateFundingRef })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/funding')
+      .set('Content-Type', 'application/json')
+      .set('Stripe-Signature', 'sig_v1')
+      .send('{}')
+
+    expect(res.status).toBe(200)
+    expect(resolveAlternateFundingRef).toHaveBeenCalledWith('pi_123')
+    expect(missLookup['eq']).toHaveBeenCalledWith('funding_payment_ref', 'pi_123')
+    expect(hitLookup['eq']).toHaveBeenCalledWith('funding_payment_ref', 'cs_test_123')
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('still acks unmatched when resolveAlternateFundingRef also finds nothing', async () => {
+    from.mockReturnValueOnce(selectChain({ data: null }))
+    const resolveAlternateFundingRef = vi.fn(async () => null)
+    processorOverride.current = fakeStripeProcessor({ resolveAlternateFundingRef })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/funding')
+      .set('Content-Type', 'application/json')
+      .set('Stripe-Signature', 'sig_v1')
+      .send('{}')
+
+    expect(res.status).toBe(200)
+    expect(resolveAlternateFundingRef).toHaveBeenCalledWith('pi_123')
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    await app.close()
+  })
 })
 
 // ── funding webhook, onramp-shaped processor (#213) ─────────────────────────
