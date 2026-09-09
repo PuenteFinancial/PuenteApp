@@ -1790,7 +1790,7 @@ const en: Translations = {
           released: 'Released — payout submission queued.',
           releasedNotEnqueued:
             'Released — the direct enqueue failed; the sweep resubmits within a minute. Watch the Timeline for FUNDED → SUBMITTED.',
-          refunded: 'Refunded — correction payment sent, both ledger batches posted.',
+          refunded: 'Refunded — correction payment sent; the expected ledger batches posted.',
           already_disbursed: 'Settled — a prior run had already paid; the ledger is now complete. No money moved now.',
           already_settled: 'Already refunded — nothing to do; no money moved now.',
         },
@@ -2725,7 +2725,7 @@ const es: Translations = {
           released: 'Liberada \u2014 env\u00edo del payout en cola.',
           releasedNotEnqueued:
             'Liberada \u2014 fall\u00f3 el encolado directo; el barrido reenv\u00eda en menos de un minuto. Observa la l\u00ednea de tiempo hasta ver FUNDED \u2192 SUBMITTED.',
-          refunded: 'Reembolsada \u2014 pago de correcci\u00f3n enviado, ambos lotes asentados.',
+          refunded: 'Reembolsada \u2014 pago de correcci\u00f3n enviado; los lotes esperados quedaron asentados.',
           already_disbursed:
             'Asentado \u2014 una ejecuci\u00f3n anterior ya hab\u00eda pagado; el libro ahora est\u00e1 completo. Ahora no se movi\u00f3 dinero.',
           already_settled: 'Ya reembolsada \u2014 nada que hacer; ahora no se movi\u00f3 dinero.',
