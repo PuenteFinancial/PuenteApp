@@ -115,6 +115,21 @@ means it is still on its way — wait for the terminal event.
 
 ### 3. Execute
 
+**From the ops board (since slice O-B, 2026-09-08).** On `/dashboard/ops/transfers/<id>` the
+Refund section shows the preflight — the RECORDED half of the interlock (state, claim, return
+event) — and, when it passes, a **Refund** button. Press it, read the amount (send + fee) and the
+irreversibility line, type the note (what you verified; no names, no account numbers), confirm. The
+API then runs the same steps as the CLI below in the same order: the LIVE Bridge check (the busy
+state can last up to the Bridge timeout), the claim, the refund, the ledger proof, and an
+`ops_actions` row. Two refusals render as red STOP panels with **no retry button** — close and
+follow this runbook: *principal not returned* (Bridge and the recorded event disagree; if the
+detail says `bridge=refund_failed` go to [Escalation](#escalation--refund_failed-principal-stuck-at-bridge))
+and *claim abandoned* (below). The success panel lists the ledger batches; if it says a batch is
+**MISSING**, money moved but the book is short — go straight to step 4. There is deliberately no
+reclaim on the board: an abandoned claim is worked from this runbook, with the CLI.
+
+**From the terminal (break-glass, and the only path for `--reclaim`):**
+
 ```bash
 doppler run -- pnpm exec tsx scripts/trigger-refund.ts <transferId> --operator <your-id> --confirm
 ```
@@ -198,7 +213,21 @@ select t.transition, t.idempotency_key,
 
 Every `net` must be `0`, and both `{id}:bridge_return` and `{id}:REFUNDED` must be present. The
 script checks that both **keys** are present and exits non-zero if either is missing; it never reads
-`ledger_entries`, so the net-zero check is this query's job.
+`ledger_entries`, so the net-zero check is this query's job. (The board's refund does the same key
+check and reports `ledgerComplete`; a pre-submit row expects only `{id}:REFUNDED`.)
+
+A refund triggered from the board also left its provenance row — who, when, what they typed, and
+what the API saw before and after:
+
+```sql
+select created_at, actor, action, reason, note, before, after, request_id
+  from public.ops_actions
+ where transfer_id = '<transfer-id>' order by created_at;
+```
+
+Expect `action = 'refund'`, `reason` = the outcome (`refunded` / `already_disbursed` /
+`already_settled`), and `after ->> 'ledgerComplete' = 'true'`. A CLI run writes no `ops_actions`
+row — its record is the `ops:<your-id>` transition actor above.
 
 ## Escalation — `refund_failed` (principal stuck at Bridge)
 

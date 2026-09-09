@@ -225,6 +225,48 @@ export function detailActions(detail: OpsTransferDetail): OpsDetailAction[] {
   return actions
 }
 
+// ── O-B: the two write actions ───────────────────────────────────────────────
+
+// The operator's note: what they verified before acting. Mirrors the API's
+// body schema (10–500 chars after trim) so the button gates client-side and
+// the 400 is never the first feedback. Free text; the hint tells the operator
+// to keep names and account numbers out of it.
+export const OPS_NOTE_MIN = 10
+export const OPS_NOTE_MAX = 500
+export function opsNoteValid(note: string): boolean {
+  const n = note.trim().length
+  return n >= OPS_NOTE_MIN && n <= OPS_NOTE_MAX
+}
+
+export interface OpsHoldReleaseSuccess {
+  transferId: string
+  outcome: 'released'
+  enqueued: boolean
+}
+
+export function isOpsHoldReleaseSuccessShape(v: unknown): v is OpsHoldReleaseSuccess {
+  if (!isRecord(v)) return false
+  return typeof v.transferId === 'string' && v.outcome === 'released' && typeof v.enqueued === 'boolean'
+}
+
+const REFUND_OUTCOMES = ['refunded', 'already_disbursed', 'already_settled'] as const
+export type OpsRefundOutcome = (typeof REFUND_OUTCOMES)[number]
+
+export interface OpsRefundSuccess {
+  transferId: string
+  outcome: OpsRefundOutcome
+  ledgerComplete: boolean
+  ledgerKeys: string[]
+}
+
+export function isOpsRefundSuccessShape(v: unknown): v is OpsRefundSuccess {
+  if (!isRecord(v)) return false
+  if (typeof v.transferId !== 'string') return false
+  if (!REFUND_OUTCOMES.includes(v.outcome as OpsRefundOutcome)) return false
+  if (typeof v.ledgerComplete !== 'boolean') return false
+  return Array.isArray(v.ledgerKeys) && v.ledgerKeys.every((k) => typeof k === 'string')
+}
+
 /** Date AND time — an operator reading a timeline needs the minute. */
 export function formatOpsTimestamp(iso: string, lang: 'en' | 'es'): string {
   const d = new Date(iso)

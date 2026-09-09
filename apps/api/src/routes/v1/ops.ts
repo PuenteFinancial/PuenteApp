@@ -8,6 +8,7 @@ import {
   attachDepositInstructions,
   getDepositInstructions,
 } from '../../services/deposit-instructions.js'
+import { recordOpsAction } from '../../services/ops-actions.js'
 import { errorResponseSchema, sendError } from '../../utils/errors.js'
 import {
   opsWriteEnabled,
@@ -396,6 +397,21 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
             : await denyCancellation({ transferId, operator: request.user!.id, depositedAt: depositedAt! })
 
         if (outcome.done) {
+          // Provenance (O-B): the decision, the outcome, and the evidence the
+          // operator typed — fixed keys, never a row spread.
+          await recordOpsAction(
+            {
+              actor: `ops:${request.user!.id}`,
+              action: 'cancellation_resolve',
+              transferId,
+              reason: decision,
+              note: null,
+              before: {},
+              after: { outcome: outcome.outcome, ...(depositedAt !== undefined && { depositedAt }) },
+              requestId: request.id,
+            },
+            request.log,
+          )
           return { transferId, outcome: outcome.outcome }
         }
 
@@ -509,6 +525,19 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
         })
 
         if (result.done) {
+          await recordOpsAction(
+            {
+              actor: `ops:${request.user!.id}`,
+              action: 'manual_funding',
+              transferId,
+              reason: kind,
+              note: null,
+              before: {},
+              after: { outcome: result.outcome, externalRef, amountMinor },
+              requestId: request.id,
+            },
+            request.log,
+          )
           return { transferId, outcome: result.outcome }
         }
 
@@ -617,6 +646,20 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
         })
         switch (result.outcome) {
           case 'attached':
+            await recordOpsAction(
+              {
+                actor: `ops:${request.user!.id}`,
+                action: 'deposit_instructions_attach',
+                transferId: request.body.transferId,
+                reason: null,
+                note: null,
+                before: {},
+                // The onramp id only — never the bank coordinates the row holds.
+                after: { bridgeTransferRef: request.body.bridgeTransferId },
+                requestId: request.id,
+              },
+              request.log,
+            )
             return {
               transferId: request.body.transferId,
               outcome: 'attached',
@@ -735,6 +778,19 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
           // the top-up is idempotent on the ref, so posting again is a no-op,
           // and skipping it here is what would strand a half-recorded deposit.
           await recordFloatTopUp({ amountMinor, externalRef })
+          await recordOpsAction(
+            {
+              actor: `ops:${request.user!.id}`,
+              action: 'deposit_landed',
+              transferId,
+              reason: null,
+              note: null,
+              before: {},
+              after: { outcome: result.outcome, externalRef, amountMinor },
+              requestId: request.id,
+            },
+            request.log,
+          )
           return { transferId, outcome: result.outcome }
         }
 
@@ -833,6 +889,20 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
       try {
         await recordFloatTopUp({ amountMinor, externalRef })
         const balance = await getAccountBalance('bridge_wallet_float')
+        await recordOpsAction(
+          {
+            actor: `ops:${request.user!.id}`,
+            action: 'float_topup',
+            // Treasury-level: no transfer.
+            transferId: null,
+            reason: null,
+            note: null,
+            before: {},
+            after: { externalRef, amountMinor, floatBalanceMinor: balance.amountMinor },
+            requestId: request.id,
+          },
+          request.log,
+        )
         return { amountMinor, externalRef, floatBalanceMinor: balance.amountMinor }
       } catch (err) {
         if (err instanceof PayoutValidationError) {

@@ -23,6 +23,13 @@ export type ApiErrorCode =
   | 'refund_owed'
   | 'claim_abandoned'
   | 'deposit_evidence_conflict'
+  // Ops refund (ops board slice 1 / O-B), 409: the principal-returned
+  // interlock failed — the recorded payment_events return row and Bridge's
+  // live state must AGREE before a refund may post, and one of them said no
+  // (no event recorded, or Bridge disagrees — including refund_failed, where
+  // the principal is stuck AT Bridge). Never retry from the UI: the operator
+  // reads the Bridge dashboard and follows runbooks/manual-refund.md.
+  | 'principal_not_returned'
   // Onramp supportability refusal (#213): the funding processor can't serve
   // this sender's location/profile. 403 at confirm; permanent for the sender
   // from this network location, not retryable-later like not_configured.
