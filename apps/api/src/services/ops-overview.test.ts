@@ -49,6 +49,14 @@ vi.mock('./refunds.js', () => ({
   listRefundBacklog: (...args: unknown[]) => listRefundBacklog(...args),
 }))
 
+// Slice 2: the Recent activity feed rides the overview. The read itself
+// (columns, order, mapping) is pinned in ops-actions.test.ts.
+const listRecentOpsActions = vi.hoisted(() => vi.fn())
+vi.mock('./ops-actions.js', () => ({
+  ACTIVITY_FEED_LIMIT: 25,
+  listRecentOpsActions: (...args: unknown[]) => listRecentOpsActions(...args),
+}))
+
 const { buildOpsOverview } = await import('./ops-overview.js')
 
 const NOW = new Date('2026-08-01T12:00:00.000Z')
@@ -112,6 +120,7 @@ beforeEach(() => {
   isFloatCeilingTripped.mockReset().mockResolvedValue({ tripped: false, balanceMinor: 0, ceilingMinor: 100 })
   getAccountBalance.mockReset().mockResolvedValue({ amountMinor: 0, currency: 'USD' })
   listRefundBacklog.mockReset().mockResolvedValue([])
+  listRecentOpsActions.mockReset().mockResolvedValue([])
   envMock.FLOAT_CEILING_MINOR = undefined
   transfersResult = { data: [], error: null }
   instructionsResult = { data: [], error: null }
@@ -155,6 +164,8 @@ describe('buildOpsOverview', () => {
     expect(overview.ledgerBalances).toBeNull()
     expect(overview.reconciliationRuns).toEqual([])
     expect(overview.refundBacklog).toEqual([])
+    expect(overview.activity).toEqual([])
+    expect(listRecentOpsActions).toHaveBeenCalledWith(25)
     // The open-transfers select sweeps the pager's states PLUS
     // PENDING_PAYMENT (board-only — the pager itself stays untouched).
     expect(transfersIn).toHaveBeenCalledWith('state', [
@@ -570,5 +581,25 @@ describe('buildOpsOverview', () => {
       error: null,
     }
     await expect(buildOpsOverview()).rejects.toThrow(/1000-row PostgREST cap/)
+  })
+})
+
+// Slice 2: the feed is passed through untouched (the service already shaped
+// it) and, like every panel, fails the whole read rather than rendering an
+// empty feed as "nobody did anything".
+describe('activity feed (slice 2)', () => {
+  it('passes the feed rows through in the order the read returned them', async () => {
+    const rows = [
+      { id: 'a2', createdAt: '2026-09-09T12:00:00.000Z', actor: 'ops:u1', action: 'refund', transferId: 't1', reason: 'refunded' },
+      { id: 'a1', createdAt: '2026-09-09T11:00:00.000Z', actor: 'ops:u1', action: 'float_topup', transferId: null, reason: null },
+    ]
+    listRecentOpsActions.mockResolvedValue(rows)
+    const overview = await buildOpsOverview()
+    expect(overview.activity).toEqual(rows)
+  })
+
+  it('fails closed when the feed read throws', async () => {
+    listRecentOpsActions.mockRejectedValue(new Error('ops activity feed select failed: db down'))
+    await expect(buildOpsOverview()).rejects.toThrow(/activity feed select failed/)
   })
 })

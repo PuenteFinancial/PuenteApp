@@ -26,10 +26,13 @@ import {
   formatBalance,
   workerHeartbeatAlarm,
   refundBacklogRows,
+  activityFeedRows,
   opsTransferHref,
   type OpsOverview,
   type OpsOpenTransfer,
 } from '@/lib/opsOverview'
+import { actorShort, activityTone, isKnownActionKind } from '@/lib/opsActivity'
+import { formatOpsTimestamp } from '@/lib/opsTransferDetail'
 
 // Slice 1: ids on every card link to the per-transfer detail page. The id is
 // the only thing that ever goes in that URL (#215).
@@ -52,6 +55,7 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
   const skipped = latestSkipped(overview)
   const run = latestRun(overview)
   const backlog = refundBacklogRows(overview)
+  const activity = activityFeedRows(overview)
   const attention = overview.openTransfers.filter((tr) => tr.overThreshold || tr.holdReason != null)
   const quiet = overview.openTransfers.filter((tr) => !tr.overThreshold && tr.holdReason == null)
 
@@ -242,6 +246,53 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
                 </Card>
               ))}
             </>
+          )}
+        </Section>
+      )}
+
+      {/* Slice 2: the ops_actions record read back — what humans did, placed
+          after what needs a human and before what the system found. One line
+          per action, no note (that lives on the transfer's page). Absent =
+          not reported (deploy skew), same as the backlog. */}
+      {overview.activity !== undefined && (
+        <Section title={s.activity.feedTitle}>
+          {activity.length === 0 ? (
+            <p style={{ fontSize: 13, color: 'var(--muted)' }}>{s.activity.feedEmpty}</p>
+          ) : (
+            <Card>
+              <p style={{ fontSize: 12, color: 'var(--muted)', margin: '0 0 4px' }}>{s.activity.feedNote}</p>
+              {activity.map((row) => (
+                <div
+                  key={row.id}
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '6px 0',
+                    borderTop: '1px solid var(--line-2)',
+                    fontSize: 13,
+                  }}
+                >
+                  <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted)' }}>
+                    {formatOpsTimestamp(row.createdAt, lang)}
+                  </span>
+                  <Pill
+                    label={isKnownActionKind(row.action) ? s.activity.actions[row.action] : row.action}
+                    tone={activityTone(row.action)}
+                  />
+                  {row.transferId != null ? (
+                    <IdLink id={row.transferId} />
+                  ) : (
+                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>{s.activity.treasury}</span>
+                  )}
+                  <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{actorShort(row.actor)}</span>
+                  {row.reason != null && (
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted)' }}>{row.reason}</span>
+                  )}
+                </div>
+              ))}
+            </Card>
           )}
         </Section>
       )}

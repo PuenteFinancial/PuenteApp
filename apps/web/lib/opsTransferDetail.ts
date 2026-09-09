@@ -7,6 +7,8 @@
 // PII posture is the API's (ids, amounts, timestamps, states, opaque refs,
 // joined-row statuses) — nothing here re-derives anything about a person.
 
+import { isOpsActivityRowShape, type OpsActivityRow } from './opsActivity'
+
 export interface OpsDwell {
   enteredStateAt: string
   dwellMinutes: number
@@ -145,6 +147,9 @@ export interface OpsTransferDetail {
   cancellationRequests: OpsDetailCancellationRequest[]
   depositInstructions: OpsDetailDepositInstructions | null
   disclosures: OpsDetailDisclosure[]
+  // Slice 2: the transfer's ops history. Same deploy-skew semantics as
+  // actionsEnabled — absent = not reported, and the section stays hidden.
+  activity?: OpsActivityRow[]
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null
@@ -165,7 +170,15 @@ export function isOpsTransferDetailShape(v: unknown): v is OpsTransferDetail {
     if (!Array.isArray(v[list])) return false
   }
   if (v.actionsEnabled !== undefined && typeof v.actionsEnabled !== 'boolean') return false
+  if (v.activity !== undefined && !(Array.isArray(v.activity) && v.activity.every(isOpsActivityRowShape))) {
+    return false
+  }
   return true
+}
+
+/** Slice 2: the history as the API sent it (newest first); empty when not reported. */
+export function activityRows(detail: OpsTransferDetail): OpsActivityRow[] {
+  return detail.activity ?? []
 }
 
 /** Every posting batch nets to zero — the runbook's verify step, as a boolean. */

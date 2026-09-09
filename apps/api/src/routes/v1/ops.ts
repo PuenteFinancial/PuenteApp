@@ -186,6 +186,22 @@ const overviewResponseSchema = {
         },
       },
     },
+    // Slice 2: the Recent activity feed. One line per ops action — deliberately
+    // NO note and NO before/after here; those live on the transfer's own page.
+    activity: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          createdAt: { type: 'string' },
+          actor: { type: 'string' },
+          action: { type: 'string' },
+          transferId: { type: ['string', 'null'] },
+          reason: { type: ['string', 'null'] },
+        },
+      },
+    },
   },
 } as const
 

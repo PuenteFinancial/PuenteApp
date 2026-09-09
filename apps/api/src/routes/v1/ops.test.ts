@@ -150,6 +150,17 @@ const OVERVIEW = {
       refundPaymentRef: null,
     },
   ],
+  // Slice 2: the Recent activity feed rides the overview wire.
+  activity: [
+    {
+      id: 'act-1',
+      createdAt: '2026-08-01T11:30:00.000Z',
+      actor: 'ops:aaaaaaaa-1111-4222-8333-444444444444',
+      action: 'hold_release',
+      transferId: 'dddddddd-1111-4222-8333-444444444444',
+      reason: 'velocity_review',
+    },
+  ],
 }
 
 beforeEach(() => {
@@ -250,6 +261,9 @@ describe('GET /v1/ops/overview', () => {
         },
       ],
       leakedTopLevel: 'SENSITIVE',
+      // Slice 2: the feed row must shed anything beyond its six fields — the
+      // operator's note and the raw before/after belong to the detail page.
+      activity: [{ ...OVERVIEW.activity[0], note: 'SENSITIVE NOTE', before: { secret: true }, after: { secret: false } }],
     })
     const app = await buildApp()
     const res = await supertest(app.server)
@@ -257,6 +271,8 @@ describe('GET /v1/ops/overview', () => {
       .set('Authorization', `Bearer ${ADMIN}`)
     expect(res.status).toBe(200)
     expect(res.body.leakedTopLevel).toBeUndefined()
+    expect(res.body.activity).toEqual(OVERVIEW.activity)
+    expect(JSON.stringify(res.body)).not.toContain('SENSITIVE NOTE')
     expect(res.body.reconciliationRuns[0].checks[0]).toEqual({
       name: 'bridge_wallet_float',
       status: 'findings',

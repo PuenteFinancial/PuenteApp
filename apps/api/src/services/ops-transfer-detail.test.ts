@@ -29,6 +29,13 @@ vi.mock('./ledger.js', () => ({ getAccountBalance: vi.fn() }))
 
 // refunds.ts drags the Bridge client in; the two seams this service uses are
 // mocked. classifyRefundClaim's window arithmetic is pinned in refunds.test.ts.
+// Slice 2: the transfer's ops history rides the detail. The read itself
+// (columns, scope, changes derivation, cap) is pinned in ops-actions.test.ts.
+const listOpsActionsForTransfer = vi.hoisted(() => vi.fn())
+vi.mock('./ops-actions.js', () => ({
+  listOpsActionsForTransfer: (...args: unknown[]) => listOpsActionsForTransfer(...args),
+}))
+
 const recordedReturnEvent = vi.hoisted(() => vi.fn())
 vi.mock('./refunds.js', () => ({
   recordedReturnEvent: (...args: unknown[]) => recordedReturnEvent(...args),
@@ -104,6 +111,7 @@ const transferRow = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   from.mockReset().mockImplementation((table: string) => chain(table))
   recordedReturnEvent.mockReset().mockResolvedValue(null)
+  listOpsActionsForTransfer.mockReset().mockResolvedValue([])
   selects = {}
   ors = []
   results = {
@@ -476,5 +484,35 @@ describe('buildOpsTransferDetail', () => {
   it('throws (fails closed) when a list read errors', async () => {
     results['payment_events'] = { data: null, error: { message: 'db down' } }
     await expect(buildOpsTransferDetail(T)).rejects.toThrow(/payment-events select failed: db down/)
+  })
+})
+
+// Slice 2: the history is read for THIS transfer and passed through as the
+// service shaped it; a failed read fails the whole detail (no silent
+// "nobody touched this").
+describe('activity history (slice 2)', () => {
+  it('reads the history for the transfer and passes it through', async () => {
+    const rows = [
+      {
+        id: 'act-1',
+        createdAt: '2026-09-09T12:00:00.000Z',
+        actor: 'ops:u1',
+        action: 'hold_release',
+        transferId: T,
+        reason: 'velocity_review',
+        note: 'Verified by phone.',
+        changes: [{ key: 'payoutHoldReason', before: 'velocity_review', after: null }],
+        requestId: 'req-1',
+      },
+    ]
+    listOpsActionsForTransfer.mockResolvedValue(rows)
+    const detail = await buildOpsTransferDetail(T)
+    expect(listOpsActionsForTransfer).toHaveBeenCalledWith(T)
+    expect(detail?.activity).toEqual(rows)
+  })
+
+  it('fails closed when the history read throws', async () => {
+    listOpsActionsForTransfer.mockRejectedValue(new Error('ops activity history select failed: db down'))
+    await expect(buildOpsTransferDetail(T)).rejects.toThrow(/activity history select failed/)
   })
 })

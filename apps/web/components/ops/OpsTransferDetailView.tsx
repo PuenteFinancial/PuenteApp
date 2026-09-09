@@ -20,9 +20,11 @@ import {
   releasableHoldReason,
   refundPreflight,
   detailActions,
+  activityRows,
   formatOpsTimestamp,
   type OpsTransferDetail,
 } from '@/lib/opsTransferDetail'
+import { actorShort, activityTone, isKnownActionKind, formatChange } from '@/lib/opsActivity'
 import { Pill, Section, Card, Row, Muted, shortId } from '@/components/ops/OpsPrimitives'
 import HoldReleaseAction from '@/components/ops/HoldReleaseAction'
 import RefundAction from '@/components/ops/RefundAction'
@@ -41,6 +43,7 @@ export default function OpsTransferDetailView({ detail }: { detail: OpsTransferD
   const releasable = releasableHoldReason(detail)
   const preflight = refundPreflight(detail)
   const actions = detailActions(detail)
+  const activity = activityRows(detail)
   const balanced = ledgerBalanced(detail)
   const totalMinor = tr.sendAmountMinor + tr.feeAmountMinor
 
@@ -187,6 +190,64 @@ export default function OpsTransferDetailView({ detail }: { detail: OpsTransferD
           {actions.includes('refund') && <RefundAction transferId={tr.transferId} totalMinor={totalMinor} />}
         </Card>
       </Section>
+
+      {/* === Activity (slice 2) — what humans did to this transfer, between what
+          is blocking it and what happened. The note and the derived changes
+          live here and only here. Absent = not reported (deploy skew). === */}
+      {detail.activity !== undefined && (
+        <Section title={s.activity.historyTitle}>
+          {activity.length === 0 ? (
+            <Muted>{s.activity.historyEmpty}</Muted>
+          ) : (
+            <Card>
+              {activity.map((row, i) => (
+                <div
+                  key={row.id}
+                  style={{
+                    marginTop: i === 0 ? 0 : 10,
+                    paddingTop: i === 0 ? 0 : 10,
+                    borderTop: i === 0 ? 'none' : '1px solid var(--line-2)',
+                    fontSize: 13,
+                  }}
+                >
+                  <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
+                    <Pill
+                      label={isKnownActionKind(row.action) ? s.activity.actions[row.action] : row.action}
+                      tone={activityTone(row.action)}
+                    />
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted)' }}>
+                      {ts(row.createdAt)}
+                    </span>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{actorShort(row.actor)}</span>
+                    {row.reason != null && (
+                      <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted)' }}>{row.reason}</span>
+                    )}
+                  </div>
+                  {row.note != null && (
+                    <p style={{ margin: '6px 0 0', whiteSpace: 'pre-wrap' }}>
+                      <span style={{ color: 'var(--muted)' }}>{s.activity.note}: </span>
+                      {row.note}
+                    </p>
+                  )}
+                  {row.changes.length > 0 && (
+                    <div style={{ marginTop: 6, fontFamily: 'var(--mono)', fontSize: 12 }}>
+                      <div style={{ color: 'var(--muted)' }}>{s.activity.changes}</div>
+                      {row.changes.map((c) => (
+                        <div key={c.key}>{formatChange(c)}</div>
+                      ))}
+                    </div>
+                  )}
+                  {row.requestId != null && (
+                    <div style={{ marginTop: 4, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--muted)' }}>
+                      {s.activity.requestId}: {row.requestId}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </Card>
+          )}
+        </Section>
+      )}
 
       {/* === Timeline === */}
       <Section title={d.sections.timeline}>

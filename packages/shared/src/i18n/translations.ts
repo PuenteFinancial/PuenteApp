@@ -661,6 +661,28 @@ export type Translations = {
     claimStatus: { unclaimed: string; claimed: string; abandoned: string }
     preSubmit: string
     disbursedUnsettled: string
+    // Ops board slice 2: the ops_actions record read back — a feed on the
+    // board, a history on the detail page.
+    activity: {
+      feedTitle: string
+      feedEmpty: string
+      feedNote: string
+      historyTitle: string
+      historyEmpty: string
+      treasury: string
+      note: string
+      changes: string
+      requestId: string
+      actions: {
+        hold_release: string
+        refund: string
+        cancellation_resolve: string
+        manual_funding: string
+        deposit_instructions_attach: string
+        deposit_landed: string
+        float_topup: string
+      }
+    }
     detail: {
       title: string
       backToBoard: string
@@ -1694,6 +1716,26 @@ const en: Translations = {
     },
     preSubmit: 'pre-submit — never reached Bridge',
     disbursedUnsettled: 'disbursed, not settled',
+    activity: {
+      feedTitle: 'Recent activity',
+      feedEmpty: 'No operator actions recorded yet.',
+      feedNote: 'The newest 25 actions taken from this board, across all transfers. Notes live on each transfer’s page.',
+      historyTitle: 'Activity',
+      historyEmpty: 'No operator has acted on this transfer.',
+      treasury: 'treasury',
+      note: 'Note',
+      changes: 'Changed',
+      requestId: 'Request',
+      actions: {
+        hold_release: 'Hold released',
+        refund: 'Refund',
+        cancellation_resolve: 'Cancellation resolved',
+        manual_funding: 'Manual funding',
+        deposit_instructions_attach: 'Instructions attached',
+        deposit_landed: 'Deposit landed',
+        float_topup: 'Float top-up',
+      },
+    },
     detail: {
       title: 'Transfer',
       backToBoard: 'Back to the board',
@@ -2634,6 +2676,27 @@ const es: Translations = {
     },
     preSubmit: 'pre-env\u00edo \u2014 nunca lleg\u00f3 a Bridge',
     disbursedUnsettled: 'desembolsado, no asentado',
+    activity: {
+      feedTitle: 'Actividad reciente',
+      feedEmpty: 'A\u00fan no hay acciones de operador registradas.',
+      feedNote:
+        'Las 25 acciones m\u00e1s recientes tomadas desde este tablero, en todas las transferencias. Las notas viven en la p\u00e1gina de cada transferencia.',
+      historyTitle: 'Actividad',
+      historyEmpty: 'Ning\u00fan operador ha actuado sobre esta transferencia.',
+      treasury: 'tesorer\u00eda',
+      note: 'Nota',
+      changes: 'Cambi\u00f3',
+      requestId: 'Solicitud',
+      actions: {
+        hold_release: 'Retenci\u00f3n liberada',
+        refund: 'Reembolso',
+        cancellation_resolve: 'Cancelaci\u00f3n resuelta',
+        manual_funding: 'Fondeo manual',
+        deposit_instructions_attach: 'Instrucciones adjuntadas',
+        deposit_landed: 'Dep\u00f3sito recibido',
+        float_topup: 'Recarga de flotante',
+      },
+    },
     detail: {
       title: 'Transferencia',
       backToBoard: 'Volver al tablero',

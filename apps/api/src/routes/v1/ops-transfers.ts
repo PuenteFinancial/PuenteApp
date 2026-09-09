@@ -219,6 +219,36 @@ const detailResponseSchema = {
         },
       },
     },
+    // Slice 2: this transfer's ops history. The note rides here (and only
+    // here); before/after arrive as a derived list of string changes so the
+    // allowlist stays strict — a raw jsonb object never crosses this wire.
+    activity: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          createdAt: { type: 'string' },
+          actor: { type: 'string' },
+          action: { type: 'string' },
+          transferId: { type: ['string', 'null'] },
+          reason: { type: ['string', 'null'] },
+          note: { type: ['string', 'null'] },
+          changes: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                key: { type: 'string' },
+                before: { type: ['string', 'null'] },
+                after: { type: ['string', 'null'] },
+              },
+            },
+          },
+          requestId: { type: ['string', 'null'] },
+        },
+      },
+    },
   },
 } as const
 

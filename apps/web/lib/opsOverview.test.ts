@@ -17,6 +17,7 @@ import {
   workerHeartbeatAlarm,
   stalestHeartbeat,
   refundBacklogRows,
+  activityFeedRows,
   opsTransferHref,
   type OpsOverview,
   type OpsOpenTransfer,
@@ -368,5 +369,32 @@ describe('isOpsFloatTopUpSuccessShape (slice 2)', () => {
     expect(isOpsFloatTopUpSuccessShape({ amountMinor: '100', externalRef: 'x', floatBalanceMinor: 1 })).toBe(false)
     expect(isOpsFloatTopUpSuccessShape(null)).toBe(false)
     expect(isOpsFloatTopUpSuccessShape('booked')).toBe(false)
+  })
+})
+
+// Slice 2: the activity feed is optional (deploy skew) but, when present,
+// must be well-formed — a malformed feed fails the whole shape check rather
+// than rendering a half-broken board.
+describe('activity feed tolerance (slice 2)', () => {
+  const row = {
+    id: 'act-1',
+    createdAt: '2026-09-09T12:00:00.000Z',
+    actor: 'ops:u1',
+    action: 'hold_release',
+    transferId: 't-1',
+    reason: 'velocity_review',
+  }
+
+  it('accepts an absent feed and an empty one', () => {
+    expect(isOpsOverviewShape(overview())).toBe(true)
+    expect(isOpsOverviewShape(overview({ activity: [] }))).toBe(true)
+    expect(activityFeedRows(overview())).toEqual([])
+  })
+
+  it('passes well-formed rows through and rejects malformed ones', () => {
+    expect(isOpsOverviewShape(overview({ activity: [row] }))).toBe(true)
+    expect(activityFeedRows(overview({ activity: [row] }))).toEqual([row])
+    expect(isOpsOverviewShape({ ...overview(), activity: [{ ...row, createdAt: 1 }] })).toBe(false)
+    expect(isOpsOverviewShape({ ...overview(), activity: 'nope' })).toBe(false)
   })
 })
