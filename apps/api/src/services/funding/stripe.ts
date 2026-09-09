@@ -1,6 +1,7 @@
 import Stripe from 'stripe'
 import { env } from '../../config/env.js'
 import type {
+  IdentityFlow,
   FundingClientSession,
   FundingEventType,
   FundingInitiation,
@@ -38,6 +39,8 @@ export class StripeFundingProcessor implements FundingProcessor {
   // Widened, matching stripe-onramp: the Checkout Sessions rail subclasses
   // this one, and a literal type would refuse the override.
   readonly provider: string = 'stripe'
+  // Widened like `provider` so the Checkout subclass can override it.
+  readonly identityFlow: IdentityFlow = 'none'
   readonly signatureHeader = 'stripe-signature'
   // protected, not private: stripe-checkout.ts extends this class to reuse the
   // settlement-aware void/refund logic, and needs the same client to resolve a

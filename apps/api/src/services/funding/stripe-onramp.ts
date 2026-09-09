@@ -3,6 +3,7 @@ import Stripe from 'stripe'
 import { env } from '../../config/env.js'
 import { FundingInitiationError } from './errors.js'
 import {
+  type IdentityFlow,
   type FundingClientSession,
   type FundingEventType,
   type FundingInitiation,
@@ -130,6 +131,7 @@ export class StripeOnrampFundingProcessor implements FundingProcessor {
   // Widened to string (not the literal) so the embedded-rail subclass (K4)
   // can carry its own provider name through the inherited machinery.
   readonly provider: string = 'stripe_onramp'
+  readonly identityFlow: IdentityFlow = 'none'
   readonly signatureHeader = 'stripe-signature'
   // ONLY for webhooks.constructEvent (parse + HMAC + 300s timestamp
   // tolerance, purely local). Every network call in this file is raw fetch.

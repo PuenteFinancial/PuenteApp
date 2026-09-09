@@ -21,6 +21,7 @@ import type {
 // (OPS_ADMIN_USER_IDS + OPS_WRITE_ENABLED), not a shared secret.
 export class ManualFundingProcessor implements FundingProcessor {
   readonly provider = 'manual'
+  readonly identityFlow = 'none' as const
   // No webhook exists for this processor. The interface requires a header name;
   // this one is never read, because verifySignature always refuses.
   readonly signatureHeader = 'manual-funding-signature'

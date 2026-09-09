@@ -25,6 +25,7 @@ const EVENT_TYPES: ReadonlySet<string> = new Set([
 
 export class MockFundingProcessor implements FundingProcessor {
   readonly provider = 'mock'
+  readonly identityFlow = 'none' as const
   readonly signatureHeader = 'funding-signature'
 
   isConfigured(): boolean {

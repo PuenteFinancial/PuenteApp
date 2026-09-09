@@ -221,6 +221,15 @@ not yet spent. Two things C2 measured that this document had wrong or could not 
   Reading `payment_method_types` is therefore NOT sufficient to know what a sender is offered; the
   rendered element is. Funding an outbound international transfer with buy-now-pay-later is the
   §5.2 question in a sharper form, and it is a Dashboard decision.
+- **C3 + C4 are one change in two commits.** C3 made Bridge the sole verifier and built the pay-step
+  identity leg; C4 moved the send gate off `kyc_status = approved`. Either alone is inert: with C3
+  only, a fresh sender is refused at transfer creation and never reaches the leg.
+- **The rail's identity model is now one field, `identityFlow`** (`none` / `provider_then_bridge` /
+  `bridge_only`), read by both the send gate and the Bridge relay's precondition. It replaced a pair
+  of booleans whose fourth combination was incoherent. Unknown rails resolve to `none`, the strict
+  answer.
+- **The 30-minute abandonment clock was wrong for this rail** and is now hours: the identity leg can
+  send a sender to Bridge's hosted terms and then to a manual review that says come back later.
 - **Locale is fixed at `loadStripe()` on this rail.** The Checkout SDK options carry no `locale`
   field, unlike `<Elements>`. Spanish senders get an English form unless the key is loaded with the
   locale, so `getStripe()` now caches on (key, locale).

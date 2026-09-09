@@ -12,7 +12,7 @@ import {
   recordKycVerification,
 } from '../../services/kyc-verifications.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
-import { getFundingProcessor } from '../../services/funding/index.js'
+import { currentIdentityFlow } from '../../services/funding/index.js'
 import { fetchGrantedConsents, missingConsents } from './consents.js'
 import { isProfileComplete, type UserRow } from './users.js'
 
@@ -160,8 +160,8 @@ export async function bridgeCustomerRoute(server: FastifyInstance) {
           return { bridgeCustomerId: user.bridge_customer_id, status: user.kyc_status }
         }
 
-        // The precondition depends on WHO verifies first, which is a property
-        // of the funding rail (C3).
+        // The precondition depends on WHO verifies first, which is the rail's
+        // `identityFlow` (C3/C4).
         //
         // On the Stripe crypto rail, decision 2: sequential, after Stripe L1.
         // stripe_kyc_tier is the column derived only from `verified` entries
@@ -182,7 +182,7 @@ export async function bridgeCustomerRoute(server: FastifyInstance) {
         // help with: profile-complete above, ToS below, the no-op when a
         // customer already exists, and RELAY_RATE_LIMIT (5 per 15 min) — so a
         // sender costs Bridge at most five KYC attempts, ever.
-        if (getFundingProcessor().providerVerifiesIdentity) {
+        if (currentIdentityFlow() === 'provider_then_bridge') {
           if (user.stripe_kyc_tier !== 'L1' && user.stripe_kyc_tier !== 'L2') {
             return sendError(
               reply,

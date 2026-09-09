@@ -59,6 +59,13 @@ vi.mock('../../services/deposit-instructions.js', () => ({
 }))
 const isConfigured = vi.fn(() => true)
 const deferredInitiation = vi.fn(() => false)
+// C4: the send gate reads identityFlow, and it is a SEPARATE knob from
+// deferredInitiation on purpose. The two coincided only while the crypto rail
+// was the only rail doing identity in the pay step; the Checkout rail is
+// eager-initiating AND pay-step-verifying, and reading the wrong one turns
+// every fresh sender on it into a 403 at transfer creation. Default 'none' —
+// the pre-K-lane gate the bulk of this suite assumes.
+const identityFlow = vi.fn<() => 'none' | 'provider_then_bridge' | 'bridge_only'>(() => 'none')
 const getDeferredClientBootstrap = vi.fn()
 const getPaymentStatus = vi.fn()
 
@@ -74,6 +81,12 @@ vi.mock('../../services/funding/index.js', async (importOriginal) => {
     isConfigured: () => isConfigured(),
     // K4: flipped true by the deferred-initiation tests; read at call time.
     deferredInitiation: deferredInitiation(),
+    // C4: the send gate reads identityFlow, NOT deferredInitiation — the two
+    // coincided only while the crypto rail was the only deferred one. The
+    // deferred tests below are that rail, so they get its flow; everything
+    // else is 'none' (the sender must already be approved), which is what the
+    // rest of this suite has always assumed.
+    identityFlow: identityFlow(),
     initiateFunding,
     voidFunding,
     getClientSession,
@@ -84,6 +97,11 @@ vi.mock('../../services/funding/index.js', async (importOriginal) => {
   return {
     ...actual,
     getFundingProcessor: fakeProcessor,
+    // Overridden explicitly, not inherited from `actual`: currentIdentityFlow
+    // calls getFundingProcessor through the module's OWN binding, which this
+    // factory does not rebind — so without this it would read the real
+    // (mock-rail) processor and answer 'none' while the fake says otherwise.
+    currentIdentityFlow: () => identityFlow(),
     // Per-row accessor (audit corner 1): rows in this suite are unstamped,
     // so it resolves to the same fake the process would.
     processorFor: fakeProcessor,
@@ -225,6 +243,8 @@ beforeEach(() => {
   transitionTransfer.mockReset()
   deferredInitiation.mockReset()
   deferredInitiation.mockReturnValue(false)
+  identityFlow.mockReset()
+  identityFlow.mockReturnValue('none')
   initiateFunding.mockReset()
   voidFunding.mockReset()
   initiateFunding.mockResolvedValue({
@@ -451,6 +471,7 @@ describe('POST /v1/transfers/:id/confirm', () => {
 
   it('deferred rail: records acceptance, never initiates, persists no ref', async () => {
     deferredInitiation.mockReturnValue(true)
+    identityFlow.mockReturnValue('provider_then_bridge')
     routeTables({
       users: () => chain({ data: newFlowUser }),
       consents: () => chain({ data: grantedConsents }),
@@ -467,6 +488,7 @@ describe('POST /v1/transfers/:id/confirm', () => {
 
   it('deferred rail: acceptance ALONE is confirmed-ness — re-confirm 409s', async () => {
     deferredInitiation.mockReturnValue(true)
+    identityFlow.mockReturnValue('provider_then_bridge')
     routeTables({
       users: () => chain({ data: newFlowUser }),
       consents: () => chain({ data: grantedConsents }),
@@ -483,8 +505,46 @@ describe('POST /v1/transfers/:id/confirm', () => {
     await app.close()
   })
 
+  it('C4: a rail that initiates EAGERLY but verifies at the pay step still gets the new gate', async () => {
+    // The Checkout rail's exact shape, and the reason the gate had to stop
+    // reading deferredInitiation: it creates the payment object at confirm
+    // (eager) AND runs the Bridge identity leg in the pay step. Under the old
+    // gate this sender was a 403 at transfer creation and never reached it.
+    identityFlow.mockReturnValue('bridge_only')
+    deferredInitiation.mockReturnValue(false)
+    routeTables({
+      // Complete profile, consents granted, NOT verified — precisely the
+      // sender the Checkout rail expects to meet at the pay step.
+      users: () => chain({ data: { ...newFlowUser, kyc_status: 'not_started' } }),
+      consents: () => chain({ data: grantedConsents }),
+    })
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).not.toBe(403)
+    expect(initiateFunding).toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('C4: a rail with no identity leg still demands an approved sender', async () => {
+    // The other side. Nothing downstream will verify this person, so an
+    // onboarding-approved status is the only evidence there will ever be.
+    identityFlow.mockReturnValue('none')
+    routeTables({ users: () => chain({ data: { ...newFlowUser, kyc_status: 'not_started' } }) })
+    const app = await buildApp()
+
+    const res = await confirm(app)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('kyc_required')
+    expect(initiateFunding).not.toHaveBeenCalled()
+    await app.close()
+  })
+
   it('deferred rail: an incomplete new-flow profile is refused before acceptance', async () => {
     deferredInitiation.mockReturnValue(true)
+    identityFlow.mockReturnValue('provider_then_bridge')
     routeTables() // default user: approved KYC but NO address — incomplete under the new gate
     const app = await buildApp()
 
@@ -1370,6 +1430,7 @@ describe('GET /v1/transfers/:id/funding-session', () => {
   // crash window — the route serves the SDK bootstrap instead of a 409.
   it('deferred rail + null ref: serves the SDK bootstrap, never a session read', async () => {
     deferredInitiation.mockReturnValue(true)
+    identityFlow.mockReturnValue('provider_then_bridge')
     from.mockReturnValueOnce(chain({ data: transferRow })) // ref is null in the fixture
     const app = await buildApp()
 
@@ -1395,6 +1456,7 @@ describe('GET /v1/transfers/:id/funding-session', () => {
     // already-paid session renders "submitted" rather than offering a second
     // charge.
     deferredInitiation.mockReturnValue(true)
+    identityFlow.mockReturnValue('provider_then_bridge')
     from.mockReturnValueOnce(chain({ data: { ...transferRow, funding_payment_ref: 'cos_1' } }))
     getPaymentStatus.mockResolvedValue({ status: 'requires_payment' })
     const app = await buildApp()
@@ -1419,6 +1481,7 @@ describe('GET /v1/transfers/:id/funding-session', () => {
     // platform-key read resolves them is a preview-API unknown. Sessions are
     // never resumed, so the bootstrap is a safe answer either way.
     deferredInitiation.mockReturnValue(true)
+    identityFlow.mockReturnValue('provider_then_bridge')
     from.mockReturnValueOnce(chain({ data: { ...transferRow, funding_payment_ref: 'cos_1' } }))
     getPaymentStatus.mockRejectedValue(new Error('platform key cannot read user-scoped session'))
     const app = await buildApp()

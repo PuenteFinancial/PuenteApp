@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-10 · **Updated:** 2026-09-03 (de-stale pass: §1d — the K5/K6 embedded-components
 rail with the ToS gate and the Bridge identity relay; §1c demoted to legacy)
-**Status:** current through the K lane (K1–K6) + K7a pre-flip hardening
+**Status:** current through the K lane (K1–K6) + K7a pre-flip hardening, and the Checkout Sessions
+rail C1–C4 (§1e — built, staging-selected, never paid on)
 **Pairs with:** `transfer-state-machine.md` (states), `ledger-rules.md` (postings),
 `api-contract.md` (routes), `architecture.md` (components), `plans/kyc-at-first-send.md` (the K lane)
 
@@ -188,6 +189,67 @@ Key properties: jobs are enqueued after the state change commits and are idempot
 lost enqueue is healed by the 1-min sweep, never a correctness problem (enqueue-after-commit, not a
 transactional outbox; see decisions.md 2026-07-20); every external money call carries an
 idempotency key; webhooks are the source of truth for `FUNDED`, `IN_FLIGHT`, `COMPLETED`.
+
+## 1e. Send money — Stripe Checkout Sessions, Bridge as sole verifier (`stripe_checkout`, C1–C4)
+
+The rail the Checkout PRD built. Shorter than §1d because **Stripe stops being an identity
+provider**: a card or bank charge needs no verification of Stripe's, so Link, the Stripe KYC form,
+its polling and its document upload all disappear. Bridge becomes the sole verifier, and the two
+values it needs still cross our server exactly once, in memory.
+
+Which payment methods a sender is offered is **Dashboard configuration**, not code. Reading
+`payment_method_types` off the session is NOT enough to know what they will see: Klarna arrives
+through Link and does not appear in that array (measured 2026-09-09).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor S as Sender (web)
+    participant API as Fastify API
+    participant DB as Postgres
+    participant ST as Stripe (Checkout Session)
+    participant BR as Bridge
+
+    Note over S,DB: Send gate (C4) — profile + consents, never kyc_status
+    S->>API: POST /v1/transfers (quote, recipient)
+    API->>DB: transfer row, PENDING_PAYMENT
+    API->>ST: checkout.sessions.create (ui_mode elements)
+    ST-->>API: cs_... + client_secret
+    API->>DB: funding_payment_ref = the SESSION id
+
+    Note over S,BR: Identity leg (C3) — Bridge is the only verifier
+    S->>API: GET /v1/transfers/:id/funding-session
+    API-->>S: provider, client_secret, publishable key, status
+    S->>API: POST /v1/users/me/tos-link
+    API->>BR: hosted terms URL
+    S->>BR: accepts Bridge's terms, returns with signed_agreement_id
+    S->>API: POST /v1/users/me/bridge-customer (DOB + tax ID, in memory only)
+    API->>BR: create customer with identity
+    BR-->>API: customer id + status
+    API->>DB: bridge_customer_id, kyc_status
+    Note over S,API: approved is the ONLY status that reaches the pay form
+
+    Note over S,ST: Payment — our Payment Element, driven by the Session
+    S->>ST: checkout.confirm (card, bank debit, or Link)
+    ST-->>S: confirmed, submitted not paid
+    ST->>API: checkout.session.completed
+    API->>DB: FUNDED, ledger posted
+    ST->>API: async_payment_succeeded (bank) or payment_intent.succeeded (card)
+    API->>DB: funding_cleared
+```
+
+**`completed` always means FUNDED**, whatever `payment_status` says. Clearing arrives on its own
+event and differs by method: a bank debit sends `checkout.session.async_payment_succeeded`, a card
+sends **no async event ever** and clears on `payment_intent.succeeded`. Five webhook events, not
+three. Mapping `completed` with `payment_status: paid` to cleared is a money bug — it posts nothing
+and lets the abandonment sweep kill a transfer after the card was charged.
+
+The abandonment clock is hours, not the 30-minute webhook rule (C4): the identity leg can send a
+sender to Bridge's hosted terms and then to a manual review that tells them to come back later.
+
+Untested end to end as of 2026-09-09. Nobody has paid on this rail — no webhook has ever been
+delivered for a Checkout session, neither clearing leg has run, and reconciliation has never seen a
+`stripe_checkout` transfer. That is C5.
 
 ## 2. Payout webhook (Bridge → us)
 
