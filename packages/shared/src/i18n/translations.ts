@@ -742,6 +742,27 @@ export type Translations = {
         claim_live: string
         no_return_event: string
       }
+      // O-B: the two write actions on the detail page. Operator jargon.
+      actions: {
+        releaseHold: string
+        confirmReleaseHold: string
+        releaseConsequence: string
+        noteLabel: string
+        noteHint: string
+        noteTooShort: string
+        refund: string
+        confirmRefund: string
+        refundConsequence: string
+        outcomes: {
+          released: string
+          releasedNotEnqueued: string
+          refunded: string
+          already_disbursed: string
+          already_settled: string
+        }
+        ledgerKeys: string
+        ledgerIncomplete: string
+      }
     }
     // v1.1 resolve-cancellation actions. Operator jargon, not consumer copy —
     // no legal-review markers needed (the consumer-facing Reg E strings live
@@ -772,6 +793,7 @@ export type Translations = {
       }
       errors: {
         claim_abandoned: string
+        principal_not_returned: string
         refund_owed: string
         evidence_conflict: string
         conflict: string
@@ -1532,6 +1554,8 @@ const en: Translations = {
       errors: {
         claim_abandoned:
           'DANGER: a prior refund run abandoned its claim and may have disbursed without recording it. Do NOT retry — follow runbooks/manual-refund.md (abandoned claims).',
+        principal_not_returned:
+          'STOP: the principal is not confirmed back from Bridge — the recorded return event and Bridge’s live state must agree before a refund can post. Do NOT retry from here: read the Bridge dashboard, then follow runbooks/manual-refund.md.',
         refund_owed:
           'This request met both cancellation conditions — a refund is owed and it cannot be denied by any tool. Refund it instead.',
         evidence_conflict: 'The cited deposit time conflicts with recorded evidence:',
@@ -1745,6 +1769,31 @@ const en: Translations = {
         claim_live: 'A refund run holds the claim right now — wait for it to finish, then refresh.',
         no_return_event:
           'No return event from Bridge is recorded yet — the principal must be back before a refund can post. Check the Bridge dashboard.',
+      },
+      actions: {
+        releaseHold: 'Release hold',
+        confirmReleaseHold: 'Confirm release',
+        releaseConsequence:
+          'Clears the hold and submits the payout to Bridge within a minute. The recipient is paid at the quoted rate; any drift lands on fx_slippage. Not reversible once Bridge accepts it.',
+        noteLabel: 'What you verified (required, 10–500 characters)',
+        noteHint:
+          'Recorded with your user id in ops_actions. Ids, states and what you checked — no names, no account numbers.',
+        noteTooShort: 'Write at least 10 characters — the note is the record of why.',
+        refund: 'Refund',
+        confirmRefund: 'Confirm refund',
+        refundConsequence:
+          'Verifies with Bridge live that the principal is back, then sends the full amount (send + fee) back to the sender through the funding processor and marks the transfer REFUNDED. Not reversible.',
+        outcomes: {
+          released: 'Released — payout submission queued.',
+          releasedNotEnqueued:
+            'Released — the direct enqueue failed; the sweep resubmits within a minute. Watch the Timeline for FUNDED → SUBMITTED.',
+          refunded: 'Refunded — correction payment sent, both ledger batches posted.',
+          already_disbursed: 'Settled — a prior run had already paid; the ledger is now complete. No money moved now.',
+          already_settled: 'Already refunded — nothing to do; no money moved now.',
+        },
+        ledgerKeys: 'Ledger batches',
+        ledgerIncomplete:
+          'An expected ledger batch is MISSING — money moved but the book is short. Paged to Sentry; follow runbooks/manual-refund.md (verify) before doing anything else.',
       },
     },
   },
@@ -2430,6 +2479,8 @@ const es: Translations = {
       errors: {
         claim_abandoned:
           'PELIGRO: una ejecuci\u00f3n anterior abandon\u00f3 su claim de reembolso y pudo haber desembolsado sin registrarlo. NO reintentes \u2014 sigue runbooks/manual-refund.md (claims abandonados).',
+        principal_not_returned:
+          'ALTO: no est\u00e1 confirmado que el principal haya regresado de Bridge \u2014 el evento de retorno registrado y el estado en vivo de Bridge deben coincidir antes de asentar un reembolso. NO reintentes desde aqu\u00ed: revisa el panel de Bridge y sigue runbooks/manual-refund.md.',
         refund_owed:
           'La solicitud cumpli\u00f3 ambas condiciones de cancelaci\u00f3n \u2014 se debe un reembolso y ninguna herramienta puede denegarla. Reemb\u00f3lsala.',
         evidence_conflict: 'La hora de dep\u00f3sito citada contradice la evidencia registrada:',
@@ -2651,6 +2702,32 @@ const es: Translations = {
           'Una ejecuci\u00f3n de reembolso tiene el claim ahora mismo \u2014 espera a que termine y actualiza.',
         no_return_event:
           'A\u00fan no hay evento de retorno de Bridge registrado \u2014 el principal debe haber regresado antes de asentar un reembolso. Revisa el panel de Bridge.',
+      },
+      actions: {
+        releaseHold: 'Liberar retenci\u00f3n',
+        confirmReleaseHold: 'Confirmar liberaci\u00f3n',
+        releaseConsequence:
+          'Quita la retenci\u00f3n y env\u00eda el payout a Bridge en menos de un minuto. El destinatario recibe a la tasa cotizada; cualquier deriva cae en fx_slippage. No es reversible una vez que Bridge lo acepta.',
+        noteLabel: 'Qu\u00e9 verificaste (obligatorio, 10\u2013500 caracteres)',
+        noteHint:
+          'Se registra con tu id de usuario en ops_actions. Ids, estados y qu\u00e9 revisaste \u2014 sin nombres, sin n\u00fameros de cuenta.',
+        noteTooShort: 'Escribe al menos 10 caracteres \u2014 la nota es el registro del porqu\u00e9.',
+        refund: 'Reembolsar',
+        confirmRefund: 'Confirmar reembolso',
+        refundConsequence:
+          'Verifica en vivo con Bridge que el principal regres\u00f3, luego devuelve el monto completo (env\u00edo + comisi\u00f3n) al remitente a trav\u00e9s del procesador de fondeo y marca la transferencia como REFUNDED. No es reversible.',
+        outcomes: {
+          released: 'Liberada \u2014 env\u00edo del payout en cola.',
+          releasedNotEnqueued:
+            'Liberada \u2014 fall\u00f3 el encolado directo; el barrido reenv\u00eda en menos de un minuto. Observa la l\u00ednea de tiempo hasta ver FUNDED \u2192 SUBMITTED.',
+          refunded: 'Reembolsada \u2014 pago de correcci\u00f3n enviado, ambos lotes asentados.',
+          already_disbursed:
+            'Asentado \u2014 una ejecuci\u00f3n anterior ya hab\u00eda pagado; el libro ahora est\u00e1 completo. Ahora no se movi\u00f3 dinero.',
+          already_settled: 'Ya reembolsada \u2014 nada que hacer; ahora no se movi\u00f3 dinero.',
+        },
+        ledgerKeys: 'Lotes en el libro',
+        ledgerIncomplete:
+          'FALTA un lote esperado en el libro \u2014 se movi\u00f3 dinero pero el libro est\u00e1 corto. Enviado a Sentry; sigue runbooks/manual-refund.md (verificar) antes de hacer cualquier otra cosa.',
       },
     },
   },

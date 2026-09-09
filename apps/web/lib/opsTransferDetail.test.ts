@@ -7,6 +7,9 @@ import {
   detailActions,
   formatOpsTimestamp,
   RELEASABLE_HOLD_REASONS,
+  opsNoteValid,
+  isOpsHoldReleaseSuccessShape,
+  isOpsRefundSuccessShape,
   type OpsTransferDetail,
 } from './opsTransferDetail'
 
@@ -183,6 +186,38 @@ describe('detailActions', () => {
         ),
       ),
     ).toEqual([])
+  })
+})
+
+describe('opsNoteValid (O-B) — mirrors the API body bound so the 400 is never the first feedback', () => {
+  it('accepts 10–500 trimmed chars and rejects outside', () => {
+    expect(opsNoteValid('exactly10c')).toBe(true)
+    expect(opsNoteValid('   padded to ten   ')).toBe(true)
+    expect(opsNoteValid('x'.repeat(500))).toBe(true)
+    expect(opsNoteValid('too short')).toBe(false)
+    expect(opsNoteValid('         ')).toBe(false)
+    expect(opsNoteValid('x'.repeat(501))).toBe(false)
+  })
+})
+
+describe('write success shapes (O-B)', () => {
+  it('hold release: transferId + released + enqueued boolean', () => {
+    expect(isOpsHoldReleaseSuccessShape({ transferId: T, outcome: 'released', enqueued: true })).toBe(true)
+    expect(isOpsHoldReleaseSuccessShape({ transferId: T, outcome: 'released', enqueued: false })).toBe(true)
+    expect(isOpsHoldReleaseSuccessShape({ transferId: T, outcome: 'refunded', enqueued: true })).toBe(false)
+    expect(isOpsHoldReleaseSuccessShape({ transferId: T, outcome: 'released' })).toBe(false)
+    expect(isOpsHoldReleaseSuccessShape('<html>')).toBe(false)
+  })
+
+  it('refund: one of the three outcomes, ledgerComplete, string keys', () => {
+    const ok = { transferId: T, outcome: 'refunded', ledgerComplete: true, ledgerKeys: [`${T}:bridge_return`, `${T}:REFUNDED`] }
+    expect(isOpsRefundSuccessShape(ok)).toBe(true)
+    expect(isOpsRefundSuccessShape({ ...ok, outcome: 'already_disbursed', ledgerComplete: false })).toBe(true)
+    expect(isOpsRefundSuccessShape({ ...ok, outcome: 'already_settled', ledgerKeys: [] })).toBe(true)
+    expect(isOpsRefundSuccessShape({ ...ok, outcome: 'released' })).toBe(false)
+    expect(isOpsRefundSuccessShape({ ...ok, ledgerComplete: 'yes' })).toBe(false)
+    expect(isOpsRefundSuccessShape({ ...ok, ledgerKeys: [1] })).toBe(false)
+    expect(isOpsRefundSuccessShape(null)).toBe(false)
   })
 })
 

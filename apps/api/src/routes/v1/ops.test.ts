@@ -63,6 +63,14 @@ vi.mock('../../services/ledger.js', () => ({
   getAccountBalance: (...args: unknown[]) => getAccountBalance(...args),
 }))
 
+// O-B: every ops write records an append-only ops_actions row on 2xx (pinned
+// in services/ops-actions.test.ts); here only that each route calls it with
+// its fixed-key shape, and never on a refusal.
+const recordOpsAction = vi.hoisted(() => vi.fn())
+vi.mock('../../services/ops-actions.js', () => ({
+  recordOpsAction: (...args: unknown[]) => recordOpsAction(...args),
+}))
+
 // supabaseAdmin backs only the idempotency plugin here — claims always win.
 const from = vi.hoisted(() => vi.fn())
 vi.mock('../../services/supabase.js', () => ({
@@ -155,6 +163,7 @@ beforeEach(() => {
   getDepositInstructions.mockReset().mockResolvedValue(null)
   recordFloatTopUp.mockReset().mockResolvedValue({ idempotencyKey: 'float_topup:x' })
   getAccountBalance.mockReset().mockResolvedValue({ amountMinor: 22_000, currency: 'USD' })
+  recordOpsAction.mockReset().mockResolvedValue(true)
   from.mockReset().mockImplementation(() => chain({ data: { id: 'claim-1' } }))
 })
 
@@ -434,6 +443,32 @@ describe('POST /v1/ops/cancellations/resolve', () => {
       expect(res.status).toBe(200)
       expect(res.body).toEqual({ transferId: TRANSFER_ID, outcome: 'refunded' })
       expect(refundCancellation).toHaveBeenCalledWith({ transferId: TRANSFER_ID, operator: ADMIN })
+      await app.close()
+    })
+
+    it('records provenance on 2xx (decision as the reason, cited evidence in after) and never on a refusal', async () => {
+      const app = await buildApp()
+      await resolvePost(app, ADMIN).send({ transferId: TRANSFER_ID, decision: 'deny', depositedAt: DEPOSITED_AT })
+      expect(recordOpsAction).toHaveBeenCalledTimes(1)
+      expect(recordOpsAction).toHaveBeenCalledWith(
+        {
+          actor: `ops:${ADMIN}`,
+          action: 'cancellation_resolve',
+          transferId: TRANSFER_ID,
+          reason: 'deny',
+          note: null,
+          before: {},
+          after: { outcome: 'denied', depositedAt: DEPOSITED_AT },
+          requestId: expect.any(String),
+        },
+        expect.anything(),
+      )
+
+      recordOpsAction.mockClear()
+      refundCancellation.mockResolvedValue({ done: false, reason: 'claim_taken' })
+      const refused = await resolvePost(app, ADMIN).send({ transferId: TRANSFER_ID, decision: 'refund' })
+      expect(refused.status).toBe(409)
+      expect(recordOpsAction).not.toHaveBeenCalled()
       await app.close()
     })
 
@@ -758,6 +793,31 @@ describe('POST /v1/ops/transfers/funding', () => {
       await app.close()
     })
 
+    it('records provenance on 2xx (kind as the reason, ref + amount in after) and never on a refusal', async () => {
+      const app = await buildApp()
+      await fundingPost(app, ADMIN).send(FUNDED_BODY)
+      expect(recordOpsAction).toHaveBeenCalledWith(
+        {
+          actor: `ops:${ADMIN}`,
+          action: 'manual_funding',
+          transferId: TRANSFER_ID,
+          reason: 'funded',
+          note: null,
+          before: {},
+          after: { outcome: 'funded', externalRef: EXTERNAL_REF, amountMinor: 5100 },
+          requestId: expect.any(String),
+        },
+        expect.anything(),
+      )
+
+      recordOpsAction.mockClear()
+      recordManualFunding.mockResolvedValue({ done: false, reason: 'transfer_not_found' })
+      const refused = await fundingPost(app, ADMIN).send(FUNDED_BODY)
+      expect(refused.status).toBe(404)
+      expect(recordOpsAction).not.toHaveBeenCalled()
+      await app.close()
+    })
+
     it('200s a cleared leg and a skipped one distinctly', async () => {
       const app = await buildApp()
       recordManualFunding.mockResolvedValue({ done: true, outcome: 'cleared_skipped', state: 'CANCELED' })
@@ -866,6 +926,22 @@ describe('POST /v1/ops/transfers/deposit-instructions', () => {
       bridgeTransferId: ONRAMP_ID,
       operator: ADMIN,
     })
+    // Provenance carries the onramp id only — never the bank coordinates the
+    // attached row holds.
+    expect(recordOpsAction).toHaveBeenCalledWith(
+      {
+        actor: `ops:${ADMIN}`,
+        action: 'deposit_instructions_attach',
+        transferId: TRANSFER_ID,
+        reason: null,
+        note: null,
+        before: {},
+        after: { bridgeTransferRef: ONRAMP_ID },
+        requestId: expect.any(String),
+      },
+      expect.anything(),
+    )
+    expect(JSON.stringify(recordOpsAction.mock.calls)).not.toContain('BRGABCD1234')
     await app.close()
   })
 
@@ -1014,6 +1090,20 @@ describe('POST /v1/ops/transfers/deposit-landed', () => {
         amountMinor: 5100,
         externalRef: EXTERNAL_REF,
       })
+      // Provenance AFTER both legs, with the trimmed ref.
+      expect(recordOpsAction).toHaveBeenCalledWith(
+        {
+          actor: `ops:${ADMIN}`,
+          action: 'deposit_landed',
+          transferId: TRANSFER_ID,
+          reason: null,
+          note: null,
+          before: {},
+          after: { outcome: 'cleared', externalRef: EXTERNAL_REF, amountMinor: 5100 },
+          requestId: expect.any(String),
+        },
+        expect.anything(),
+      )
       await app.close()
     })
 
@@ -1234,6 +1324,20 @@ describe('POST /v1/ops/treasury/float-topup', () => {
         externalRef: 'bridge-tx-9',
       })
       expect(getAccountBalance).toHaveBeenCalledWith('bridge_wallet_float')
+      // Treasury-level provenance: no transfer, the after-balance echoed.
+      expect(recordOpsAction).toHaveBeenCalledWith(
+        {
+          actor: `ops:${ADMIN}`,
+          action: 'float_topup',
+          transferId: null,
+          reason: null,
+          note: null,
+          before: {},
+          after: { externalRef: 'bridge-tx-9', amountMinor: 10_000, floatBalanceMinor: 22_000 },
+          requestId: expect.any(String),
+        },
+        expect.anything(),
+      )
       await app.close()
     })
 

@@ -1,9 +1,10 @@
 'use client'
 
 // The per-transfer ops page (ops board slice 1, /dashboard/ops/transfers/[id]).
-// Props-fed by the server component — this view fetches nothing. Read-only in
-// PR O-A; the hold-release and refund actions mount into the Hold and Refund
-// sections in O-B, gated on actionsEnabled + detailActions().
+// Props-fed by the server component — this view fetches nothing. The
+// hold-release and refund actions (O-B) mount into the Hold and Refund
+// sections, gated on detailActions() — which is [] unless the API reports the
+// write capability live, and never offers refund on an abandoned claim.
 //
 // Section order is the operator's reading order: what is blocking it (hold /
 // refund preflight), then what happened (timeline, ledger, events), then the
@@ -18,10 +19,13 @@ import {
   ledgerBalanced,
   releasableHoldReason,
   refundPreflight,
+  detailActions,
   formatOpsTimestamp,
   type OpsTransferDetail,
 } from '@/lib/opsTransferDetail'
 import { Pill, Section, Card, Row, Muted, shortId } from '@/components/ops/OpsPrimitives'
+import HoldReleaseAction from '@/components/ops/HoldReleaseAction'
+import RefundAction from '@/components/ops/RefundAction'
 
 const formatMinor = (minor: number, currency: string) => formatBalance(minor, currency)
 
@@ -36,6 +40,7 @@ export default function OpsTransferDetailView({ detail }: { detail: OpsTransferD
 
   const releasable = releasableHoldReason(detail)
   const preflight = refundPreflight(detail)
+  const actions = detailActions(detail)
   const balanced = ledgerBalanced(detail)
   const totalMinor = tr.sendAmountMinor + tr.feeAmountMinor
 
@@ -113,7 +118,9 @@ export default function OpsTransferDetailView({ detail }: { detail: OpsTransferD
                 {releasable != null ? d.holdGuidance[releasable] : d.releaseNotAvailableKyc}
               </p>
             </div>
-            {/* O-B mounts <HoldReleaseAction/> here when detailActions() offers it. */}
+            {actions.includes('holdRelease') && releasable != null && (
+              <HoldReleaseAction transferId={tr.transferId} reason={releasable} />
+            )}
           </Card>
         )}
       </Section>
@@ -177,7 +184,7 @@ export default function OpsTransferDetailView({ detail }: { detail: OpsTransferD
               )}
             </div>
           )}
-          {/* O-B mounts <RefundAction/> here when detailActions() offers it. */}
+          {actions.includes('refund') && <RefundAction transferId={tr.transferId} totalMinor={totalMinor} />}
         </Card>
       </Section>
 
