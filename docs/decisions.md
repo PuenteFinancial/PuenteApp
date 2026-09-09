@@ -70,8 +70,12 @@ error code: `verifyPrincipalReturned` first (a real Bridge GET, bounded by `BRID
 `not_submitted` passes per #254), disagreement → 409 `principal_not_returned`, because the operator
 behavior differs from every existing 409 (read the Bridge dashboard, escalate on `refund_failed`,
 never retry); then the claim — `abandoned` refuses BEFORE any write; then the refund; then the ledger
-proof, where a missing batch is paged but still 200 (money moved). Bridge unreachable is a 500 in this
-slice; a 502 `provider_unavailable` mapping is a follow-up. (6) **No `--reclaim` on the board, ever.**
+proof, where a missing batch is paged but still 200 (money moved). Bridge unreachable — transport
+error, the `BRIDGE_TIMEOUT_SECONDS` signal, or a Bridge 5xx, classified by `isBridgeUnreachable` in
+`services/bridge.ts` — is 502 `provider_unavailable` (2026-09-09 follow-up): the check did not run and
+nothing was written, so "retry in a minute" is the honest instruction, and a 500 would have hidden it.
+A Bridge 4xx is an answer about OUR ref, not an outage, so it takes the STOP code with the HTTP status
+in `details`; a database failure inside the same call stays a 500. (6) **No `--reclaim` on the board, ever.**
 An abandoned claim is the STOP state: the detail page shows the runbook path and no button, and if the
 claim goes abandoned between page load and click the refusal renders as a red panel with Close only.
 Reclaiming stays a CLI act with the runbook open. **Status: active.**
