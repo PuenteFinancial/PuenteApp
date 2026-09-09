@@ -68,6 +68,9 @@ vi.mock('../../services/supabase.js', () => ({
 const { opsTransfersRoute } = await import('./ops-transfers.js')
 const { errorHandlerPlugin } = await import('../../plugins/error-handler.js')
 const { idempotencyPlugin } = await import('../../plugins/idempotency.js')
+// Real, not mocked: the refund route branches on the error CLASS the Bridge
+// client throws, so the test must throw the genuine one.
+const { BridgeApiError } = await import('../../services/bridge.js')
 
 function chain(result: { data?: unknown; error?: unknown }) {
   const resolved = { data: result.data ?? null, error: result.error ?? null }
@@ -625,14 +628,41 @@ describe('POST /v1/ops/transfers/refund', () => {
       expect(refundClaimStatus).not.toHaveBeenCalled()
     })
 
-    it('(1) interlock: Bridge unreachable → 500, nothing else runs (silence is not confirmation)', async () => {
-      verifyPrincipalReturned.mockRejectedValue(new Error('Bridge GET timed out'))
+    it.each([
+      ['undici transport failure', new TypeError('fetch failed')],
+      ['the BRIDGE_TIMEOUT_SECONDS signal', Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })],
+      ['a Bridge 503', new BridgeApiError(503, null)],
+    ])('(1) interlock: Bridge unreachable (%s) → 502 provider_unavailable, nothing written, retry is the instruction', async (_label, err) => {
+      verifyPrincipalReturned.mockRejectedValue(err)
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(502)
+      expect(res.body.error.code).toBe('provider_unavailable')
+      expect(res.body.error.message).toMatch(/nothing was changed/i)
+      expect(refundClaimStatus).not.toHaveBeenCalled()
+      expect(refundPayoutFailure).not.toHaveBeenCalled()
+      expect(recordOpsAction).not.toHaveBeenCalled()
+    })
+
+    it('(1) interlock: a Bridge 4xx is an answer, not an outage → 409 principal_not_returned with the status in details', async () => {
+      verifyPrincipalReturned.mockRejectedValue(new BridgeApiError(404, { code: 'not_found' }))
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send(BODY)
+      expect(res.status).toBe(409)
+      expect(res.body.error.code).toBe('principal_not_returned')
+      expect(res.body.error.details).toEqual([
+        { path: 'transferId', issue: 'bridge_lookup_failed; bridge=http_404; event=unknown' },
+      ])
+      expect(refundPayoutFailure).not.toHaveBeenCalled()
+    })
+
+    it('(1) interlock: a database failure inside the check is still a 500 — only Bridge transport maps to 502', async () => {
+      verifyPrincipalReturned.mockRejectedValue(new Error('refund interlock transfer load failed: pii-free'))
       const app = await buildApp()
       const res = await post(app, ADMIN).send(BODY)
       expect(res.status).toBe(500)
       expect(res.body.error.code).toBe('internal_error')
       expect(refundClaimStatus).not.toHaveBeenCalled()
-      expect(refundPayoutFailure).not.toHaveBeenCalled()
     })
 
     it('(1) interlock: not_submitted PASSES (#254) and the ledger proof expects only the REFUNDED batch', async () => {

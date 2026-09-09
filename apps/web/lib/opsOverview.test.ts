@@ -213,6 +213,10 @@ describe('resolveErrorKind', () => {
     expect(resolveErrorKind(409, envelope('claim_abandoned'))).toBe('claim_abandoned')
     // O-B: the refund interlock refusal is its own STOP branch, never a retryable conflict.
     expect(resolveErrorKind(409, envelope('principal_not_returned'))).toBe('principal_not_returned')
+    // Bridge could not be asked: the one refusal whose instruction is "retry".
+    expect(resolveErrorKind(502, envelope('provider_unavailable'))).toBe('provider_unavailable')
+    expect(resolveErrorKind(503, envelope('rate_unavailable'))).toBe('provider_unavailable')
+    expect(resolveErrorKind(502, '<html>bad gateway</html>')).toBe('generic')
     expect(resolveErrorKind(409, envelope('refund_owed'))).toBe('refund_owed')
     expect(resolveErrorKind(409, envelope('deposit_evidence_conflict'))).toBe('evidence_conflict')
     expect(resolveErrorKind(409, envelope('conflict'))).toBe('conflict')

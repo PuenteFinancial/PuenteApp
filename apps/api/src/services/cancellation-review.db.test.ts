@@ -180,6 +180,28 @@ describe.skipIf(!runDb)('cancellation review exits (integration, local Supabase)
   })
 
   afterAll(async () => {
+    // Every run seeds a fresh random USER with five FUNDED transfers, i.e.
+    // 100,000 minor of funding_receivable. Until 2026-09-09 nothing here
+    // removed them, so any later file that reads a GLOBAL ledger balance
+    // (float-ceiling-concurrency) failed by exactly +100,000 whenever vitest's
+    // duration-based ordering put this file first — the "~1-in-12 DB-suite
+    // flake". truncate bypasses the append-only row triggers (precedent:
+    // refund-tail.db.test.ts); the rest is scoped to this run's USER.
+    await db.query('truncate table public.ledger_entries, public.ledger_transactions cascade')
+    await db.query('truncate table public.payment_events, public.transfer_transitions, public.disclosures')
+    await db.query(
+      'delete from public.cancellation_requests where transfer_id in (select id from public.transfers where user_id = $1)',
+      [USER],
+    )
+    await db.query('delete from public.transfers where user_id = $1', [USER])
+    await db.query('delete from public.quotes where user_id = $1', [USER])
+    await db.query(
+      `delete from public.payout_destinations where recipient_id in
+       (select id from public.recipients where user_id = $1)`,
+      [USER],
+    )
+    await db.query('delete from public.recipients where user_id = $1', [USER])
+    await db.query('delete from auth.users where id = $1', [USER])
     await db.end()
   })
 

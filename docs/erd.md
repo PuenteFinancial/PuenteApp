@@ -20,8 +20,9 @@ slice, so the lending stack and richer risk controls slot in later without migra
 - **Access model: pure API.** The Fastify API uses the Supabase service role and bypasses RLS, so RLS
   is a defense-in-depth backstop, not the primary control. Clients never touch the DB directly.
 - **Append-only tables** (no UPDATE/DELETE — trigger + role-level revoke): `ledger_transactions`,
-  `ledger_entries`, `transfer_transitions`, `disclosures`, `reconciliation_runs`, and
-  `otp_send_attempts` (no UPDATE; DELETE only for the retention prune).
+  `ledger_entries`, `transfer_transitions`, `disclosures`, `reconciliation_runs`, `consents`,
+  `kyc_verifications`, `ops_actions`, and `otp_send_attempts` (no UPDATE; DELETE only for the
+  retention prune). Retention posture for all of them: `compliance/records-retention-policy.md`.
 - **`payment_events`** is the **status-mutable event inbox**: its raw `payload` is immutable, but
   `status` / `processed_at` / `error` are updated in place as the worker processes each event (it
   carries a `moddatetime` `updated_at` trigger) — so it is **not** append-only.
@@ -150,6 +151,27 @@ documents, never identity numbers).
 - `occurred_at` / `created_at` timestamptz
 - `forbid_mutation` trigger — append-only, same guard as `consents`
 - **RLS:** deny-all (service-role only). Writers are best-effort and never block the primary write.
+
+### ops_actions  *(append-only — built 2026-09-08, ops board slice 1 / O-B; audit corner "no durable actor record")*
+One row per operator action taken through the ops surface (`POST /v1/ops/**`): the seven writes
+that exist — hold release, refund, cancellation resolve, manual funding, deposit-instructions
+attach, deposit landed, float top-up. `transfer_transitions` records the actor of a STATE CHANGE;
+this records the operator's stated why, what they saw, and actions that change no state at all (a
+hold release). Written best-effort after the primary write; a failed insert pages Sentry and never
+turns a completed money movement into a 500.
+- `actor` TEXT — `ops:<admin user id>` (the transition vocabulary; CHECK 1–100)
+- `action` TEXT — CHECK-pinned to the seven routes; an eighth is a migration
+- `transfer_id` FK → transfers (**RESTRICT**; null only for `float_topup`)
+- `reason` TEXT — MACHINE vocabulary only (the hold reason, the decision, the outcome; CHECK ≤ 100)
+- `note` TEXT — the operator's typed note where the route requires one (CHECK 1–500); free text,
+  guided "no names, no account numbers", never copied to `transfer_transitions.reason` or logs
+- `before` / `after` JSONB — fixed keys per caller, never a row spread (the PII guard; CHECK object)
+- `request_id` TEXT — Fastify request id; joins the row to the audit-plugin log line
+- `created_at` timestamptz; indexes `(transfer_id, created_at desc)` and `(created_at desc)`
+- `forbid_mutation` trigger — append-only
+- **RLS:** deny-all (service-role only). Retention: see `compliance/records-retention-policy.md`.
+- **Test gotcha:** the RESTRICT FK means every DB test that `TRUNCATE`s `transfers` must name
+  `ops_actions` in the same statement (0A000 otherwise).
 
 ## Money movement
 
