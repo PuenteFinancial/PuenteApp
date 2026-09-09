@@ -211,6 +211,8 @@ describe('resolveErrorKind', () => {
 
   it('classifies each ops refusal onto its own UI branch', () => {
     expect(resolveErrorKind(409, envelope('claim_abandoned'))).toBe('claim_abandoned')
+    // O-B: the refund interlock refusal is its own STOP branch, never a retryable conflict.
+    expect(resolveErrorKind(409, envelope('principal_not_returned'))).toBe('principal_not_returned')
     expect(resolveErrorKind(409, envelope('refund_owed'))).toBe('refund_owed')
     expect(resolveErrorKind(409, envelope('deposit_evidence_conflict'))).toBe('evidence_conflict')
     expect(resolveErrorKind(409, envelope('conflict'))).toBe('conflict')

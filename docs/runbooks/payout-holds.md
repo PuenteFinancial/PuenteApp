@@ -4,24 +4,35 @@ Held rows are listed with their reasons on the ops board at `/dashboard/ops` (8.
 opens `/dashboard/ops/transfers/<id>` (ops board slice 1), which shows the hold, this runbook's
 per-reason guidance inline, the quote's Bridge buy rate (for `fx_drift`), the destination and
 recipient statuses (for `payability`), the full transition timeline, ledger postings, and provider
-events — the investigation inputs below, on one page. Release itself is still SQL until slice O-B.
+events — the investigation inputs below, on one page — and, since slice O-B, the **Release hold**
+button that performs the release and records who did it and why.
 
-**Date:** 2026-07-20 · **Status:** live process (slice 5)
+**Date:** 2026-07-20 · **Status:** live process (slice 5; release from the board since 2026-09-08)
 
 A payout hold is a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`,
 `submit_error`, `velocity_review`, or — since K6 — the auto-released `sender_kyc_pending`) and
 `payout_held_at`. The submit job sets the hold and stops; the 1-min
 `payout.sweep` cron skips held rows. Releasing a hold means clearing the column — the sweep
-resubmits automatically within a minute. There is no admin endpoint at MVP; release is SQL via
-the Supabase SQL editor (a sanctioned ops **data** fix — schema changes still go through
-migrations only). Background: [transfer-state-machine.md](../transfer-state-machine.md),
-[decisions.md](../decisions.md) 2026-07-20.
+resubmits automatically within a minute. Release is the detail page's **Release hold** button
+(`POST /v1/ops/transfers/hold-release`, double-control gated, `ops_actions` row); the SQL below is
+break-glass for when the board is unavailable (a sanctioned ops **data** fix — schema changes still
+go through migrations only). Background: [transfer-state-machine.md](../transfer-state-machine.md),
+[decisions.md](../decisions.md) 2026-07-20 and 2026-09-08.
 
 ## Release procedure (all hold reasons)
 
 1. Investigate per the reason-specific steps below. Do not release until the underlying cause is
    understood — release means "submit this payout to Bridge within a minute."
-2. Run the release SQL in the **Supabase SQL editor** (staging or prod project as appropriate):
+2. On `/dashboard/ops/transfers/<id>` press **Release hold**, read the consequence line, and type
+   the note — what you verified (ids, states, what you checked; **no names, no account numbers**).
+   The button stays disabled until the note is 10 characters; confirm. The API applies the same
+   compare-and-swap as the SQL below (`FUNDED` and `payout_hold_reason = '<reason as shown>'`), so a
+   hold that changed underneath you is refused with *"the hold changed underneath you"* — refresh,
+   re-read the reason, decide again. `sender_kyc_pending` has **no button by design** (it auto-releases
+   on Bridge's approval webhook; releasing by hand only re-holds the row as `submit_error`).
+
+   **Break-glass (board down):** the SQL in the **Supabase SQL editor** (staging or prod project as
+   appropriate):
 
    ```sql
    update public.transfers
@@ -30,11 +41,21 @@ migrations only). Background: [transfer-state-machine.md](../transfer-state-mach
    ```
 
    The `payout_hold_reason = '<reason>'` guard makes the release a no-op if the hold has already
-   changed or been cleared — expect exactly 1 row updated.
-3. Verify: within ~1 minute the sweep enqueues the submit job; the transfer should move to
-   `SUBMITTED` (check `transfer_transitions` for the `worker:payout` actor).
-4. Provenance: no extra logging step needed — the Supabase query history records who ran the
-   release, and the submit job's transition metadata records the resulting submission.
+   changed or been cleared — expect exactly 1 row updated. A SQL release leaves no `ops_actions` row;
+   note it in the incident channel.
+3. Verify: the success line says whether the submit was enqueued directly (`enqueued: false` = the
+   sweep picks it up); within ~1 minute the transfer should move to `SUBMITTED` — the detail page's
+   Timeline shows `FUNDED → SUBMITTED` with the `worker:payout` actor.
+4. Provenance: the release wrote a row to `public.ops_actions` (`action = 'hold_release'`, `actor =
+   'ops:<your user id>'`, `reason` = the hold reason, your `note`, `before`/`after` hold columns,
+   `request_id` joining the audit-plugin log line). The submit job's transition metadata records the
+   resulting submission. Query:
+
+   ```sql
+   select created_at, actor, reason, note, before, after
+     from public.ops_actions
+    where transfer_id = '<transfer-id>' order by created_at;
+   ```
 
 ## `sender_kyc_pending` — sender's Bridge KYC not approved at payout time (AUTO-RELEASED, K6)
 
@@ -156,7 +177,8 @@ the window rolls — hence the hold.
      sign-off** rather than releasing repeatedly.
    - **Error or suspicious** → do not release; cancel the transfer and refund the sender (the Reg E
      cancel/refund path), then follow up.
-3. Release SQL is the standard procedure above with `payout_hold_reason = 'velocity_review'`.
+3. Release is the standard procedure above (the detail page's **Release hold**; break-glass SQL
+   with `payout_hold_reason = 'velocity_review'`).
 
 ## Cancel request during Bridge `in_review`
 

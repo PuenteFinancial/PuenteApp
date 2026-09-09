@@ -39,9 +39,42 @@ share `OpsPrimitives`/`opsStyles` instead of triplicated style helpers; the web 
 UUIDs with distinct prefixes (the page rejects non-UUIDs and cards show the first 8 chars). Found
 along the way: the two deny-path ops e2e specs had been failing since the float top-up card landed
 (2026-08-20) because their card locator required a Refund button that the deny panel replaces, and
-e2e is not in CI — the locator now anchors on the card's own annotation. Hold-release and refund
-buttons, and the `ops_actions` table, are slice O-B (same plan, `~/.claude/plans/joyful-discovering-gem.md`).
-**Status: active** (O-A).
+e2e is not in CI — the locator now anchors on the card's own annotation.
+
+**O-B (same day, second PR) — the two crypto-rail actions and `ops_actions`.** Release-hold and
+refund were a SQL statement in the Supabase editor and a CLI; both are now buttons on the detail page
+behind the same double-control gate, idempotency contract, and 404 posture as every other ops write.
+Six choices. (1) **The release enum is the policy.** `POST /ops/transfers/hold-release` accepts
+exactly the four human-actioned reasons (`fx_drift`, `payability`, `velocity_review`, `submit_error`;
+Joshua 2026-09-08); `sender_kyc_pending` is a schema 400, because it auto-releases on Bridge's approval
+webhook and a hand release while the customer is unverified only re-holds the row as `submit_error`.
+`submit_error` is offered with the runbook's "never for `source_amount_parse`" as guidance, not
+enforcement — drop to three reasons if that proves too permissive. The service applies the runbook's
+compare-and-swap verbatim (`FUNDED` and `payout_hold_reason = <reason>`), so a hold that changed
+underneath the operator is a 409, never a release. (2) **A new append-only `ops_actions` table**
+(migration 20260908171500), written by every ops POST on 2xx — the seven existing and new writes.
+`transfer_transitions` carries the actor of a STATE CHANGE, and a release changes no state; nothing
+recorded the operator's stated reason or what they saw. `actor` is the transition vocabulary
+(`ops:<id>`), `action` is CHECK-pinned to the routes that exist, `reason` is machine vocabulary,
+`before`/`after` are built from fixed keys by each caller (never a row spread — the PII guard for the
+jsonb columns), `request_id` joins the audit-plugin line. Deny-all RLS, `forbid_mutation` trigger,
+RESTRICT on the transfer. No backfill. (3) **The write is best-effort, not an atomic RPC.** The state
+change, the ledger batch, and the transition actor are the primary record; a failed provenance insert
+pages Sentry (fingerprint per action) and the 2xx stands. The alternative — a 500 after money moved —
+invites the operator to retry a completed movement, which is the worse failure. Revisit if a gap ever
+proves unacceptable. (4) **The operator's note is a required, bounded free-text field (10–500) stored
+ONLY in `ops_actions.note`** — never in `transfer_transitions.reason` (system vocabulary), never
+logged, never in Sentry context. The UI hint says what not to type (names, account numbers). (5)
+**The refund runs the CLI's live interlock inside the request, in the CLI's order,** and gains one
+error code: `verifyPrincipalReturned` first (a real Bridge GET, bounded by `BRIDGE_TIMEOUT_SECONDS`;
+`not_submitted` passes per #254), disagreement → 409 `principal_not_returned`, because the operator
+behavior differs from every existing 409 (read the Bridge dashboard, escalate on `refund_failed`,
+never retry); then the claim — `abandoned` refuses BEFORE any write; then the refund; then the ledger
+proof, where a missing batch is paged but still 200 (money moved). Bridge unreachable is a 500 in this
+slice; a 502 `provider_unavailable` mapping is a follow-up. (6) **No `--reclaim` on the board, ever.**
+An abandoned claim is the STOP state: the detail page shows the runbook path and no button, and if the
+claim goes abandoned between page load and click the refusal renders as a red panel with Close only.
+Reclaiming stays a CLI act with the runbook open. **Status: active.**
 
 **2026-09-03 · trustProxy moves from hop count to connecting-address trust (`TRUST_PROXY_SOURCES`),
 forced by fastify 5.12.1.** Fastify disabled numeric `trustProxy` (GHSA: "X-Forwarded-* spoofing

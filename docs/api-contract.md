@@ -66,6 +66,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 409 | `refund_owed` | Ops deny refused: the request met both §1005.34 conditions — a refund is owed; no tool may deny it |
 | 409 | `claim_abandoned` | Ops resolve refused: a prior refund run abandoned its claim — manual-refund runbook, never retry |
 | 409 | `deposit_evidence_conflict` | Ops deny refused: cited `depositedAt` provably wrong; `details[]` carries the legal bounds |
+| 409 | `principal_not_returned` | Ops refund refused (slice O-B): the recorded return event and Bridge's live state do not agree that the principal is back — includes `refund_failed` (stuck at Bridge). Read the Bridge dashboard; manual-refund runbook; never retry from the UI |
 | 422 | `provider_rejected` | Upstream provider rejected the request (e.g. bank refused the account) |
 | 429 | `rate_limited` | Throttled |
 | 500 | `internal_error` | Unexpected failure; details never leak — use `requestId` |
@@ -353,6 +354,8 @@ row has no postings and no funds moved — a dead row, not lost money).
 | POST | `/v1/ops/transfers/deposit-instructions` | double control | naturally idempotent (no key) | Attach (#203, for #199): pulls the deposit coordinates off a Bridge onramp and upserts them onto the transfer. Body: `{ transferId, bridgeTransferId }`. Re-attach overwrites. Since funding-ops slice 3 attach is **automatic at confirm** (the `funding.onramp_prepare` job, `attached_by` null = system) — this route and CLI `attach-deposit-instructions.ts` are the break-glass for the job's dead ends (Sentry `onramp-prepare-*`). |
 | POST | `/v1/ops/transfers/deposit-landed` | double control | naturally idempotent (no key) | Slice 1, funding-ops-automation: one action, both books — `recordManualFunding(kind: cleared)` then `recordFloatTopUp`, idempotent on the shared onramp ref (cleared replays as `cleared_skipped`; ledger key `float_topup:<ref>`). Ordering invariant: cleared FIRST, and the top-up runs on `cleared_skipped` too, so a re-tap after a mid-action crash heals. When instructions are attached, `externalRef` MUST match `deposit_instructions.bridge_transfer_ref` (409 `conflict` otherwise) — the ledger key is global, so a cross-transfer ref typo would silently consume another transfer's top-up. Body: `{ transferId, externalRef, amountMinor, currency }` → 200 `{ transferId, outcome: cleared \| cleared_skipped }`. |
 | GET | `/v1/ops/transfers/:id` | bearer + allowlist | read-only | **Ops board slice 1.** One transfer, the whole story: the row, dwell, quote, destination **statuses**, refund claim + recorded return event + which refund batches posted, `transfer_transitions` (no `metadata`), ledger batches with entries and a per-batch net, `payment_events` (no `payload`, error reduced to a boolean), cancellation requests, deposit instructions (no bank coordinates), disclosures. Gate runs as an `onRequest` hook BEFORE params validation — a non-admin with a malformed id gets the same 404 as a missing route, never a 400. Admins get an honest 404 `not_found` for an unknown id. Response schema is the output allowlist. Never calls Bridge (the live interlock half runs only in the refund action, slice O-B). |
+| POST | `/v1/ops/transfers/hold-release` | double control | `Idempotency-Key` required | **Ops board slice 1 / O-B.** The payout-holds runbook's release SQL as a service: compare-and-swap `FUNDED` + `payout_hold_reason = <reason>` → both hold columns null, then `enqueuePayoutSubmit` (the 1-min sweep resubmits regardless). Body: `{ transferId, reason: fx_drift \| payability \| velocity_review \| submit_error, note: 10–500 chars }` — the enum IS the policy; `sender_kyc_pending` is a 400 (auto-released, never by hand). 200 `{ transferId, outcome: released, enqueued }`. Refusals: 404 `not_found`; 409 `conflict` + `details[]` for not-FUNDED / no hold / hold changed underneath. Writes an `ops_actions` row (best-effort). SQL becomes break-glass. |
+| POST | `/v1/ops/transfers/refund` | double control | `Idempotency-Key` required | **Ops board slice 1 / O-B.** `scripts/trigger-refund.ts` as a service, same step order: (1) `verifyPrincipalReturned` — the one LIVE Bridge call on the ops surface, bounded by `BRIDGE_TIMEOUT_SECONDS`; `not_submitted` passes (#254), disagreement → 409 `principal_not_returned`; (2) claim status — `abandoned` → 409 `claim_abandoned` BEFORE any write; (3) `refundPayoutFailure` with actor `ops:<admin id>`; (4) ledger proof — both expected keys present → `ledgerComplete`, a missing one is paged but still 200 (money moved; a 500 invites a retry); (5) `ops_actions` row. Body: `{ transferId, note: 10–500 chars }` — there is NO `reclaim` (an abandoned claim is the STOP state; CLI only). 200 `{ transferId, outcome: refunded \| already_disbursed \| already_settled, ledgerComplete, ledgerKeys[] }`. Bridge unreachable → 500. |
 | POST | `/v1/ops/treasury/float-topup` | double control | `Idempotency-Key` required | Slice 2, funding-ops-automation: ad-hoc treasury top-up (`DR bridge_wallet_float / CR cash_clearing` via `recordFloatTopUp`; CLI `record-float-topup.ts` is break-glass). Body `{ amountMinor, currency: 'USD', externalRef? }` — blank/absent ref derives `adhoc:<Idempotency-Key>` so the HTTP and ledger layers agree on booking identity (held key → replay; same ref → ledger no-op; fresh key + blank ref → new booking). → 200 `{ amountMinor, externalRef, floatBalanceMinor }` (balance after the post; replays echo the original). No transferId — a transfer's own deposit goes through `deposit-landed`, not here. |
 
 One aggregate for the ops page (`/dashboard/ops`, no nav entry — direct URL).
@@ -470,7 +473,45 @@ HTTP): `transfer_not_found` → 404 `not_found`; `not_under_review` / `no_pendin
 | `deposit_evidence_conflict` | 409 | Cited `depositedAt` is provably wrong; `details[]` carries the legal bounds so the operator corrects the input. |
 
 Actor attribution: the services record `ops:<admin user id>` on the transition and the request
-resolution — the durable decision record (the audit plugin only logs the hit).
+resolution — the durable decision record (the audit plugin only logs the hit). Since slice O-B every
+ops write also appends an `ops_actions` row (`actor`, `action`, `transfer_id`, machine `reason`, the
+operator's `note` where the route takes one, fixed-key `before`/`after`, `request_id`) — the record
+for actions that change no state (a hold release) and the operator's stated why for the rest.
+Best-effort: a failed provenance write pages Sentry and never turns a completed money movement into
+a 500.
+
+### POST /v1/ops/transfers/hold-release and /refund (ops board slice 1 / O-B)
+
+Same posture as resolve: double-control gate as an `onRequest` hook (404 before validation and before
+the idempotency plugin), `transferId` in the **body**, `Idempotency-Key` required, refusals non-2xx,
+response schema = output allowlist. Both take a REQUIRED operator `note` (10–500 chars) that is
+stored only in `ops_actions.note` — never in `transfer_transitions.reason`, never logged.
+
+```jsonc
+// POST /v1/ops/transfers/hold-release  (Idempotency-Key required)
+{ "transferId": "…", "reason": "velocity_review", "note": "Spoke with the sender; both sends today are legitimate." }
+// → 200
+{ "transferId": "…", "outcome": "released", "enqueued": true }   // enqueued:false = sweep resubmits within a minute
+// 400 for reason: sender_kyc_pending (auto-released; the enum is the policy)
+// 404 not_found · 409 conflict + details[{path, issue}] for not FUNDED / no hold / hold changed underneath
+
+// POST /v1/ops/transfers/refund  (Idempotency-Key required; NO reclaim field exists)
+{ "transferId": "…", "note": "Bridge dashboard shows returned; sender confirmed by phone." }
+// → 200
+{ "transferId": "…", "outcome": "refunded", "ledgerComplete": true,
+  "ledgerKeys": ["<id>:bridge_return", "<id>:REFUNDED"] }        // pre-submit rows expect only <id>:REFUNDED
+```
+
+Refund step order, each refusal stopping the chain before any write:
+
+| Step | Refusal | Status / code | Required behavior |
+|---|---|---|---|
+| 1 interlock (live Bridge) | `no_return_event`, `bridge_disagrees` | 409 `principal_not_returned` | STOP. `details[0].issue` carries `<reason>; bridge=<state>; event=<type>`; `bridge=refund_failed` means the principal is stuck AT Bridge — escalate per `runbooks/manual-refund.md`. Never retry from the UI. |
+| 1 interlock | `not_submitted` | passes | #254: never reached Bridge, nothing to return; `bridge_return` not expected. |
+| 1 interlock | Bridge unreachable | 500 `internal_error` | Silence is not confirmation. Retry later. |
+| 2 claim | `abandoned` | 409 `claim_abandoned` | STOP. A prior run may have paid without recording — `runbooks/manual-refund.md` (abandoned claims). The UI renders no retry. |
+| 3 refund | `not_payout_failed`, `claim_taken` | 409 `conflict` + details | The row moved / a run is disbursing now — refresh, wait. |
+| 4 ledger proof | expected key missing | **200** with `ledgerComplete:false` | Money moved; paged to Sentry (`ops-refund-ledger-incomplete`). Verify per the runbook before anything else. |
 
 ## Endpoint → state transition map
 
@@ -488,6 +529,8 @@ resolution — the durable decision record (the audit plugin only logs the hit).
 | Bridge webhook: delivered, request out of window | **no transition** — stays `COMPLETED`, ops alerted to deny |
 | `POST /ops/cancellations/resolve` `decision:refund` (ops; CLI `resolve-cancellation.ts --refund` is break-glass) | `UNDER_REVIEW → REFUNDED` (correction payment) |
 | `POST /ops/cancellations/resolve` `decision:deny` (ops; CLI `--deny` is break-glass) | `UNDER_REVIEW → COMPLETED`, or no transition if never routed |
+| `POST /ops/transfers/hold-release` (ops, slice O-B; SQL is break-glass) | **no transition** — clears `payout_hold_reason`; the worker then does `FUNDED → SUBMITTED` within a minute (actor `worker:payout`). Recorded in `ops_actions`. |
+| `POST /ops/transfers/refund` (ops, slice O-B; CLI `trigger-refund.ts` is break-glass) | `PAYOUT_FAILED → REFUNDED` (actor `ops:<admin id>`; `bridge_return` + `REFUNDED` batches, `bridge_return` only if the payout had reached Bridge) |
 | Bridge webhook: accepted | `SUBMITTED → IN_FLIGHT` |
 | Bridge webhook: delivered | `IN_FLIGHT → COMPLETED` |
 | Bridge webhook: failed | `SUBMITTED/IN_FLIGHT → PAYOUT_FAILED → REFUNDED` |
