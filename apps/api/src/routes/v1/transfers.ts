@@ -1209,6 +1209,14 @@ export async function transfersRoute(server: FastifyInstance) {
               // Live PI status (stripe only) — lets a reload after
               // confirmPayment render "submitted" instead of the pay form.
               status: { type: 'string' },
+              // Checkout Sessions rail (C2): the Session's payment_status,
+              // alongside its status. Two fields because they answer
+              // different questions — whether the SESSION is still open, and
+              // whether MONEY already moved — and the pay step must never
+              // re-offer a payable form for a session that already charged.
+              // Without this key Fastify's serializer silently drops what the
+              // processor returns, and a reload would re-offer the form.
+              paymentStatus: { type: 'string' },
               // Out-of-band deposit coordinates (#199, manual only) — present
               // once ops attaches them; the pay step renders them verbatim.
               depositInstructions: {

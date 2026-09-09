@@ -60,3 +60,42 @@ test('a blocked Stripe loader fails into the error card — the dynamic-import s
   // The simulate stand-in must not appear on a stripe-provider transfer.
   await expect(page.getByRole('button', { name: /simulate payment|simular pago/i })).toHaveCount(0)
 })
+
+test('the Checkout rail fails into the error card when js.stripe.com is blocked', async ({
+  context,
+  page,
+}) => {
+  await signIn(context)
+  // Same contract as the Payment Intents rail: CI never depends on that
+  // origin, and a load failure is the retryable card rather than a form that
+  // hangs forever with no way to pay.
+  await page.route('**/js.stripe.com/**', (route) => route.abort())
+  await page.goto('/dashboard/send/transfer-e2e-checkout-1')
+
+  await expect(
+    page.getByText(/could not load the payment form|no pudimos cargar el formulario/i),
+  ).toBeVisible()
+  await expect(page.getByRole('button', { name: /retry|reintentar/i })).toBeVisible()
+  await expect(page.getByRole('button', { name: /simulate payment|simular pago/i })).toHaveCount(0)
+})
+
+test('a Checkout session that already took the money shows submitted, never a payable form', async ({
+  context,
+  page,
+}) => {
+  await signIn(context)
+  // js.stripe.com is aborted here as an ASSERTION, not a stub: a session whose
+  // payment_status is 'paid' must reach the submitted panel without loading the
+  // SDK at all, so blocking that origin has to change nothing. If the pay step
+  // ever pulls the loader on this path, this test goes red with the error card.
+  // A sender whose card already cleared must never see a second pay button —
+  // nor a loader error standing where their confirmation should be.
+  await page.route('**/js.stripe.com/**', (route) => route.abort())
+  await page.goto('/dashboard/send/transfer-e2e-checkout-paid')
+
+  await expect(page.getByText(/payment submitted|pago enviado/i)).toBeVisible()
+  await expect(
+    page.getByText(/could not load the payment form|no pudimos cargar el formulario/i),
+  ).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^pay \$|^pagar \$/i })).toHaveCount(0)
+})

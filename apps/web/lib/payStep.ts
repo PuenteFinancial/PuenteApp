@@ -24,6 +24,11 @@ export interface FundingSession {
   walletAddress?: string
   /** Live PI status (stripe only) — drives the reload-after-pay branch. */
   status?: string
+  /** Checkout Sessions rail only: the Session's payment_status (paid /
+   *  unpaid / no_payment_required), beside `status` (open / complete /
+   *  expired). Two fields because a Session answers two questions — is it
+   *  still usable, and did money already move. */
+  paymentStatus?: string
   /** Validated at RENDER time (isDepositInstructionsShape), not here — a
    *  malformed object must degrade to the fallback copy, not to the error
    *  card, so it is typed as unknown until the component proves it. */
@@ -59,6 +64,7 @@ export function isFundingSessionShape(body: unknown): body is FundingSession {
   if (b.publishableKey !== undefined && typeof b.publishableKey !== 'string') return false
   if (b.walletAddress !== undefined && typeof b.walletAddress !== 'string') return false
   if (b.status !== undefined && typeof b.status !== 'string') return false
+  if (b.paymentStatus !== undefined && typeof b.paymentStatus !== 'string') return false
   // depositInstructions is deliberately NOT validated here: the offline panel
   // works without it, so a malformed object degrades to the fallback copy
   // (checked at render) rather than failing the whole session into the
@@ -91,6 +97,7 @@ const ONRAMP_PAID_STATUSES = new Set(['fulfillment_processing', 'fulfillment_com
  */
 export type PayAffordance =
   | 'stripe'
+  | 'checkout'
   | 'onramp'
   | 'crypto'
   | 'simulate'
@@ -113,6 +120,34 @@ export function payAffordanceFor(session: FundingSession, canSimulate: boolean):
     // error: never a payable form for a dead PI.
     if (session.status === undefined || PAYABLE_PI_STATUSES.has(session.status)) return 'stripe'
     if (session.status === 'processing' || session.status === 'succeeded') return 'submitted'
+    return 'error'
+  }
+  if (session.provider === 'stripe_checkout') {
+    if (!session.clientSecret || !session.publishableKey) return 'error'
+    // A Checkout Session answers two questions and both can strand a sender,
+    // so read them in the order that costs the least when we're wrong.
+    //
+    // MONEY FIRST. `paid` (a card) and `no_payment_required` both mean the
+    // charge already happened; re-offering a payable form there is the one
+    // failure mode that takes a sender's money twice. Checked before status
+    // so it holds even if a future API leaves the session `open` with a
+    // settled payment.
+    if (session.paymentStatus === 'paid' || session.paymentStatus === 'no_payment_required') {
+      return 'submitted'
+    }
+    // complete = the sender confirmed; clearing is the webhook's job. Show
+    // submitted, never "paid" (the transfer sits at PENDING_PAYMENT until
+    // checkout.session.completed lands, so transfer state can't make this
+    // call — the PI rail's PAYABLE_PI_STATUSES reasoning).
+    if (session.status === 'complete') return 'submitted'
+    // expired = past its 24h life; confirm would fail. The abandonment sweep
+    // is already driving this transfer to PAYMENT_FAILED — hold the error
+    // card until the tracker's banner takes over.
+    if (session.status === 'expired') return 'error'
+    // open (or a route that served no status): mount the Payment Element.
+    // Unlike the onramp widget, this surface can actually take money, so an
+    // unrecognized status is an error rather than an optimistic mount.
+    if (session.status === undefined || session.status === 'open') return 'checkout'
     return 'error'
   }
   if (session.provider === 'stripe_onramp') {
@@ -181,4 +216,28 @@ export function classifyConfirmPaymentError(err: {
   code?: string
 }): PayErrorKind {
   return err.type === 'card_error' || err.type === 'validation_error' ? 'inline' : 'retryable'
+}
+
+/**
+ * The same decision for `checkout.confirm()`, which reports a DIFFERENT error
+ * shape and so cannot reuse the function above.
+ *
+ * A PaymentIntent error carries `type` ('card_error', 'api_error', …) and the
+ * PI rail sniffs it to decide whether Stripe wrote the message for the buyer
+ * or for us. Checkout's confirm has no `type` at all: its union is
+ * `{message, code: 'paymentFailed', paymentFailed: {declineCode}}` or
+ * `{message, code: null}`, and Stripe's own typings name that base case
+ * `AnyBuyerError` — every arm is already buyer-facing and localized by the
+ * session's locale. So the test is simply whether a message actually arrived;
+ * the typings are optimistic about that, and an empty string rendered as an
+ * error line would read as a broken page.
+ *
+ * The message stays UI-only either way. Analytics captures `code` and never
+ * the text — a decline message can name the sender's bank.
+ */
+export function classifyCheckoutConfirmError(err: {
+  message?: string
+  code?: string | null
+}): PayErrorKind {
+  return typeof err.message === 'string' && err.message.trim() !== '' ? 'inline' : 'retryable'
 }

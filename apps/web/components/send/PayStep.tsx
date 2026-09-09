@@ -21,6 +21,7 @@ import { getStripe } from '@/lib/stripe'
 import { getStripeOnramp } from '@/lib/stripeOnramp'
 import { getCryptoOnramp } from '@/lib/cryptoOnramp'
 import CryptoPayStep from '@/components/send/crypto/CryptoPayStep'
+import CheckoutPayStep from '@/components/send/checkout/CheckoutPayStep'
 
 // The whole PENDING_PAYMENT affordance: fetches the funding session once, then
 // renders the Payment Element (stripe), the dev simulate button (mock, non-prod),
@@ -78,6 +79,13 @@ export default function PayStep({
   const [claimError, setClaimError] = useState('')
 
   const fetching = useRef(false)
+  // Read inside loadSession but deliberately NOT a dependency of it. The
+  // Checkout rail fixes its locale at loadStripe() time (see lib/stripe.ts),
+  // so a mid-payment language switch has nothing to re-do — and making
+  // loadSession depend on `lang` would refetch the session and remount a live
+  // Payment Element under a sender who was halfway through typing a card.
+  const langRef = useRef(lang)
+  langRef.current = lang
 
   // `quiet` = a background refetch (the pending-instructions poll below): a
   // transient failure must leave the current panel alone — flipping visible
@@ -106,6 +114,35 @@ export default function PayStep({
         let loaded: Stripe | null = null
         try {
           loaded = await getStripe(body.publishableKey)
+        } catch {
+          loaded = null
+        }
+        if (!loaded) {
+          setSessionError(true)
+          return
+        }
+        setStripe(loaded)
+        posthog.capture('send_payment_opened', { transfer_id: transferId })
+      }
+      if (
+        body.provider === 'stripe_checkout' &&
+        body.clientSecret &&
+        body.publishableKey &&
+        // Only for a session that can still be confirmed. A reload after
+        // paying renders the submitted panel, and pulling js.stripe.com for
+        // it is worse than wasteful: a blocked or slow load would fail into
+        // "we could not load the payment form" for a sender whose money has
+        // already left. Asking the affordance here keeps that one decision in
+        // one place. (The Payment Intents arm above has the same shape and the
+        // same latent behavior; it is proven and out of this slice's scope.)
+        payAffordanceFor(body, canSimulate) === 'checkout'
+      ) {
+        // Loader-first contract, plus the locale: the Checkout SDK takes no
+        // per-mount locale option, so the sender's language has to ride on the
+        // loadStripe call itself.
+        let loaded: Stripe | null = null
+        try {
+          loaded = await getStripe(body.publishableKey, langRef.current)
         } catch {
           loaded = null
         }
@@ -159,7 +196,7 @@ export default function PayStep({
     } finally {
       fetching.current = false
     }
-  }, [transferId, router])
+  }, [transferId, router, canSimulate])
 
   useEffect(() => {
     void loadSession()
@@ -368,6 +405,40 @@ export default function PayStep({
           </div>
         )}
       </div>
+    )
+  }
+
+  // Checkout Sessions rail (C2): our Payment Element, driven by a Session.
+  // This component only guarantees the two things the SDK cannot start
+  // without — a resolved Stripe object and the session's client secret; the
+  // provider handshake, the three-way loading/error/ready split and confirm
+  // all live in CheckoutPayStep. Preserved across the tracker's 5 s poll by
+  // position and type, so a half-entered card is never wiped.
+  if (affordance === 'checkout') {
+    if (!stripe || !session.clientSecret) {
+      return (
+        <div style={{ marginBottom: 14, paddingTop: 14, borderTop: '1px dashed var(--line)' }}>
+          <p role="alert" style={{ color: 'var(--color-error)', fontSize: 13, margin: '0 0 8px' }}>
+            {s.pay.sessionError}
+          </p>
+          <button type="button" className="btn btn--ghost btn--sm" onClick={() => void loadSession()}>
+            {s.retry}
+          </button>
+        </div>
+      )
+    }
+    return (
+      <CheckoutPayStep
+        stripe={stripe}
+        clientSecret={session.clientSecret}
+        transferId={transferId}
+        totalAmountMinor={totalAmountMinor}
+        onSubmitted={() => {
+          setSubmitted(true)
+          void onAdvanced() // banner already swapped in — no need to hold on the poll
+        }}
+        onReload={() => void loadSession()}
+      />
     )
   }
 
