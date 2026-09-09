@@ -93,6 +93,83 @@ async function stripeForm(
   return { status: res.status, body: (await res.json()) as SessionResponse }
 }
 
+// The five events this rail needs. `completed` drives FUNDED; clearing then
+// arrives on DIFFERENT events depending on how the sender paid — a bank debit
+// clears on its async event, a card clears on payment_intent.succeeded and
+// emits no async event ever. Miss the payment_intent pair and every
+// card-funded transfer stays uncleared forever with its receivable open.
+// See services/funding/stripe-checkout.ts.
+const REQUIRED_EVENTS = [
+  'checkout.session.completed',
+  'checkout.session.async_payment_succeeded',
+  'checkout.session.async_payment_failed',
+  'payment_intent.succeeded',
+  'payment_intent.payment_failed',
+] as const
+
+interface WebhookEndpoint {
+  url?: string
+  status?: string
+  enabled_events?: string[]
+}
+
+async function stripeGet(path: string): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`${env.STRIPE_API_BASE}${path}`, {
+    signal: AbortSignal.timeout(env.STRIPE_TIMEOUT_SECONDS * 1000),
+    headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+  })
+  return { status: res.status, body: await res.json() }
+}
+
+/**
+ * Are the rail's webhook events actually subscribed?
+ *
+ * Read-only, and worth a probe rather than a one-off check because it is
+ * configuration living outside the repository that silently decides whether
+ * money is recorded. A missing event does not error anywhere — Stripe simply
+ * never calls us, the transfer sits in whatever state it was in, and the first
+ * symptom is a reconciliation finding days later.
+ *
+ * Reports per endpoint and passes if ANY enabled endpoint carries all five,
+ * since an account can legitimately have several.
+ */
+async function probeWebhookEvents(): Promise<ProbeResult> {
+  const name = 'Webhook events subscribed'
+  const { status, body } = await stripeGet('/v1/webhook_endpoints?limit=20')
+  if (status !== 200) {
+    return { name, verdict: `HTTP ${status}`, detail: 'Could not list webhook endpoints.' }
+  }
+  const endpoints = ((body as { data?: WebhookEndpoint[] }).data ?? []).filter(
+    (e) => e.status === 'enabled',
+  )
+  if (endpoints.length === 0) {
+    return {
+      name,
+      verdict: 'NO ENABLED ENDPOINTS',
+      detail: 'Nothing will ever tell us a payment happened.',
+    }
+  }
+
+  const lines: string[] = []
+  let anyComplete = false
+  for (const ep of endpoints) {
+    const events = ep.enabled_events ?? []
+    const all = events.includes('*')
+    const missing = REQUIRED_EVENTS.filter((e) => !all && !events.includes(e))
+    if (missing.length === 0) anyComplete = true
+    lines.push(
+      missing.length === 0
+        ? `${ep.url} — all ${REQUIRED_EVENTS.length} present`
+        : `${ep.url} — MISSING: ${missing.join(', ')}`,
+    )
+  }
+  return {
+    name,
+    verdict: anyComplete ? 'OK' : 'INCOMPLETE',
+    detail: lines.join('\n      '),
+  }
+}
+
 let createdSessionId: string | undefined
 
 async function probeCreateSession(): Promise<ProbeResult> {
@@ -189,6 +266,7 @@ async function main(): Promise<void> {
     results.push(reportPaymentMethods(body.payment_method_types))
   }
   if (createdSessionId) results.push(await expireSession(createdSessionId))
+  results.push(await probeWebhookEvents())
 
   console.log('Results:')
   for (const r of results) {
@@ -196,9 +274,9 @@ async function main(): Promise<void> {
     if (r.detail) console.log(`      ${r.detail}`)
   }
   console.log(
-    '\nNot probed: webhook delivery (needs a registered endpoint and a real payment) and\n' +
-      'confirmation (needs the browser SDK). This proves the key, ui_mode=elements, and the\n' +
-      'payment methods a sender would actually be shown.',
+    '\nNot probed: actual webhook DELIVERY (needs a real payment) and confirmation (needs the\n' +
+      'browser SDK). This proves the key, ui_mode=elements, the payment methods a sender would\n' +
+      'be shown, and that the events which record the money are subscribed.',
   )
   if (results.some((r) => !r.verdict.startsWith('OK'))) process.exitCode = 1
 }
