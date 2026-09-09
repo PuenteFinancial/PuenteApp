@@ -36,6 +36,9 @@ export interface FundingTransferRow {
   send_amount_minor: number
   fee_amount_minor: number
   margin_minor: number
+  /** Read so the FUNDED path can notice a clearing that already arrived — see
+   *  the out-of-order catch-up in applyFundingSucceeded. */
+  funding_cleared: boolean
 }
 
 export type ApplyFundingOutcome =
@@ -52,7 +55,7 @@ export type ApplyFundingOutcome =
 async function loadFundingTransfer(transferId: string): Promise<FundingTransferRow | null> {
   const { data } = await supabaseAdmin
     .from('transfers')
-    .select('id, state, send_amount_minor, fee_amount_minor, margin_minor')
+    .select('id, state, send_amount_minor, fee_amount_minor, margin_minor, funding_cleared')
     .eq('id', transferId)
     .single()
   return (data as FundingTransferRow | null) ?? null
@@ -99,6 +102,38 @@ export async function applyFundingSucceeded(input: {
       return { outcome: 'stale' }
     }
     throw err
+  }
+
+  // OUT-OF-ORDER CLEARING CATCH-UP.
+  //
+  // A clearing event can land BEFORE the funding one, and on the Checkout rail
+  // with a card it routinely will: `payment_intent.succeeded` and
+  // `checkout.session.completed` are emitted about a second apart and Stripe
+  // guarantees no order between them. Observed on the very first real payment
+  // (2026-09-09, transfer 681c8e1a): succeeded at :43, completed at :44.
+  //
+  // applyFundingCleared sets `funding_cleared` unconditionally but SKIPS its
+  // ledger leg while the transfer is still PENDING_PAYMENT — correctly, since
+  // the receivable it would settle does not exist yet. Without this catch-up
+  // nothing ever posts that leg afterwards: a card emits no further event. The
+  // row then claims cleared while the ledger still carries an open receivable,
+  // forever, and the check that would notice (stripe_receivables) does not run
+  // on this rail.
+  //
+  // So: now that FUNDED has committed and the receivable IS open, re-run the
+  // clearing. It re-reads state and is idempotent on (transfer, transition), so
+  // the in-order case — where this flag is false here and the real cleared
+  // event arrives later — is untouched. Same shape as the catch-up
+  // applyOnrampSettlement already does in the other direction.
+  //
+  // Reported, never thrown: FUNDED is committed and cannot be unwound, and a
+  // funded transfer must still get its payout. Same posture as the enqueue.
+  if (transfer.funding_cleared) {
+    try {
+      await applyFundingCleared({ transferId: transfer.id })
+    } catch (clearErr) {
+      Sentry.captureException(clearErr)
+    }
   }
 
   // Immediate payout (slice-5 decision 1). An enqueue failure is REPORTED, not
