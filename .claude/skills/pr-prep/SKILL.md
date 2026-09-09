@@ -18,10 +18,29 @@ npm run lint
 Zero warnings allowed on new files. Existing warnings are pre-existing debt — don't add more.
 
 ## Step 3 — Tests
+
+Run from the repo root, and KEEP THE OUTPUT:
+
 ```bash
-npm test
+pnpm run test 2>&1 | tee /tmp/puente-test-$(date +%H%M%S).log | tail -40
 ```
-Run from the repo root. All tests must pass. If a test was skipped with `.skip`, note it explicitly in the PR description.
+
+All tests must pass. If a test was skipped with `.skip`, note it explicitly in the PR description.
+
+**Never pipe this suite straight into `grep`.** The api suite has a known
+intermittent failure (~1 in 12, never in isolation — see the api DB-suite flake
+note). A filter that shows only the summary lines throws away the one thing
+worth reading: the name and diff of the test that failed. Re-running usually
+goes green, and then the evidence is gone for good.
+
+When a run does fail, before re-running:
+
+```bash
+grep -E "FAIL|✕|AssertionError|→|Expected|Received" /tmp/puente-test-*.log | head -40
+```
+
+Record the test name in the PR or the flake note even if the retry passes. A
+second sighting is what turns an unexplained flake into a fixable one.
 
 ## Step 4 — Determine which reviewers are required
 
