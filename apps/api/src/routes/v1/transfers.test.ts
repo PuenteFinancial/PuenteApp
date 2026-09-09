@@ -1211,6 +1211,37 @@ describe('GET /v1/transfers/:id/funding-session', () => {
     await app.close()
   })
 
+  it('serves the Checkout Session status AND payment_status (C2 allowlist pin)', async () => {
+    // Two fields, and the serializer must pass both. `paymentStatus` is the
+    // only signal that a card session already took money while the transfer
+    // still sits at PENDING_PAYMENT — dropped by the output allowlist, the pay
+    // step would re-offer a payable form and charge the sender twice.
+    from.mockReturnValueOnce(chain({ data: { ...transferRow, funding_payment_ref: 'cs_test_1' } }))
+    getClientSession.mockResolvedValue({
+      provider: 'stripe_checkout',
+      fields: {
+        clientSecret: 'cs_test_1_secret_x',
+        publishableKey: 'pk_test_x',
+        status: 'complete',
+        paymentStatus: 'paid',
+      },
+    })
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({
+      provider: 'stripe_checkout',
+      clientSecret: 'cs_test_1_secret_x',
+      publishableKey: 'pk_test_x',
+      status: 'complete',
+      paymentStatus: 'paid',
+    })
+    expect(getClientSession).toHaveBeenCalledWith({ paymentRef: 'cs_test_1' })
+    await app.close()
+  })
+
   it('returns provider-only under the mock processor — no clientSecret key at all', async () => {
     from.mockReturnValueOnce(chain({ data: pendingWithRef }))
     const app = await buildApp()

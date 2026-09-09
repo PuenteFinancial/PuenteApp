@@ -907,6 +907,36 @@ const server = createServer(async (req, res) => {
         publishableKey: 'pk_test_e2e',
       })
     }
+    // Checkout Sessions rail (C2). -paid is a session that already took the
+    // money: the pay step must resolve that to the submitted panel WITHOUT
+    // touching js.stripe.com, which is what makes it assertable in CI.
+    //
+    // MOCK_CHECKOUT_* let a human point transfer-e2e-checkout-1 at a REAL
+    // test-mode Checkout Session, which is the only way to see the actual
+    // Payment Element render (CI always uses the fake pair below and always
+    // aborts js.stripe.com). Create one with a test-mode key, then:
+    //   MOCK_CHECKOUT_CLIENT_SECRET=cs_test_..._secret_... \
+    //   MOCK_CHECKOUT_PUBLISHABLE_KEY=pk_test_... npx playwright test ...
+    // Never commit a real value here — the pair is read from the environment
+    // precisely so it cannot end up in the repo.
+    if (id === 'transfer-e2e-checkout-paid') {
+      return json(res, 200, {
+        provider: 'stripe_checkout',
+        clientSecret: 'cs_e2e_secret_x',
+        publishableKey: 'pk_test_e2e',
+        status: 'complete',
+        paymentStatus: 'paid',
+      })
+    }
+    if (/^transfer-e2e-checkout/.test(id)) {
+      return json(res, 200, {
+        provider: 'stripe_checkout',
+        clientSecret: process.env.MOCK_CHECKOUT_CLIENT_SECRET || 'cs_e2e_secret_x',
+        publishableKey: process.env.MOCK_CHECKOUT_PUBLISHABLE_KEY || 'pk_test_e2e',
+        status: 'open',
+        paymentStatus: 'unpaid',
+      })
+    }
     return json(res, 200, { provider: 'mock' })
   }
 

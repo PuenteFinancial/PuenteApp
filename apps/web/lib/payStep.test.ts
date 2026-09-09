@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   isDepositInstructionsShape,
+  classifyCheckoutConfirmError,
   classifyConfirmPaymentError,
   isFundingSessionShape,
   payAffordanceFor,
@@ -294,5 +295,99 @@ describe('payAffordanceFor — stripe_crypto missing the treasury address', () =
     expect(payAffordanceFor({ provider: 'stripe_crypto', publishableKey: 'pk_test_x' }, false)).toBe(
       'error',
     )
+  })
+})
+
+describe('payAffordanceFor — stripe_checkout (C2 Checkout Sessions rail)', () => {
+  const checkoutSession = {
+    provider: 'stripe_checkout',
+    clientSecret: 'cs_test_x_secret_y',
+    publishableKey: 'pk_test_z',
+  }
+
+  it('mounts the Payment Element for an open session, regardless of canSimulate', () => {
+    expect(payAffordanceFor({ ...checkoutSession, status: 'open' }, true)).toBe('checkout')
+    expect(payAffordanceFor({ ...checkoutSession, status: 'open' }, false)).toBe('checkout')
+  })
+
+  it('mounts it when the route served no status at all', () => {
+    expect(payAffordanceFor(checkoutSession, false)).toBe('checkout')
+  })
+
+  it('an open session with unpaid payment_status is still payable — the pre-confirm state', () => {
+    expect(
+      payAffordanceFor({ ...checkoutSession, status: 'open', paymentStatus: 'unpaid' }, false),
+    ).toBe('checkout')
+  })
+
+  it('a complete session renders submitted, not the form — the reload-after-pay case', () => {
+    expect(
+      payAffordanceFor({ ...checkoutSession, status: 'complete', paymentStatus: 'unpaid' }, false),
+    ).toBe('submitted')
+    expect(
+      payAffordanceFor({ ...checkoutSession, status: 'complete', paymentStatus: 'paid' }, false),
+    ).toBe('submitted')
+  })
+
+  it('a SETTLED payment is submitted even if the session still reads open — never charge twice', () => {
+    // The money check runs before the status check on purpose: `paid` is the
+    // one signal that a second confirm would take the sender's money again.
+    expect(
+      payAffordanceFor({ ...checkoutSession, status: 'open', paymentStatus: 'paid' }, false),
+    ).toBe('submitted')
+    expect(
+      payAffordanceFor(
+        { ...checkoutSession, status: 'open', paymentStatus: 'no_payment_required' },
+        false,
+      ),
+    ).toBe('submitted')
+  })
+
+  it('an expired session is an error — confirm can no longer succeed against it', () => {
+    expect(payAffordanceFor({ ...checkoutSession, status: 'expired' }, false)).toBe('error')
+  })
+
+  it('an unrecognized status is an error — this surface can actually take money', () => {
+    expect(payAffordanceFor({ ...checkoutSession, status: 'garbage' }, false)).toBe('error')
+  })
+
+  it('a session missing either client field is an error, not a dead Element mount', () => {
+    expect(payAffordanceFor({ provider: 'stripe_checkout' }, false)).toBe('error')
+    expect(
+      payAffordanceFor({ provider: 'stripe_checkout', clientSecret: 'cs_test_x' }, false),
+    ).toBe('error')
+    expect(
+      payAffordanceFor({ provider: 'stripe_checkout', publishableKey: 'pk_test_z' }, false),
+    ).toBe('error')
+  })
+
+  it('never refetches (a refetch would remount a live Payment Element)', () => {
+    expect(shouldRefetchSession({ ...checkoutSession, status: 'open' })).toBe(false)
+  })
+
+  it('paymentStatus survives the shape check, and a wrongly-typed one does not', () => {
+    expect(isFundingSessionShape({ ...checkoutSession, paymentStatus: 'unpaid' })).toBe(true)
+    expect(isFundingSessionShape({ ...checkoutSession, paymentStatus: 3 })).toBe(false)
+  })
+})
+
+describe('classifyCheckoutConfirmError', () => {
+  it('renders a Stripe-authored buyer message inline — every arm of the union is buyer-facing', () => {
+    expect(
+      classifyCheckoutConfirmError({
+        message: 'Your card was declined.',
+        code: 'paymentFailed',
+      }),
+    ).toBe('inline')
+    // code: null is Stripe's AnyBuyerError — still written for the buyer.
+    expect(classifyCheckoutConfirmError({ message: 'Enter a valid ZIP.', code: null })).toBe(
+      'inline',
+    )
+  })
+
+  it('falls back to Puente copy when no message actually arrived', () => {
+    expect(classifyCheckoutConfirmError({ code: 'paymentFailed' })).toBe('retryable')
+    expect(classifyCheckoutConfirmError({ message: '', code: null })).toBe('retryable')
+    expect(classifyCheckoutConfirmError({ message: '   ', code: null })).toBe('retryable')
   })
 })

@@ -332,6 +332,28 @@ export type Translations = {
         // payment; our state advances only on the webhook).
         onrampTitle: string
         onrampBody: string
+        // Checkout Sessions rail (C2): OUR Payment Element, driven by a
+        // Checkout Session. The keys above it (payTitle, bankNote) are the
+        // Payment Intents rail's, which accepts bank debit and nothing else;
+        // here WHICH methods appear is Dashboard configuration, so the copy
+        // has to name a choice rather than a single rail. Stripe authors and
+        // localizes the form itself, its mandate text and its decline
+        // messages — this is only the Puente-authored frame.
+        checkout: {
+          title: string
+          // Steers toward bank debit, which is both cheaper for us and
+          // cheaper for the sender, and warns about the cash-advance
+          // treatment some issuers apply to a card-funded transfer.
+          // NEEDS LEGAL REVIEW (EN + ES)
+          body: string
+          // The Payment Element is still fetching the session. A line of copy,
+          // not a spinner — repo idiom is label swaps over spinners.
+          loading: string
+          // Bank debit is instant-verification only here too (no microdeposit
+          // fallback at pilot), but unlike `bankNote` above an unconnectable
+          // bank is not the end of the road: cards are enabled on this rail.
+          bankNote: string
+        }
         // Out-of-band funding (FUNDING_PROCESSOR=manual): the sender pays by a
         // rail Puente does not operate, so there is nothing to click here. The
         // copy must set the expectation without implying we received anything
@@ -1282,6 +1304,14 @@ const en: Translations = {
         onrampTitle: 'Pay with card or bank',
         onrampBody:
           'Complete your payment securely with Stripe. Stripe will verify your identity and show you its processing fee before you confirm.',
+        checkout: {
+          title: 'Choose how to pay',
+          // NEEDS LEGAL REVIEW (EN + ES)
+          body: 'Paying straight from your bank account is the cheapest way to send. Cards work too, but some card issuers treat a transfer like this as a cash advance and add their own fee.',
+          loading: 'Loading payment options…',
+          bankNote:
+            "If your bank isn't in the list, we can't connect to it yet. You can still pay by card, and you haven't been charged.",
+        },
         offlineTitle: 'Waiting for your deposit',
         // The deposit instructions live with the ops team, not in the app —
         // nothing in the schema stores them, so this copy must not promise
@@ -2251,6 +2281,14 @@ const es: Translations = {
         onrampTitle: 'Paga con tarjeta o banco',
         onrampBody:
           'Completa tu pago de forma segura con Stripe. Stripe verificará tu identidad y te mostrará su comisión de procesamiento antes de confirmar.',
+        checkout: {
+          title: 'Elige cómo pagar',
+          // NEEDS LEGAL REVIEW (ES)
+          body: 'Pagar directamente desde tu cuenta bancaria es la forma más económica de enviar. También puedes pagar con tarjeta, pero algunos emisores de tarjetas consideran una transferencia como esta un adelanto de efectivo y cobran su propia comisión.',
+          loading: 'Cargando las opciones de pago…',
+          bankNote:
+            'Si tu banco no aparece en la lista, aún no podemos conectarnos con él; puedes pagar con tarjeta. No se te ha cobrado.',
+        },
         offlineTitle: 'Esperando tu depósito',
         offlineBody:
           'Envía tu pago con las instrucciones de depósito que te compartió nuestro equipo, incluyendo el código de referencia. Esta transferencia avanza en cuanto confirmemos que el dinero llegó.',
