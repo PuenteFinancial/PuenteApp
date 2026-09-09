@@ -47,6 +47,14 @@ test('renders the needs-you queue and state-of-world panels', async ({ context, 
   // Held over-threshold transfer with its hold annotation.
   await expect(page.getByText(/velocity review|revisión de velocidad/i)).toBeVisible()
 
+  // Slice 2: the Recent activity feed — a transfer-scoped row with its
+  // reason and a treasury row with no transfer link.
+  await expect(page.getByText(/recent activity|actividad reciente/i)).toBeVisible()
+  await expect(page.getByText(/^(hold released|retención liberada)$/i)).toBeVisible()
+  await expect(page.getByText(/^(float top-up|recarga de flotante)$/i)).toBeVisible()
+  await expect(page.getByText(/^(treasury|tesorería)$/i)).toBeVisible()
+  await expect(page.getByText('ops:aaaaaaaa').first()).toBeVisible()
+
   // Latest recon findings names the failing check.
   await expect(page.getByText('bridge_wallet_float').first()).toBeVisible()
 

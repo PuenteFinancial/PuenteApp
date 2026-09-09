@@ -46,7 +46,9 @@ go through migrations only). Background: [transfer-state-machine.md](../transfer
 3. Verify: the success line says whether the submit was enqueued directly (`enqueued: false` = the
    sweep picks it up); within ~1 minute the transfer should move to `SUBMITTED` — the detail page's
    Timeline shows `FUNDED → SUBMITTED` with the `worker:payout` actor.
-4. Provenance: the release wrote a row to `public.ops_actions` (`action = 'hold_release'`, `actor =
+4. Provenance: the detail page's **Activity** section (slice 2) shows the release first — who, when,
+   the note, and `payoutHoldReason: <reason> → —` — and the board's **Recent activity** feed lists it
+   among the newest 25 actions. Underneath, the release wrote a row to `public.ops_actions` (`action = 'hold_release'`, `actor =
    'ops:<your user id>'`, `reason` = the hold reason, your `note`, `before`/`after` hold columns,
    `request_id` joining the audit-plugin log line). The submit job's transition metadata records the
    resulting submission. Query:

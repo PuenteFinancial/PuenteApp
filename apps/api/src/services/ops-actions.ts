@@ -68,6 +68,140 @@ export async function recordOpsAction(input: OpsActionInput, log: Logger): Promi
   }
 }
 
+// ── Slice 2: reading the record back ─────────────────────────────────────────
+//
+// Two reads, two shapes. The board FEED carries no note and no before/after —
+// it is a one-line log across transfers, and the operator's free text belongs
+// on the transfer it was written about. The detail HISTORY carries the note
+// and a derived `changes` list. `before`/`after` never reach the wire as
+// objects: the response schemas are strict allowlists (no additionalProperties
+// true), and a free-shaped jsonb would need exactly that. `changes` is the
+// list the UI renders anyway.
+
+const ROW_BOUND = 1000
+export const ACTIVITY_FEED_LIMIT = 25
+
+// The feed literal deliberately omits note/before/after: what is not selected
+// cannot leak, whatever a schema later says.
+const FEED_COLUMNS = 'id, created_at, actor, action, transfer_id, reason'
+const HISTORY_COLUMNS = 'id, created_at, actor, action, transfer_id, reason, note, before, after, request_id'
+
+export interface OpsActivityFeedRow {
+  id: string
+  createdAt: string
+  actor: string
+  action: string
+  /** Null for treasury-level actions (float_topup). */
+  transferId: string | null
+  reason: string | null
+}
+
+export interface OpsActivityChange {
+  key: string
+  before: string | null
+  after: string | null
+}
+
+export interface OpsActivityRow extends OpsActivityFeedRow {
+  note: string | null
+  changes: OpsActivityChange[]
+  requestId: string | null
+}
+
+interface FeedRawRow {
+  id: string
+  created_at: string
+  actor: string
+  action: string
+  transfer_id: string | null
+  reason: string | null
+}
+
+interface HistoryRawRow extends FeedRawRow {
+  note: string | null
+  before: unknown
+  after: unknown
+  request_id: string | null
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+
+// Display form of one value: strings as they are, everything else as JSON, and
+// null/undefined as null so "was unset" reads as an absence, not the word.
+function displayValue(v: unknown): string | null {
+  if (v == null) return null
+  return typeof v === 'string' ? v : JSON.stringify(v)
+}
+
+/**
+ * The key-by-key difference the operator's action made. Keys are the union of
+ * both objects in first-seen order (before's keys, then any after-only keys);
+ * a key whose value did not change is omitted. Callers write fixed keys, so
+ * this is a short list; a non-object side (should never happen — the CHECK
+ * forbids it) is treated as empty rather than thrown, because the read of a
+ * history must not fail on one malformed row.
+ */
+export function deriveChanges(before: unknown, after: unknown): OpsActivityChange[] {
+  const b = isRecord(before) ? before : {}
+  const a = isRecord(after) ? after : {}
+  const keys = [...Object.keys(b), ...Object.keys(a).filter((k) => !Object.hasOwn(b, k))]
+  const changes: OpsActivityChange[] = []
+  for (const key of keys) {
+    const bv = displayValue(b[key])
+    const av = displayValue(a[key])
+    if (bv === av) continue
+    changes.push({ key, before: bv, after: av })
+  }
+  return changes
+}
+
+function feedRow(r: FeedRawRow): OpsActivityFeedRow {
+  return {
+    id: r.id,
+    createdAt: r.created_at,
+    actor: r.actor,
+    action: r.action,
+    transferId: r.transfer_id,
+    reason: r.reason,
+  }
+}
+
+/** Newest N across every transfer — the board's Recent activity feed. */
+export async function listRecentOpsActions(limit = ACTIVITY_FEED_LIMIT): Promise<OpsActivityFeedRow[]> {
+  const { data, error } = await supabaseAdmin
+    .from('ops_actions')
+    .select(FEED_COLUMNS)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+  if (error || data == null) {
+    throw new Error(`ops activity feed select failed: ${error?.message ?? 'no rows returned'}`)
+  }
+  return (data as FeedRawRow[]).map(feedRow)
+}
+
+/** Every action taken on one transfer, newest first — the detail page's Activity section. */
+export async function listOpsActionsForTransfer(transferId: string): Promise<OpsActivityRow[]> {
+  const { data, error } = await supabaseAdmin
+    .from('ops_actions')
+    .select(HISTORY_COLUMNS)
+    .eq('transfer_id', transferId)
+    .order('created_at', { ascending: false })
+    .limit(ROW_BOUND)
+  if (error || data == null) {
+    throw new Error(`ops activity history select failed: ${error?.message ?? 'no rows returned'}`)
+  }
+  const rows = data as HistoryRawRow[]
+  if (rows.length >= ROW_BOUND) {
+    throw new Error(`ops activity history hit the ${ROW_BOUND}-row PostgREST cap — results may be silently truncated`)
+  }
+  return rows.map((r) => ({
+    ...feedRow(r),
+    note: r.note,
+    changes: deriveChanges(r.before, r.after),
+    requestId: r.request_id,
+  }))
+}
+
 function report(input: OpsActionInput, detail: string, log: Logger): void {
   // Ids and codes only — the note is operator free text and stays out of logs.
   log.error(

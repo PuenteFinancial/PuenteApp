@@ -405,7 +405,11 @@ timestamps, states, hold reasons, booleans; never names, destinations, or user i
       "claimStatus": "unclaimed",  // unclaimed | claimed | abandoned — abandoned is the STOP state (manual-refund.md)
       "claimedAt": null, "claimedBy": null,
       "providerTransferRef": null, // null = pre-submit (#254): never reached Bridge, no bridge_return batch
-      "refundPaymentRef": null } ] // non-null = disbursed but never settled; needs finishing, not disbursing
+      "refundPaymentRef": null } ], // non-null = disbursed but never settled; needs finishing, not disbursing
+  "activity": [                    // ops board slice 2: the newest 25 ops_actions across all transfers — a FEED: no note, no before/after
+    { "id": "…", "createdAt": "…", "actor": "ops:<admin id>", "action": "hold_release",   // action ∈ the seven ops writes
+      "transferId": "…",           // null for float_topup (treasury-level)
+      "reason": "velocity_review" } ]  // machine vocabulary only
 }
 ```
 
@@ -440,7 +444,12 @@ route's response schema enumerates every field. Joined rows contribute statuses 
     "entries": [ { "accountCode": "funding_receivable", "direction": "debit", "amountMinor": 30500, "currency": "USD" } ] } ],
   "paymentEvents": [ { "id": "…", "source": "funding", "eventType": "funding_succeeded", "status": "processed",
     "receivedAt": "…", "processedAt": "…", "providerRef": "cos_…", "hasError": false } ],  // no payload, no error text
-  "cancellationRequests": [], "depositInstructions": null, "disclosures": [ { "type": "prepayment", "locale": "es", "presentedAt": "…" } ]
+  "cancellationRequests": [], "depositInstructions": null, "disclosures": [ { "type": "prepayment", "locale": "es", "presentedAt": "…" } ],
+  "activity": [                    // ops board slice 2: this transfer's ops_actions HISTORY, newest first (bounded 1000, loud at cap)
+    { "id": "…", "createdAt": "…", "actor": "ops:<admin id>", "action": "hold_release", "transferId": "…", "reason": "velocity_review",
+      "note": "Verified the sender by phone.",   // the operator's free text — ONLY here, never on the feed, never in transitions
+      "changes": [ { "key": "payoutHoldReason", "before": "velocity_review", "after": null } ],  // derived STRINGS; raw before/after jsonb never crosses the wire
+      "requestId": "req-…" } ]     // joins the row to the audit-plugin log line
 }
 ```
 

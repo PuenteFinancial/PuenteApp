@@ -205,6 +205,23 @@ const DETAIL = {
   cancellationRequests: [],
   depositInstructions: null,
   disclosures: [{ type: 'prepayment', locale: 'en', presentedAt: '2026-09-08T09:56:00.000Z' }],
+  // Slice 2: the transfer's ops history — note and derived changes ride here.
+  activity: [
+    {
+      id: 'act-1',
+      createdAt: '2026-09-08T11:30:00.000Z',
+      actor: `ops:${ADMIN}`,
+      action: 'hold_release',
+      transferId: TRANSFER,
+      reason: 'velocity_review',
+      note: 'Verified the sender by phone.',
+      changes: [
+        { key: 'payoutHoldReason', before: 'velocity_review', after: null },
+        { key: 'payoutHeldAt', before: '2026-09-08T11:00:00.000Z', after: null },
+      ],
+      requestId: 'req-9',
+    },
+  ],
 }
 
 // Strip the per-request id so two 404 bodies can be compared for shape.
@@ -322,6 +339,16 @@ describe('GET /v1/ops/transfers/:id', () => {
       transitions: [{ ...DETAIL.transitions[0], metadata: { secret: true } }],
       paymentEvents: [{ ...DETAIL.paymentEvents[0], payload: { raw: 'provider body' }, error: 'boom' }],
       depositInstructions: { bridgeTransferRef: 'x', currency: 'USD', amountMinor: 1, paymentRail: 'ach', depositMessage: 'm', attachedBy: null, bankAccountNumber: '1' },
+      // Slice 2: a raw before/after object leaking past the service must not
+      // reach the wire; only the derived string changes may.
+      activity: [
+        {
+          ...DETAIL.activity[0],
+          before: { payoutHoldReason: 'velocity_review', rawRow: 'SENSITIVE' },
+          after: {},
+          changes: [{ ...DETAIL.activity[0]!.changes[0]!, rawValue: { secret: true } }, DETAIL.activity[0]!.changes[1]!],
+        },
+      ],
     })
     const app = await buildApp()
     const res = await supertest(app.server)
@@ -330,10 +357,11 @@ describe('GET /v1/ops/transfers/:id', () => {
 
     expect(res.status).toBe(200)
     const text = JSON.stringify(res.body)
-    for (const forbidden of ['userId', 'bankAccountNumber', 'clabeLast4', 'recipientName', 'metadata', 'payload', '"error"']) {
+    for (const forbidden of ['userId', 'bankAccountNumber', 'clabeLast4', 'recipientName', 'metadata', 'payload', '"error"', 'rawRow', 'rawValue']) {
       expect(text).not.toContain(forbidden)
     }
     expect(res.body.paymentEvents[0]).toEqual(DETAIL.paymentEvents[0])
+    expect(res.body.activity).toEqual(DETAIL.activity)
   })
 
   it('500s with the generic envelope when the read throws, logging the message only', async () => {

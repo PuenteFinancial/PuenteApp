@@ -6,6 +6,7 @@ import { getAccountBalance } from './ledger.js'
 import { coarseAnchor, thresholdMs, WATCHED_STATES } from '../jobs/stuck-watch.js'
 import { processorNameFor } from './funding/index.js'
 import { listRefundBacklog, type ClaimStatus } from './refunds.js'
+import { listRecentOpsActions, ACTIVITY_FEED_LIMIT, type OpsActivityFeedRow } from './ops-actions.js'
 
 // The 8.5-v1 ops overview (GET /v1/ops/overview, docs/api-contract.md): one
 // read-only aggregate the admin page renders in a single pass. Panels are all
@@ -189,6 +190,9 @@ export interface OpsOverview {
   reconciliationRuns: OpsReconciliationRun[]
   workerHeartbeats: OpsWorkerHeartbeat[]
   refundBacklog: OpsParkedRefund[]
+  // Slice 2: the newest ops actions across every transfer — one line each,
+  // no operator note (that stays on the transfer's own page).
+  activity: OpsActivityFeedRow[]
 }
 
 // Row shape for the open-transfers select — a superset of stuck-watch's
@@ -433,7 +437,7 @@ async function readRefundBacklog(): Promise<OpsParkedRefund[]> {
 
 export async function buildOpsOverview(): Promise<OpsOverview> {
   const nowMs = Date.now()
-  const [pending, openTransfers, floatCeiling, transferCounts, recon, workerHeartbeats, refundBacklog] =
+  const [pending, openTransfers, floatCeiling, transferCounts, recon, workerHeartbeats, refundBacklog, activity] =
     await Promise.all([
       listPendingReviews(),
       readOpenTransfers(nowMs),
@@ -442,6 +446,7 @@ export async function buildOpsOverview(): Promise<OpsOverview> {
       readReconciliationRuns(),
       readWorkerHeartbeats(nowMs),
       readRefundBacklog(),
+      listRecentOpsActions(ACTIVITY_FEED_LIMIT),
     ])
   return {
     generatedAt: new Date(nowMs).toISOString(),
@@ -461,5 +466,6 @@ export async function buildOpsOverview(): Promise<OpsOverview> {
     reconciliationRuns: recon.runs,
     workerHeartbeats,
     refundBacklog,
+    activity,
   }
 }
