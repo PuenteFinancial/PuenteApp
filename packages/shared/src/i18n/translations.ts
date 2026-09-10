@@ -921,7 +921,7 @@ const en: Translations = {
     sub: 'Send money the way you already do, and build real U.S. credit with every transfer. All in one app.',
     cta1: 'Join the Waitlist',
     cta2: 'See how it works',
-    elig: 'Works with your ITIN or SSN.',
+    elig: 'Works with your ITIN or SSN',
     // Credit reporting is not built (no furnisher code exists) — copy must not
     // claim it. Forward-looking wording pending counsel review of the
     // replacement (audit 2026-09-02, UDAAP). NEEDS LEGAL REVIEW (EN + ES)
@@ -1933,7 +1933,7 @@ const es: Translations = {
     sub: 'Envía dinero como ya lo haces, y construye crédito real en EE. UU. con cada transferencia. Todo en una sola app.',
     cta1: 'Únete a la Lista de Espera',
     cta2: 'Mira cómo funciona',
-    elig: 'Funciona con tu ITIN o SSN.',
+    elig: 'Funciona con tu ITIN o SSN',
     pills: [
       // NEEDS LEGAL REVIEW (EN + ES) — see the en block
       'Construcción de crédito, próximamente',
