@@ -170,10 +170,20 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
     const unhandled = { outcome: 'unhandled', eventId: envelope.id, eventType: envelope.type } as const
     const object = envelope.data?.object
 
-    // Not a checkout.session.* event: hand it to the parent, which already
-    // parses payment_intent.* and charge.dispute.created. That fall-through is
-    // load-bearing rather than tidiness — it is where card clearing and
-    // post-settlement ACH returns come from on this rail.
+    // `payment_intent.processing` is the PI rail's FUNDED signal and this rail
+    // does not want it: `checkout.session.completed` is funding here, and a
+    // bank debit emits `processing` about a second BEFORE `completed` (cards
+    // never emit it at all). Left to fall through, the parent maps it to
+    // funding_succeeded and the row is funded a second early under the PI's
+    // ref — measured 2026-09-10 on the first ACH payment. Acked as unhandled;
+    // `completed` carries everything this rail needs.
+    if (envelope.type === 'payment_intent.processing') return unhandled
+
+    // Every other non-checkout.session.* event: hand it to the parent, which
+    // already parses payment_intent.succeeded / payment_failed and
+    // charge.dispute.created. That fall-through is load-bearing rather than
+    // tidiness — it is where card clearing and post-settlement ACH returns
+    // come from on this rail.
     if (!CHECKOUT_EVENTS.has(envelope.type)) return super.parseEvent(rawBody)
 
     if (!object || typeof object['id'] !== 'string') return { outcome: 'malformed' }
@@ -275,6 +285,11 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
    * the claim stays standing and a human looks.
    */
   private async paymentIntentFor(sessionId: string): Promise<string> {
+    // Tolerate a ref that is ALREADY the PaymentIntent. Two staging rows carry
+    // one from the 2026-09-10 overwrite (fixed above, but the rows remain), and
+    // refusing them would make exactly the transfers that exposed the bug the
+    // ones that cannot be refunded.
+    if (sessionId.startsWith('pi_')) return sessionId
     const session = await this.client.checkout.sessions.retrieve(sessionId)
     const pi = session.payment_intent
     const id = typeof pi === 'string' ? pi : (pi as Stripe.PaymentIntent | null)?.id

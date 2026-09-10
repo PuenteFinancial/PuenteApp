@@ -39,6 +39,9 @@ export interface FundingTransferRow {
   /** Read so the FUNDED path can notice a clearing that already arrived — see
    *  the out-of-order catch-up in applyFundingSucceeded. */
   funding_cleared: boolean
+  /** Read so a funding event can never REPLACE the ref initiation persisted —
+   *  see the guard on fundingPaymentRef in applyFundingSucceeded. */
+  funding_payment_ref: string | null
 }
 
 export type ApplyFundingOutcome =
@@ -55,7 +58,7 @@ export type ApplyFundingOutcome =
 async function loadFundingTransfer(transferId: string): Promise<FundingTransferRow | null> {
   const { data } = await supabaseAdmin
     .from('transfers')
-    .select('id, state, send_amount_minor, fee_amount_minor, margin_minor, funding_cleared')
+    .select('id, state, send_amount_minor, fee_amount_minor, margin_minor, funding_cleared, funding_payment_ref')
     .eq('id', transferId)
     .single()
   return (data as FundingTransferRow | null) ?? null
@@ -95,7 +98,18 @@ export async function applyFundingSucceeded(input: {
       ledgerEntries: fundedLedgerEntries(transfer),
       paymentAt,
       cancelableUntil: new Date(paymentAt.getTime() + env.CANCEL_WINDOW_MINUTES * 60_000),
-      fundingPaymentRef: input.paymentRef,
+      // NEVER REPLACE A REF INITIATION PERSISTED. The RPC coalesces
+      // (new ?? existing), so passing the event's ref would overwrite. On the
+      // Checkout rail with bank debit that is exactly what happened
+      // (2026-09-10, f07c8e67): `payment_intent.processing` beat
+      // `checkout.session.completed`, came through the parent PI map as
+      // funding_succeeded, and wrote its `pi_…` over the `cs_…` the row was
+      // created with — after which void/refund, which look the Session up by
+      // that ref, throw on a 404. The event's ref is only ever needed when
+      // initiation did not persist one (the deferred crypto rail, whose
+      // session exists only from the pay step). Every eager rail already
+      // carries the same value both places, so this changes nothing for them.
+      fundingPaymentRef: transfer.funding_payment_ref ?? input.paymentRef,
     })
   } catch (err) {
     if (err instanceof TransferRpcError && err.code === 'transition_conflict') {

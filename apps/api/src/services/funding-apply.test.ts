@@ -244,6 +244,11 @@ describe('applyOnrampFunded — the amount guard (#213)', () => {
   }
 
   it('a to-the-cent match delegates to the shared FUNDED applier', async () => {
+    // The deferred rail has NO ref until the pay step creates the session, so
+    // at funding time the row's ref is null and the event's is what gets
+    // written. (The shared PENDING fixture carries a manual-rail ref, which a
+    // funding event must never replace — the C5 ref-overwrite guard.)
+    stubTransfer({ ...PENDING, funding_payment_ref: null })
     const result = await funded(MATCHING)
     expect(result).toEqual({ outcome: 'applied', enqueueFailed: false })
     const transition = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
@@ -374,7 +379,7 @@ describe('applyOnrampSettlement (#213)', () => {
   })
 
   it('out-of-order: catches up PENDING_PAYMENT → FUNDED before the cash leg', async () => {
-    row = { ...PENDING, refund_payment_ref: null } // still PENDING_PAYMENT
+    row = { ...PENDING, refund_payment_ref: null, funding_payment_ref: null /* deferred rail: no ref yet */ } // still PENDING_PAYMENT
     transitionTransfer.mockImplementation(async () => {
       row['state'] = 'FUNDED'
       return { id: TRANSFER_ID }
@@ -586,5 +591,35 @@ describe('out-of-order clearing catch-up (C5 — found by the first real payment
 
     expect(out).toEqual({ outcome: 'applied', enqueueFailed: false })
     expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID, 'api')
+  })
+})
+
+describe('a funding event never replaces the ref initiation persisted (C5 — the ACH overwrite)', () => {
+  beforeEach(() => {
+    transitionTransfer.mockReset()
+    postLedgerTransaction.mockReset()
+    enqueuePayoutSubmit.mockReset()
+    transitionTransfer.mockResolvedValue(undefined)
+    enqueuePayoutSubmit.mockResolvedValue(undefined)
+  })
+
+  const succeedWith = (paymentRef: string) =>
+    applyFundingSucceeded({ transferId: TRANSFER_ID, paymentRef, eventId: 'evt_x', actor: 'webhook:funding' })
+
+  it('keeps the persisted cs_ ref when the funding event carries a pi_ ref', async () => {
+    // The RPC coalesces (new ?? existing); passing the event's ref would win.
+    // On 2026-09-10 payment_intent.processing did exactly that to f07c8e67,
+    // after which void/refund — which retrieve the Session by this ref —
+    // threw on a 404.
+    stubTransfer({ ...PENDING, funding_cleared: false, funding_payment_ref: 'cs_test_persisted' })
+    await succeedWith('pi_from_event')
+    expect(transitionTransfer).toHaveBeenCalledTimes(1)
+    expect(transitionTransfer.mock.calls[0]![0]).toMatchObject({ fundingPaymentRef: 'cs_test_persisted' })
+  })
+
+  it('writes the event ref only when initiation persisted none — the deferred crypto rail', async () => {
+    stubTransfer({ ...PENDING, funding_cleared: false, funding_payment_ref: null })
+    await succeedWith('cos_from_pay_step')
+    expect(transitionTransfer.mock.calls[0]![0]).toMatchObject({ fundingPaymentRef: 'cos_from_pay_step' })
   })
 })
