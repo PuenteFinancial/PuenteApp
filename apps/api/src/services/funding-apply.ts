@@ -8,9 +8,12 @@ import { getFundingProcessor, undoModeForRef } from './funding/index.js'
 import {
   fundedLedgerEntries,
   fundingClearedLedgerEntries,
+  fundingReversedLedgerEntries,
+  fundingReversedVoidLedgerEntries,
   transitionTransfer,
   TransferRpcError,
 } from './transfers.js'
+import { holdPayoutForDispute } from './payout-holds.js'
 
 // The PENDING_PAYMENT → FUNDED / PAYMENT_FAILED transitions and the ACH-clears
 // cash leg, lifted out of the funding webhook route so the ops manual-funding
@@ -33,6 +36,8 @@ import {
 export interface FundingTransferRow {
   id: string
   state: string
+  /** Read so the loss path can freeze the sender — see applyFundingReversed. */
+  user_id: string
   send_amount_minor: number
   fee_amount_minor: number
   margin_minor: number
@@ -58,7 +63,7 @@ export type ApplyFundingOutcome =
 async function loadFundingTransfer(transferId: string): Promise<FundingTransferRow | null> {
   const { data } = await supabaseAdmin
     .from('transfers')
-    .select('id, state, send_amount_minor, fee_amount_minor, margin_minor, funding_cleared, funding_payment_ref')
+    .select('id, state, user_id, send_amount_minor, fee_amount_minor, margin_minor, funding_cleared, funding_payment_ref')
     .eq('id', transferId)
     .single()
   return (data as FundingTransferRow | null) ?? null
@@ -207,6 +212,126 @@ export async function applyFundingFailed(input: {
     throw err
   }
   return { outcome: 'applied', enqueueFailed: false }
+}
+
+export type ApplyFundingReversedOutcome =
+  /** Post-delivery. The transfer is at FUNDING_REVERSED and the loss is booked. */
+  | { outcome: 'reversed'; frozen: boolean; cleared: boolean }
+  /** Pre-payout. The payout is stopped and NOTHING is booked — nothing is lost
+   *  yet. `held` is false when the row was already held by someone else. */
+  | { outcome: 'held'; frozen: boolean; held: boolean }
+  /** The payout is already at Bridge. It cannot be stopped and the loss cannot
+   *  be booked yet (delivery has not been confirmed) — a human's problem. */
+  | { outcome: 'in_flight'; state: string; frozen: boolean }
+  /** No open exposure: already refunded, canceled, or never funded. Still a
+   *  fraud signal worth freezing on. */
+  | { outcome: 'no_exposure'; state: string; frozen: boolean }
+  | { outcome: 'replayed' }
+  | { outcome: 'stale' }
+  | { outcome: 'unknown_transfer' }
+
+/**
+ * Freeze the sender. Idempotent, and returns whether THIS call flipped it, so
+ * a redelivered dispute does not re-page.
+ *
+ * Deliberately does not touch kyc_status: the sender is still the verified
+ * human they were. `status` is the transacting privilege, and that is what a
+ * clawback withdraws.
+ */
+async function suspendSender(userId: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from('users')
+    .update({ status: 'suspended' })
+    .eq('id', userId)
+    .neq('status', 'suspended')
+    .select('id')
+  // Throws on purpose. A freeze that silently failed is the difference between
+  // one loss and several, and the caller is a webhook whose provider will
+  // redeliver into a clean attempt.
+  if (error) throw new Error(`sender suspend failed: ${error.message}`)
+  return ((data ?? []) as Array<{ id: string }>).length === 1
+}
+
+/**
+ * The loss path: a dispute or ACH return on money we already collected.
+ *
+ * Everything else in this file moves a transfer FORWARD through money it is
+ * gaining. This one is the only place the system recognizes money it has LOST,
+ * and what it does depends entirely on where the pesos are:
+ *
+ *   COMPLETED          delivered and irreversible → FUNDING_REVERSED + the loss
+ *                      batch. The obligation was already discharged, so nothing
+ *                      is being reversed; a loss is being recognized.
+ *   FUNDED             not yet sent → hold the payout, book NOTHING. There is
+ *                      no loss while the pesos are still ours.
+ *   SUBMITTED/IN_FLIGHT already at Bridge → cannot stop it, cannot book it
+ *                      (delivery unconfirmed). Page; the recon dispute check
+ *                      catches it once the payout resolves.
+ *   anything else      no open exposure (refunded, canceled, never funded), but
+ *                      a dispute here is a fraud signal, so the freeze stands.
+ *
+ * The sender is frozen FIRST, before any branch: it is the cheap, idempotent,
+ * protective act, and doing it before the money work means a failure part-way
+ * through still leaves the account stopped.
+ *
+ * Amount booked is send + fee, the whole sum collected — see
+ * fundingReversedLedgerEntries for why a partial dispute pages instead.
+ */
+export async function applyFundingReversed(input: {
+  transferId: string
+  paymentRef: string
+  eventId: string
+  actor: string
+  reason?: string
+}): Promise<ApplyFundingReversedOutcome> {
+  const transfer = await loadFundingTransfer(input.transferId)
+  if (!transfer) return { outcome: 'unknown_transfer' }
+  if (transfer.state === 'FUNDING_REVERSED') return { outcome: 'replayed' }
+
+  const frozen = await suspendSender(transfer.user_id)
+
+  if (transfer.state === 'COMPLETED') {
+    // Which asset is credited depends on whether the cash ever arrived. Picking
+    // the wrong one invents money — see the two builders in transfers.ts.
+    const cleared = transfer.funding_cleared
+    try {
+      await transitionTransfer({
+        transferId: transfer.id,
+        fromState: 'COMPLETED',
+        toState: 'FUNDING_REVERSED',
+        actor: input.actor,
+        reason: input.reason ?? 'funding reversed',
+        metadata: {
+          eventId: input.eventId,
+          paymentRef: input.paymentRef,
+          fundingCleared: cleared,
+        },
+        ledgerDescription: cleared
+          ? 'funding reversed after delivery — collected cash clawed back'
+          : 'funding reversed after delivery — uncleared funding written off',
+        ledgerEntries: cleared
+          ? fundingReversedLedgerEntries(transfer)
+          : fundingReversedVoidLedgerEntries(transfer),
+      })
+    } catch (err) {
+      if (err instanceof TransferRpcError && err.code === 'transition_conflict') {
+        return { outcome: 'stale' }
+      }
+      throw err
+    }
+    return { outcome: 'reversed', frozen, cleared }
+  }
+
+  if (transfer.state === 'FUNDED') {
+    const held = await holdPayoutForDispute(transfer.id)
+    return { outcome: 'held', frozen, held }
+  }
+
+  if (transfer.state === 'SUBMITTED' || transfer.state === 'IN_FLIGHT') {
+    return { outcome: 'in_flight', state: transfer.state, frozen }
+  }
+
+  return { outcome: 'no_exposure', state: transfer.state, frozen }
 }
 
 export type ApplyFundingClearedOutcome =

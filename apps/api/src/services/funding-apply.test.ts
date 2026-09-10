@@ -30,8 +30,18 @@ vi.mock('./funding/index.js', async (importOriginal) => {
   return { ...actual, getFundingProcessor: () => getFundingProcessor() }
 })
 
-const { recordManualFunding, applyFundingSucceeded, applyOnrampFunded, applyOnrampSettlement } =
-  await import('./funding-apply.js')
+const holdPayoutForDispute = vi.hoisted(() => vi.fn(async (..._a: unknown[]) => true))
+vi.mock('./payout-holds.js', () => ({
+  holdPayoutForDispute: (...a: unknown[]) => holdPayoutForDispute(...a),
+}))
+
+const {
+  recordManualFunding,
+  applyFundingSucceeded,
+  applyFundingReversed,
+  applyOnrampFunded,
+  applyOnrampSettlement,
+} = await import('./funding-apply.js')
 const { TransferRpcError } = await import('./transfers.js')
 
 const TRANSFER_ID = 'cccccccc-1111-4222-8333-444444444444'
@@ -681,5 +691,151 @@ describe('a funding event never replaces the ref initiation persisted (C5 — th
     stubTransfer({ ...PENDING, funding_cleared: false, funding_payment_ref: null })
     await succeedWith('cos_from_pay_step')
     expect(transitionTransfer.mock.calls[0]![0]).toMatchObject({ fundingPaymentRef: 'cos_from_pay_step' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// applyFundingReversed — THE LOSS PATH.
+//
+// The only place the system recognizes money it has LOST, so each arm is
+// pinned: what is booked, what is stopped, and what is merely paged. Getting
+// the branch wrong either invents money (booking a loss on pesos we still
+// hold) or hides one (paying out against a clawback).
+// ---------------------------------------------------------------------------
+
+const USER_ID = 'dddddddd-1111-4222-8333-444444444444'
+
+const reversibleRow = (overrides: Record<string, unknown> = {}) => ({
+  id: TRANSFER_ID,
+  state: 'COMPLETED',
+  user_id: USER_ID,
+  send_amount_minor: 5000,
+  fee_amount_minor: 100,
+  margin_minor: 0,
+  funding_cleared: true,
+  funding_payment_ref: 'pi_123',
+  ...overrides,
+})
+
+/** The transfer read, then the sender-freeze update. `frozen` false means the
+ *  sender was ALREADY suspended (a second dispute), which must not re-page. */
+function stubReversal(row: unknown, frozen = true) {
+  let call = 0
+  from.mockImplementation(() => {
+    const b: Record<string, unknown> = {}
+    for (const m of ['select', 'eq', 'update', 'neq']) b[m] = () => b
+    b['single'] = async () => ({ data: row, error: null })
+    b['maybeSingle'] = async () => ({ data: row, error: null })
+    ;(b as { then?: unknown }).then = (r: (v: unknown) => void) =>
+      r({ data: frozen ? [{ id: USER_ID }] : [], error: null })
+    call += 1
+    return b
+  })
+  return () => call
+}
+
+const reverse = () =>
+  applyFundingReversed({
+    transferId: TRANSFER_ID,
+    paymentRef: 'pi_123',
+    eventId: 'evt_1',
+    actor: 'system:funding_webhook',
+    reason: 'fraudulent',
+  })
+
+describe('applyFundingReversed', () => {
+  beforeEach(() => {
+    transitionTransfer.mockReset().mockResolvedValue({})
+    holdPayoutForDispute.mockReset().mockResolvedValue(true)
+  })
+
+  it('COMPLETED + cleared: books the loss against CASH and freezes the sender', async () => {
+    stubReversal(reversibleRow())
+
+    const out = await reverse()
+
+    expect(out).toEqual({ outcome: 'reversed', frozen: true, cleared: true })
+    const arg = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+    expect(arg['fromState']).toBe('COMPLETED')
+    expect(arg['toState']).toBe('FUNDING_REVERSED')
+    // send + fee, the whole sum collected.
+    expect(arg['ledgerEntries']).toEqual([
+      { account_code: 'loss_funding_reversed', direction: 'debit', amount_minor: 5100, currency: 'USD' },
+      { account_code: 'cash_clearing', direction: 'credit', amount_minor: 5100, currency: 'USD' },
+    ])
+  })
+
+  it('COMPLETED + NOT cleared: credits the RECEIVABLE, never cash that never arrived', async () => {
+    // The ACH returned while the pull was still in flight. Crediting
+    // cash_clearing here would claim a withdrawal from money we never held and
+    // strand funding_receivable open forever.
+    stubReversal(reversibleRow({ funding_cleared: false }))
+
+    const out = await reverse()
+
+    expect(out).toEqual({ outcome: 'reversed', frozen: true, cleared: false })
+    const arg = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+    expect(arg['ledgerEntries']).toEqual([
+      { account_code: 'loss_funding_reversed', direction: 'debit', amount_minor: 5100, currency: 'USD' },
+      { account_code: 'funding_receivable', direction: 'credit', amount_minor: 5100, currency: 'USD' },
+    ])
+  })
+
+  it('FUNDED: stops the payout and books NOTHING — nothing is lost yet', async () => {
+    stubReversal(reversibleRow({ state: 'FUNDED' }))
+
+    const out = await reverse()
+
+    expect(out).toEqual({ outcome: 'held', frozen: true, held: true })
+    expect(holdPayoutForDispute).toHaveBeenCalledWith(TRANSFER_ID)
+    expect(transitionTransfer).not.toHaveBeenCalled()
+  })
+
+  it.each(['SUBMITTED', 'IN_FLIGHT'])(
+    '%s: cannot stop it and cannot book it — reports for a human, freezes anyway',
+    async (state) => {
+      stubReversal(reversibleRow({ state }))
+
+      const out = await reverse()
+
+      expect(out).toEqual({ outcome: 'in_flight', state, frozen: true })
+      expect(transitionTransfer).not.toHaveBeenCalled()
+      expect(holdPayoutForDispute).not.toHaveBeenCalled()
+    },
+  )
+
+  it('REFUNDED: no open exposure, but still a fraud signal worth freezing on', async () => {
+    stubReversal(reversibleRow({ state: 'REFUNDED' }))
+
+    const out = await reverse()
+
+    expect(out).toEqual({ outcome: 'no_exposure', state: 'REFUNDED', frozen: true })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+  })
+
+  it('already FUNDING_REVERSED: a replay books nothing and does not re-freeze', async () => {
+    stubReversal(reversibleRow({ state: 'FUNDING_REVERSED' }))
+
+    expect(await reverse()).toEqual({ outcome: 'replayed' })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    // The freeze read must not even run — a redelivered dispute is not news.
+    expect(holdPayoutForDispute).not.toHaveBeenCalled()
+  })
+
+  it('an already-suspended sender reports frozen:false so the page does not repeat', async () => {
+    stubReversal(reversibleRow(), false)
+    expect(await reverse()).toEqual({ outcome: 'reversed', frozen: false, cleared: true })
+  })
+
+  it('unknown transfer: nothing to act on', async () => {
+    stubReversal(null)
+    expect(await reverse()).toEqual({ outcome: 'unknown_transfer' })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+  })
+
+  it('a lost transition race is stale, never forced', async () => {
+    stubReversal(reversibleRow())
+    transitionTransfer.mockRejectedValue(new TransferRpcError('transition_conflict'))
+    expect(await reverse()).toEqual({ outcome: 'stale' })
   })
 })

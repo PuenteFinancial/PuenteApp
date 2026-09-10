@@ -79,7 +79,7 @@ export async function requireOnboardedUser(
   const { data, error } = await supabaseAdmin
     .from('users')
     .select(
-      'kyc_status, bridge_customer_id, first_name, last_name, email, address_line1, address_city, address_state, address_postal_code',
+      'kyc_status, status, bridge_customer_id, first_name, last_name, email, address_line1, address_city, address_state, address_postal_code',
     )
     .eq('id', userId)
     .single()
@@ -90,6 +90,7 @@ export async function requireOnboardedUser(
   }
   const user = data as {
     kyc_status: string
+    status: string
     bridge_customer_id: string | null
     first_name: string | null
     last_name: string | null
@@ -98,6 +99,22 @@ export async function requireOnboardedUser(
     address_city: string | null
     address_state: string | null
     address_postal_code: string | null
+  }
+
+  // THE SENDER FREEZE (the loss path, 2026-09-10). Checked before anything
+  // rail-specific because it is not about identity or readiness: a chargeback
+  // or ACH return withdraws the privilege of transacting, whatever the rail.
+  // Placed here rather than on the transfer-create handler alone because this
+  // helper already gates the ENTIRE post-onboarding surface — recipients and
+  // destinations included — and a frozen sender adding a fresh recipient is
+  // the first move of the fraud pattern this freeze exists to stop.
+  //
+  // Deliberately NOT applied to cancellation: routes/v1/transfers.ts leaves
+  // cancel ungated on purpose (a legal right), and freezing must not take that
+  // away from someone whose money is still in our hands.
+  if (user.status === 'suspended') {
+    await sendError(reply, 403, 'account_suspended', 'Account suspended')
+    return null
   }
 
   // WHAT "ONBOARDED" MEANS DEPENDS ON THE RAIL (C4).

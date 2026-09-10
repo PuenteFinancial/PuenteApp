@@ -71,6 +71,9 @@ function chainResolving(result: { data: unknown; error: unknown }) {
   for (const method of ['select', 'or', 'limit', 'like', 'in', 'eq']) {
     c[method] = vi.fn().mockReturnValue(c)
   }
+  // Single-row terminal, for the checks that resolve one transfer at a time
+  // (the dispute sweep's alternate-ref retry).
+  c['maybeSingle'] = vi.fn(async () => result)
   c['then'] = (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) =>
     Promise.resolve(result).then(resolve, reject)
   return c as Record<string, ReturnType<typeof vi.fn>> & PromiseLike<unknown>
@@ -739,6 +742,7 @@ const stripeProcessor = () => ({
   isConfigured: () => true,
   getPaymentStatus: vi.fn(),
   listRecentPayments: vi.fn(),
+  listRecentDisputes: vi.fn(),
 })
 
 describe('cleared_postings — the flag must have its ledger leg', () => {
@@ -951,5 +955,120 @@ describe('stripe_orphans', () => {
       'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
       '99999999-8888-4777-8666-555555555554',
     ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// stripe_disputes — the backstop for a clawback the webhook never saw.
+// ---------------------------------------------------------------------------
+describe('stripe_disputes', () => {
+  const dispute = (over: Record<string, unknown> = {}) => ({
+    disputeRef: 'du_1',
+    paymentRef: 'pi_1',
+    status: 'needs_response',
+    createdAt: daysAgo(1),
+    ...over,
+  })
+
+  it('skips under the mock processor', async () => {
+    getFundingProcessor.mockReturnValue({ provider: 'mock', isConfigured: () => true })
+    expect((await check('stripe_disputes').run()).status).toBe('skipped')
+  })
+
+  it('looks back far enough to catch a chargeback that arrived months later', async () => {
+    const processor = stripeProcessor()
+    processor.listRecentDisputes.mockResolvedValue([])
+    getFundingProcessor.mockReturnValue(processor)
+
+    const outcome = await check('stripe_disputes').run()
+
+    // 60 days, not the orphan checks' 7: a card dispute can land long after the
+    // payment, and by definition we only notice a MISSED one afterwards.
+    expect(processor.listRecentDisputes).toHaveBeenCalledWith({
+      createdAfter: new Date(nowMs - 60 * 24 * 3600_000),
+      limit: 100,
+    })
+    expect(outcome.status).toBe('pass')
+  })
+
+  it('passes a dispute whose transfer was reversed, and one whose payout was held', async () => {
+    const processor = stripeProcessor()
+    processor.listRecentDisputes.mockResolvedValue([dispute(), dispute({ disputeRef: 'du_2', paymentRef: 'pi_2' })])
+    getFundingProcessor.mockReturnValue(processor)
+    from.mockReturnValue(
+      chainResolving({
+        data: [
+          // the delivered case: loss booked
+          { id: 'tr-1', state: 'FUNDING_REVERSED', payout_hold_reason: null, funding_payment_ref: 'pi_1' },
+          // the undelivered case: payout stopped, nothing booked
+          { id: 'tr-2', state: 'FUNDED', payout_hold_reason: 'funding_disputed', funding_payment_ref: 'pi_2' },
+        ],
+        error: null,
+      }),
+    )
+
+    expect((await check('stripe_disputes').run()).status).toBe('pass')
+  })
+
+  it('PAGES a dispute whose transfer still reads COMPLETED — the webhook was missed', async () => {
+    // The exact shape of the bug this check exists for: money clawed back, the
+    // transfer untouched, and the sender still free to send.
+    const processor = stripeProcessor()
+    processor.listRecentDisputes.mockResolvedValue([dispute()])
+    getFundingProcessor.mockReturnValue(processor)
+    from.mockReturnValue(
+      chainResolving({
+        data: [{ id: 'tr-1', state: 'COMPLETED', payout_hold_reason: null, funding_payment_ref: 'pi_1' }],
+        error: null,
+      }),
+    )
+
+    const outcome = await check('stripe_disputes').run()
+
+    expect(outcome.status).toBe('findings')
+    expect(outcome.findings[0]!.key).toBe('stripe-dispute-unrecorded:du_1')
+    expect(outcome.findings[0]!.detail).toMatchObject({ transferId: 'tr-1', state: 'COMPLETED' })
+  })
+
+  it('pages a dispute it cannot tie to any transfer', async () => {
+    const processor = stripeProcessor()
+    processor.listRecentDisputes.mockResolvedValue([dispute({ paymentRef: '' })])
+    getFundingProcessor.mockReturnValue(processor)
+    from.mockReturnValue(chainResolving({ data: [], error: null }))
+
+    const outcome = await check('stripe_disputes').run()
+
+    expect(outcome.findings.map((f) => f.key)).toEqual(['stripe-dispute-unjoinable:du_1'])
+  })
+
+  it('resolves the Checkout rail ref divergence before calling a dispute unjoinable', async () => {
+    // The persisted ref is the SESSION id while the dispute carries the
+    // PaymentIntent id, so the direct join misses by construction.
+    const processor = { ...stripeProcessor(), resolveAlternateFundingRef: vi.fn(async () => 'cs_test_1') }
+    processor.listRecentDisputes.mockResolvedValue([dispute()])
+    getFundingProcessor.mockReturnValue(processor)
+    from
+      .mockReturnValueOnce(chainResolving({ data: [], error: null }))
+      .mockReturnValueOnce(
+        chainResolving({ data: { id: 'tr-1', state: 'FUNDING_REVERSED', payout_hold_reason: null }, error: null }),
+      )
+
+    const outcome = await check('stripe_disputes').run()
+
+    expect(processor.resolveAlternateFundingRef).toHaveBeenCalledWith('pi_1')
+    expect(outcome.status).toBe('pass')
+  })
+
+  it('a full page is TRUNCATED, not "everything"', async () => {
+    const processor = stripeProcessor()
+    processor.listRecentDisputes.mockResolvedValue(
+      Array.from({ length: 100 }, (_, i) => dispute({ disputeRef: `du_${i}`, paymentRef: `pi_${i}` })),
+    )
+    getFundingProcessor.mockReturnValue(processor)
+    from.mockReturnValue(chainResolving({ data: [], error: null }))
+
+    const outcome = await check('stripe_disputes').run()
+
+    expect(outcome.findings[0]!.key).toBe('stripe-disputes-truncated')
   })
 })

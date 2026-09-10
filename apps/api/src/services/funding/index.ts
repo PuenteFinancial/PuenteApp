@@ -138,6 +138,16 @@ export interface FundingPaymentListItem {
   createdAt: string
 }
 
+/** One dispute as reconciliation needs it. `paymentRef` is the id the funding
+ *  side persisted or can be joined through — the same ref the webhook's
+ *  fallback join uses. */
+export interface FundingDisputeListItem {
+  disputeRef: string
+  paymentRef: string
+  status: string
+  createdAt: string
+}
+
 // The result of a funding-undo op (slice 6). Persisted to
 // transfers.refund_payment_ref (one undo path per transfer). `pending` is for a
 // real async return (Stripe ACH refund); the mock void/refund is always
@@ -394,6 +404,19 @@ export interface FundingProcessor {
    */
   expireFunding?(input: { paymentRef: string }): Promise<'expired' | 'not_open'>
   listRecentPayments?(input: { createdAfter: Date; limit: number }): Promise<FundingPaymentListItem[]>
+  /**
+   * OPTIONAL — reconciliation's dispute sweep (the loss path, 2026-09-10).
+   *
+   * Lists the account's recent disputes so recon can answer the one question
+   * the webhook cannot: did we MISS one? A dispute that never reached us — an
+   * unsubscribed event, a delivery that failed past its retry window, a
+   * handler that threw for three days — leaves money clawed back with the
+   * transfer still reading COMPLETED and the sender still able to send. The
+   * webhook is the fast path; this is the one that notices its absence.
+   *
+   * A full page means TRUNCATED, not "everything", exactly as for payments.
+   */
+  listRecentDisputes?(input: { createdAfter: Date; limit: number }): Promise<FundingDisputeListItem[]>
   /**
    * OPTIONAL — only rails whose persisted funding_payment_ref can diverge
    * from what an echo-less event's paymentRef carries need to implement this.

@@ -14,6 +14,7 @@ import { actOnRefundTailEvent } from '../../services/refunds.js'
 import {
   applyFundingCleared,
   applyFundingFailed,
+  applyFundingReversed,
   applyFundingSucceeded,
   applyOnrampFunded,
   applyOnrampSettlement,
@@ -565,15 +566,41 @@ export async function webhooksRoute(server: FastifyInstance) {
       }
 
       if (event.type === 'funding_reversed') {
-        // THE LOSS PATH, not yet implemented: a post-settlement ACH return or
-        // card chargeback on a transfer whose MXN may already be delivered.
-        // The full handler (state-dependent branch, FUNDING_REVERSED + loss
-        // posting per ledger-rules.md, sender freeze) is its own slice. Until
-        // it exists the one non-negotiable is that a dispute never passes
-        // silently — the old warn log went only to the server logs and nothing
-        // paged. Ack, don't 4xx/5xx: a redelivery loop can't fix a handler
-        // that cannot act, and the fatal page (fingerprinted per transfer, so
-        // redeliveries collapse into one issue) is what summons the human.
+        // THE LOSS PATH: a post-settlement ACH return or card chargeback on
+        // money we already collected. What it does depends on where the pesos
+        // are — see applyFundingReversed, which owns that branch.
+        //
+        // Every arm still PAGES. A clawback is the one event class where the
+        // system acting correctly is not enough: someone has to decide whether
+        // to fight the dispute, and on the arms we cannot act on at all
+        // (payout already at Bridge) a human is the only remedy. Severity
+        // tracks how bad the position is, and fingerprints are per transfer so
+        // redeliveries collapse into one issue.
+        let applied: Awaited<ReturnType<typeof applyFundingReversed>>
+        try {
+          applied = await applyFundingReversed({
+            transferId,
+            paymentRef: event.paymentRef,
+            eventId: event.eventId,
+            actor: 'system:funding_webhook',
+            ...(event.reason !== undefined && { reason: event.reason }),
+          })
+        } catch (err) {
+          // The freeze, the hold, and the ledger post all throw rather than
+          // returning a benign outcome. 500 so the processor redelivers into a
+          // clean attempt — the transition guard and the ledger's
+          // (transfer_id, transition) uniqueness make that safe to repeat.
+          server.log.error(
+            { webhook: 'funding', transferId },
+            `funding_reversed failed: ${err instanceof Error ? err.message : String(err)}`,
+          )
+          return sendError(reply, 500, 'internal_error', 'Failed to process webhook')
+        }
+
+        if (applied.outcome === 'replayed') return { received: true }
+
+        // Ids and enum-ish outcomes only — no PII, no amounts beyond what the
+        // ledger already holds.
         server.log.error(
           {
             audit: true,
@@ -581,13 +608,24 @@ export async function webhooksRoute(server: FastifyInstance) {
             transferId,
             eventId: event.eventId,
             reason: event.reason,
+            outcome: applied.outcome,
           },
-          'funding_reversed received — loss path, handler not yet implemented',
+          'funding_reversed applied — loss path',
         )
-        Sentry.captureMessage('funding reversed — dispute/ACH return on unhandled loss path', {
-          level: 'fatal',
-          fingerprint: ['funding-reversed-unhandled', transferId],
-          tags: { transferId, reason: event.reason ?? 'unknown' },
+
+        const level =
+          applied.outcome === 'reversed' || applied.outcome === 'in_flight' ? 'fatal' : 'error'
+        Sentry.captureMessage(`funding reversed — ${applied.outcome}`, {
+          level,
+          fingerprint: ['funding-reversed', applied.outcome, transferId],
+          tags: {
+            transferId,
+            outcome: applied.outcome,
+            reason: event.reason ?? 'unknown',
+            ...('frozen' in applied && { senderFrozen: String(applied.frozen) }),
+            ...('cleared' in applied && { fundingCleared: String(applied.cleared) }),
+            ...('state' in applied && { state: applied.state }),
+          },
         })
         return { received: true }
       }

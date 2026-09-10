@@ -60,7 +60,13 @@ const holdFingerprint = (reason: string) => ['payout-hold', reason]
 // existing hold and never touches a row that has already moved on.
 async function placeHold(
   transferId: string,
-  reason: 'fx_drift' | 'payability' | 'submit_error' | 'velocity_review' | 'sender_kyc_pending',
+  reason:
+    | 'fx_drift'
+    | 'payability'
+    | 'submit_error'
+    | 'velocity_review'
+    | 'sender_kyc_pending'
+    | 'sender_suspended',
   context: Record<string, unknown>,
 ): Promise<void> {
   const { data, error } = await supabaseAdmin
@@ -155,6 +161,22 @@ export async function submitPayout(transferId: string): Promise<number> {
     // reconciliation's HUMAN_ACTIONED_HOLD_REASONS on purpose.
     const sender = await loadSender(transfer.user_id)
     bridgeCustomerId = sender.bridgeCustomerId
+
+    // THE SENDER FREEZE (the loss path). A chargeback or ACH return on ONE of
+    // this sender's transfers stops ALL of them: the others are funded by the
+    // same instrument, and paying them out while money is being clawed back
+    // turns one loss into several. Checked before the KYC gate because it is
+    // the stronger statement — a frozen sender's KYC status is irrelevant.
+    //
+    // Not auto-released: unlike sender_kyc_pending there is no event that
+    // says "this person is trustworthy again". A human unfreezes the sender
+    // and then releases (docs/runbooks/payout-holds.md); releasing without
+    // unfreezing just re-holds here on the next sweep, which is safe.
+    if (sender.status === 'suspended') {
+      await placeHold(transfer.id, 'sender_suspended', { senderStatus: sender.status })
+      return 0
+    }
+
     if (sender.kycStatus !== 'approved') {
       await placeHold(transfer.id, 'sender_kyc_pending', { kycStatus: sender.kycStatus })
       return 0
@@ -474,17 +496,28 @@ export async function submitPayout(transferId: string): Promise<number> {
 // what it means; only the submission itself insists on one.
 async function loadSender(
   userId: string,
-): Promise<{ bridgeCustomerId: string | null; kycStatus: string }> {
+): Promise<{ bridgeCustomerId: string | null; kycStatus: string; status: string }> {
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select('bridge_customer_id, kyc_status')
+    .select('bridge_customer_id, kyc_status, status')
     .eq('id', userId)
     .maybeSingle()
   if (error) throw new Error(`payout-submit user load failed: ${error.message}`)
-  const row = data as { bridge_customer_id: string | null; kyc_status: string | null } | null
+  const row = data as {
+    bridge_customer_id: string | null
+    kyc_status: string | null
+    status: string | null
+  } | null
   return {
     bridgeCustomerId: row?.bridge_customer_id ?? null,
     kycStatus: row?.kyc_status ?? 'not_started',
+    // users.status is NOT NULL, so this default only covers a MISSING row —
+    // an FK impossibility. Deliberately 'active' rather than a fail-safe
+    // 'suspended': the KYC gate immediately below already holds a missing row
+    // (kycStatus falls back to 'not_started'), so nothing can fail open here,
+    // and labelling a nonexistent user "suspended" would put a reason in the
+    // audit log that is not true.
+    status: row?.status ?? 'active',
   }
 }
 

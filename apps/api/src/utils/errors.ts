@@ -14,6 +14,12 @@ export type ApiErrorCode =
   | 'idempotency_conflict'
   | 'quote_expired'
   | 'transfer_not_cancelable'
+  // The sender freeze (loss path, 2026-09-10), 403: a chargeback or ACH return
+  // withdrew this account's privilege to transact. Its own code rather than a
+  // bare `forbidden` because the client owes the sender an accurate reason —
+  // "you don't have access" describes a permission bug, not a frozen account —
+  // and because support triage starts from this code.
+  | 'account_suspended'
   // Ops resolve-cancellation refusals (slice 8.5-v1.1) — all 409, but each
   // demands DIFFERENT operator behavior, so each gets its own code:
   // refund_owed = permanent legal refusal (both §1005.34 conditions held — no

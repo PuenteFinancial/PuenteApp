@@ -194,11 +194,27 @@ PAYOUT_FAILED → REFUNDED  (BEFORE SUBMITTED — #254. The submit never reached
   (End state: the submitted case minus the bridge_return pair — due_from_bridge was never
    opened, so it never needs closing. The sender is made whole identically.)
 
-FUNDING_REVERSED  (ACH return after COMPLETED — money already delivered, irreversible)
+FUNDING_REVERSED  (ACH return / chargeback after COMPLETED — money delivered, irreversible)
   DR loss_funding_reversed  100
-  CR cash_clearing          100
-  (Or DR a user receivable instead of straight loss, then write off to loss_funding_reversed if
-   unrecoverable. This is the loss the risk engine exists to prevent.)
+  CR cash_clearing          100     ← when the funding had CLEARED
+  CR funding_receivable     100     ← when it had NOT (the pull will never settle)
+
+  (POLICY, decided 2026-09-10: book the STRAIGHT LOSS at dispute creation rather than opening a
+   user receivable and writing it off later. The ledger is append-only, so a dispute we later WIN
+   or recover is a correcting CREDIT on its own transition — never a rewrite of this batch. The
+   receivable alternative is honest too, but it means carrying per-sender collection bookkeeping
+   for an event that at this scale is rare and usually unrecoverable.
+
+   The CREDITED ASSET is state-dependent for the same reason as the refund pair above: crediting
+   cash_clearing for funding that never cleared claims a withdrawal from money we never held and
+   strands funding_receivable open forever. applyFundingReversed picks by transfers.funding_cleared.
+
+   Amount is send + fee, the whole sum collected. A PARTIAL dispute would over-book; at this
+   volume that pages for a human rather than silently prorating.
+
+   PRE-DELIVERY disputes post NOTHING. A dispute on a FUNDED transfer whose payout has not left
+   places a `funding_disputed` hold instead: nothing is lost while the pesos are still ours, and
+   booking a loss there would invent one. This is the loss the risk engine exists to prevent.)
 
 UNDER_REVIEW → REFUNDED  (entry from COMPLETED — post-delivery Reg E correction, NOT a reversal;
   undo mode REFUNDED — the funding had settled)

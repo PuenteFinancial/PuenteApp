@@ -103,6 +103,29 @@ describe('POST /v1/recipients', () => {
     await app.close()
   })
 
+  it('403s a SUSPENDED sender with account_suspended and never touches recipients', async () => {
+    // The sender freeze (loss path). Enforced at this gate rather than only on
+    // transfer-create because a frozen sender adding a fresh recipient is the
+    // first move of the pattern the freeze exists to stop. Its own code, not a
+    // bare `forbidden`: the client owes the sender an accurate reason and
+    // support triage starts from the code.
+    from.mockReturnValueOnce(
+      chain({ data: { kyc_status: 'approved', status: 'suspended', bridge_customer_id: 'cust_1' } }),
+    )
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/recipients')
+      .set('Authorization', 'Bearer test-token')
+      .send(validBody)
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('account_suspended')
+    expect(from).toHaveBeenCalledTimes(1)
+    expect(from).toHaveBeenCalledWith('users')
+    await app.close()
+  })
+
   it('403s when the user is not KYC-approved and never touches recipients', async () => {
     from.mockReturnValueOnce(chain({ data: { kyc_status: 'pending', bridge_customer_id: null } }))
     const app = await buildApp()

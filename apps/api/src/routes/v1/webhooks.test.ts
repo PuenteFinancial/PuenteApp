@@ -40,9 +40,11 @@ vi.mock('../../services/queue.js', () => ({
 
 const releaseSenderKycHolds = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => [] as string[]))
 const releaseDestinationPayabilityHolds = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => [] as string[]))
+const holdPayoutForDispute = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => true))
 vi.mock('../../services/payout-holds.js', () => ({
   releaseSenderKycHolds: (...args: unknown[]) => releaseSenderKycHolds(...args),
   releaseDestinationPayabilityHolds: (...args: unknown[]) => releaseDestinationPayabilityHolds(...args),
+  holdPayoutForDispute: (...args: unknown[]) => holdPayoutForDispute(...args),
 }))
 const registerPendingDestinations = vi.hoisted(() =>
   vi.fn(async (..._args: unknown[]) => ({
@@ -135,6 +137,7 @@ beforeEach(() => {
   postLedgerTransaction.mockReset().mockResolvedValue(undefined)
   captureMessage.mockReset()
   captureException.mockReset()
+  holdPayoutForDispute.mockClear().mockResolvedValue(true)
   processorOverride.current = null
 })
 
@@ -597,10 +600,31 @@ const transferRow = {
   margin_minor: 0,
 }
 
+const USER_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+
+// The loss path's default subject: delivered and cleared, so a dispute on it
+// recognizes a real loss. Branch-specific tests override `state`.
+const reversedRow = {
+  ...transferRow,
+  state: 'COMPLETED',
+  user_id: USER_ID,
+  funding_cleared: true,
+  funding_payment_ref: 'pi_123',
+}
+
+/** The two reads applyFundingReversed makes before it branches: the transfer,
+ *  then the sender freeze. Kept together so a test that only cares about the
+ *  branch does not have to remember the order. */
+const reversalReads = (row: Record<string, unknown> = reversedRow, frozen = true) => {
+  from
+    .mockReturnValueOnce(selectChain({ data: row }))
+    .mockReturnValueOnce(selectChain({ data: frozen ? [{ id: USER_ID }] : [] }))
+}
+
 function selectChain(result: { data?: unknown; error?: unknown }) {
   const resolved = { data: result.data ?? null, error: result.error ?? null }
   const b: Record<string, ReturnType<typeof vi.fn>> = {} as never
-  for (const m of ['select', 'update', 'eq', 'is'] as const) b[m] = vi.fn(() => b)
+  for (const m of ['select', 'update', 'eq', 'is', 'neq'] as const) b[m] = vi.fn(() => b)
   b['single'] = vi.fn(async () => resolved)
   b['maybeSingle'] = vi.fn(async () => resolved)
   ;(b as { then?: (r: (v: unknown) => void) => void }).then = (r) => r(resolved)
@@ -941,6 +965,8 @@ describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
   it('resolves a null-transferRef dispute through transfers.funding_payment_ref and acks', async () => {
     const lookup = selectChain({ data: { id: TRANSFER_ID } })
     from.mockReturnValueOnce(lookup)
+    reversalReads()
+    transitionTransfer.mockResolvedValue({ ...reversedRow, state: 'FUNDING_REVERSED' })
     processorOverride.current = fakeStripeProcessor()
     const app = await buildApp()
 
@@ -955,18 +981,10 @@ describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
     expect(lookup['select']).toHaveBeenCalledWith('id')
     expect(lookup['eq']).toHaveBeenCalledWith('funding_payment_ref', 'pi_123')
     expect(lookup['maybeSingle']).toHaveBeenCalled()
-    // The full handler is its own slice — no transition yet. But the loss
-    // path must PAGE, fatal, fingerprinted per transfer so Stripe
-    // redeliveries collapse into one Sentry issue. The old warn log was the
-    // silent-dispute bug: be7a6e9f sat FUNDED+cleared with a live dispute.
-    expect(transitionTransfer).not.toHaveBeenCalled()
-    expect(captureMessage).toHaveBeenCalledWith(
-      'funding reversed — dispute/ACH return on unhandled loss path',
-      expect.objectContaining({
-        level: 'fatal',
-        fingerprint: ['funding-reversed-unhandled', TRANSFER_ID],
-        tags: expect.objectContaining({ transferId: TRANSFER_ID, reason: 'insufficient_funds' }),
-      }),
+    // Resolution is this test's subject; the loss branch has its own describe
+    // below. Enough here that the resolved id is what the handler acted on.
+    expect(transitionTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ transferId: TRANSFER_ID, toState: 'FUNDING_REVERSED' }),
     )
     await app.close()
   })
@@ -1007,6 +1025,8 @@ describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
     const missLookup = selectChain({ data: null })
     const hitLookup = selectChain({ data: { id: TRANSFER_ID } })
     from.mockReturnValueOnce(missLookup).mockReturnValueOnce(hitLookup)
+    reversalReads()
+    transitionTransfer.mockResolvedValue({ ...reversedRow, state: 'FUNDING_REVERSED' })
     const resolveAlternateFundingRef = vi.fn(async () => 'cs_test_123')
     processorOverride.current = fakeStripeProcessor({ resolveAlternateFundingRef })
     const app = await buildApp()
@@ -1021,7 +1041,11 @@ describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
     expect(resolveAlternateFundingRef).toHaveBeenCalledWith('pi_123')
     expect(missLookup['eq']).toHaveBeenCalledWith('funding_payment_ref', 'pi_123')
     expect(hitLookup['eq']).toHaveBeenCalledWith('funding_payment_ref', 'cs_test_123')
-    expect(transitionTransfer).not.toHaveBeenCalled()
+    // The alternate ref is this test's subject; that the handler then acted on
+    // the resolved transfer is the proof the retry actually landed.
+    expect(transitionTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ transferId: TRANSFER_ID, toState: 'FUNDING_REVERSED' }),
+    )
     await app.close()
   })
 
@@ -1558,5 +1582,105 @@ describe('POST /v1/webhooks/bridge — transfer events', () => {
     expect(res.status).toBe(400)
     expect(recordEvent).not.toHaveBeenCalled()
     await app.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The loss path at the route: which arm ran, how loudly it said so.
+// applyFundingReversed owns the branch logic (funding-apply.test.ts); here the
+// contract is that every arm PAGES and none of them silently 200s.
+// ---------------------------------------------------------------------------
+describe('POST /v1/webhooks/funding — funding_reversed (the loss path)', () => {
+  beforeEach(() => {
+    transitionTransfer.mockReset()
+    captureMessage.mockReset()
+  })
+
+  const postDispute = async () => {
+    processorOverride.current = fakeStripeProcessor()
+    const app = await buildApp()
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/funding')
+      .set('Content-Type', 'application/json')
+      .set('Stripe-Signature', 'sig_v1')
+      .send('{}')
+    await app.close()
+    return res
+  }
+
+  it('a delivered transfer is reversed, booked, and paged at FATAL', async () => {
+    from.mockReturnValueOnce(selectChain({ data: { id: TRANSFER_ID } }))
+    reversalReads()
+    transitionTransfer.mockResolvedValue({ ...reversedRow, state: 'FUNDING_REVERSED' })
+
+    const res = await postDispute()
+
+    expect(res.status).toBe(200)
+    expect(transitionTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ toState: 'FUNDING_REVERSED' }),
+    )
+    // Fatal: the money is gone and someone must decide whether to fight it.
+    expect(captureMessage).toHaveBeenCalledWith(
+      'funding reversed — reversed',
+      expect.objectContaining({
+        level: 'fatal',
+        fingerprint: ['funding-reversed', 'reversed', TRANSFER_ID],
+        tags: expect.objectContaining({ senderFrozen: 'true', fundingCleared: 'true' }),
+      }),
+    )
+  })
+
+  it('an undelivered transfer is held, books nothing, and pages at error', async () => {
+    from.mockReturnValueOnce(selectChain({ data: { id: TRANSFER_ID } }))
+    reversalReads({ ...reversedRow, state: 'FUNDED' })
+
+    const res = await postDispute()
+
+    expect(res.status).toBe(200)
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(holdPayoutForDispute).toHaveBeenCalledWith(TRANSFER_ID)
+    // Error, not fatal: nothing is lost while the pesos are still ours.
+    expect(captureMessage).toHaveBeenCalledWith(
+      'funding reversed — held',
+      expect.objectContaining({ level: 'error' }),
+    )
+  })
+
+  it('a payout already at Bridge cannot be stopped — fatal, and nothing booked', async () => {
+    from.mockReturnValueOnce(selectChain({ data: { id: TRANSFER_ID } }))
+    reversalReads({ ...reversedRow, state: 'IN_FLIGHT' })
+
+    const res = await postDispute()
+
+    expect(res.status).toBe(200)
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(holdPayoutForDispute).not.toHaveBeenCalled()
+    expect(captureMessage).toHaveBeenCalledWith(
+      'funding reversed — in_flight',
+      expect.objectContaining({ level: 'fatal', tags: expect.objectContaining({ state: 'IN_FLIGHT' }) }),
+    )
+  })
+
+  it('a redelivered dispute acks silently — no second page for the same loss', async () => {
+    from.mockReturnValueOnce(selectChain({ data: { id: TRANSFER_ID } }))
+    reversalReads({ ...reversedRow, state: 'FUNDING_REVERSED' })
+
+    const res = await postDispute()
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ received: true })
+    expect(captureMessage).not.toHaveBeenCalled()
+  })
+
+  it('500s when the freeze or the posting fails, so the provider redelivers', async () => {
+    // The transition guard and the ledger's (transfer_id, transition)
+    // uniqueness make the retry safe; swallowing it would lose the loss.
+    from.mockReturnValueOnce(selectChain({ data: { id: TRANSFER_ID } }))
+    reversalReads()
+    transitionTransfer.mockRejectedValue(new Error('ledger unavailable'))
+
+    const res = await postDispute()
+
+    expect(res.status).toBe(500)
   })
 })

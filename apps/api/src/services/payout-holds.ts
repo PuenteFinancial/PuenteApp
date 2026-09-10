@@ -35,6 +35,14 @@ export const RELEASABLE_HOLD_REASONS = [
   'payability',
   'velocity_review',
   'submit_error',
+  // The loss path (2026-09-10). `funding_disputed` releases when a human wins
+  // or writes off the dispute — that judgement is exactly what an operator is
+  // for. `sender_suspended` is derived from users.status rather than from this
+  // transfer, so releasing it WITHOUT unfreezing the sender simply re-holds the
+  // row on the next sweep: safe and self-correcting, but the runbook's order is
+  // unfreeze first, then release.
+  'funding_disputed',
+  'sender_suspended',
 ] as const
 export type ReleasableHoldReason = (typeof RELEASABLE_HOLD_REASONS)[number]
 
@@ -294,4 +302,31 @@ export async function releaseSenderKycHolds(userId: string, log: Logger): Promis
     }
   }
   return released
+}
+
+/**
+ * Stop a payout because the money that funded it is being clawed back.
+ *
+ * The pre-delivery arm of the loss path: the pesos have NOT left, so the right
+ * answer is to refuse to send them, and to book NOTHING — there is no loss yet
+ * (docs/ledger-rules.md gives the loss batch to the post-delivery case only).
+ *
+ * Guarded exactly like payout-submit's own hold: FUNDED and not already held,
+ * so a row that moved on, or that another actor held first, is left alone.
+ * Returns whether this call is the one that placed it, so the caller can page
+ * once rather than on every redelivery.
+ */
+export async function holdPayoutForDispute(transferId: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from('transfers')
+    .update({ payout_hold_reason: 'funding_disputed', payout_held_at: new Date().toISOString() })
+    .eq('id', transferId)
+    .eq('state', 'FUNDED')
+    .is('payout_hold_reason', null)
+    .select('id')
+  // Throws rather than returning false: a dispute hold that silently failed to
+  // land would let the sweep pay out money we are being forced to give back.
+  // The caller is a webhook, so throwing means a 500 and a provider redelivery.
+  if (error) throw new Error(`dispute hold update failed: ${error.message}`)
+  return ((data ?? []) as Array<{ id: string }>).length === 1
 }
