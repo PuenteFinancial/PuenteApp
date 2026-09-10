@@ -409,7 +409,20 @@ export async function holdPayoutForDispute(transferId: string): Promise<boolean>
     .update({ payout_hold_reason: 'funding_disputed', payout_held_at: new Date().toISOString() })
     .eq('id', transferId)
     .eq('state', 'FUNDED')
-    .is('payout_hold_reason', null)
+    // Unheld, OR already held as `sender_suspended` — which is an UPGRADE, not
+    // the overwrite the no-clobber rule forbids.
+    //
+    // Observed on the staging drive 2026-09-10: the loss path freezes the
+    // sender before it holds this transfer, and the 1-minute payout sweep can
+    // land in between. It then sees a suspended sender and holds the row as
+    // `sender_suspended` — correct, but the LESS specific of two reasons the
+    // same dispute caused, and it made reconciliation's `stripe_disputes`
+    // check report the dispute as unrecorded on every run.
+    //
+    // The reason a transfer carries should name what happened to THAT
+    // transfer; the sender's other payouts are the ones `sender_suspended`
+    // describes. Any other hold reason still wins and is left alone.
+    .or('payout_hold_reason.is.null,payout_hold_reason.eq.sender_suspended')
     .select('id')
   // Throws rather than returning false: a dispute hold that silently failed to
   // land would let the sweep pay out money we are being forced to give back.
