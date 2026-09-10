@@ -60,6 +60,15 @@ const FRESH = process.argv.includes('--fresh')
 // `payment_intent.succeeded`. Verification is instant-only (Financial
 // Connections), so this walks Stripe's test institution.
 const ACH = process.argv.includes('--ach')
+// The failure drive. Stripe's test numbers each script a different outcome
+// (docs.stripe.com/testing): 4000000000000002 declines at confirm,
+// 4000000000009995 insufficient funds, 4000000000000341 attaches then fails,
+// 4000000000000259 SUCCEEDS then raises a dispute — the only test path that
+// produces a real charge.dispute.created against our webhook. Bank-side,
+// Financial Connections offers the "Invalid Payment Accounts" institution.
+const argOf = (flag) => { const i = process.argv.indexOf(flag); return i >= 0 ? process.argv[i + 1] : undefined }
+const CARD = argOf('--card') ?? '4242424242424242'
+const BANK_INSTITUTION = argOf('--bank-institution') ?? 'Test (Non-OAuth)'
 
 const url = process.env.SUPABASE_URL
 const anon = process.env.SUPABASE_PUBLISHABLE_KEY
@@ -337,8 +346,8 @@ async function fillAndSubmitBank(page, frame) {
     // (docs.stripe.com/financial-connections/testing) — NOT "Test Institution",
     // which is what the first attempts searched for and never matched. Non-OAuth
     // is the one that stays in the modal; OAuth opens a popup.
-    await search.fill('Test')
-    console.log('  bank: searching for a sandbox test institution')
+    await search.fill(BANK_INSTITUTION.split(' ')[0])
+    console.log(`  bank: searching for "${BANK_INSTITUTION}"`)
     await page.waitForTimeout(3500)
     if (process.env.DRIVE_DUMP_FIELDS) {
       console.log('  --- frames after opening the bank search ---')
@@ -354,7 +363,8 @@ async function fillAndSubmitBank(page, frame) {
       }
     }
     let picked = false
-    for (const label of [/Test \(Non-OAuth\)/i, /Bank \(Non-OAuth\)/i, /Test \(OAuth\)/i]) {
+    const wanted = new RegExp(BANK_INSTITUTION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+    for (const label of [wanted, /Test \(Non-OAuth\)/i, /Bank \(Non-OAuth\)/i, /Test \(OAuth\)/i]) {
       for (const sf of [frame, ...page.frames()]) {
         const hit = sf.getByText(label).first()
         if (await hit.isVisible({ timeout: 1200 }).catch(() => false)) {
@@ -405,12 +415,12 @@ async function fillAndSubmitBank(page, frame) {
 
 async function fillAndSubmitCard(page, frame) {
   await frame.getByText('Card', { exact: true }).first().click()
-  await frame.getByPlaceholder('1234 1234 1234 1234').fill('4242424242424242')
+  await frame.getByPlaceholder('1234 1234 1234 1234').fill(CARD)
   await frame.getByPlaceholder('MM / YY').fill('12 / 34')
   await frame.getByPlaceholder('CVC').fill('123')
   const zip = frame.getByPlaceholder('12345')
   if (await zip.isVisible({ timeout: 3000 }).catch(() => false)) await zip.fill('94080')
-  console.log('card filled (4242, test mode)')
+  console.log(`card filled (…${CARD.slice(-4)}, test mode)`)
 
   // Contact fields Stripe renders alongside the card. The first --pay run died
   // on "Your phone number is incomplete" — the session carries an email but no
@@ -570,8 +580,18 @@ async function main() {
   } else {
     await fillAndSubmitCard(page, frame)
   }
-  const submitted = await waitForStep(page, ['Payment submitted', 'went wrong', "couldn't"], 60000)
+  const submitted = await waitForStep(page, ['Payment submitted', 'went wrong', "couldn't", 'declined', 'insufficient'], 60000)
   console.log('after confirm:', submitted ?? '(timeout)', '|', await stepText(page))
+  if (submitted && submitted !== 'Payment submitted') {
+    // The Element surfaced Stripe's decline inline and the sender can retry —
+    // that IS the correct outcome for a failing card. Report the row's state
+    // (must still be PENDING_PAYMENT, no FUNDED, no ledger) and stop.
+    const H = { Authorization: `Bearer ${token}` }
+    const t = await (await fetch(`${API}/v1/transfers/${transferId}`, { headers: H })).json()
+    console.log(`\nDECLINED AT CONFIRM as expected — transfer state=${t.state} (must be PENDING_PAYMENT)`)
+    await browser.close()
+    return
+  }
 
   // The webhook is the point. Poll the SERVER, not the page.
   console.log('\nwaiting for Stripe to deliver checkout.session.completed …')

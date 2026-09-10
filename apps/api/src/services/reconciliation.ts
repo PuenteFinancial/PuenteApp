@@ -180,6 +180,58 @@ async function runStatePostings(): Promise<CheckOutcome> {
   }
 }
 
+// ── The clearing flag must have its ledger leg ──────────────────────────────
+
+interface ClearedFlagRow {
+  id: string
+  state: string
+}
+
+/**
+ * `funding_cleared = true` ⇒ a `funding_cleared` ledger transaction exists.
+ *
+ * The detector bug 1 actually needed, and the one I wrongly said
+ * stripe_receivables was (2026-09-10). That check compares Stripe's view to
+ * our FLAG — a missed webhook. Bug 1 was the flag set with the ledger leg
+ * skipped (clearing arrived before funding), which the flag-trusting checks
+ * all read as fine while the receivable sat open forever. This compares the
+ * flag to the LEDGER. It would have paged on 681c8e1a the same evening.
+ *
+ * Fatal, like the other book-vs-state rules: a set flag with no posting is a
+ * receivable that will never close, and the float ceiling reads that balance.
+ */
+async function runClearedPostings(): Promise<CheckOutcome> {
+  const { data: flagged, error: flaggedError } = await supabaseAdmin
+    .from('transfers')
+    .select('id, state')
+    .eq('funding_cleared', true)
+    .limit(ROW_BOUND)
+  if (flaggedError || flagged == null) failClosed('cleared-postings select', flaggedError)
+  const rows = flagged as ClearedFlagRow[]
+  assertBound('cleared-postings', rows)
+  if (rows.length === 0) return { status: 'pass', findings: [], summary: { flagged: 0 } }
+
+  const { data: posted, error: postedError } = await supabaseAdmin
+    .from('ledger_transactions')
+    .select('transfer_id')
+    .eq('transition', 'funding_cleared')
+    .in('transfer_id', rows.map((r) => r.id))
+  if (postedError || posted == null) failClosed('cleared-postings ledger select', postedError)
+  const has = new Set((posted as { transfer_id: string }[]).map((p) => p.transfer_id))
+
+  const findings: CheckFinding[] = rows
+    .filter((r) => !has.has(r.id))
+    .map((r) => ({
+      key: `cleared-without-posting:${r.id}`,
+      detail: { transferId: r.id, state: r.state },
+    }))
+  return {
+    status: findings.length === 0 ? 'pass' : 'findings',
+    findings,
+    summary: { flagged: rows.length, unposted: findings.length },
+  }
+}
+
 // ── Account balances snapshot + negative open-item guard ────────────────────
 
 // Accounts where a negative balance means over-relief (more credited out than
@@ -751,6 +803,7 @@ export function buildChecks(): ReconciliationCheck[] {
     { name: 'ledger_net_zero', severity: 'fatal', runbook: RUNBOOK, run: runNetZero },
     { name: 'ledger_min_entries', severity: 'fatal', runbook: RUNBOOK, run: runMinEntries },
     { name: 'state_postings', severity: 'fatal', runbook: RUNBOOK, run: runStatePostings },
+    { name: 'cleared_postings', severity: 'fatal', runbook: RUNBOOK, run: runClearedPostings },
     { name: 'account_balances', severity: 'fatal', runbook: RUNBOOK, run: runAccountBalances },
     { name: 'transfer_aging', severity: 'warning', runbook: RUNBOOK, run: runTransferAging },
     { name: 'bridge_state_sweep', severity: 'warning', runbook: RUNBOOK, run: runBridgeStateSweep },

@@ -741,6 +741,46 @@ const stripeProcessor = () => ({
   listRecentPayments: vi.fn(),
 })
 
+describe('cleared_postings — the flag must have its ledger leg', () => {
+  const flagged = (rows: { id: string; state: string }[]) => chainResolving({ data: rows, error: null })
+  const posted = (ids: string[]) => chainResolving({ data: ids.map((transfer_id) => ({ transfer_id })), error: null })
+
+  it('passes when every set flag has a funding_cleared posting', async () => {
+    from.mockReturnValueOnce(flagged([{ id: 't-1', state: 'FUNDED' }, { id: 't-2', state: 'COMPLETED' }]))
+    from.mockReturnValueOnce(posted(['t-1', 't-2']))
+    const outcome = await check('cleared_postings').run()
+    expect(outcome.status).toBe('pass')
+    expect(outcome.summary).toMatchObject({ flagged: 2, unposted: 0 })
+  })
+
+  it('flags a set flag with no posting — the bug-1 shape stripe_receivables cannot see', async () => {
+    // 681c8e1a: clearing arrived before funding, the flag was set, the ledger
+    // leg was skipped, and every flag-trusting check read it as fine.
+    from.mockReturnValueOnce(flagged([{ id: 't-lost', state: 'FUNDED' }, { id: 't-ok', state: 'FUNDED' }]))
+    from.mockReturnValueOnce(posted(['t-ok']))
+    const outcome = await check('cleared_postings').run()
+    expect(outcome.status).toBe('findings')
+    expect(outcome.findings.map((f) => f.key)).toEqual(['cleared-without-posting:t-lost'])
+    expect(outcome.findings[0]!.detail).toEqual({ transferId: 't-lost', state: 'FUNDED' })
+  })
+
+  it('passes without a ledger read when nothing is flagged', async () => {
+    from.mockReturnValueOnce(flagged([]))
+    const outcome = await check('cleared_postings').run()
+    expect(outcome.status).toBe('pass')
+    expect(from).toHaveBeenCalledTimes(1)
+  })
+
+  it('is fatal — a set flag with no posting is a receivable that never closes', () => {
+    expect(buildChecks().find((c) => c.name === 'cleared_postings')?.severity).toBe('fatal')
+  })
+
+  it('fails closed when the select errors', async () => {
+    from.mockReturnValueOnce(chainResolving({ data: null, error: { message: 'boom' } }))
+    await expect(check('cleared_postings').run()).rejects.toThrow()
+  })
+})
+
 describe('stripe_receivables', () => {
   beforeEach(() => {
     processorFor.mockReset()
