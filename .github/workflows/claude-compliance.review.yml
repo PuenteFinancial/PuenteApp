@@ -10,6 +10,15 @@ on:
       - "**/consent/**"
       - "**/credit/**"
       - "**/*auth*"
+      # NOT self-triggering, and it cannot be. claude-code-action refuses to
+      # run on any PR that modifies a workflow file ("Action skipped due to
+      # workflow validation error") — the right call, since otherwise a PR
+      # could rewrite the reviewer that guards it. Adding this file to the
+      # paths above only produces a job that runs, skips the action, and
+      # reports a GREEN check with no review behind it, which is the exact
+      # failure class this workflow keeps falling into. Tried on PR #309;
+      # reverted. A change to this file is therefore validated by the NEXT PR
+      # that touches apps/api, never by its own.
 
 jobs:
   review:
@@ -21,25 +30,80 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }   # full history so it can diff against base
-      # SHA-pinned: the floating v1 tag shipped a broken v1.0.175 on
-      # 2026-07-15 (runs die in ~2s with is_error:true). This is v1.0.174,
-      # the last known-good. Unpin once upstream fixes it.
-      - uses: anthropics/claude-code-action@d75b94d5ad426cb8546e6628b6f5f19b84e5cce1 # v1.0.216
+
+      # SHA-pinned (v1.0.216). History: the floating v1 tag shipped a broken
+      # v1.0.175 on 2026-07-15 (runs died in ~2s with is_error:true), so this
+      # was pinned at v1.0.174 and has since been bumped. Unpin only once the
+      # floating tag has been stable for a while.
+      - id: claude
+        uses: anthropics/claude-code-action@d75b94d5ad426cb8546e6628b6f5f19b84e5cce1 # v1.0.216
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # The ACTION owns posting, not Claude. Without this the run went
-          # green while saying nothing (2026-08-31, PR #265): Claude reviewed
-          # across 9 turns, tried once to post, and was denied — CI is
-          # non-interactive, the project allowlist in .claude/settings.json
-          # permits only pnpm typecheck/lint/test, and .mcp.json exposes no
-          # GitHub tool. track_progress makes the action create and update the
-          # PR comment itself, so findings land without granting a CI-run
-          # Claude new powers on a public repo.
+          # track_progress makes the ACTION create the PR comment and hands
+          # Claude the tool to update it (2026-08-31, PR #265: without it the
+          # run went green while saying nothing, because CI is
+          # non-interactive and .mcp.json exposes no GitHub tool).
+          #
+          # It does NOT publish Claude's final message. The action's own last
+          # act is to stamp the comment with a job link, nothing more — so the
+          # findings only reach the PR if Claude writes them into the comment
+          # itself. The prompt below used to forbid exactly that, which is why
+          # every run since #265 froze at the progress checklist while
+          # reporting success (diagnosed on PR #308).
           track_progress: true
+          # The default tool set under track_progress is Glob/Grep/LS/Read,
+          # the comment tool, and the action's git add/commit/rm/push — no
+          # `git diff`. The action supplies only a <changed_files> manifest
+          # (paths and line counts, never content), so "review the diff" was
+          # impossible: the reviewer read whole files at head with no way to
+          # tell which lines were new. Diagnosed on PR #308.
+          #
+          # This ACCUMULATES with the action's own --allowedTools rather than
+          # replacing it (allowedTools is in the SDK parser's
+          # ACCUMULATING_FLAGS, base-action/src/parse-sdk-options.ts), so only
+          # the genuinely new grants belong here — the read-only git commands.
+          # Re-listing Read/Grep/Glob or the comment tool would be noise.
+          #
+          # Note this cannot NARROW the default set: the reviewer keeps the
+          # action's git add/commit/push grants. Revoking those would take
+          # --disallowedTools (also accumulating, and deny beats allow).
+          # Worth doing — a reviewer should not be able to write to the branch
+          # it reviews — but it is a separate change from making it speak.
+          claude_args: >-
+            --allowedTools "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git merge-base:*),Bash(git status:*)"
           prompt: |
-            Review the diff in this PR (against the base branch) using TWO subagents:
+            Review this PR using TWO subagents:
             1. The security-reviewer subagent.
             2. The compliance-reviewer subagent.
-            Report their findings grouped by agent. If both report no issues,
-            say "✅ Security & compliance: no issues." Do NOT try to post a
-            comment yourself — the action publishes this output to the PR.
+
+            Review the DIFF, not the files at head. Get it with:
+              git diff origin/${{ github.base_ref }}...HEAD
+            (checkout uses fetch-depth 0, so that ref resolves; `...` already
+            means "since the merge base". Read files only to get context on a
+            hunk the diff alone does not settle.)
+
+            When both subagents are done, you MUST publish the result by
+            calling mcp__github_comment__update_claude_comment, replacing your
+            progress checklist with the findings grouped by agent. Nothing
+            else posts for you: a run that ends without that call reports
+            success and says nothing, which is the failure this prompt exists
+            to avoid. If both agents report no issues, the comment body is
+            "✅ Security & compliance: no issues."
+
+      # The per-turn stream never reaches the CI log — only the init and
+      # result objects do — so a run that says nothing leaves no trace of what
+      # it found. Keep the full transcript for exactly that case.
+      #
+      # The output is EMPTY whenever the action skips (a workflow-modifying
+      # PR, as above). upload-artifact treats an empty `path` as a missing
+      # required input and fails the job, so the guard is load-bearing:
+      # if-no-files-found does not cover it, that is for a path that resolves
+      # but matches nothing.
+      - name: Upload Claude execution log
+        if: always() && steps.claude.outputs.execution_file != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-review-execution-log
+          path: ${{ steps.claude.outputs.execution_file }}
+          if-no-files-found: warn
+          retention-days: 14
