@@ -5,7 +5,7 @@ import { env } from '../../config/env.js'
 import { BRIDGE_KYC_STATUS_MAP } from '../../services/bridge.js'
 import { registerPendingDestinations } from '../../services/destination-registration.js'
 import { bridgeKycToVerificationStatus, recordKycVerification } from '../../services/kyc-verifications.js'
-import { releaseSenderKycHolds } from '../../services/payout-holds.js'
+import { releaseSenderKycHolds, releaseDestinationPayabilityHolds } from '../../services/payout-holds.js'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { getFundingProcessor, isOnrampSessionRail } from '../../services/funding/index.js'
 import { enqueuePaymentEventProcess } from '../../services/queue.js'
@@ -303,23 +303,33 @@ export async function webhooksRoute(server: FastifyInstance) {
           // `customer.updated` when the endorsement lands, and this pass runs
           // again and succeeds. The payout self-heal is the backstop.
           //
-          // Note the payout is NOT auto-released by that later pass: a row
-          // already parked on a `payability` hold stays held for an operator
-          // (RELEASABLE_HOLD_REASONS). Auto-release on late registration is a
-          // deliberate gap, not an oversight — see the PR discussion.
+          // That LATER pass is why the release below exists. #307 left it as a
+          // deliberate gap: a payout already parked on a `payability` hold was
+          // NOT cleared by the ref finally arriving, and `payability` is
+          // operator-releasable, so the sender's money waited on a human for a
+          // condition the system had just fixed. It no longer does.
           try {
             const registration = await registerPendingDestinations(userId, bridgeCustomerId)
-            if (registration.registered > 0 || registration.failed.length > 0) {
+            if (registration.registeredIds.length > 0 || registration.failed.length > 0) {
               server.log.info(
                 {
                   userId,
-                  registered: registration.registered,
+                  registered: registration.registeredIds.length,
                   failed: registration.failed.length,
                   reasons: registration.failed.map((f) => f.reason),
                 },
                 'registered pending payout destinations on bridge approval',
               )
             }
+            await releaseDestinationPayabilityHolds(
+              {
+                userId,
+                destinationIds: registration.registeredIds,
+                actor: 'webhook:bridge',
+                requestId: request.id,
+              },
+              server.log,
+            )
           } catch (err) {
             server.log.error(
               { userId, err: err instanceof Error ? err.message : String(err) },

@@ -677,13 +677,19 @@ export async function usersRoute(server: FastifyInstance) {
           // sender their KYC link. Anything left unregistered is retried by
           // the payout worker, and until then checkPayability holds the payout
           // rather than paying blind.
+          //
+          // No payability auto-release here (unlike the approval webhook):
+          // this branch runs only when the customer did NOT exist, and
+          // payout-submit holds on `sender_kyc_pending` before it ever reaches
+          // payability, so a sender with no customer has no payability hold to
+          // release.
           try {
             const registration = await registerPendingDestinations(userId, bridgeCustomerId)
-            if (registration.registered > 0 || registration.failed.length > 0) {
+            if (registration.registeredIds.length > 0 || registration.failed.length > 0) {
               server.log.info(
                 {
                   userId,
-                  registered: registration.registered,
+                  registered: registration.registeredIds.length,
                   failed: registration.failed.length,
                   reasons: registration.failed.map((f) => f.reason),
                 },

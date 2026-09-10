@@ -17,7 +17,16 @@ import { decryptString, DecryptionError } from '../utils/encryption.js'
 // actually arrives.
 
 export interface DestinationRegistrationResult {
-  registered: number
+  /**
+   * The destinations that hold a Bridge ref BECAUSE OF this pass, by id.
+   *
+   * Callers use these to release the payout holds the missing ref caused
+   * (services/payout-holds.ts). An id appears here when the pass ended with
+   * the ref present, which includes the case where a concurrent caller won
+   * the scoped write below: the destination is registered either way, which
+   * is the only property a release depends on.
+   */
+  registeredIds: string[]
   failed: { destinationId: string; reason: string }[]
 }
 
@@ -123,7 +132,7 @@ export async function registerPendingDestinations(
   if (error) throw new Error(`pending destinations select failed: ${error.message}`)
 
   const rows = (data ?? []) as unknown as PendingRow[]
-  const result: DestinationRegistrationResult = { registered: 0, failed: [] }
+  const result: DestinationRegistrationResult = { registeredIds: [], failed: [] }
 
   for (const row of rows) {
     const outcome = await registerOne(bridgeCustomerId, row)
@@ -144,7 +153,7 @@ export async function registerPendingDestinations(
       result.failed.push({ destinationId: row.id, reason: 'persist_failed' })
       continue
     }
-    result.registered++
+    result.registeredIds.push(row.id)
   }
 
   return result

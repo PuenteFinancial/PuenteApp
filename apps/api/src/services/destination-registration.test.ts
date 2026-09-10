@@ -69,7 +69,7 @@ describe('registerPendingDestinations', () => {
 
     const result = await registerPendingDestinations(USER, 'cust_1')
 
-    expect(result).toEqual({ registered: 1, failed: [] })
+    expect(result).toEqual({ registeredIds: ['dest-1'], failed: [] })
     // The decrypted CLABE reaches Bridge — never the ciphertext.
     expect(createExternalAccount).toHaveBeenCalledWith('cust_1', {
       firstName: 'Ana',
@@ -91,7 +91,7 @@ describe('registerPendingDestinations', () => {
 
     const result = await registerPendingDestinations(USER, 'cust_1')
 
-    expect(result.registered).toBe(1)
+    expect(result.registeredIds).toEqual(['dest-1'])
     expect(update).toHaveBeenCalledWith({ provider_account_ref: 'ext_existing' })
   })
 
@@ -109,7 +109,7 @@ describe('registerPendingDestinations', () => {
 
     const result = await registerPendingDestinations(USER, 'cust_1')
 
-    expect(result.registered).toBe(0)
+    expect(result.registeredIds).toEqual([])
     expect(result.failed).toEqual([{ destinationId: 'dest-1', reason: 'duplicate_ambiguous' }])
     expect(update).not.toHaveBeenCalled()
   })
@@ -120,7 +120,7 @@ describe('registerPendingDestinations', () => {
 
     const result = await registerPendingDestinations(USER, 'cust_1')
 
-    expect(result.registered).toBe(0)
+    expect(result.registeredIds).toEqual([])
     expect(result.failed[0]!.reason).toBe('bridge_rejected_422')
   })
 
@@ -139,7 +139,7 @@ describe('registerPendingDestinations', () => {
 
     const result = await registerPendingDestinations(USER, 'cust_1')
 
-    expect(result.registered).toBe(0)
+    expect(result.registeredIds).toEqual([])
     expect(result.failed).toEqual([{ destinationId: 'dest-1', reason: 'endorsement_missing' }])
     // Not a duplicate — nothing to adopt, so no list call.
     expect(listExternalAccounts).not.toHaveBeenCalled()
@@ -157,7 +157,7 @@ describe('registerPendingDestinations', () => {
   it('is a no-op when nothing is pending', async () => {
     tables([])
     const result = await registerPendingDestinations(USER, 'cust_1')
-    expect(result).toEqual({ registered: 0, failed: [] })
+    expect(result).toEqual({ registeredIds: [], failed: [] })
     expect(createExternalAccount).not.toHaveBeenCalled()
   })
 

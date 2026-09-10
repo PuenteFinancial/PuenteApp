@@ -39,11 +39,16 @@ vi.mock('../../services/queue.js', () => ({
 }))
 
 const releaseSenderKycHolds = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => [] as string[]))
+const releaseDestinationPayabilityHolds = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => [] as string[]))
 vi.mock('../../services/payout-holds.js', () => ({
   releaseSenderKycHolds: (...args: unknown[]) => releaseSenderKycHolds(...args),
+  releaseDestinationPayabilityHolds: (...args: unknown[]) => releaseDestinationPayabilityHolds(...args),
 }))
 const registerPendingDestinations = vi.hoisted(() =>
-  vi.fn(async (..._args: unknown[]) => ({ registered: 0, failed: [] as { reason: string }[] })),
+  vi.fn(async (..._args: unknown[]) => ({
+    registeredIds: [] as string[],
+    failed: [] as { destinationId: string; reason: string }[],
+  })),
 )
 vi.mock('../../services/destination-registration.js', () => ({
   registerPendingDestinations: (...args: unknown[]) => registerPendingDestinations(...args),
@@ -124,6 +129,7 @@ async function buildApp() {
 beforeEach(() => {
   from.mockReset()
   releaseSenderKycHolds.mockClear()
+  releaseDestinationPayabilityHolds.mockClear()
   registerPendingDestinations.mockClear()
   recordKycVerification.mockClear()
   postLedgerTransaction.mockReset().mockResolvedValue(undefined)
@@ -172,6 +178,7 @@ describe('POST /v1/webhooks/bridge', () => {
     )
     expect(releaseSenderKycHolds).not.toHaveBeenCalled()
     expect(registerPendingDestinations).not.toHaveBeenCalled()
+    expect(releaseDestinationPayabilityHolds).not.toHaveBeenCalled()
     await app.close()
   })
 
@@ -201,7 +208,7 @@ describe('POST /v1/webhooks/bridge', () => {
     const { table } = customerUpdate()
     from.mockReturnValue(table)
     releaseSenderKycHolds.mockResolvedValueOnce(['tr-1', 'tr-2'])
-    registerPendingDestinations.mockResolvedValueOnce({ registered: 1, failed: [] })
+    registerPendingDestinations.mockResolvedValueOnce({ registeredIds: ['dest-1'], failed: [] })
     const app = await buildApp()
 
     const body = JSON.stringify({
@@ -251,6 +258,100 @@ describe('POST /v1/webhooks/bridge', () => {
 
     expect(res.status).toBe(200)
     expect(releaseSenderKycHolds).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  // The gap f64cf12 named and left open: Bridge gates the CLABE on the SPEI
+  // endorsement, so the approval-time registration 403s and the payout parks
+  // on `payability`. The endorsement lands, Bridge sends another
+  // customer.updated, THIS pass registers — and the payout must not keep
+  // waiting on an operator.
+  it('on a late registration: releases the payability holds those destinations caused', async () => {
+    const { table } = customerUpdate()
+    from.mockReturnValue(table)
+    registerPendingDestinations.mockResolvedValueOnce({ registeredIds: ['dest-1', 'dest-2'], failed: [] })
+    releaseDestinationPayabilityHolds.mockResolvedValueOnce(['tr-1'])
+    const app = await buildApp()
+
+    const body = JSON.stringify({
+      event_type: 'customer.updated',
+      event_object: { id: 'cust_abc', status: 'active' },
+    })
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/bridge')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', signHeader(body))
+      .send(body)
+
+    expect(res.status).toBe(200)
+    expect(releaseDestinationPayabilityHolds).toHaveBeenCalledWith(
+      {
+        userId: 'user-1',
+        destinationIds: ['dest-1', 'dest-2'],
+        actor: 'webhook:bridge',
+        requestId: expect.any(String),
+      },
+      expect.anything(),
+    )
+    // Registration first: a release before the ref lands would only re-hold.
+    expect(registerPendingDestinations.mock.invocationCallOrder[0]!).toBeLessThan(
+      releaseDestinationPayabilityHolds.mock.invocationCallOrder[0]!,
+    )
+    await app.close()
+  })
+
+  // The narrowing lives in the service; what the ROUTE must never do is hand
+  // it a wider set than the pass actually registered. A pass where every
+  // destination is still endorsement-blocked releases nothing.
+  it('hands the release nothing when the pass registered nothing', async () => {
+    const { table } = customerUpdate()
+    from.mockReturnValue(table)
+    registerPendingDestinations.mockResolvedValueOnce({
+      registeredIds: [],
+      failed: [{ destinationId: 'dest-1', reason: 'endorsement_missing' }],
+    })
+    const app = await buildApp()
+
+    const body = JSON.stringify({
+      event_type: 'customer.updated',
+      event_object: { id: 'cust_abc', status: 'active' },
+    })
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/bridge')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', signHeader(body))
+      .send(body)
+
+    expect(res.status).toBe(200)
+    expect(releaseDestinationPayabilityHolds).toHaveBeenCalledWith(
+      expect.objectContaining({ destinationIds: [] }),
+      expect.anything(),
+    )
+    await app.close()
+  })
+
+  it('still acks 200 when the auto-release throws — the status is already committed', async () => {
+    const { table } = customerUpdate()
+    from.mockReturnValue(table)
+    registerPendingDestinations.mockResolvedValueOnce({ registeredIds: ['dest-1'], failed: [] })
+    releaseDestinationPayabilityHolds.mockRejectedValueOnce(new Error('supabase down'))
+    const app = await buildApp()
+
+    const body = JSON.stringify({
+      event_type: 'customer.updated',
+      event_object: { id: 'cust_abc', status: 'active' },
+    })
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/bridge')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', signHeader(body))
+      .send(body)
+
+    // A 500 here would make Bridge redeliver a status we already applied.
+    expect(res.status).toBe(200)
     await app.close()
   })
 

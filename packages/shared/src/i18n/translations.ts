@@ -1858,7 +1858,7 @@ const en: Translations = {
         fx_drift:
           'Compare the Bridge buy rate at quote (Quote section) and its age with the live Bridge buy rate. Tolerable drift → release; the difference lands on fx_slippage. A genuine dislocation → get Joshua’s sign-off first. Merely stale → find out why the transfer was stuck before releasing. Never re-quote: the customer amount is a firm Reg E commitment.',
         payability:
-          'Release only once the destination is active, the recipient is active, and the Bridge external account is registered (Destination section). Otherwise the submit job re-holds within a minute. Fix the record first — re-activate, or register the external account.',
+          'Release only once the destination is active, the recipient is active, and the Bridge external account is registered (Destination section). Otherwise the submit job re-holds within a minute. Fix the record first — re-activate, or register the external account. A hold whose only cause is the missing external account needs no button: Bridge gates the CLABE on the customer’s SPEI endorsement, and when that endorsement lands the registration retries and this hold releases itself (actor webhook:bridge in Activity).',
         velocity_review:
           'Check the sender’s other in-window sends. A legitimate burst → release. An error or anything suspicious → do NOT release; cancel and refund instead. If this sender will routinely exceed the caps, raise RISK_* with Joshua’s sign-off rather than releasing repeatedly.',
         submit_error:
@@ -2831,7 +2831,7 @@ const es: Translations = {
         fx_drift:
           'Compara la tasa de compra de Bridge al cotizar (secci\u00f3n Cotizaci\u00f3n) y su antig\u00fcedad con la tasa de compra actual de Bridge. Deriva tolerable \u2192 libera; la diferencia cae en fx_slippage. Dislocaci\u00f3n real \u2192 primero la aprobaci\u00f3n de Joshua. Solo antigua \u2192 averigua por qu\u00e9 se atasc\u00f3 antes de liberar. Nunca recotices: el monto al cliente es un compromiso firme bajo Reg E.',
         payability:
-          'Libera solo cuando el destino est\u00e9 activo, el destinatario est\u00e9 activo y la cuenta externa en Bridge est\u00e9 registrada (secci\u00f3n Destino). Si no, el job de env\u00edo vuelve a retener en un minuto. Corrige el registro primero: reactiva, o registra la cuenta externa.',
+          'Libera solo cuando el destino est\u00e9 activo, el destinatario est\u00e9 activo y la cuenta externa en Bridge est\u00e9 registrada (secci\u00f3n Destino). Si no, el job de env\u00edo vuelve a retener en un minuto. Corrige el registro primero: reactiva, o registra la cuenta externa. Una retenci\u00f3n cuya \u00fanica causa es la cuenta externa faltante no necesita bot\u00f3n: Bridge condiciona la CLABE al endoso SPEI del cliente, y cuando ese endoso llega el registro se reintenta y la retenci\u00f3n se libera sola (actor webhook:bridge en Actividad).',
         velocity_review:
           'Revisa los otros env\u00edos del remitente dentro de la ventana. Una r\u00e1faga leg\u00edtima \u2192 libera. Un error o algo sospechoso \u2192 NO liberes; cancela y reembolsa. Si este remitente superar\u00e1 los l\u00edmites con frecuencia, sube RISK_* con la aprobaci\u00f3n de Joshua en vez de liberar repetidamente.',
         submit_error:
