@@ -252,6 +252,38 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
   }
 
   /**
+   * Expire an unpaid Session so the reaper can fail its row without leaving a
+   * payable form alive somewhere. Status is READ FIRST rather than relying on
+   * Stripe's error for a non-open session: `complete` means the sender paid in
+   * the window between our sweep's select and this call, and the
+   * checkout.session.completed webhook is on its way — that row must not be
+   * failed. `expired` is Stripe's own 24h clock having beaten ours; nothing to
+   * do. Only `open` is ours to close.
+   */
+  async expireFunding(input: { paymentRef: string }): Promise<'expired' | 'not_open'> {
+    const session = await this.client.checkout.sessions.retrieve(input.paymentRef)
+    if (session.status !== 'open') return 'not_open'
+    try {
+      await this.client.checkout.sessions.expire(input.paymentRef)
+    } catch (err) {
+      // THE RACE WINDOW, decided on purpose rather than by accident. Between
+      // the retrieve above and this call the sender can confirm, and Stripe
+      // refuses to expire a completed session with an invalid_request_error.
+      // The reaper skips a row on ANY throw, so this was safe even unhandled —
+      // but "safe because transport errors also skip" is not a decision, and a
+      // Stripe change to succeed silently here would have failed a paid row.
+      // Re-read and answer for the state we can see; anything else is a real
+      // failure and propagates.
+      if (isInvalidRequest(err)) {
+        const now = await this.client.checkout.sessions.retrieve(input.paymentRef)
+        if (now.status !== 'open') return 'not_open'
+      }
+      throw err
+    }
+    return 'expired'
+  }
+
+  /**
    * The route's fallback-join escape hatch (FundingProcessor doc comment):
    * charge.dispute.created and a dashboard-issued refund carry the underlying
    * PaymentIntent id as paymentRef, but funding_payment_ref on THIS rail's
@@ -302,6 +334,17 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
     }
     return id
   }
+}
+
+// Stripe rejects `sessions.expire` on a non-open session as an
+// invalid_request_error. Duck-typed like isUnexpectedState in stripe.ts — the
+// SDK's error classes are not worth an import for one field.
+function isInvalidRequest(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { type?: unknown }).type === 'StripeInvalidRequestError'
+  )
 }
 
 const CHECKOUT_EVENTS = new Set([

@@ -54,6 +54,10 @@ function chain(result: { data?: unknown; error?: unknown }) {
     b[m] = vi.fn(() => b)
   }
   b['single'] = vi.fn(async () => resolved)
+  // The applier's post-FUNDED re-read uses maybeSingle (C5 race fix); a chain
+  // that claims to be the supabase client has to answer it, or the route 500s
+  // on a TypeError that only the test asserting status would ever notice.
+  b['maybeSingle'] = vi.fn(async () => resolved)
   return b
 }
 
@@ -113,6 +117,7 @@ describe('POST /v1/dev/transfers/:id/simulate-funding', () => {
   it('drives the transfer to FUNDED through the real funding webhook', async () => {
     from.mockReturnValueOnce(chain({ data: confirmedTransfer }))
     from.mockReturnValueOnce(chain({ data: transferForWebhook }))
+    from.mockReturnValueOnce(chain({ data: { funding_cleared: false } })) // post-FUNDED re-read (C5 race fix)
     const app = await buildApp()
 
     const res = await post(app)
@@ -137,6 +142,7 @@ describe('POST /v1/dev/transfers/:id/simulate-funding', () => {
     // webhook's fundingPaymentRef update, silently corrupting the transfer.
     from.mockReturnValueOnce(chain({ data: confirmedTransfer }))
     from.mockReturnValueOnce(chain({ data: transferForWebhook }))
+    from.mockReturnValueOnce(chain({ data: { funding_cleared: false } })) // post-FUNDED re-read (C5 race fix)
     const app = await buildApp()
 
     await post(app)

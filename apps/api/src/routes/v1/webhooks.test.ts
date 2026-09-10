@@ -524,7 +524,8 @@ describe('POST /v1/webhooks/funding', () => {
   })
 
   it('drives PENDING_PAYMENT → FUNDED with the ledger batch, timestamps, and payment ref', async () => {
-    from.mockReturnValueOnce(selectChain({ data: transferRow }))
+    // load, [transition], then the post-commit funding_cleared re-read (C5 race fix)
+    from.mockReturnValueOnce(selectChain({ data: transferRow })).mockReturnValueOnce(selectChain({ data: { funding_cleared: false } }))
     transitionTransfer.mockResolvedValue({ ...transferRow, state: 'FUNDED' })
     const app = await buildApp()
 
@@ -552,7 +553,8 @@ describe('POST /v1/webhooks/funding', () => {
   })
 
   it('still acks 200 when the payout enqueue fails — the sweep heals it', async () => {
-    from.mockReturnValueOnce(selectChain({ data: transferRow }))
+    // load, [transition], then the post-commit funding_cleared re-read (C5 race fix)
+    from.mockReturnValueOnce(selectChain({ data: transferRow })).mockReturnValueOnce(selectChain({ data: { funding_cleared: false } }))
     transitionTransfer.mockResolvedValue({ ...transferRow, state: 'FUNDED' })
     enqueuePayoutSubmit.mockRejectedValue(new Error('DATABASE_URL is not set'))
     const app = await buildApp()
@@ -588,7 +590,9 @@ describe('POST /v1/webhooks/funding', () => {
     // that balance, making it a one-way ratchet that permanently halts payouts.
     const load = selectChain({ data: { ...transferRow, state: 'FUNDED' } })
     const update = selectChain({ data: null })
-    from.mockReturnValueOnce(load).mockReturnValueOnce(update)
+    // UPDATE first, then the load — the C5 race fix reads state AFTER setting
+    // the flag, so a FUNDED committing concurrently is seen, not missed.
+    from.mockReturnValueOnce(update).mockReturnValueOnce(load)
     const app = await buildApp()
 
     const body = fundingBody('funding_cleared')
@@ -623,7 +627,7 @@ describe('POST /v1/webhooks/funding', () => {
     'skips the cash leg when the receivable is already closed (%s) — never drives it negative',
     async (state, refundRef) => {
       const load = selectChain({ data: { ...transferRow, state, refund_payment_ref: refundRef } })
-      from.mockReturnValueOnce(load).mockReturnValueOnce(selectChain({ data: null }))
+      from.mockReturnValueOnce(selectChain({ data: null })).mockReturnValueOnce(load) // update, then load
       const app = await buildApp()
 
       const body = fundingBody('funding_cleared')
@@ -639,7 +643,7 @@ describe('POST /v1/webhooks/funding', () => {
     const load = selectChain({
       data: { ...transferRow, state: 'REFUNDED', refund_payment_ref: 're_stripe_1' },
     })
-    from.mockReturnValueOnce(load).mockReturnValueOnce(selectChain({ data: null }))
+    from.mockReturnValueOnce(selectChain({ data: null })).mockReturnValueOnce(load) // update, then load
     const app = await buildApp()
 
     const body = fundingBody('funding_cleared')
@@ -654,7 +658,7 @@ describe('POST /v1/webhooks/funding', () => {
     // The flag is already set; a swallowed failure would strand the receivable
     // open forever with nothing to retry it.
     const load = selectChain({ data: { ...transferRow, state: 'FUNDED' } })
-    from.mockReturnValueOnce(load).mockReturnValueOnce(selectChain({ data: null }))
+    from.mockReturnValueOnce(selectChain({ data: null })).mockReturnValueOnce(load) // update, then load
     postLedgerTransaction.mockRejectedValueOnce(new Error('ledger rpc down'))
     const app = await buildApp()
 
@@ -970,11 +974,12 @@ describe('POST /v1/webhooks/funding — onramp settlement (#213)', () => {
   it('fulfillment_complete posts the cash leg AND the float top-up', async () => {
     processorOverride.current = fakeOnrampProcessor('funding_cleared')
     const funded = { ...transferRow, state: 'FUNDED', refund_payment_ref: null }
-    // applyOnrampSettlement reads: catch-up load, cleared load, flag update
+    // applyOnrampSettlement reads: settlement load, then cleared's flag UPDATE,
+    // then cleared's load (update precedes load since the C5 race fix)
     from
       .mockReturnValueOnce(selectChain({ data: funded }))
-      .mockReturnValueOnce(selectChain({ data: funded }))
       .mockReturnValueOnce(selectChain({ data: null }))
+      .mockReturnValueOnce(selectChain({ data: funded }))
     const app = await buildApp()
 
     const res = await postOnramp(app)
@@ -998,8 +1003,9 @@ describe('POST /v1/webhooks/funding — onramp settlement (#213)', () => {
     from
       .mockReturnValueOnce(selectChain({ data: pending })) // settlement load
       .mockReturnValueOnce(selectChain({ data: pending })) // catch-up load
-      .mockReturnValueOnce(selectChain({ data: funded })) // cleared load (post-transition)
-      .mockReturnValueOnce(selectChain({ data: null })) // flag update
+      .mockReturnValueOnce(selectChain({ data: { funding_cleared: false } })) // post-FUNDED re-read
+      .mockReturnValueOnce(selectChain({ data: null })) // cleared: flag update
+      .mockReturnValueOnce(selectChain({ data: funded })) // cleared: load (post-transition)
     const app = await buildApp()
 
     const res = await postOnramp(app)
@@ -1016,10 +1022,12 @@ describe('POST /v1/webhooks/funding — onramp settlement (#213)', () => {
   it('suppresses the top-up when the receivable is closed (CANCELED)', async () => {
     processorOverride.current = fakeOnrampProcessor('funding_cleared')
     const canceled = { ...transferRow, state: 'CANCELED', refund_payment_ref: null }
+    // Passed by accident under the old select-then-update order (the null went
+    // to the load, which also reads as "receivable closed"). Now honest.
     from
       .mockReturnValueOnce(selectChain({ data: canceled }))
-      .mockReturnValueOnce(selectChain({ data: canceled }))
       .mockReturnValueOnce(selectChain({ data: null }))
+      .mockReturnValueOnce(selectChain({ data: canceled }))
     const app = await buildApp()
 
     const res = await postOnramp(app)
@@ -1034,8 +1042,8 @@ describe('POST /v1/webhooks/funding — onramp settlement (#213)', () => {
     const funded = { ...transferRow, state: 'FUNDED', refund_payment_ref: null }
     from
       .mockReturnValueOnce(selectChain({ data: funded }))
-      .mockReturnValueOnce(selectChain({ data: funded }))
       .mockReturnValueOnce(selectChain({ data: null }))
+      .mockReturnValueOnce(selectChain({ data: funded }))
     postLedgerTransaction
       .mockResolvedValueOnce(undefined) // cash leg
       .mockRejectedValueOnce(new Error('ledger rpc down')) // top-up
@@ -1049,10 +1057,12 @@ describe('POST /v1/webhooks/funding — onramp settlement (#213)', () => {
 
   it('fulfillment_processing drives the ordinary FUNDED transition + payout', async () => {
     processorOverride.current = fakeOnrampProcessor('funding_succeeded')
-    // Two loads: the amount guard's, then the shared applier's own.
+    // Three reads: the amount guard's, the shared applier's own, then the
+    // applier's post-commit funding_cleared re-read (C5 race fix).
     from
       .mockReturnValueOnce(selectChain({ data: transferRow }))
       .mockReturnValueOnce(selectChain({ data: transferRow }))
+      .mockReturnValueOnce(selectChain({ data: { funding_cleared: false } }))
     transitionTransfer.mockResolvedValue({ ...transferRow, state: 'FUNDED' })
     const app = await buildApp()
 

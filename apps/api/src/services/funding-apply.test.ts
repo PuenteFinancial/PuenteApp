@@ -594,6 +594,66 @@ describe('out-of-order clearing catch-up (C5 — found by the first real payment
   })
 })
 
+describe('the concurrent race — the flag flips while FUNDED is committing', () => {
+  // The two ordering bugs were fixed for the observed orders; this pins the
+  // interleaving that survived them. cleared loads state (PENDING), FUNDED
+  // commits, cleared sets the flag and skips on its stale state, FUNDED's
+  // catch-up read the flag BEFORE the transition and saw false. Both skip;
+  // the clearing leg is lost again. The fix reads the flag AFTER the commit.
+  beforeEach(() => {
+    transitionTransfer.mockReset()
+    postLedgerTransaction.mockReset()
+    enqueuePayoutSubmit.mockReset()
+    transitionTransfer.mockResolvedValue(undefined)
+    postLedgerTransaction.mockResolvedValue(undefined)
+    enqueuePayoutSubmit.mockResolvedValue(undefined)
+  })
+
+  /** Reads in order: the pre-load (flag false), the post-transition re-read
+   *  (flag TRUE — a concurrent cleared landed in the gap), then the row the
+   *  catch-up's own cleared read sees (FUNDED). */
+  function stubRaceReads() {
+    const reads = [
+      { ...PENDING, funding_cleared: false, funding_payment_ref: 'cs_race' },
+      { funding_cleared: true },
+      { ...PENDING, state: 'FUNDED', funding_cleared: true, funding_payment_ref: 'cs_race' },
+    ]
+    let n = 0
+    from.mockImplementation(() => {
+      const b: Record<string, unknown> = {}
+      for (const m of ['select', 'eq', 'update']) b[m] = () => b
+      const read = async () => ({ data: reads[Math.min(n++, reads.length - 1)], error: null })
+      b['maybeSingle'] = read
+      b['single'] = read
+      return b
+    })
+  }
+
+  it('posts the clearing leg when the flag was false at load but true after the commit', async () => {
+    stubRaceReads()
+    const out = await applyFundingSucceeded({
+      transferId: TRANSFER_ID,
+      paymentRef: 'cs_race',
+      eventId: 'evt_race',
+      actor: 'webhook:funding',
+    })
+    expect(out.outcome).toBe('applied')
+    expect(postLedgerTransaction).toHaveBeenCalledTimes(1)
+    expect(postLedgerTransaction.mock.calls[0]![0]).toMatchObject({ transition: 'funding_cleared' })
+  })
+
+  it('applyFundingCleared judges the receivable from a read taken AFTER its update', async () => {
+    // First read is what the update-then-read order produces: FUNDED. If the
+    // implementation ever regresses to reading before updating, a PENDING
+    // pre-read would make it skip — this stub has no such row to hand it.
+    stubTransfer({ ...PENDING, state: 'FUNDED', funding_cleared: true, refund_payment_ref: null })
+    const { applyFundingCleared } = await import('./funding-apply.js')
+    const out = await applyFundingCleared({ transferId: TRANSFER_ID })
+    expect(out).toEqual({ outcome: 'applied' })
+    expect(postLedgerTransaction).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('a funding event never replaces the ref initiation persisted (C5 — the ACH overwrite)', () => {
   beforeEach(() => {
     transitionTransfer.mockReset()
