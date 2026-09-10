@@ -87,6 +87,10 @@ const HUMAN_ACTIONED_HOLD_REASONS = new Set([
 ])
 const FUNDED_HELD_ACTIONABLE_STALE_MS = 24 * 60 * 60_000
 const ORPHAN_WINDOW_MS = 7 * 24 * 60 * 60_000
+// Disputes get their own, much longer window: a card chargeback can land
+// months after the payment, and the whole point of this check is to catch the
+// one whose webhook we MISSED — which we only notice later, by definition.
+const DISPUTE_WINDOW_MS = 60 * 24 * 60 * 60_000
 const LIST_LIMIT = 100
 // PostgREST caps every response at max_rows (1000, supabase/config.toml) no
 // matter the requested limit, so a response AT the cap is indistinguishable
@@ -201,10 +205,23 @@ interface ClearedFlagRow {
  * receivable that will never close, and the float ceiling reads that balance.
  */
 async function runClearedPostings(): Promise<CheckOutcome> {
+  // FUNDING_REVERSED is excluded, and ONLY it. The flag says the provider once
+  // told us the money cleared; on the loss path the reversal's void arm then
+  // wrote the receivable off directly, so there is deliberately no
+  // `funding_cleared` ledger leg and the books are already correct. Without
+  // this exclusion every reversed transfer whose clearing event landed late
+  // would page here forever (the flag is written before the state is read, by
+  // design — the C5 race fix).
+  //
+  // The rest of applyFundingCleared's skip states are NOT excluded: this check
+  // caught its first real bug on a FUNDED row, and widening it to every
+  // unwound state would blunt exactly that. A flagged CANCELED or REFUNDED row
+  // with no leg stays a finding, because it is genuinely worth a look.
   const { data: flagged, error: flaggedError } = await supabaseAdmin
     .from('transfers')
     .select('id, state')
     .eq('funding_cleared', true)
+    .neq('state', 'FUNDING_REVERSED')
     .limit(ROW_BOUND)
   if (flaggedError || flagged == null) failClosed('cleared-postings select', flaggedError)
   const rows = flagged as ClearedFlagRow[]
@@ -726,6 +743,126 @@ async function runStripeReceivables(): Promise<CheckOutcome> {
   }
 }
 
+/**
+ * Did a dispute reach us at all?
+ *
+ * The funding webhook is the fast path for a clawback, and it is a SINGLE
+ * point of failure: an unsubscribed event type (found on staging 2026-09-10),
+ * a delivery that failed past Stripe's retry window, or a handler that threw
+ * for three days all end the same way — money taken back, the transfer still
+ * reading COMPLETED, and the sender still free to send. Nothing else in the
+ * system would ever notice.
+ *
+ * So this asks Stripe directly, and holds every dispute to one rule: it must
+ * have left a mark. Either the transfer is at FUNDING_REVERSED (the delivered
+ * case, loss booked) or it is held on `funding_disputed` (the undelivered
+ * case, payout stopped). Anything else means the webhook did not do its job.
+ */
+async function runStripeDisputes(): Promise<CheckOutcome> {
+  const processor = getFundingProcessor()
+  if (
+    !STRIPE_RECEIVABLE_RAILS.has(processor.provider) ||
+    !processor.isConfigured() ||
+    !processor.listRecentDisputes
+  ) {
+    return {
+      status: 'skipped',
+      findings: [],
+      summary: { reason: 'funding processor is not a Stripe rail' },
+    }
+  }
+
+  const listed = await processor.listRecentDisputes({
+    createdAfter: new Date(Date.now() - DISPUTE_WINDOW_MS),
+    limit: LIST_LIMIT,
+  })
+  const findings: CheckFinding[] = []
+  if (listed.length >= LIST_LIMIT) {
+    // Same silent-cap rule as the orphan checks: an incomplete window pages.
+    findings.push({ key: 'stripe-disputes-truncated', detail: { listed: listed.length } })
+  }
+  if (listed.length === 0) {
+    return { status: findings.length === 0 ? 'pass' : 'findings', findings, summary: { listed: 0 } }
+  }
+
+  // Join on the ref the funding side persisted. On the Checkout rail that is
+  // the SESSION id while a dispute carries the PaymentIntent id, so the direct
+  // join misses by construction — the same divergence the webhook's fallback
+  // handles, resolved the same way. Disputes are rare enough that a per-miss
+  // provider call is cheaper than carrying a second index.
+  const byRef = new Map<string, { id: string; state: string; payout_hold_reason: string | null }>()
+  const refs = listed.map((d) => d.paymentRef).filter((r) => r !== '')
+  if (refs.length > 0) {
+    const { data, error } = await supabaseAdmin
+      .from('transfers')
+      .select('id, state, payout_hold_reason, funding_payment_ref')
+      .in('funding_payment_ref', refs)
+    if (error || data == null) failClosed('stripe-disputes select', error)
+    for (const row of data as Array<{
+      id: string
+      state: string
+      payout_hold_reason: string | null
+      funding_payment_ref: string
+    }>) {
+      byRef.set(row.funding_payment_ref, row)
+    }
+  }
+
+  for (const dispute of listed) {
+    let row = dispute.paymentRef === '' ? undefined : byRef.get(dispute.paymentRef)
+    if (!row && dispute.paymentRef !== '' && processor.resolveAlternateFundingRef) {
+      const alternate = await processor.resolveAlternateFundingRef(dispute.paymentRef)
+      if (alternate) {
+        const { data, error } = await supabaseAdmin
+          .from('transfers')
+          .select('id, state, payout_hold_reason')
+          .eq('funding_payment_ref', alternate)
+          .maybeSingle()
+        if (error) failClosed('stripe-disputes alternate select', error)
+        row =
+          (data as { id: string; state: string; payout_hold_reason: string | null } | null) ??
+          undefined
+      }
+    }
+
+    if (!row) {
+      // Money is being clawed back and we cannot even name the transfer.
+      findings.push({
+        key: `stripe-dispute-unjoinable:${dispute.disputeRef}`,
+        detail: {
+          disputeRef: dispute.disputeRef,
+          paymentRef: dispute.paymentRef,
+          disputeStatus: dispute.status,
+          createdAt: dispute.createdAt,
+        },
+      })
+      continue
+    }
+
+    const recorded =
+      row.state === 'FUNDING_REVERSED' || row.payout_hold_reason === 'funding_disputed'
+    if (!recorded) {
+      findings.push({
+        key: `stripe-dispute-unrecorded:${dispute.disputeRef}`,
+        detail: {
+          disputeRef: dispute.disputeRef,
+          transferId: row.id,
+          state: row.state,
+          payoutHoldReason: row.payout_hold_reason,
+          disputeStatus: dispute.status,
+          createdAt: dispute.createdAt,
+        },
+      })
+    }
+  }
+
+  return {
+    status: findings.length === 0 ? 'pass' : 'findings',
+    findings,
+    summary: { listed: listed.length, unrecorded: findings.length },
+  }
+}
+
 async function runStripeOrphans(): Promise<CheckOutcome> {
   const processor = getFundingProcessor()
   if (
@@ -811,5 +948,6 @@ export function buildChecks(): ReconciliationCheck[] {
     { name: 'bridge_wallet_float', severity: 'warning', runbook: RUNBOOK, run: runBridgeWalletFloat },
     { name: 'stripe_receivables', severity: 'error', runbook: RUNBOOK, run: runStripeReceivables },
     { name: 'stripe_orphans', severity: 'error', runbook: RUNBOOK, run: runStripeOrphans },
+    { name: 'stripe_disputes', severity: 'error', runbook: RUNBOOK, run: runStripeDisputes },
   ]
 }

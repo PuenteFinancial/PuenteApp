@@ -31,7 +31,7 @@ stateDiagram-v2
     IN_FLIGHT --> PAYOUT_FAILED: delivery fails
     CANCELED --> REFUNDED: void settles (mock/stripe only — manual/onramp rest at CANCELED)
     PAYOUT_FAILED --> REFUNDED
-    COMPLETED --> FUNDING_REVERSED: designed — NO writer in code yet (see below)
+    COMPLETED --> FUNDING_REVERSED: dispute / ACH return after delivery
     COMPLETED --> UNDER_REVIEW: timely cancellation (PR6b) / Reg E dispute (future)
     PAYMENT_FAILED --> [*]
     REFUNDED --> [*]
@@ -40,10 +40,14 @@ stateDiagram-v2
 ```
 
 **Honesty notes on the diagram (2026-08-26):**
-- **`FUNDING_REVERSED` has no writer in code.** The webhook route receives `funding_reversed`
-  (Stripe `charge.dispute.created`, mock), logs "handling deferred", and acks. The state exists in
-  the enum and is *read* (settled-states, risk unwinding) but nothing transitions into it — a real
-  ACH return today is a Sentry page and a human, not a state change.
+- **`FUNDING_REVERSED` is written by the funding webhook (2026-09-10).** `funding_reversed`
+  (Stripe `charge.dispute.created`, mock) reaches `applyFundingReversed`, which branches on where
+  the pesos are: **COMPLETED** transitions here and posts the loss batch; **FUNDED** places a
+  `funding_disputed` payout hold and posts NOTHING (nothing is lost while the money is still
+  ours); **SUBMITTED/IN_FLIGHT** can neither be stopped nor booked and only page. Every arm
+  freezes the sender (`users.status = 'suspended'`, enforced at the onboarded gate and at payout
+  submit) and every arm pages. `reconciliation.stripe_disputes` is the backstop for a dispute
+  whose webhook never arrived.
 - **`CANCELED → REFUNDED` is synchronous only on mock/stripe.** On the manual and onramp rails the
   undo ref (`manualrefund_…` / `onramprefund_…`) is `pending` and requires a human disbursement
   (manual-refund runbook), so the transfer **rests at `CANCELED`** with the ref recorded until
@@ -102,7 +106,7 @@ payment* (new debit against Puente), not a reversal of the original entries. The
 | `CANCELED` | User canceled while still pre-delivery; triggers the void/refund. On mock/stripe the undo settles synchronously → `REFUNDED`. On manual/onramp the undo needs a human disbursement, so this is a **resting state** until the runbook runs. | → REFUNDED |
 | `PAYOUT_FAILED` | Bridge could not deliver (bad CLABE, bank reject); triggers refund. | → REFUNDED |
 | `REFUNDED` | Funds returned to sender (from CANCELED, PAYOUT_FAILED, or UNDER_REVIEW). | ✅ |
-| `FUNDING_REVERSED` | ACH return / card chargeback **after** payout — our loss/recovery path. **Designed, not wired:** no code writes this state today (the webhook acks and defers). | ✅ (ops) |
+| `FUNDING_REVERSED` | ACH return / card chargeback **after** payout — our loss/recovery path. Written by the funding webhook via `applyFundingReversed`; the loss is booked straight to `loss_funding_reversed` at dispute creation, and a win is a correcting credit rather than a rewrite. | ✅ (ops) |
 | `UNDER_REVIEW` | Reg E error-resolution / dispute open; exits to `REFUNDED` or `COMPLETED` only. | no |
 
 ## Funding rails — the five doors into `FUNDED` (2026-08-26)

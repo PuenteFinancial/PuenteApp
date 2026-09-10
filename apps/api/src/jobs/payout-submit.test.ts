@@ -471,6 +471,49 @@ describe('submitPayout — holds', () => {
   })
 })
 
+describe('submitPayout — sender freeze (the loss path)', () => {
+  it('a suspended sender is held before the KYC gate, with no Bridge call', async () => {
+    // One dispute stops ALL of this sender's payouts: the others are funded by
+    // the same instrument, so paying them turns one loss into several.
+    const load = chain({ data: baseTransfer, error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
+    route('transfers', load, hold)
+    route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'approved', status: 'suspended' }, error: null }))
+
+    expect(await submitPayout('tr-1')).toBe(0)
+
+    expect(hold.update).toHaveBeenCalledWith(
+      expect.objectContaining({ payout_hold_reason: 'sender_suspended' }),
+    )
+    expect(setFingerprint).toHaveBeenCalledWith(['payout-hold', 'sender_suspended'])
+    expect(payability).not.toHaveBeenCalled()
+    expect(createPayout).not.toHaveBeenCalled()
+  })
+
+  it('the freeze outranks the KYC gate — an unapproved AND suspended sender reads as suspended', async () => {
+    // Both gates would hold, but the reason in the audit log must be the one
+    // that actually matters: a frozen sender's KYC status is irrelevant.
+    const load = chain({ data: baseTransfer, error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
+    route('transfers', load, hold)
+    route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'pending', status: 'suspended' }, error: null }))
+
+    expect(await submitPayout('tr-1')).toBe(0)
+
+    expect(hold.update).toHaveBeenCalledWith(
+      expect.objectContaining({ payout_hold_reason: 'sender_suspended' }),
+    )
+  })
+
+  it('an active sender passes the freeze gate untouched', async () => {
+    setupHappy()
+    route('users', chain({ data: { bridge_customer_id: 'cust_1', kyc_status: 'approved', status: 'active' }, error: null }))
+
+    expect(await submitPayout('tr-1')).toBe(1)
+    expect(createPayout).toHaveBeenCalled()
+  })
+})
+
 describe('submitPayout — submission and transition', () => {
   it('happy path: claims, POSTs the contract input, transitions with ledger + ref', async () => {
     const { claim } = setupHappy()

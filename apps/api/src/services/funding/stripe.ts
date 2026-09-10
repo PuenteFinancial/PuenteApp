@@ -7,6 +7,7 @@ import type {
   FundingEventType,
   FundingInitiation,
   FundingParseResult,
+  FundingDisputeListItem,
   FundingPaymentListItem,
   FundingPaymentStatus,
   FundingProcessor,
@@ -181,6 +182,26 @@ export class StripeFundingProcessor implements FundingProcessor {
         createdAt: new Date(pi.created * 1000).toISOString(),
       }
     })
+  }
+
+  async listRecentDisputes(input: {
+    createdAfter: Date
+    limit: number
+  }): Promise<FundingDisputeListItem[]> {
+    const page = await this.client.disputes.list({
+      created: { gte: Math.floor(input.createdAfter.getTime() / 1000) },
+      limit: input.limit,
+    })
+    // payment_intent is the join key the webhook's dispute path already uses.
+    // A dispute without one cannot be tied to a transfer by any route, so it
+    // is surfaced with an empty ref rather than dropped — recon reporting
+    // "we cannot place this dispute" is the finding.
+    return page.data.map((d) => ({
+      disputeRef: d.id,
+      paymentRef: typeof d.payment_intent === 'string' ? d.payment_intent : '',
+      status: d.status,
+      createdAt: new Date(d.created * 1000).toISOString(),
+    }))
   }
 
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean {

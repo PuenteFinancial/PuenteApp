@@ -586,6 +586,8 @@ export type Translations = {
       transfer_in_progress: string
       quote_expired: string
       transfer_not_cancelable: string
+      /** The sender is frozen after a chargeback or ACH return (loss path). */
+      account_suspended: string
       conflict: string
       idempotency_conflict: string
       // Embedded onramp (K5): the user must (re)connect with Link before the
@@ -1577,6 +1579,8 @@ const en: Translations = {
         'You already have a transfer in progress. You can send again once it clears, usually within a few business days.',
       quote_expired: 'This rate expired. Get a new quote to continue.',
       transfer_not_cancelable: 'This transfer can no longer be canceled.',
+      account_suspended:
+        'Your account is on hold while we review a problem with a payment. Contact support to continue.',
       conflict: 'This can’t be updated right now. Refresh and try again.',
       idempotency_conflict:
         'We’re still processing your last request. Give it a moment before trying again.',
@@ -2537,6 +2541,8 @@ const es: Translations = {
         'Ya tienes una transferencia en curso. Podrás enviar otra cuando se procese tu pago, normalmente en unos días hábiles.',
       quote_expired: 'Este tipo de cambio expiró. Obtén una nueva cotización para continuar.',
       transfer_not_cancelable: 'Esta transferencia ya no se puede cancelar.',
+      account_suspended:
+        'Tu cuenta está en revisión por un problema con un pago. Comunícate con soporte para continuar.',
       conflict: 'Esto no se puede actualizar ahora. Actualiza e inténtalo de nuevo.',
       idempotency_conflict:
         'Todavía estamos procesando tu solicitud anterior. Espera un momento antes de intentar de nuevo.',

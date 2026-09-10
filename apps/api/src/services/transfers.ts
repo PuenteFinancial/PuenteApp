@@ -370,6 +370,71 @@ export function correctionVoidLedgerEntries(transfer: TransferAmounts): LedgerEn
   ]
 }
 
+// ── The loss path: COMPLETED -> FUNDING_REVERSED (docs/ledger-rules.md) ──────
+//
+// A dispute or ACH return AFTER the pesos were delivered. Unlike every other
+// exit in this file, nothing here can be undone: the recipient has the money,
+// the obligation was already discharged by the COMPLETED batch, and the funds
+// we collected are being taken back. So this is not a reversal of anything —
+// it is recognizing a loss.
+//
+// POLICY (2026-09-10): book the STRAIGHT LOSS at dispute creation rather than
+// opening a user receivable and writing it off later. The ledger is
+// append-only, so if we win the dispute or recover the money, a correcting
+// CREDIT reverses this batch on its own transition — honest, and it avoids
+// carrying per-sender receivable bookkeeping at this scale. ledger-rules.md
+// names both options; this is the one we chose.
+//
+// Amount is send + fee, the whole sum we collected. A partial dispute would
+// over-book, which is why the handler records the provider's own reason and
+// pages: at this volume a mismatch is a human's call, not a silent proration.
+//
+// Two variants, exactly like the refund pair above, and picking the wrong one
+// invents money. They differ ONLY in the asset credited:
+
+// The funding CLEARED: real cash landed in cash_clearing and is now being
+// pulled back out. Nets to zero.
+export function fundingReversedLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  return [
+    {
+      account_code: 'loss_funding_reversed',
+      direction: 'debit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+    {
+      account_code: 'cash_clearing',
+      direction: 'credit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+  ]
+}
+
+// The funding NEVER cleared: an ACH returned while the pull was still in
+// flight, so no cash ever reached cash_clearing. Crediting it would claim a
+// withdrawal from money we never held, and would leave funding_receivable open
+// for a pull that will now never settle. The receivable is written off
+// directly instead. Same P&L, different asset. Nets to zero.
+export function fundingReversedVoidLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  return [
+    {
+      account_code: 'loss_funding_reversed',
+      direction: 'debit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+    {
+      account_code: 'funding_receivable',
+      direction: 'credit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+  ]
+}
+
 export async function createTransferFromQuote(input: {
   quoteId: string
   userId: string

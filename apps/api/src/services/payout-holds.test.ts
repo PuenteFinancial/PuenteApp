@@ -22,8 +22,13 @@ vi.mock('@sentry/node', () => ({
   captureMessage: (...args: unknown[]) => captureMessage(...args),
 }))
 
-const { releaseSenderKycHolds, releaseHold, releaseDestinationPayabilityHolds, RELEASABLE_HOLD_REASONS } =
-  await import('./payout-holds.js')
+const {
+  releaseSenderKycHolds,
+  releaseHold,
+  releaseDestinationPayabilityHolds,
+  holdPayoutForDispute,
+  RELEASABLE_HOLD_REASONS,
+} = await import('./payout-holds.js')
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 
@@ -252,8 +257,20 @@ const held = (reason: string | null, state = 'FUNDED'): HoldRow => ({
 const input = { transferId: TRANSFER, reason: 'velocity_review' as const, actor: ACTOR, note: NOTE, requestId: 'req-1' }
 
 describe('releaseHold', () => {
-  it('offers exactly the four human-actioned reasons — sender_kyc_pending is not one', () => {
-    expect([...RELEASABLE_HOLD_REASONS].sort()).toEqual(['fx_drift', 'payability', 'submit_error', 'velocity_review'])
+  it('offers exactly the human-actioned reasons — sender_kyc_pending is not one', () => {
+    // sender_kyc_pending stays out because it AUTO-releases on the Bridge
+    // approval webhook; offering it would let an operator release a row that
+    // immediately re-holds. The loss-path pair is in, for opposite reasons:
+    // funding_disputed needs a human to decide the dispute was won or written
+    // off, and sender_suspended needs a human to unfreeze the sender first.
+    expect([...RELEASABLE_HOLD_REASONS].sort()).toEqual([
+      'funding_disputed',
+      'fx_drift',
+      'payability',
+      'sender_suspended',
+      'submit_error',
+      'velocity_review',
+    ])
   })
 
   it('releases with the runbook compare-and-swap, records provenance, and enqueues the submit', async () => {
@@ -366,5 +383,49 @@ describe('releaseHold', () => {
       expect(recordOpsAction).not.toHaveBeenCalled()
       expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// holdPayoutForDispute: the PRE-delivery arm of the loss path.
+// ---------------------------------------------------------------------------
+
+// transfers.update().eq().eq().is().select() — the same guard payout-submit
+// uses for its own holds, so a row that moved on is left alone.
+function disputeHoldTable(result: { data: unknown; error: unknown }) {
+  const select = vi.fn(async (..._args: unknown[]) => result)
+  const is = vi.fn((..._args: unknown[]) => ({ select }))
+  const eq2 = vi.fn((..._args: unknown[]) => ({ is }))
+  const eq1 = vi.fn((..._args: unknown[]) => ({ eq: eq2 }))
+  const update = vi.fn((..._args: unknown[]) => ({ eq: eq1 }))
+  from.mockReturnValue({ update })
+  return { update, eq1, eq2, is, select }
+}
+
+describe('holdPayoutForDispute', () => {
+  it('stops a FUNDED payout and books nothing', async () => {
+    const t = disputeHoldTable({ data: [{ id: 'tr-1' }], error: null })
+
+    expect(await holdPayoutForDispute('tr-1')).toBe(true)
+
+    expect(t.update).toHaveBeenCalledWith(
+      expect.objectContaining({ payout_hold_reason: 'funding_disputed' }),
+    )
+    expect(t.eq1).toHaveBeenCalledWith('id', 'tr-1')
+    // Guarded exactly like payout-submit's hold: only a FUNDED, unheld row.
+    expect(t.eq2).toHaveBeenCalledWith('state', 'FUNDED')
+    expect(t.is).toHaveBeenCalledWith('payout_hold_reason', null)
+  })
+
+  it('reports false when another actor held or moved the row first', async () => {
+    // Not an error: the guard did its job. The caller uses this to page once
+    // rather than on every redelivery of the same dispute.
+    disputeHoldTable({ data: [], error: null })
+    expect(await holdPayoutForDispute('tr-1')).toBe(false)
+  })
+
+  it('THROWS on a DB error — a silently missed hold pays out clawed-back money', async () => {
+    disputeHoldTable({ data: null, error: { message: 'connection reset' } })
+    await expect(holdPayoutForDispute('tr-1')).rejects.toThrow(/dispute hold update failed/)
   })
 })

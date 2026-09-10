@@ -23,6 +23,11 @@ export type OpsActionKind =
   | 'deposit_instructions_attach'
   | 'deposit_landed'
   | 'float_topup'
+  // System-initiated, not operator-initiated: the loss path freezes a sender
+  // on a dispute. Recorded here so the freeze has provenance in the same place
+  // an investigator already looks — see the migration for why it is not a
+  // table of its own.
+  | 'sender_freeze'
 
 export interface OpsActionInput {
   /** `ops:<admin user id>` — the same vocabulary as transfer_transitions.actor. */
