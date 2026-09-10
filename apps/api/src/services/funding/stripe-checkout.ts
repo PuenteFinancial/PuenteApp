@@ -7,6 +7,7 @@ import type {
   FundingParseResult,
   FundingPaymentStatus,
   FundingUndo,
+  NormalizedPaymentStatus,
 } from './index.js'
 
 // Checkout Sessions rail (C1 — docs/prds/checkout-sessions-rail.md).
@@ -179,11 +180,22 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
     // `completed` carries everything this rail needs.
     if (envelope.type === 'payment_intent.processing') return unhandled
 
+    // `payment_intent.payment_failed` is not this rail's failure signal
+    // either, and letting it through KILLED A TRANSFER ON A DECLINED CARD
+    // (staging, 2026-09-10, ebb028a1): the Element showed "Your card has been
+    // declined" with the Pay button still up — the UI promises a retry — while
+    // the parent map drove the row to PAYMENT_FAILED. The Session stayed open
+    // at Stripe, so a retry with a good card would charge the sender for a
+    // dead row. On this rail the SESSION is the unit: a card decline is
+    // synchronous (confirm returns the error; no webhook is needed), and a
+    // delayed method failing is `checkout.session.async_payment_failed` —
+    // which is mapped above. The PI event carries nothing this rail needs.
+    if (envelope.type === 'payment_intent.payment_failed') return unhandled
+
     // Every other non-checkout.session.* event: hand it to the parent, which
-    // already parses payment_intent.succeeded / payment_failed and
-    // charge.dispute.created. That fall-through is load-bearing rather than
-    // tidiness — it is where card clearing and post-settlement ACH returns
-    // come from on this rail.
+    // already parses payment_intent.succeeded and charge.dispute.created.
+    // That fall-through is load-bearing rather than tidiness — it is where
+    // card clearing and post-settlement returns come from on this rail.
     if (!CHECKOUT_EVENTS.has(envelope.type)) return super.parseEvent(rawBody)
 
     if (!object || typeof object['id'] !== 'string') return { outcome: 'malformed' }
@@ -212,12 +224,20 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
   }
 
   override async getPaymentStatus(input: { paymentRef: string }): Promise<FundingPaymentStatus> {
+    // A `pi_` ref on this rail is a row the 2026-09-10 overwrite hit before
+    // #301 closed it (f07c8e67 on staging). Reconciliation reads through the
+    // ROW's rail, so this adapter gets asked — answer from the PaymentIntent,
+    // exactly as paymentIntentFor tolerates the same rows for refunds.
+    if (input.paymentRef.startsWith('pi_')) return super.getPaymentStatus(input)
     const session = await this.client.checkout.sessions.retrieve(input.paymentRef)
+    const status = session.status ?? 'unknown'
+    const paymentStatus = session.payment_status ?? 'unknown'
     return {
       paymentRef: session.id,
       // Both, joined: `complete/unpaid` and `complete/paid` are different
       // worlds and a single field cannot tell reconciliation which it is.
-      status: `${session.status ?? 'unknown'}/${session.payment_status ?? 'unknown'}`,
+      status: `${status}/${paymentStatus}`,
+      normalized: normalizeCheckoutStatus(status, paymentStatus),
     }
   }
 
@@ -336,6 +356,33 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
   }
 }
 
+/**
+ * A Checkout Session's two status fields, in reconciliation's vocabulary.
+ *
+ *   open     / unpaid  → awaiting    nothing has happened yet
+ *   expired  / *       → canceled    Stripe's 24h clock ran out; it will never pay
+ *   complete / unpaid  → processing  bank debit submitted, settling (the only
+ *                                    shape where a live pull can still fail)
+ *   complete / paid    → succeeded   settled — a card, or a bank debit after
+ *   complete / no_payment_required   async_payment_succeeded; we never create
+ *                                    zero-amount sessions but the value exists
+ *
+ * Anything unrecognized is `awaiting` on purpose: for the classifier that is
+ * the reading that produces NO finding on a live row, so an API vocabulary
+ * change degrades to "not alarmed" rather than "paged on every row".
+ */
+export function normalizeCheckoutStatus(
+  status: string,
+  paymentStatus: string,
+): NormalizedPaymentStatus {
+  if (status === 'expired') return 'canceled'
+  if (status === 'complete') {
+    if (paymentStatus === 'paid' || paymentStatus === 'no_payment_required') return 'succeeded'
+    return 'processing'
+  }
+  return 'awaiting'
+}
+
 // Stripe rejects `sessions.expire` on a non-open session as an
 // invalid_request_error. Duck-typed like isUnexpectedState in stripe.ts — the
 // SDK's error classes are not worth an import for one field.
@@ -382,9 +429,12 @@ const CHECKOUT_EVENTS = new Set([
  * event and a PI event; that is harmless, because the clearing ledger batch is
  * keyed on (transfer, 'funding_cleared') and the second one is a no-op.
  *
- * WEBHOOK CONSEQUENCE: this rail needs `payment_intent.succeeded` and
- * `payment_intent.payment_failed` subscribed alongside the three
- * checkout.session.* events. Three is not enough.
+ * WEBHOOK CONSEQUENCE: this rail needs `payment_intent.succeeded` subscribed
+ * alongside the three checkout.session.* events, and `charge.dispute.created`
+ * for the loss path (post-settlement returns and chargebacks — ours on this
+ * rail). `payment_intent.payment_failed` and `.processing` are acked as
+ * unhandled here (see parseEvent) but harmless to subscribe. Three is not
+ * enough; the smoke script's REQUIRED_EVENTS is the authoritative list.
  */
 function checkoutEventType(
   eventType: string,

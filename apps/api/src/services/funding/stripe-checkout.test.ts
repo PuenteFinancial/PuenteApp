@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import Stripe from 'stripe'
-import { StripeCheckoutFundingProcessor } from './stripe-checkout.js'
+import { StripeCheckoutFundingProcessor, normalizeCheckoutStatus } from './stripe-checkout.js'
 import { undoModeForRef } from './index.js'
 
 // The Checkout Sessions rail. Mirrors stripe.test.ts's harness — a real Stripe
@@ -99,7 +99,12 @@ describe('StripeCheckoutFundingProcessor — event mapping', () => {
     expect(result).toEqual({ outcome: 'unhandled', eventId: 'evt_p', eventType: 'payment_intent.processing' })
   })
 
-  it('still lets payment_intent.payment_failed through to the parent — pre-settlement returns need it', () => {
+  it('acks payment_intent.payment_failed as unhandled — a declined card must NOT kill the transfer', () => {
+    // The premise this test used to encode ("pre-settlement returns need it")
+    // was wrong: on this rail a delayed-method failure arrives as
+    // checkout.session.async_payment_failed, and a card decline is
+    // synchronous. Letting the PI event through failed a transfer on an
+    // ordinary decline while the Element still offered a retry.
     const failed = Buffer.from(
       JSON.stringify({
         id: 'evt_f',
@@ -107,7 +112,17 @@ describe('StripeCheckoutFundingProcessor — event mapping', () => {
         data: { object: { id: 'pi_123', metadata: { transfer_id: TRANSFER_ID } } },
       }),
     )
-    const result = make().parseEvent(failed)
+    expect(make().parseEvent(failed)).toEqual({
+      outcome: 'unhandled',
+      eventId: 'evt_f',
+      eventType: 'payment_intent.payment_failed',
+    })
+  })
+
+  it('async_payment_failed IS the failure signal, and still maps', () => {
+    const result = make().parseEvent(
+      sessionEvent('checkout.session.async_payment_failed', { payment_status: 'unpaid' }),
+    )
     expect(result.outcome).toBe('event')
     if (result.outcome !== 'event') return
     expect(result.event.type).toBe('funding_failed')
@@ -351,6 +366,48 @@ describe("StripeCheckoutFundingProcessor — expireFunding (the reaper's stale-t
     const { expire, processor } = client('expired')
     await expect(processor.expireFunding({ paymentRef: SESSION_ID })).resolves.toBe('not_open')
     expect(expire).not.toHaveBeenCalled()
+  })
+})
+
+describe('normalizeCheckoutStatus — the Session in reconciliation\'s vocabulary', () => {
+  it('maps every shape a Session can take', () => {
+    expect(normalizeCheckoutStatus('open', 'unpaid')).toBe('awaiting')
+    expect(normalizeCheckoutStatus('expired', 'unpaid')).toBe('canceled')
+    // Bank debit: completed but the pull is still settling and can still fail.
+    expect(normalizeCheckoutStatus('complete', 'unpaid')).toBe('processing')
+    // Card: settled on completion.
+    expect(normalizeCheckoutStatus('complete', 'paid')).toBe('succeeded')
+    expect(normalizeCheckoutStatus('complete', 'no_payment_required')).toBe('succeeded')
+  })
+
+  it('an unrecognized vocabulary degrades to awaiting — never to a page on every row', () => {
+    expect(normalizeCheckoutStatus('unknown', 'unknown')).toBe('awaiting')
+    expect(normalizeCheckoutStatus('some_new_state', 'paid')).toBe('awaiting')
+  })
+
+  it('a pi_ ref — the rows the overwrite left behind — is read from the PaymentIntent', async () => {
+    const retrieveSession = vi.fn()
+    const retrievePi = vi.fn().mockResolvedValue({ id: 'pi_left_behind', status: 'succeeded' })
+    const processor = make({
+      checkout: { sessions: { create: vi.fn(), retrieve: retrieveSession, expire: vi.fn() } },
+      paymentIntents: { retrieve: retrievePi, cancel: vi.fn(), create: vi.fn() },
+    })
+    await expect(processor.getPaymentStatus({ paymentRef: 'pi_left_behind' })).resolves.toEqual({
+      paymentRef: 'pi_left_behind',
+      status: 'succeeded',
+      normalized: 'succeeded',
+    })
+    expect(retrieveSession).not.toHaveBeenCalled()
+  })
+
+  it('getPaymentStatus carries both the raw pair and the normalized reading', async () => {
+    const retrieve = vi.fn().mockResolvedValue({ id: SESSION_ID, status: 'complete', payment_status: 'unpaid' })
+    const processor = make({ checkout: { sessions: { create: vi.fn(), retrieve, expire: vi.fn() } } })
+    await expect(processor.getPaymentStatus({ paymentRef: SESSION_ID })).resolves.toEqual({
+      paymentRef: SESSION_ID,
+      status: 'complete/unpaid',
+      normalized: 'processing',
+    })
   })
 })
 

@@ -579,3 +579,37 @@ describe('stripe parseEvent — refund tails (PR-S2)', () => {
     ).toEqual({ outcome: 'malformed' })
   })
 })
+
+describe('getPaymentStatus carries the normalized reading beside the raw PI status', () => {
+  it('a processing PI reads as processing; a requires_* PI reads as awaiting', async () => {
+    const retrieve = vi
+      .fn()
+      .mockResolvedValueOnce({ id: 'pi_1', status: 'processing' })
+      .mockResolvedValueOnce({ id: 'pi_2', status: 'requires_payment_method' })
+    const p = new StripeFundingProcessor({ paymentIntents: { retrieve } } as unknown as Stripe)
+    await expect(p.getPaymentStatus({ paymentRef: 'pi_1' })).resolves.toEqual({
+      paymentRef: 'pi_1',
+      status: 'processing',
+      normalized: 'processing',
+    })
+    await expect(p.getPaymentStatus({ paymentRef: 'pi_2' })).resolves.toEqual({
+      paymentRef: 'pi_2',
+      status: 'requires_payment_method',
+      normalized: 'awaiting',
+    })
+  })
+})
+
+describe('normalizePiStatus — the PI in reconciliation\'s vocabulary', () => {
+  it('passes the three terminal-ish words through and folds every requires_* into awaiting', async () => {
+    const { normalizePiStatus } = await import('./stripe.js')
+    expect(normalizePiStatus('processing')).toBe('processing')
+    expect(normalizePiStatus('succeeded')).toBe('succeeded')
+    expect(normalizePiStatus('canceled')).toBe('canceled')
+    for (const s of ['requires_payment_method', 'requires_confirmation', 'requires_action', 'requires_capture']) {
+      expect(normalizePiStatus(s), s).toBe('awaiting')
+    }
+    // Unknown vocabulary is "not alarmed", never "page on every row".
+    expect(normalizePiStatus('some_future_status')).toBe('awaiting')
+  })
+})

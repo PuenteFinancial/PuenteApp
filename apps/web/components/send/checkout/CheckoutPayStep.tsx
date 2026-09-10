@@ -272,7 +272,15 @@ function CheckoutForm({
 
   return (
     <div>
-      <PaymentElement />
+      {/* Link OFF, deliberately (2026-09-10). Left to its default the Element
+          renders Link's "save my info" opt-in PRE-CHECKED, which renders a
+          phone field, and an empty one makes checkout.confirm refuse with
+          "Your phone number is incomplete" — the first thing a real sender
+          hit in C5, and a step nobody chose. Nothing about a card or a bank
+          debit needs it. Link was also the surface the Checkout PRD exists
+          to take off the sender's path. Account-level Link stays whatever
+          the Dashboard says; this only stops the Element offering it. */}
+      <PaymentElement options={{ wallets: { link: 'never' } }} />
       {/* Instant-only bank verification (locked decision 3): no microdeposit
           fallback, so an unconnectable bank cannot fund a transfer — but on
           this rail cards are enabled, so it is not the end of the road. */}

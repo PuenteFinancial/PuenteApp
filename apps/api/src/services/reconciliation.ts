@@ -2,7 +2,7 @@ import { env } from '../config/env.js'
 import { supabaseAdmin } from './supabase.js'
 import { getAccountBalance } from './ledger.js'
 import { getBridgeWalletBalances, listBridgeTransfers } from './bridge.js'
-import { getFundingProcessor, pendingReaperDeadAfterMs } from './funding/index.js'
+import { processorFor, getFundingProcessor, pendingReaperDeadAfterMs } from './funding/index.js'
 import { pollPayouts } from '../jobs/payout-poll.js'
 
 // The reconciliation checks registry (slice-8 O2, docs/runbooks/reconciliation.md).
@@ -177,6 +177,58 @@ async function runStatePostings(): Promise<CheckOutcome> {
       key: `state-postings:${row.transfer_id}:${row.problem}`,
       detail: { transferId: row.transfer_id, state: row.state, problem: row.problem },
     })),
+  }
+}
+
+// ── The clearing flag must have its ledger leg ──────────────────────────────
+
+interface ClearedFlagRow {
+  id: string
+  state: string
+}
+
+/**
+ * `funding_cleared = true` ⇒ a `funding_cleared` ledger transaction exists.
+ *
+ * The detector bug 1 actually needed, and the one I wrongly said
+ * stripe_receivables was (2026-09-10). That check compares Stripe's view to
+ * our FLAG — a missed webhook. Bug 1 was the flag set with the ledger leg
+ * skipped (clearing arrived before funding), which the flag-trusting checks
+ * all read as fine while the receivable sat open forever. This compares the
+ * flag to the LEDGER. It would have paged on 681c8e1a the same evening.
+ *
+ * Fatal, like the other book-vs-state rules: a set flag with no posting is a
+ * receivable that will never close, and the float ceiling reads that balance.
+ */
+async function runClearedPostings(): Promise<CheckOutcome> {
+  const { data: flagged, error: flaggedError } = await supabaseAdmin
+    .from('transfers')
+    .select('id, state')
+    .eq('funding_cleared', true)
+    .limit(ROW_BOUND)
+  if (flaggedError || flagged == null) failClosed('cleared-postings select', flaggedError)
+  const rows = flagged as ClearedFlagRow[]
+  assertBound('cleared-postings', rows)
+  if (rows.length === 0) return { status: 'pass', findings: [], summary: { flagged: 0 } }
+
+  const { data: posted, error: postedError } = await supabaseAdmin
+    .from('ledger_transactions')
+    .select('transfer_id')
+    .eq('transition', 'funding_cleared')
+    .in('transfer_id', rows.map((r) => r.id))
+  if (postedError || posted == null) failClosed('cleared-postings ledger select', postedError)
+  const has = new Set((posted as { transfer_id: string }[]).map((p) => p.transfer_id))
+
+  const findings: CheckFinding[] = rows
+    .filter((r) => !has.has(r.id))
+    .map((r) => ({
+      key: `cleared-without-posting:${r.id}`,
+      detail: { transferId: r.id, state: r.state },
+    }))
+  return {
+    status: findings.length === 0 ? 'pass' : 'findings',
+    findings,
+    summary: { flagged: rows.length, unposted: findings.length },
   }
 }
 
@@ -526,18 +578,40 @@ interface StripeCandidateRow {
   funding_payment_ref: string
   funding_cleared: boolean
   refund_payment_ref: string | null
+  /** The rail that created this row. Read so the status lookup goes through
+   *  the ROW's processor: after a FUNDING_PROCESSOR flip the table holds
+   *  `pi_` rows beside `cs_` rows, and asking the live adapter about the
+   *  other rail's ref is a guaranteed 404 (audit corner 1). */
+  funding_processor?: string | null
 }
+
+// Both Stripe rails keep a receivable the classifier can reason about. The
+// crypto onramp does not (Stripe is merchant of record there) and is covered
+// by its own session poll.
+const STRIPE_RECEIVABLE_RAILS = new Set(['stripe', 'stripe_checkout'])
+const STRIPE_REF_PREFIXES = ['pi_%', 'cs_%'] as const
 
 // Exported for tests: classify one transfer against its live PI status.
 export function classifyStripeStatus(
   row: StripeCandidateRow,
-  piStatus: string,
+  status: string,
+  /** What the processor actually said, for the finding's detail — the
+   *  Checkout rail classifies on `processing` but an operator needs to see
+   *  `complete/unpaid`. Defaults to `status` for the PI rail, whose raw words
+   *  are the vocabulary. */
+  raw?: string,
 ): CheckFinding | null {
+  // Accepts either reconciliation's four normalized words or a raw
+  // PaymentIntent status (the PI rail's own words minus requires_*, which all
+  // mean "the sender has not paid"). The Checkout rail hands in the normalized
+  // form because its raw form — `complete/unpaid` — is a different language
+  // for the same facts; see NormalizedPaymentStatus.
+  const piStatus = status.startsWith('requires_') ? 'awaiting' : status
   const detail = {
     transferId: row.id,
     state: row.state,
     paymentRef: row.funding_payment_ref,
-    piStatus,
+    piStatus: raw ?? status,
   }
   if (row.state === 'PENDING_PAYMENT') {
     // The sender's money is (or will be) pulled but our row never advanced —
@@ -564,7 +638,7 @@ export function classifyStripeStatus(
     return null
   }
   // Past FUNDED the pull must be live (processing) or settled (succeeded).
-  if (piStatus === 'canceled' || piStatus.startsWith('requires_')) {
+  if (piStatus === 'canceled' || piStatus === 'awaiting') {
     return { key: `stripe-pi-regressed:${row.id}`, detail }
   }
   if (piStatus === 'succeeded' && !row.funding_cleared) {
@@ -592,25 +666,48 @@ function stripeOrFilter(nowMs: number): string {
 
 async function runStripeReceivables(): Promise<CheckOutcome> {
   const processor = getFundingProcessor()
-  if (processor.provider !== 'stripe' || !processor.isConfigured() || !processor.getPaymentStatus) {
-    return { status: 'skipped', findings: [], summary: { reason: 'funding processor is not stripe' } }
+  if (!STRIPE_RECEIVABLE_RAILS.has(processor.provider) || !processor.isConfigured()) {
+    return {
+      status: 'skipped',
+      findings: [],
+      summary: { reason: 'funding processor is not a Stripe rail' },
+    }
   }
-  const { data, error } = await supabaseAdmin
-    .from('transfers')
-    .select('id, state, funding_payment_ref, funding_cleared, refund_payment_ref')
-    .like('funding_payment_ref', 'pi_%')
-    .or(stripeOrFilter(Date.now()))
-    .limit(ROW_BOUND)
-  if (error || data == null) failClosed('stripe-receivables select', error)
-  const rows = data as StripeCandidateRow[]
+  // One select per ref prefix rather than a single OR: the state filter below
+  // is already an OR, and PostgREST's `like` wildcard inside an `or=` string
+  // is not the `%` the query builder takes — two plain selects are obviously
+  // right, and ROW_BOUND is asserted on the union.
+  const now = Date.now()
+  // Keyed by id: a ref matches exactly one prefix, so this is a no-op against
+  // the database — it exists so a row can never be swept twice, whatever the
+  // store hands back.
+  const byId = new Map<string, StripeCandidateRow>()
+  for (const prefix of STRIPE_REF_PREFIXES) {
+    const { data, error } = await supabaseAdmin
+      .from('transfers')
+      .select('id, state, funding_payment_ref, funding_cleared, refund_payment_ref, funding_processor')
+      .like('funding_payment_ref', prefix)
+      .or(stripeOrFilter(now))
+      .limit(ROW_BOUND)
+    if (error || data == null) failClosed('stripe-receivables select', error)
+    for (const row of data as StripeCandidateRow[]) byId.set(row.id, row)
+  }
+  const rows = [...byId.values()]
   assertBound('stripe-receivables', rows)
 
   const findings: CheckFinding[] = []
   const readFailures: string[] = []
   for (const row of rows) {
     try {
-      const status = await processor.getPaymentStatus({ paymentRef: row.funding_payment_ref })
-      const finding = classifyStripeStatus(row, status.status)
+      // The ROW's rail, not the process's: a `pi_` row is only readable
+      // through the PI adapter and a `cs_` row only through Checkout's.
+      const rail = processorFor(row)
+      if (!rail.getPaymentStatus) {
+        readFailures.push(`${row.id}: rail ${rail.provider} cannot read payment status`)
+        continue
+      }
+      const status = await rail.getPaymentStatus({ paymentRef: row.funding_payment_ref })
+      const finding = classifyStripeStatus(row, status.normalized ?? status.status, status.status)
       if (finding) findings.push(finding)
     } catch (err) {
       // One PI read failing must not blind the rest of the sweep — but a
@@ -632,12 +729,21 @@ async function runStripeReceivables(): Promise<CheckOutcome> {
 async function runStripeOrphans(): Promise<CheckOutcome> {
   const processor = getFundingProcessor()
   if (
-    processor.provider !== 'stripe' ||
+    !STRIPE_RECEIVABLE_RAILS.has(processor.provider) ||
     !processor.isConfigured() ||
     !processor.listRecentPayments
   ) {
-    return { status: 'skipped', findings: [], summary: { reason: 'funding processor is not stripe' } }
+    return {
+      status: 'skipped',
+      findings: [],
+      summary: { reason: 'funding processor is not a Stripe rail' },
+    }
   }
+  // Lists PaymentIntents. On the Checkout rail a PI exists for every PAID
+  // session and carries the same transfer_id echo (payment_intent_data at
+  // creation), so paid-but-unknown-to-us is caught here exactly as on the PI
+  // rail. An unpaid or expired session has no PI and no money — nothing to
+  // orphan.
   const listed = await processor.listRecentPayments({
     createdAfter: new Date(Date.now() - ORPHAN_WINDOW_MS),
     limit: LIST_LIMIT,
@@ -697,6 +803,7 @@ export function buildChecks(): ReconciliationCheck[] {
     { name: 'ledger_net_zero', severity: 'fatal', runbook: RUNBOOK, run: runNetZero },
     { name: 'ledger_min_entries', severity: 'fatal', runbook: RUNBOOK, run: runMinEntries },
     { name: 'state_postings', severity: 'fatal', runbook: RUNBOOK, run: runStatePostings },
+    { name: 'cleared_postings', severity: 'fatal', runbook: RUNBOOK, run: runClearedPostings },
     { name: 'account_balances', severity: 'fatal', runbook: RUNBOOK, run: runAccountBalances },
     { name: 'transfer_aging', severity: 'warning', runbook: RUNBOOK, run: runTransferAging },
     { name: 'bridge_state_sweep', severity: 'warning', runbook: RUNBOOK, run: runBridgeStateSweep },

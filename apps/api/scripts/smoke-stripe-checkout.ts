@@ -105,6 +105,12 @@ const REQUIRED_EVENTS = [
   'checkout.session.async_payment_failed',
   'payment_intent.succeeded',
   'payment_intent.payment_failed',
+  // The loss path. A post-settlement ACH return or a card chargeback arrives
+  // as a dispute, and on this rail Puente is merchant of record — it is OUR
+  // money. Found unsubscribed on staging 2026-09-10 by paying with Stripe's
+  // dispute test card: the dispute was created, the event fired, and it
+  // reached nothing. Six events, not five.
+  'charge.dispute.created',
 ] as const
 
 interface WebhookEndpoint {
