@@ -169,25 +169,46 @@ export async function submitPayout(transferId: string): Promise<number> {
     // would otherwise strand this payout on a hold no retry could clear.
     // Registering here closes that gap: it is the same call the backfill makes,
     // and it runs ONLY for the one reason it can fix, never as a blanket retry.
+    //
+    // Why the outcome is CAPTURED rather than discarded: registration
+    // failures are reported, not thrown, so a discarded result meant every
+    // cause collapsed into the bare word "payability" on the ops board. A
+    // sender waiting on their SPEI endorsement and a genuine Bridge outage
+    // produced identical rows, and the distinguishing reason existed the
+    // whole time (2026-09-10 — it cost a day to rediscover from the Bridge
+    // API by hand). These are fixed enum-ish strings, never PII.
+    const registrationFailures: string[] = []
     if (!payability.payable && payability.reason === 'provider_account_ref_missing') {
-      // Swallowed on purpose: a sender with no Bridge customer yet, or a
+      // Never throws onward: a sender with no Bridge customer yet, or a
       // Bridge outage, must fall through to the ordinary payability hold —
-      // never throw, or pg-boss would retry a money job over a condition
+      // throwing would make pg-boss retry a money job over a condition
       // retrying cannot fix.
-      try {
-        if (!bridgeCustomerId) throw new Error('payout-submit: user has no bridge_customer_id')
-        await registerPendingDestinations(transfer.user_id, bridgeCustomerId)
-        payability = await checkPayability(transfer.payout_destination_id)
-      } catch {
-        // Fall through to the hold below, which already carries the Sentry
-        // signal. No event of its own: a sender with no Bridge customer yet
-        // is the ORDINARY pre-verification state, not an anomaly, and paging
-        // on it would bury the holds that do need a human.
+      if (!bridgeCustomerId) {
+        registrationFailures.push('no_bridge_customer')
+      } else {
+        try {
+          const registration = await registerPendingDestinations(
+            transfer.user_id,
+            bridgeCustomerId,
+          )
+          registrationFailures.push(...registration.failed.map((f) => f.reason))
+          payability = await checkPayability(transfer.payout_destination_id)
+        } catch {
+          // Bridge unreachable, or the pending-destination read failed. Still
+          // no event of its own — the hold below carries the Sentry signal,
+          // now with this reason attached.
+          registrationFailures.push('registration_unavailable')
+        }
       }
     }
 
     if (!payability.payable) {
-      await placeHold(transfer.id, 'payability', { reason: payability.reason })
+      await placeHold(transfer.id, 'payability', {
+        reason: payability.reason,
+        // Omitted entirely when the self-heal never ran, so its presence in
+        // Sentry means "registration was attempted and these came back".
+        ...(registrationFailures.length > 0 ? { registrationFailures } : {}),
+      })
       return 0
     }
     providerAccountRef = payability.providerAccountRef

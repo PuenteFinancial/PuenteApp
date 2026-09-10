@@ -124,6 +124,27 @@ describe('registerPendingDestinations', () => {
     expect(result.failed[0]!.reason).toBe('bridge_rejected_422')
   })
 
+  it('names the SPEI endorsement gate instead of burying it in a bare 403', async () => {
+    // Bridge refuses an MXN external account until the customer's `spei`
+    // endorsement is approved, and customer-level `active` does NOT imply it
+    // (verified in sandbox 2026-09-10). Sharing the generic bucket with every
+    // other 403 is what made this read as a Bridge outage on the ops board.
+    tables([pendingRow()])
+    createExternalAccount.mockRejectedValue(
+      new BridgeApiError(403, {
+        code: 'missing_required_endorsements',
+        source: { key: { account_type: "'spei' endorsement required" } },
+      }),
+    )
+
+    const result = await registerPendingDestinations(USER, 'cust_1')
+
+    expect(result.registered).toBe(0)
+    expect(result.failed).toEqual([{ destinationId: 'dest-1', reason: 'endorsement_missing' }])
+    // Not a duplicate — nothing to adopt, so no list call.
+    expect(listExternalAccounts).not.toHaveBeenCalled()
+  })
+
   it('reports an undecryptable CLABE instead of retrying it forever', async () => {
     tables([pendingRow({ details: { clabe_ciphertext: 'not-a-real-payload' } })])
 
