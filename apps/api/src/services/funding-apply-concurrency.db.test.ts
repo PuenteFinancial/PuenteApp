@@ -99,16 +99,16 @@ describe.skipIf(!runDb)('funding appliers under true concurrency (integration)',
   afterAll(async () => {
     // Leave the book as found (the cancellations.db leak lesson): the recon
     // suite reads global state and fails loud past its row bound.
-    if (transferIds.length > 0) {
-      await db.query(
-        `delete from public.ledger_entries where ledger_transaction_id in
-           (select id from public.ledger_transactions where transfer_id = any($1))`,
-        [transferIds],
-      )
-      await db.query(`delete from public.ledger_transactions where transfer_id = any($1)`, [transferIds])
-      await db.query(`delete from public.transfer_transitions where transfer_id = any($1)`, [transferIds])
-      await db.query(`delete from public.transfers where id = any($1)`, [transferIds])
-    }
+    //
+    // TRUNCATE, never DELETE, for the ledger: it is append-only by a row-level
+    // BEFORE DELETE trigger (ledger_forbid_mutation), so a DELETE raises P0001
+    // — which is exactly how this teardown failed its first CI run, after
+    // every assertion had already passed. TRUNCATE fires no row triggers. Same
+    // pattern as multi-user-load.db.test.ts.
+    if (!db) return
+    await db.query('truncate table public.ledger_entries, public.ledger_transactions cascade')
+    await db.query('truncate table public.transfer_transitions')
+    await db.query(`delete from public.transfers where id = any($1)`, [transferIds])
     await db.query(`delete from public.quotes where user_id = $1`, [userId])
     await db.query(`delete from public.payout_destinations where id = $1`, [destinationId])
     await db.query(`delete from public.recipients where user_id = $1`, [userId])
