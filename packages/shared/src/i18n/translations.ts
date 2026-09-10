@@ -699,6 +699,11 @@ export type Translations = {
         deposit_instructions_attach: string
         deposit_landed: string
         float_topup: string
+        // The loss path's account actions, not transfer actions: the system
+        // freezes a sender on a dispute, and only a person unfreezes them.
+        // Both must read unmistakably as a stop and a start.
+        sender_freeze: string
+        sender_unfreeze: string
       }
     }
     detail: {
@@ -1770,6 +1775,8 @@ const en: Translations = {
         deposit_instructions_attach: 'Instructions attached',
         deposit_landed: 'Deposit landed',
         float_topup: 'Float top-up',
+        sender_freeze: 'Sender frozen',
+        sender_unfreeze: 'Sender unfrozen',
       },
     },
     detail: {
@@ -2743,6 +2750,8 @@ const es: Translations = {
         deposit_instructions_attach: 'Instrucciones adjuntadas',
         deposit_landed: 'Dep\u00f3sito recibido',
         float_topup: 'Recarga de flotante',
+        sender_freeze: 'Remitente congelado',
+        sender_unfreeze: 'Remitente descongelado',
       },
     },
     detail: {

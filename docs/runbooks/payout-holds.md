@@ -10,7 +10,8 @@ button that performs the release and records who did it and why.
 **Date:** 2026-07-20 · **Status:** live process (slice 5; release from the board since 2026-09-08)
 
 A payout hold is a `FUNDED` transfer with `payout_hold_reason` set (`fx_drift`, `payability`,
-`submit_error`, `velocity_review`, or — since K6 — the auto-released `sender_kyc_pending`) and
+`submit_error`, `velocity_review`, the loss path's `funding_disputed` and `sender_suspended`, or —
+since K6 — the auto-released `sender_kyc_pending`) and
 `payout_held_at`. The submit job sets the hold and stops; the 1-min
 `payout.sweep` cron skips held rows. Releasing a hold means clearing the column — the sweep
 resubmits automatically within a minute. Release is the detail page's **Release hold** button
@@ -83,6 +84,46 @@ its own**: the Bridge `customer.*` webhook with an `approved` / `active` status 
      (`manual-refund.md`); the sender's Persona fallback is offered by the pay step, not here.
 3. **Never release while the customer is unverified.** Bridge 4xxs the payout and the row re-holds
    as `submit_error` — a worse place to be.
+
+## `sender_suspended` — the sender is frozen (the loss path)
+
+Not about this transfer at all. A chargeback or ACH return on **one** of this sender's transfers
+froze the account (`users.status = 'suspended'`), and `payout-submit` refuses to pay out anything
+of theirs while it stands: the other transfers are funded by the same instrument, and paying them
+while money is being clawed back turns one loss into several.
+
+**Do not start here — start at
+[proposals/funding-reversal.md](proposals/funding-reversal.md).** The hold is a symptom; the
+freeze is the thing, and lifting it is a decision with its own bar. Read the `sender_freeze` row
+for what caused it:
+
+```sql
+select created_at, actor, reason, transfer_id, before, after
+  from public.ops_actions
+ where action = 'sender_freeze' order by created_at desc limit 5;
+```
+
+1. **Still frozen?** Then this hold is correct and there is nothing to do here. The reconciliation
+   aging bound deliberately does not treat it as human-actioned-overdue: a fraud-coded freeze is
+   *supposed* to sit indefinitely, and a 24h page on it would fire forever.
+2. **Unfreezing?** `scripts/unfreeze-sender.ts` releases these holds itself, in the right order —
+   you do not need the Release hold button at all.
+3. **Releasing this one hold by hand anyway?** It is in the button's enum, so you can, and it is
+   safe: `payout-submit` re-reads the sender's status on the next sweep and simply re-holds the
+   row. Which means it also accomplishes nothing. **Unfreeze first, then release** — or just let
+   the unfreeze tool do both.
+
+## `funding_disputed` — this transfer's funding is being clawed back (the loss path)
+
+The pre-delivery arm: a dispute or ACH return arrived while the pesos were still ours, so the
+payout stopped and **nothing was booked** — there is no loss while we still hold the money
+(`ledger-rules.md` gives the loss batch to the post-delivery case only).
+
+Release when a human has won or written off the dispute; that judgement is the whole reason this
+hold is operator-releasable. Unlike `sender_suspended` it is scoped to this transfer and outlives
+the account freeze, so unfreezing the sender does **not** release it — decide it on its own. The
+dispute window runs to ~60 days, and the reconciliation `stripe_disputes` check covers a webhook
+we missed entirely.
 
 ## `fx_drift` — FX submission backstop tripped
 

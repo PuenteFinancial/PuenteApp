@@ -24,6 +24,7 @@ vi.mock('@sentry/node', () => ({
 
 const {
   releaseSenderKycHolds,
+  releaseSenderSuspendedHolds,
   releaseHold,
   releaseDestinationPayabilityHolds,
   holdPayoutForDispute,
@@ -52,6 +53,61 @@ beforeEach(() => {
   log.info.mockClear()
   log.warn.mockClear()
   log.error.mockClear()
+})
+
+describe('releaseSenderSuspendedHolds', () => {
+  it("clears only this sender's FUNDED sender_suspended rows and re-enqueues each", async () => {
+    const t = transfersTable({ data: [{ id: 'tr-1' }, { id: 'tr-2' }], error: null })
+
+    const released = await releaseSenderSuspendedHolds(
+      { userId: 'u-1', actor: 'ops:admin-1', requestId: 'req-1' },
+      log,
+    )
+
+    expect(released).toEqual(['tr-1', 'tr-2'])
+    expect(t.update).toHaveBeenCalledWith({ payout_hold_reason: null, payout_held_at: null })
+    expect(t.eq1).toHaveBeenCalledWith('user_id', 'u-1')
+    expect(t.eq2).toHaveBeenCalledWith('state', 'FUNDED')
+    // The compare-and-swap. A row re-held for another reason meanwhile (its own
+    // dispute, say) must survive an unfreeze that had nothing to do with it.
+    expect(t.eq3).toHaveBeenCalledWith('payout_hold_reason', 'sender_suspended')
+    expect(enqueuePayoutSubmit).toHaveBeenCalledTimes(2)
+  })
+
+  it('writes one provenance row per transfer, attributed to the operator who unfroze', async () => {
+    transfersTable({ data: [{ id: 'tr-1' }], error: null })
+
+    await releaseSenderSuspendedHolds({ userId: 'u-1', actor: 'ops:admin-1', requestId: 'req-1' }, log)
+
+    expect(recordOpsAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor: 'ops:admin-1',
+        action: 'hold_release',
+        transferId: 'tr-1',
+        reason: 'sender_suspended',
+        requestId: 'req-1',
+      }),
+      log,
+    )
+  })
+
+  it('pages on a failed write and returns empty, never throwing at the caller', async () => {
+    // The unfreeze itself has already committed by then. Throwing would report
+    // a completed unfreeze as a failure and invite a retry the CAS refuses.
+    transfersTable({ data: null, error: { code: '42501' } })
+
+    expect(await releaseSenderSuspendedHolds({ userId: 'u-1', actor: 'ops:a', requestId: null }, log)).toEqual([])
+    expect(setFingerprint).toHaveBeenCalledWith(['sender-suspended-release-failed', 'u-1'])
+    expect(captureMessage).toHaveBeenCalledWith('sender_suspended release after unfreeze failed', 'error')
+  })
+
+  it('a failed enqueue is latency only — the 1-min sweep resubmits', async () => {
+    transfersTable({ data: [{ id: 'tr-1' }], error: null })
+    enqueuePayoutSubmit.mockRejectedValue(new Error('boss down'))
+
+    expect(await releaseSenderSuspendedHolds({ userId: 'u-1', actor: 'ops:a', requestId: null }, log)).toEqual(['tr-1'])
+    expect(log.warn).toHaveBeenCalled()
+  })
 })
 
 describe('releaseSenderKycHolds', () => {

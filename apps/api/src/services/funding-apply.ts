@@ -5,6 +5,7 @@ import { postLedgerTransaction } from './ledger.js'
 import { enqueuePayoutSubmit } from './queue.js'
 import { recordFloatTopUp } from './payouts.js'
 import { recordOpsAction } from './ops-actions.js'
+import { noticeLanguage, recordAccountFrozenNotice, type NoticeLanguage } from './sender-notices.js'
 import { getFundingProcessor, undoModeForRef } from './funding/index.js'
 import {
   fundedLedgerEntries,
@@ -246,6 +247,29 @@ async function suspendSender(input: {
   actor: string
   reason?: string
 }): Promise<boolean> {
+  // ONE PRE-READ, TWO JOBS: the status the freeze is about to replace (so the
+  // audit row records what actually changed rather than assuming 'active' —
+  // a sender can reach a funded transfer while still 'waitlist'), and the
+  // language the notice below must be written in.
+  //
+  // NON-FATAL BY DESIGN. The freeze is the protective act and must not acquire
+  // a new way to fail: a broken read degrades to an honest 'unknown' in the
+  // audit row and the column's own default language, and the freeze proceeds.
+  let priorStatus: string | null = null
+  let language: NoticeLanguage = 'en'
+  const { data: senderRow, error: senderError } = await supabaseAdmin
+    .from('users')
+    .select('status, preferred_language')
+    .eq('id', input.userId)
+    .maybeSingle()
+  if (senderError) {
+    Sentry.captureMessage(`sender pre-read before freeze failed: ${senderError.message}`, 'warning')
+  } else {
+    const sender = senderRow as { status?: string; preferred_language?: string } | null
+    priorStatus = sender?.status ?? null
+    language = noticeLanguage(sender?.preferred_language)
+  }
+
   const { data, error } = await supabaseAdmin
     .from('users')
     .update({ status: 'suspended' })
@@ -272,13 +296,31 @@ async function suspendSender(input: {
       transferId: input.transferId,
       reason: input.reason ?? 'funding_reversed',
       note: null,
-      before: { status: 'active' },
+      before: { status: priorStatus ?? 'unknown' },
       after: { status: 'suspended', eventId: input.eventId },
       requestId: null,
     },
-    { error: (obj, msg) => Sentry.captureMessage(`${msg} ${JSON.stringify(obj)}`, 'error') },
+    workerLog,
+  )
+
+  // TELL THE SENDER. Only on the call that actually froze, which is what makes
+  // it idempotent across redeliveries. Runs AFTER the freeze and the audit row
+  // and cannot throw (services/sender-notices.ts), so nothing here can undo or
+  // block a freeze that has already landed.
+  await recordAccountFrozenNotice(
+    { userId: input.userId, transferId: input.transferId, language },
+    workerLog,
   )
   return true
+}
+
+// This module runs inside a webhook handler and a worker, so there is no
+// Fastify logger in scope. Sentry IS the log of record for these paths.
+const workerLog = {
+  info: (obj: Record<string, unknown>, msg: string) =>
+    Sentry.addBreadcrumb({ category: 'funding-apply', message: msg, data: obj, level: 'info' }),
+  error: (obj: Record<string, unknown>, msg: string) =>
+    Sentry.captureMessage(`${msg} ${JSON.stringify(obj)}`, 'error'),
 }
 
 /**

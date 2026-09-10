@@ -34,7 +34,7 @@ There is **no automated deletion** of any transaction or operator record, no ret
 |---|---|---|---|
 | **A · financial record** | `ledger_transactions`, `ledger_entries`, `transfer_transitions`, `disclosures`, `reconciliation_runs` | append-only (`forbid_mutation` / `ledger_forbid_mutation` triggers: UPDATE and DELETE raise) | impossible without a migration |
 | **A · financial record (row mutable, never deleted)** | `transfers`, `quotes`, `payment_events`, `cancellation_requests`, `deposit_instructions` | lifecycle columns update in place; economic terms are frozen by trigger | `transfers` is referenced RESTRICT by the ledger, transitions, `ops_actions`, `kyc`-adjacent rows — a delete fails |
-| **B · consent / identity / operator record** | `consents`, `kyc_verifications`, `ops_actions` | append-only (`forbid_mutation`) | impossible without a migration |
+| **B · consent / identity / operator record** | `consents`, `kyc_verifications`, `ops_actions`, `sender_notices` | append-only (`forbid_mutation`) | impossible without a migration |
 | **B · people** | `users`, `recipients`, `payout_destinations` | mutable | `users` is referenced RESTRICT by `transfers` ("a user with financial history is undeletable", migration 20260717164026); `recipients` cascade to `payout_destinations` only |
 | **C · abuse controls** | `otp_send_attempts`, `otp_verify_attempts` | append-only rows | **pruned** by a scheduled job (~24 h); peppered phone hashes only, never a phone number |
 | **C · replay cache** | `idempotency_keys` | write-once | **purged** after `expires_at` (~24 h); response snapshots only |
@@ -72,6 +72,12 @@ honored by **minimizing** the class B "people" row (name, phone, address, tax-id
 the retention floor, never by deleting class A rows. Before the floor, identity fields stay as
 they are; the customer is told why in plain language (Reg E and BSA recordkeeping). Procedure to be
 written on the first request unless counsel says it must exist first.
+
+3.4b **Notices to the consumer.** `sender_notices` (2026-09-10) stores the RENDERED text of every
+notice the system owes a sender, in the language it was written in, append-only. Today that is the
+account-freeze notice the loss path raises. It carries no PII: the copy is fixed per (kind,
+language) with nothing interpolated. It is the only place "what did we tell this person, and when"
+is answerable after the copy changes, which is what makes it a record rather than a queue.
 
 3.5 **Operator interventions.** Every ops action (`ops_actions`) is retained with the transfer it
 touched; a transfer cannot be deleted while an action references it (RESTRICT). The CLI paths that

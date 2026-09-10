@@ -271,6 +271,93 @@ export async function releaseDestinationPayabilityHolds(
   return released
 }
 
+/**
+ * Release the `sender_suspended` holds an UNFREEZE just made obsolete, and only
+ * those.
+ *
+ * Called by unfreezeSender (services/sender-freeze.ts) AFTER users.status is
+ * back to 'active', never before: payout-submit reads the sender's status on
+ * every run, so releasing first simply re-holds the row on the next sweep.
+ * That ordering is safety, not tidiness — but note it is safe in both
+ * directions, which is why `sender_suspended` is also in
+ * RELEASABLE_HOLD_REASONS for a manual board release.
+ *
+ * NOT an auto-release in the `releaseSenderKycHolds` sense. That one fires on a
+ * Bridge event with no human in the loop; this one is the tail of a decision a
+ * person made and signed with a note. The distinction matters for
+ * reconciliation, which classifies holds by whether anyone owes an action.
+ *
+ * Same compare-and-swap as every other release: `payout_hold_reason =
+ * 'sender_suspended'` is in the WHERE clause, so a row re-held meanwhile for a
+ * different reason (a dispute of its own, say) is left alone.
+ */
+export async function releaseSenderSuspendedHolds(
+  input: {
+    userId: string
+    /** `ops:<operator uuid>` — an unfreeze is always someone's decision. */
+    actor: string
+    /** Fastify request id on a route, null in a CLI. */
+    requestId: string | null
+  },
+  log: Logger,
+): Promise<string[]> {
+  const { data, error } = await supabaseAdmin
+    .from('transfers')
+    .update({ payout_hold_reason: null, payout_held_at: null })
+    .eq('user_id', input.userId)
+    .eq('state', 'FUNDED')
+    .eq('payout_hold_reason', 'sender_suspended')
+    .select('id')
+
+  if (error) {
+    // Degrades to the status quo — the sender is unfrozen and each hold stays
+    // operator-releasable from the board — but a failed write on a money path
+    // pages, same as the other releases. Never thrown: the unfreeze itself has
+    // already committed and must not be reported as a failure.
+    log.error(
+      { userId: input.userId, supabaseError: error.code },
+      'sender_suspended release after unfreeze failed',
+    )
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['sender-suspended-release-failed', input.userId])
+      scope.setContext('release', { userId: input.userId, supabaseError: error.code })
+      Sentry.captureMessage('sender_suspended release after unfreeze failed', 'error')
+    })
+    return []
+  }
+
+  const released = ((data ?? []) as Array<{ id: string }>).map((row) => row.id)
+  for (const transferId of released) {
+    log.info(
+      { audit: true, userId: input.userId, transferId, actor: input.actor },
+      'sender_suspended hold released after unfreeze',
+    )
+    // One row per transfer, because that is how the board reads a hold's
+    // history. Fixed keys only (the PII guard).
+    await recordOpsAction(
+      {
+        actor: input.actor,
+        action: 'hold_release',
+        transferId,
+        reason: 'sender_suspended',
+        note: null,
+        before: { payoutHoldReason: 'sender_suspended', senderStatus: 'suspended' },
+        after: { payoutHoldReason: null, senderStatus: 'active' },
+        requestId: input.requestId,
+      },
+      log,
+    )
+    // Latency only: the 1-min sweep resubmits an unheld, unclaimed FUNDED row
+    // on its own, so a failed enqueue is never fatal.
+    try {
+      await enqueuePayoutSubmit(transferId, 'api')
+    } catch {
+      log.warn({ userId: input.userId, transferId }, 'payout enqueue after release failed — sweep will heal')
+    }
+  }
+  return released
+}
+
 export async function releaseSenderKycHolds(userId: string, log: Logger): Promise<string[]> {
   const { data, error } = await supabaseAdmin
     .from('transfers')
