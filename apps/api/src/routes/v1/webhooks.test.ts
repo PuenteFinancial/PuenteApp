@@ -620,6 +620,7 @@ const reversedRow = {
   user_id: USER_ID,
   funding_cleared: true,
   funding_payment_ref: 'pi_123',
+  funding_disputed_at: null,
 }
 
 /** The three reads applyFundingReversed makes before it branches: the transfer,
@@ -628,8 +629,13 @@ const reversedRow = {
  *  cares about the branch does not have to remember the order. */
 const reversalReads = (row: Record<string, unknown> = reversedRow, frozen = true) => {
   from
+    // the transfer
     .mockReturnValueOnce(selectChain({ data: row }))
+    // funding_disputed_at — stamped in every arm, before the branch
+    .mockReturnValueOnce(selectChain({ data: null }))
+    // the sender read: status, plus the language the freeze notice needs
     .mockReturnValueOnce(selectChain({ data: { status: 'active', preferred_language: 'en' } }))
+    // the freeze UPDATE
     .mockReturnValueOnce(selectChain({ data: frozen ? [{ id: USER_ID }] : [] }))
   // The freeze notice insert, only on the call that actually froze.
   if (frozen) from.mockReturnValueOnce(noticeInsert())

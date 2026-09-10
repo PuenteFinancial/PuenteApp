@@ -1330,10 +1330,11 @@ const en: Translations = {
         checkout: {
           title: 'Choose how to pay',
           // NEEDS LEGAL REVIEW (EN + ES)
-          body: 'Paying straight from your bank account is the cheapest way to send. Cards work too, but some card issuers treat a transfer like this as a cash advance and add their own fee.',
+          body:
+            'Paying straight from your bank account is the cheapest way to send. You can also pay with a debit card. We do not accept credit or prepaid cards, because card issuers often treat a transfer like this as a cash advance and add their own fee.',
           loading: 'Loading payment options…',
           bankNote:
-            "If your bank isn't in the list, we can't connect to it yet. You can still pay by card, and you haven't been charged.",
+            "If your bank isn't in the list, we can't connect to it yet. You can still pay with a debit card, and you haven't been charged.",
           identityTitle: 'Verify your identity',
           identityHint:
             'Bridge, the licensed money transmitter that delivers your money, needs these to verify you. You only do this once.',
@@ -2327,10 +2328,11 @@ const es: Translations = {
         checkout: {
           title: 'Elige cómo pagar',
           // NEEDS LEGAL REVIEW (ES)
-          body: 'Pagar directamente desde tu cuenta bancaria es la forma más económica de enviar. También puedes pagar con tarjeta, pero algunos emisores de tarjetas consideran una transferencia como esta un adelanto de efectivo y cobran su propia comisión.',
+          body:
+            'Pagar directamente desde tu cuenta bancaria es la forma más económica de enviar. También puedes pagar con tarjeta de débito. No aceptamos tarjetas de crédito ni prepagadas, porque los emisores suelen considerar una transferencia como esta un adelanto de efectivo y cobran su propia comisión.',
           loading: 'Cargando las opciones de pago…',
           bankNote:
-            'Si tu banco no aparece en la lista, aún no podemos conectarnos con él; puedes pagar con tarjeta. No se te ha cobrado.',
+            'Si tu banco no aparece en la lista, aún no podemos conectarnos con él; puedes pagar con tarjeta de débito. No se te ha cobrado.',
           identityTitle: 'Verifica tu identidad',
           identityHint:
             'Bridge, el transmisor de dinero con licencia que entrega tu dinero, necesita estos datos para verificarte. Solo lo haces una vez.',

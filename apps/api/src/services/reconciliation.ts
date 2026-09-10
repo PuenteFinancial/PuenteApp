@@ -758,6 +758,13 @@ async function runStripeReceivables(): Promise<CheckOutcome> {
  * case, loss booked) or it is held on `funding_disputed` (the undelivered
  * case, payout stopped). Anything else means the webhook did not do its job.
  */
+interface DisputeJoinRow {
+  id: string
+  state: string
+  payout_hold_reason: string | null
+  funding_disputed_at: string | null
+}
+
 async function runStripeDisputes(): Promise<CheckOutcome> {
   const processor = getFundingProcessor()
   if (
@@ -790,20 +797,15 @@ async function runStripeDisputes(): Promise<CheckOutcome> {
   // join misses by construction — the same divergence the webhook's fallback
   // handles, resolved the same way. Disputes are rare enough that a per-miss
   // provider call is cheaper than carrying a second index.
-  const byRef = new Map<string, { id: string; state: string; payout_hold_reason: string | null }>()
+  const byRef = new Map<string, DisputeJoinRow>()
   const refs = listed.map((d) => d.paymentRef).filter((r) => r !== '')
   if (refs.length > 0) {
     const { data, error } = await supabaseAdmin
       .from('transfers')
-      .select('id, state, payout_hold_reason, funding_payment_ref')
+      .select('id, state, payout_hold_reason, funding_disputed_at, funding_payment_ref')
       .in('funding_payment_ref', refs)
     if (error || data == null) failClosed('stripe-disputes select', error)
-    for (const row of data as Array<{
-      id: string
-      state: string
-      payout_hold_reason: string | null
-      funding_payment_ref: string
-    }>) {
+    for (const row of data as Array<DisputeJoinRow & { funding_payment_ref: string }>) {
       byRef.set(row.funding_payment_ref, row)
     }
   }
@@ -815,13 +817,11 @@ async function runStripeDisputes(): Promise<CheckOutcome> {
       if (alternate) {
         const { data, error } = await supabaseAdmin
           .from('transfers')
-          .select('id, state, payout_hold_reason')
+          .select('id, state, payout_hold_reason, funding_disputed_at')
           .eq('funding_payment_ref', alternate)
           .maybeSingle()
         if (error) failClosed('stripe-disputes alternate select', error)
-        row =
-          (data as { id: string; state: string; payout_hold_reason: string | null } | null) ??
-          undefined
+        row = (data as DisputeJoinRow | null) ?? undefined
       }
     }
 
@@ -839,8 +839,16 @@ async function runStripeDisputes(): Promise<CheckOutcome> {
       continue
     }
 
-    const recorded =
-      row.state === 'FUNDING_REVERSED' || row.payout_hold_reason === 'funding_disputed'
+    // ONE question, asked of the row itself: did the dispute leave its mark?
+    //
+    // Deliberately not "is it FUNDING_REVERSED or held on funding_disputed".
+    // That inference was wrong in both directions. It missed a dispute that
+    // arrived BEFORE the funding (the transfer is legitimately still FUNDED
+    // and may be held for another reason), and it would have accepted a
+    // `funding_disputed` hold that some future code path placed for its own
+    // reasons. `funding_disputed_at` is written by the dispute handler itself,
+    // in every arm, which is exactly the fact this check is testing for.
+    const recorded = row.funding_disputed_at != null
     if (!recorded) {
       findings.push({
         key: `stripe-dispute-unrecorded:${dispute.disputeRef}`,
@@ -849,6 +857,7 @@ async function runStripeDisputes(): Promise<CheckOutcome> {
           transferId: row.id,
           state: row.state,
           payoutHoldReason: row.payout_hold_reason,
+          fundingDisputedAt: row.funding_disputed_at,
           disputeStatus: dispute.status,
           createdAt: dispute.createdAt,
         },

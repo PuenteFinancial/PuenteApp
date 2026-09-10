@@ -251,6 +251,45 @@ describe.skipIf(!runDb)('the FUNDING_REVERSED loss path (integration)', () => {
     })
   })
 
+  it('a dispute that BEATS the funding still stops the payout when it funds', async () => {
+    // The exact sequence the staging drive hit on 2026-09-10, against a real
+    // database. Stripe raised the dispute two seconds after the charge and it
+    // beat checkout.session.completed to the webhook, so the loss path saw a
+    // PENDING_PAYMENT transfer: no exposure yet, nothing to book, and no
+    // payout to hold. Before the mark existed, the transfer then funded
+    // looking perfectly ordinary and only the sender freeze stopped it.
+    const transferId = await seedPending()
+
+    const disputed = await reverse(transferId)
+    expect(disputed).toMatchObject({ outcome: 'no_exposure', state: 'PENDING_PAYMENT' })
+
+    // The mark is the whole point: nothing else on the row knows yet.
+    const marked = await db.query(
+      `select funding_disputed_at, payout_hold_reason from public.transfers where id = $1`,
+      [transferId],
+    )
+    expect(marked.rows[0].funding_disputed_at).not.toBeNull()
+    expect(marked.rows[0].payout_hold_reason).toBeNull()
+
+    // Now the funding lands, exactly as it did on the drive.
+    await applyFundingSucceeded({
+      transferId,
+      paymentRef: `cs_test_rev_${transferId}`,
+      eventId: `evt_funded_late_${transferId}`,
+      actor: 'webhook:funding',
+    })
+
+    const after = await db.query(
+      `select state, payout_hold_reason from public.transfers where id = $1`,
+      [transferId],
+    )
+    expect(after.rows[0].state).toBe('FUNDED')
+    // Held for the RIGHT reason, by the catch-up rather than by luck.
+    expect(after.rows[0].payout_hold_reason).toBe('funding_disputed')
+    // And still nothing booked: the pesos never left.
+    expect(await entriesFor(transferId, 'FUNDING_REVERSED')).toEqual([])
+  })
+
   it('a redelivered dispute changes nothing at all', async () => {
     const transferId = await seedAt('COMPLETED', true)
     await reverse(transferId)
