@@ -22,7 +22,8 @@ vi.mock('@sentry/node', () => ({
   captureMessage: (...args: unknown[]) => captureMessage(...args),
 }))
 
-const { releaseSenderKycHolds, releaseHold, RELEASABLE_HOLD_REASONS } = await import('./payout-holds.js')
+const { releaseSenderKycHolds, releaseHold, releaseDestinationPayabilityHolds, RELEASABLE_HOLD_REASONS } =
+  await import('./payout-holds.js')
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
 
@@ -87,6 +88,126 @@ describe('releaseSenderKycHolds', () => {
     expect(setFingerprint).toHaveBeenCalledWith(['sender-kyc-release-failed', 'user-1'])
     expect(captureMessage).toHaveBeenCalledWith('sender_kyc_pending release failed', 'error')
     expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// releaseDestinationPayabilityHolds: the LATE-registration auto-release.
+// ---------------------------------------------------------------------------
+
+// transfers.update().eq().eq().eq().in().select() — one .in() more than the
+// KYC release, and that .in() IS the narrowing this whole function is for.
+function payabilityTable(result: { data: unknown; error: unknown }) {
+  const select = vi.fn(async (..._args: unknown[]) => result)
+  const inFilter = vi.fn((..._args: unknown[]) => ({ select }))
+  const eq3 = vi.fn((..._args: unknown[]) => ({ in: inFilter }))
+  const eq2 = vi.fn((..._args: unknown[]) => ({ eq: eq3 }))
+  const eq1 = vi.fn((..._args: unknown[]) => ({ eq: eq2 }))
+  const update = vi.fn((..._args: unknown[]) => ({ eq: eq1 }))
+  from.mockReturnValue({ update })
+  return { update, eq1, eq2, eq3, inFilter, select }
+}
+
+const registration = (destinationIds: string[]) => ({
+  userId: 'user-1',
+  destinationIds,
+  actor: 'webhook:bridge',
+  requestId: 'req-9',
+})
+
+describe('releaseDestinationPayabilityHolds', () => {
+  it('releases only FUNDED payability holds on the destinations this pass registered', async () => {
+    const t = payabilityTable({ data: [{ id: 'tr-1' }], error: null })
+
+    const released = await releaseDestinationPayabilityHolds(registration(['dest-1', 'dest-2']), log)
+
+    expect(released).toEqual(['tr-1'])
+    expect(t.update).toHaveBeenCalledWith({ payout_hold_reason: null, payout_held_at: null })
+    expect(t.eq1).toHaveBeenCalledWith('user_id', 'user-1')
+    expect(t.eq2).toHaveBeenCalledWith('state', 'FUNDED')
+    // The compare-and-swap: a row re-held for another reason is left alone.
+    expect(t.eq3).toHaveBeenCalledWith('payout_hold_reason', 'payability')
+    // The narrowing that keeps the other payability causes held.
+    expect(t.inFilter).toHaveBeenCalledWith('payout_destination_id', ['dest-1', 'dest-2'])
+    expect(t.select).toHaveBeenCalledWith('id')
+  })
+
+  it('re-enqueues the submit for each released transfer', async () => {
+    payabilityTable({ data: [{ id: 'tr-1' }, { id: 'tr-2' }], error: null })
+
+    await releaseDestinationPayabilityHolds(registration(['dest-1']), log)
+
+    expect(enqueuePayoutSubmit).toHaveBeenCalledTimes(2)
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith('tr-1', 'api')
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith('tr-2', 'api')
+    expect(log.info).toHaveBeenCalledTimes(2)
+  })
+
+  it('records an ops_actions row per release, so the board shows the system did it', async () => {
+    payabilityTable({ data: [{ id: 'tr-1' }], error: null })
+
+    await releaseDestinationPayabilityHolds(registration(['dest-1']), log)
+
+    expect(recordOpsAction).toHaveBeenCalledTimes(1)
+    expect(recordOpsAction).toHaveBeenCalledWith(
+      {
+        actor: 'webhook:bridge',
+        action: 'hold_release',
+        transferId: 'tr-1',
+        reason: 'payability',
+        note: null,
+        before: { payoutHoldReason: 'payability', providerAccountRef: 'missing' },
+        after: { payoutHoldReason: null, providerAccountRef: 'registered' },
+        requestId: 'req-9',
+      },
+      log,
+    )
+  })
+
+  it('never queries when the pass registered nothing', async () => {
+    // The common case by far: an approval webhook for a sender with no
+    // pending destinations must not cost a write.
+    const t = payabilityTable({ data: [], error: null })
+    expect(await releaseDestinationPayabilityHolds(registration([]), log)).toEqual([])
+    expect(t.update).not.toHaveBeenCalled()
+    expect(recordOpsAction).not.toHaveBeenCalled()
+    expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
+  })
+
+  it('is quiet when the destinations registered but nothing was held on them', async () => {
+    payabilityTable({ data: [], error: null })
+    expect(await releaseDestinationPayabilityHolds(registration(['dest-1']), log)).toEqual([])
+    expect(recordOpsAction).not.toHaveBeenCalled()
+    expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
+    expect(log.info).not.toHaveBeenCalled()
+  })
+
+  it('an enqueue failure is logged, not thrown — the sweep resubmits within a minute', async () => {
+    payabilityTable({ data: [{ id: 'tr-1' }], error: null })
+    enqueuePayoutSubmit.mockRejectedValueOnce(new Error('boss down'))
+
+    expect(await releaseDestinationPayabilityHolds(registration(['dest-1']), log)).toEqual(['tr-1'])
+    expect(log.warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failed release pages and returns nothing, leaving the hold for the board', async () => {
+    payabilityTable({ data: null, error: { code: 'XX000' } })
+
+    expect(await releaseDestinationPayabilityHolds(registration(['dest-1']), log)).toEqual([])
+    expect(setFingerprint).toHaveBeenCalledWith(['payability-registration-release-failed', 'user-1'])
+    expect(captureMessage).toHaveBeenCalledWith(
+      'payability release after destination registration failed',
+      'error',
+    )
+    expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
+    expect(recordOpsAction).not.toHaveBeenCalled()
+  })
+
+  it('the release it writes is one an operator is still allowed to make by hand', async () => {
+    // If payability ever left RELEASABLE_HOLD_REASONS this auto-release would
+    // be clearing a hold the board no longer offers — a divergence worth
+    // failing on rather than discovering in production.
+    expect(RELEASABLE_HOLD_REASONS).toContain('payability')
   })
 })
 

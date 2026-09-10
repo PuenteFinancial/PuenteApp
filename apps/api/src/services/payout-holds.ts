@@ -150,6 +150,119 @@ export async function releaseHold(
   return { done: true, outcome: 'released', enqueued }
 }
 
+/**
+ * Auto-release the `payability` holds that a LATE Bridge registration just
+ * unblocked, and only those.
+ *
+ * Bridge gates an MXN external account on the customer's SPEI endorsement, and
+ * `active` at customer level does NOT imply it (sandbox, 2026-09-10). So the
+ * registration pass that runs on approval can 403, leaving
+ * `provider_account_ref` null, and payout-submit parks the transfer on
+ * `payability`. When the endorsement lands Bridge sends another
+ * `customer.updated`, the pass runs again and succeeds — but the transfer used
+ * to stay held until an operator noticed. That was money waiting on a human
+ * for a condition the system had already fixed.
+ *
+ * NARROW BY CONSTRUCTION. `payability` covers four distinct causes
+ * (destination_not_found, destination_not_active, recipient_not_active,
+ * provider_account_ref_missing) and only the last one is what a registration
+ * fixes. Releasing a user's payability holds wholesale would push genuinely
+ * unpayable transfers at Bridge, so the release is keyed on
+ * `payout_destination_id IN (the destinations this pass registered)` — passed
+ * in by the caller, never inferred here.
+ *
+ * NO PAYABILITY RE-CHECK before releasing, deliberately. payout-submit calls
+ * `checkPayability` itself on every run and holds again if anything is still
+ * wrong, so a check here would be a second read of the same row that can go
+ * stale before the submit anyway. Its only effect would be to convert a
+ * self-correcting extra hold cycle (one minute, no money moved) into a read
+ * that can fail and block a release that was safe. The cheaper, more robust
+ * order is: release, and let the gate that actually guards the money decide.
+ *
+ * Same compare-and-swap as the operator release and `releaseSenderKycHolds`:
+ * `payout_hold_reason = 'payability'` is in the WHERE clause, so a row re-held
+ * for another reason in the meantime is left alone.
+ */
+export async function releaseDestinationPayabilityHolds(
+  input: {
+    userId: string
+    /** `registeredIds` from `registerPendingDestinations`. */
+    destinationIds: string[]
+    /** The pass that healed the ref: `webhook:bridge` today. */
+    actor: string
+    /** Fastify request id on a route, null in a worker. */
+    requestId: string | null
+  },
+  log: Logger,
+): Promise<string[]> {
+  if (input.destinationIds.length === 0) return []
+
+  // `user_id` is redundant with the destination scope (the registration pass
+  // only ever selects this user's destinations) and kept as defence in depth:
+  // a caller that passed a foreign id could not release a stranger's hold.
+  const { data, error } = await supabaseAdmin
+    .from('transfers')
+    .update({ payout_hold_reason: null, payout_held_at: null })
+    .eq('user_id', input.userId)
+    .eq('state', 'FUNDED')
+    .eq('payout_hold_reason', 'payability')
+    .in('payout_destination_id', input.destinationIds)
+    .select('id')
+
+  if (error) {
+    // Degrades to the status quo — the hold is operator-releasable and
+    // reconciliation flags it overdue at 24h — but a failed write on a money
+    // path still pages, same as the KYC release.
+    log.error(
+      { userId: input.userId, supabaseError: error.code },
+      'payability release after destination registration failed',
+    )
+    Sentry.withScope((scope) => {
+      scope.setFingerprint(['payability-registration-release-failed', input.userId])
+      scope.setContext('release', {
+        userId: input.userId,
+        destinations: input.destinationIds.length,
+        supabaseError: error.code,
+      })
+      Sentry.captureMessage('payability release after destination registration failed', 'error')
+    })
+    return []
+  }
+
+  const released = ((data ?? []) as Array<{ id: string }>).map((row) => row.id)
+  for (const transferId of released) {
+    log.info(
+      { audit: true, userId: input.userId, transferId, actor: input.actor },
+      'payability hold auto-released after destination registration',
+    )
+    // The board must show that the SYSTEM released this, not a person.
+    // `releaseSenderKycHolds` predates ops_actions and writes no row; that is
+    // a gap in the older path, not a precedent to copy. Fixed keys only (the
+    // PII guard); the Bridge account id itself stays out of the jsonb.
+    await recordOpsAction(
+      {
+        actor: input.actor,
+        action: 'hold_release',
+        transferId,
+        reason: 'payability',
+        note: null,
+        before: { payoutHoldReason: 'payability', providerAccountRef: 'missing' },
+        after: { payoutHoldReason: null, providerAccountRef: 'registered' },
+        requestId: input.requestId,
+      },
+      log,
+    )
+    // Latency only: the 1-min sweep resubmits an unheld, unclaimed FUNDED row
+    // on its own, so a failed enqueue is never fatal.
+    try {
+      await enqueuePayoutSubmit(transferId, 'api')
+    } catch {
+      log.warn({ userId: input.userId, transferId }, 'payout enqueue after release failed — sweep will heal')
+    }
+  }
+  return released
+}
+
 export async function releaseSenderKycHolds(userId: string, log: Logger): Promise<string[]> {
   const { data, error } = await supabaseAdmin
     .from('transfers')

@@ -200,6 +200,14 @@ export async function submitPayout(transferId: string): Promise<number> {
           registrationFailures.push('registration_unavailable')
         }
       }
+
+      // No auto-release of SIBLING payability holds here, unlike the webhook's
+      // late pass (releaseDestinationPayabilityHolds). Reaching a sibling that
+      // this self-heal strands takes a DROPPED `customer.updated`: the same
+      // endorsement approval that lets this call succeed is what Bridge
+      // announces with that webhook, and the webhook path releases. The
+      // residual is the operator board's, and jobs carry no Logger the release
+      // could write its provenance row through.
     }
 
     if (!payability.payable) {
