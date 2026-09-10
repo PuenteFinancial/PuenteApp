@@ -263,7 +263,23 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
   async expireFunding(input: { paymentRef: string }): Promise<'expired' | 'not_open'> {
     const session = await this.client.checkout.sessions.retrieve(input.paymentRef)
     if (session.status !== 'open') return 'not_open'
-    await this.client.checkout.sessions.expire(input.paymentRef)
+    try {
+      await this.client.checkout.sessions.expire(input.paymentRef)
+    } catch (err) {
+      // THE RACE WINDOW, decided on purpose rather than by accident. Between
+      // the retrieve above and this call the sender can confirm, and Stripe
+      // refuses to expire a completed session with an invalid_request_error.
+      // The reaper skips a row on ANY throw, so this was safe even unhandled —
+      // but "safe because transport errors also skip" is not a decision, and a
+      // Stripe change to succeed silently here would have failed a paid row.
+      // Re-read and answer for the state we can see; anything else is a real
+      // failure and propagates.
+      if (isInvalidRequest(err)) {
+        const now = await this.client.checkout.sessions.retrieve(input.paymentRef)
+        if (now.status !== 'open') return 'not_open'
+      }
+      throw err
+    }
     return 'expired'
   }
 
@@ -318,6 +334,17 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
     }
     return id
   }
+}
+
+// Stripe rejects `sessions.expire` on a non-open session as an
+// invalid_request_error. Duck-typed like isUnexpectedState in stripe.ts — the
+// SDK's error classes are not worth an import for one field.
+function isInvalidRequest(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { type?: unknown }).type === 'StripeInvalidRequestError'
+  )
 }
 
 const CHECKOUT_EVENTS = new Set([

@@ -241,11 +241,16 @@ export async function applyFundingCleared(input: {
   // judge "is the receivable open?" from that stale read, which lost the
   // clearing leg under concurrency: a FUNDED transition committing between the
   // load and the update left this branch believing the row was still
-  // PENDING_PAYMENT. The UPDATE above takes the row lock and so serializes
-  // behind any in-flight transition — a read taken now sees whatever state
-  // that transition committed. Together with the post-commit re-read in
-  // applyFundingSucceeded, the two appliers now agree whichever order they
-  // run in, including at the same instant.
+  // PENDING_PAYMENT.
+  //
+  // The UPDATE above takes the row lock, so it serializes behind a transition
+  // that is mid-commit — but this SELECT is its own PostgREST transaction and
+  // does NOT wait for one that starts after the update. On its own, this
+  // reordering closes only half the window. The other half is closed by
+  // applyFundingSucceeded re-reading the flag AFTER its transition commits and
+  // running this applier again if it is set. Each side re-reads after its own
+  // write; that pair, not either half, is what makes the two agree whichever
+  // order they run in, including at the same instant.
   const { data: clearedRow, error: loadError } = await supabaseAdmin
     .from('transfers')
     .select('state, send_amount_minor, fee_amount_minor, margin_minor, refund_payment_ref')

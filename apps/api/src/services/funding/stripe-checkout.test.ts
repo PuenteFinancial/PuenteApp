@@ -325,6 +325,28 @@ describe("StripeCheckoutFundingProcessor — expireFunding (the reaper's stale-t
     expect(expire).not.toHaveBeenCalled()
   })
 
+  it('the sender paying BETWEEN retrieve and expire is answered not_open, deliberately', async () => {
+    // Stripe refuses to expire a completed session. Rather than lean on the
+    // reaper skipping any throw, this re-reads and answers for what it sees.
+    const expire = vi.fn().mockRejectedValue(
+      Object.assign(new Error('Cannot expire a completed session'), { type: 'StripeInvalidRequestError' }),
+    )
+    const retrieve = vi
+      .fn()
+      .mockResolvedValueOnce({ id: SESSION_ID, status: 'open', payment_status: 'unpaid' })
+      .mockResolvedValueOnce({ id: SESSION_ID, status: 'complete', payment_status: 'paid' })
+    const processor = make({ checkout: { sessions: { create: vi.fn(), retrieve, expire } } })
+    await expect(processor.expireFunding({ paymentRef: SESSION_ID })).resolves.toBe('not_open')
+    expect(retrieve).toHaveBeenCalledTimes(2)
+  })
+
+  it('a transport failure on expire propagates — the reaper skips the tick, the window backstops', async () => {
+    const expire = vi.fn().mockRejectedValue(new Error('ECONNRESET'))
+    const retrieve = vi.fn().mockResolvedValue({ id: SESSION_ID, status: 'open', payment_status: 'unpaid' })
+    const processor = make({ checkout: { sessions: { create: vi.fn(), retrieve, expire } } })
+    await expect(processor.expireFunding({ paymentRef: SESSION_ID })).rejects.toThrow('ECONNRESET')
+  })
+
   it("an already-expired session is Stripe's clock having won; nothing to do", async () => {
     const { expire, processor } = client('expired')
     await expect(processor.expireFunding({ paymentRef: SESSION_ID })).resolves.toBe('not_open')
