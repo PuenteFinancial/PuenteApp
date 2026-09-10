@@ -461,6 +461,16 @@ export async function webhooksRoute(server: FastifyInstance) {
             { webhook: 'funding', eventId: event.eventId, paymentRef: event.paymentRef },
             'funding event unmatched to any transfer',
           )
+          if (event.type === 'funding_reversed') {
+            // An unmatched dispute is still the loss path — money we charged
+            // is being clawed back and we can't even name the transfer. Logs
+            // don't page; this must.
+            Sentry.captureMessage('funding reversed — dispute unmatched to any transfer', {
+              level: 'fatal',
+              fingerprint: ['funding-reversed-unmatched', event.paymentRef],
+              tags: { paymentRef: event.paymentRef, reason: event.reason ?? 'unknown' },
+            })
+          }
           return { received: true }
         }
       }
@@ -532,14 +542,30 @@ export async function webhooksRoute(server: FastifyInstance) {
       }
 
       if (event.type === 'funding_reversed') {
-        // Post-COMPLETED handling (loss booking, recovery) needs the slice-5/6
-        // machinery — normalize + record the delivery now, act later. (For
-        // Stripe this is a post-settlement ACH return via dispute — final, no
-        // appeal; PR-S2's refund guard and the O-lane recon own the tail.)
-        server.log.warn(
-          { audit: true, webhook: 'funding', transferId, eventId: event.eventId },
-          'funding_reversed received — handling deferred to slice 5/6',
+        // THE LOSS PATH, not yet implemented: a post-settlement ACH return or
+        // card chargeback on a transfer whose MXN may already be delivered.
+        // The full handler (state-dependent branch, FUNDING_REVERSED + loss
+        // posting per ledger-rules.md, sender freeze) is its own slice. Until
+        // it exists the one non-negotiable is that a dispute never passes
+        // silently — the old warn log went only to the server logs and nothing
+        // paged. Ack, don't 4xx/5xx: a redelivery loop can't fix a handler
+        // that cannot act, and the fatal page (fingerprinted per transfer, so
+        // redeliveries collapse into one issue) is what summons the human.
+        server.log.error(
+          {
+            audit: true,
+            webhook: 'funding',
+            transferId,
+            eventId: event.eventId,
+            reason: event.reason,
+          },
+          'funding_reversed received — loss path, handler not yet implemented',
         )
+        Sentry.captureMessage('funding reversed — dispute/ACH return on unhandled loss path', {
+          level: 'fatal',
+          fingerprint: ['funding-reversed-unhandled', transferId],
+          tags: { transferId, reason: event.reason ?? 'unknown' },
+        })
         return { received: true }
       }
 

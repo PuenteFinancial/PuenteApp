@@ -792,6 +792,7 @@ function fakeStripeProcessor(overrides: Record<string, unknown> = {}) {
 describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
   beforeEach(() => {
     transitionTransfer.mockReset()
+    captureMessage.mockReset()
   })
 
   it('reads the signature from the header the processor declares', async () => {
@@ -853,12 +854,23 @@ describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
     expect(lookup['select']).toHaveBeenCalledWith('id')
     expect(lookup['eq']).toHaveBeenCalledWith('funding_payment_ref', 'pi_123')
     expect(lookup['maybeSingle']).toHaveBeenCalled()
-    // funding_reversed handling stays deferred — resolution is for the log/join
+    // The full handler is its own slice — no transition yet. But the loss
+    // path must PAGE, fatal, fingerprinted per transfer so Stripe
+    // redeliveries collapse into one Sentry issue. The old warn log was the
+    // silent-dispute bug: be7a6e9f sat FUNDED+cleared with a live dispute.
     expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(captureMessage).toHaveBeenCalledWith(
+      'funding reversed — dispute/ACH return on unhandled loss path',
+      expect.objectContaining({
+        level: 'fatal',
+        fingerprint: ['funding-reversed-unhandled', TRANSFER_ID],
+        tags: expect.objectContaining({ transferId: TRANSFER_ID, reason: 'insufficient_funds' }),
+      }),
+    )
     await app.close()
   })
 
-  it('acks a dispute that matches no transfer (retry cannot fix it) without touching state', async () => {
+  it('acks a dispute that matches no transfer (retry cannot fix it) without touching state — but pages', async () => {
     from.mockReturnValueOnce(selectChain({ data: null }))
     processorOverride.current = fakeStripeProcessor()
     const app = await buildApp()
@@ -872,6 +884,15 @@ describe('POST /v1/webhooks/funding — processor-declared behavior', () => {
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ received: true })
     expect(transitionTransfer).not.toHaveBeenCalled()
+    // Unmatched is WORSE, not quieter: a clawback on a payment we can't even
+    // name. Fingerprinted on the paymentRef since there is no transfer id.
+    expect(captureMessage).toHaveBeenCalledWith(
+      'funding reversed — dispute unmatched to any transfer',
+      expect.objectContaining({
+        level: 'fatal',
+        fingerprint: ['funding-reversed-unmatched', 'pi_123'],
+      }),
+    )
     await app.close()
   })
 
