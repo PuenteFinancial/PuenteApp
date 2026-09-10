@@ -7,6 +7,7 @@ import type {
   FundingParseResult,
   FundingPaymentStatus,
   FundingUndo,
+  NormalizedPaymentStatus,
 } from './index.js'
 
 // Checkout Sessions rail (C1 — docs/prds/checkout-sessions-rail.md).
@@ -213,11 +214,14 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
 
   override async getPaymentStatus(input: { paymentRef: string }): Promise<FundingPaymentStatus> {
     const session = await this.client.checkout.sessions.retrieve(input.paymentRef)
+    const status = session.status ?? 'unknown'
+    const paymentStatus = session.payment_status ?? 'unknown'
     return {
       paymentRef: session.id,
       // Both, joined: `complete/unpaid` and `complete/paid` are different
       // worlds and a single field cannot tell reconciliation which it is.
-      status: `${session.status ?? 'unknown'}/${session.payment_status ?? 'unknown'}`,
+      status: `${status}/${paymentStatus}`,
+      normalized: normalizeCheckoutStatus(status, paymentStatus),
     }
   }
 
@@ -334,6 +338,33 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
     }
     return id
   }
+}
+
+/**
+ * A Checkout Session's two status fields, in reconciliation's vocabulary.
+ *
+ *   open     / unpaid  → awaiting    nothing has happened yet
+ *   expired  / *       → canceled    Stripe's 24h clock ran out; it will never pay
+ *   complete / unpaid  → processing  bank debit submitted, settling (the only
+ *                                    shape where a live pull can still fail)
+ *   complete / paid    → succeeded   settled — a card, or a bank debit after
+ *   complete / no_payment_required   async_payment_succeeded; we never create
+ *                                    zero-amount sessions but the value exists
+ *
+ * Anything unrecognized is `awaiting` on purpose: for the classifier that is
+ * the reading that produces NO finding on a live row, so an API vocabulary
+ * change degrades to "not alarmed" rather than "paged on every row".
+ */
+export function normalizeCheckoutStatus(
+  status: string,
+  paymentStatus: string,
+): NormalizedPaymentStatus {
+  if (status === 'expired') return 'canceled'
+  if (status === 'complete') {
+    if (paymentStatus === 'paid' || paymentStatus === 'no_payment_required') return 'succeeded'
+    return 'processing'
+  }
+  return 'awaiting'
 }
 
 // Stripe rejects `sessions.expire` on a non-open session as an

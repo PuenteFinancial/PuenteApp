@@ -98,12 +98,32 @@ export interface FundingClientSession {
 // implement them and the recon checks report themselves `skipped` — no mock
 // theater, no pretend findings.
 
+/**
+ * The four things reconciliation actually needs to know about a payment,
+ * independent of which Stripe object the rail keeps. Added when the
+ * stripe_receivables check turned out to be skipping the Checkout rail
+ * entirely (C5 follow-up): its classifier spoke PaymentIntent vocabulary and a
+ * Checkout Session reports `open/unpaid`, `complete/paid` — a different
+ * language for the same four facts.
+ *
+ *   awaiting    the sender has not paid; nothing is in flight
+ *   processing  a pull is in flight and can still fail
+ *   succeeded   money settled
+ *   canceled    the object is dead; it will never pay
+ */
+export type NormalizedPaymentStatus = 'awaiting' | 'processing' | 'succeeded' | 'canceled'
+
 export interface FundingPaymentStatus {
   paymentRef: string
   /** Raw processor status (Stripe PI: requires_*, processing, succeeded,
    *  canceled…; onramp session: initialized, requires_payment, rejected,
-   *  fulfillment_*). */
+   *  fulfillment_*; Checkout Session: `status/payment_status`). */
   status: string
+  /** The raw status in reconciliation's vocabulary. Rails that expose
+   *  getPaymentStatus to the stripe_receivables check MUST set this; the
+   *  classifier falls back to reading `status` as PaymentIntent vocabulary
+   *  only for the PI rail's own sake. */
+  normalized?: NormalizedPaymentStatus
   /** Machine-readable failure detail when the processor exposes one (onramp:
    *  transaction_details.last_error, e.g. kyc_verification_failed). Optional —
    *  the PI adapter has no equivalent field. */

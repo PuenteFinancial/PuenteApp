@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import Stripe from 'stripe'
-import { StripeCheckoutFundingProcessor } from './stripe-checkout.js'
+import { StripeCheckoutFundingProcessor, normalizeCheckoutStatus } from './stripe-checkout.js'
 import { undoModeForRef } from './index.js'
 
 // The Checkout Sessions rail. Mirrors stripe.test.ts's harness — a real Stripe
@@ -351,6 +351,33 @@ describe("StripeCheckoutFundingProcessor — expireFunding (the reaper's stale-t
     const { expire, processor } = client('expired')
     await expect(processor.expireFunding({ paymentRef: SESSION_ID })).resolves.toBe('not_open')
     expect(expire).not.toHaveBeenCalled()
+  })
+})
+
+describe('normalizeCheckoutStatus — the Session in reconciliation\'s vocabulary', () => {
+  it('maps every shape a Session can take', () => {
+    expect(normalizeCheckoutStatus('open', 'unpaid')).toBe('awaiting')
+    expect(normalizeCheckoutStatus('expired', 'unpaid')).toBe('canceled')
+    // Bank debit: completed but the pull is still settling and can still fail.
+    expect(normalizeCheckoutStatus('complete', 'unpaid')).toBe('processing')
+    // Card: settled on completion.
+    expect(normalizeCheckoutStatus('complete', 'paid')).toBe('succeeded')
+    expect(normalizeCheckoutStatus('complete', 'no_payment_required')).toBe('succeeded')
+  })
+
+  it('an unrecognized vocabulary degrades to awaiting — never to a page on every row', () => {
+    expect(normalizeCheckoutStatus('unknown', 'unknown')).toBe('awaiting')
+    expect(normalizeCheckoutStatus('some_new_state', 'paid')).toBe('awaiting')
+  })
+
+  it('getPaymentStatus carries both the raw pair and the normalized reading', async () => {
+    const retrieve = vi.fn().mockResolvedValue({ id: SESSION_ID, status: 'complete', payment_status: 'unpaid' })
+    const processor = make({ checkout: { sessions: { create: vi.fn(), retrieve, expire: vi.fn() } } })
+    await expect(processor.getPaymentStatus({ paymentRef: SESSION_ID })).resolves.toEqual({
+      paymentRef: SESSION_ID,
+      status: 'complete/unpaid',
+      normalized: 'processing',
+    })
   })
 })
 

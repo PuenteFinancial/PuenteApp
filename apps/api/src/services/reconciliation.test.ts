@@ -36,11 +36,17 @@ vi.mock('./bridge.js', () => ({
 }))
 
 const getFundingProcessor = vi.hoisted(() => vi.fn())
+// The receivables sweep reads each row's status through processorFor (the
+// ROW's rail), which reaches getFundingProcessor via the module's own binding
+// — spreading `...actual` does not rebind it. Default to the live processor so
+// every single-rail test below keeps its meaning; mixed-rail tests override.
+const processorFor = vi.hoisted(() => vi.fn())
 vi.mock('./funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./funding/index.js')>()
   return {
     ...actual,
     getFundingProcessor: (...args: unknown[]) => getFundingProcessor(...args),
+    processorFor: (...args: unknown[]) => processorFor(...args),
   }
 })
 
@@ -736,10 +742,16 @@ const stripeProcessor = () => ({
 })
 
 describe('stripe_receivables', () => {
+  beforeEach(() => {
+    processorFor.mockReset()
+    processorFor.mockImplementation(() => getFundingProcessor())
+  })
+
   it('skips under the mock processor', async () => {
     getFundingProcessor.mockReturnValue({ provider: 'mock', isConfigured: () => true })
     const outcome = await check('stripe_receivables').run()
     expect(outcome.status).toBe('skipped')
+    expect(outcome.summary).toMatchObject({ reason: 'funding processor is not a Stripe rail' })
     expect(from).not.toHaveBeenCalled()
   })
 
@@ -793,6 +805,75 @@ describe('stripe_receivables', () => {
     expect(outcome.summary).toMatchObject({ readFailures: 1, firstReadFailure: 'stripe timeout' })
   })
 })
+
+  it('does NOT skip the Checkout rail — the rail C5 found two race bugs on with this check off', async () => {
+    const processor = { ...stripeProcessor(), provider: 'stripe_checkout' }
+    getFundingProcessor.mockReturnValue(processor)
+    const c = chainResolving({ data: [], error: null })
+    from.mockReturnValue(c)
+
+    const outcome = await check('stripe_receivables').run()
+    expect(outcome.status).not.toBe('skipped')
+    // Both ref prefixes are swept: pi_ rows from before a flip, cs_ rows after.
+    expect(c['like']).toHaveBeenCalledWith('funding_payment_ref', 'pi_%')
+    expect(c['like']).toHaveBeenCalledWith('funding_payment_ref', 'cs_%')
+  })
+
+  it('classifies a Checkout row by its NORMALIZED status, not the raw session pair', async () => {
+    // complete/unpaid = a bank debit still settling → processing. Against a
+    // PENDING_PAYMENT row that is the missed-webhook finding, exactly as a
+    // PI in `processing` would be.
+    const processor = { ...stripeProcessor(), provider: 'stripe_checkout' }
+    processor.getPaymentStatus.mockResolvedValueOnce({
+      paymentRef: 'cs_a',
+      status: 'complete/unpaid',
+      normalized: 'processing',
+    })
+    getFundingProcessor.mockReturnValue(processor)
+    const c = chainResolving({
+      data: [
+        {
+          id: 't-9',
+          state: 'PENDING_PAYMENT',
+          funding_payment_ref: 'cs_a',
+          funding_cleared: false,
+          refund_payment_ref: null,
+          funding_processor: 'stripe_checkout',
+        },
+      ],
+      error: null,
+    })
+    from.mockReturnValue(c)
+
+    const outcome = await check('stripe_receivables').run()
+    expect(outcome.findings.map((f) => f.key)).toEqual(['stripe-missed-processing:t-9'])
+    expect(outcome.findings[0]!.detail).toMatchObject({ piStatus: 'complete/unpaid' })
+  })
+
+  it('reads each row through the ROW\'s rail — a pi_ row beside a cs_ row after a flip', async () => {
+    const live = { ...stripeProcessor(), provider: 'stripe_checkout' }
+    const legacy = { ...stripeProcessor(), provider: 'stripe' }
+    live.getPaymentStatus.mockResolvedValue({ paymentRef: 'cs_x', status: 'complete/paid', normalized: 'succeeded' })
+    legacy.getPaymentStatus.mockResolvedValue({ paymentRef: 'pi_x', status: 'succeeded', normalized: 'succeeded' })
+    getFundingProcessor.mockReturnValue(live)
+    processorFor.mockImplementation((row: { funding_processor?: string | null }) =>
+      row.funding_processor === 'stripe' ? legacy : live,
+    )
+    const rows = [
+      { id: 't-cs', state: 'COMPLETED', funding_payment_ref: 'cs_x', funding_cleared: false, refund_payment_ref: null, funding_processor: 'stripe_checkout' },
+      { id: 't-pi', state: 'COMPLETED', funding_payment_ref: 'pi_x', funding_cleared: false, refund_payment_ref: null, funding_processor: 'stripe' },
+    ]
+    from.mockReturnValue(chainResolving({ data: rows, error: null }))
+
+    const outcome = await check('stripe_receivables').run()
+    expect(live.getPaymentStatus).toHaveBeenCalledWith({ paymentRef: 'cs_x' })
+    expect(legacy.getPaymentStatus).toHaveBeenCalledWith({ paymentRef: 'pi_x' })
+    // Both settled with the flag never flipped — the bug-1 shape, on both rails.
+    expect(outcome.findings.map((f) => f.key).sort()).toEqual([
+      'stripe-missed-cleared:t-cs',
+      'stripe-missed-cleared:t-pi',
+    ])
+  })
 
 describe('stripe_orphans', () => {
   it('skips under the mock processor', async () => {

@@ -2,6 +2,7 @@ import Stripe from 'stripe'
 import { env } from '../../config/env.js'
 import type {
   IdentityFlow,
+  NormalizedPaymentStatus,
   FundingClientSession,
   FundingEventType,
   FundingInitiation,
@@ -20,6 +21,16 @@ import type {
 // funding_cleared flag. A pre-settlement return surfaces as
 // payment_intent.payment_failed; a post-settlement return arrives as
 // charge.dispute.created (handled in parseEvent below).
+/**
+ * A PaymentIntent status in reconciliation's vocabulary. The PI rail's raw
+ * words already are that vocabulary except for the requires_* family, which
+ * all mean the same thing to a reconciler: the sender has not paid.
+ */
+export function normalizePiStatus(status: string): NormalizedPaymentStatus {
+  if (status === 'processing' || status === 'succeeded' || status === 'canceled') return status
+  return 'awaiting'
+}
+
 const PI_EVENT_MAP = new Map<string, FundingEventType>([
   ['payment_intent.processing', 'funding_succeeded'],
   ['payment_intent.succeeded', 'funding_cleared'],
@@ -146,7 +157,11 @@ export class StripeFundingProcessor implements FundingProcessor {
 
   async getPaymentStatus(input: { paymentRef: string }): Promise<FundingPaymentStatus> {
     const intent = await this.client.paymentIntents.retrieve(input.paymentRef)
-    return { paymentRef: intent.id, status: intent.status }
+    return {
+      paymentRef: intent.id,
+      status: intent.status,
+      normalized: normalizePiStatus(intent.status),
+    }
   }
 
   async listRecentPayments(input: {
