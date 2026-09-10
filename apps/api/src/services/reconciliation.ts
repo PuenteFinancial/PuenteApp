@@ -205,10 +205,23 @@ interface ClearedFlagRow {
  * receivable that will never close, and the float ceiling reads that balance.
  */
 async function runClearedPostings(): Promise<CheckOutcome> {
+  // FUNDING_REVERSED is excluded, and ONLY it. The flag says the provider once
+  // told us the money cleared; on the loss path the reversal's void arm then
+  // wrote the receivable off directly, so there is deliberately no
+  // `funding_cleared` ledger leg and the books are already correct. Without
+  // this exclusion every reversed transfer whose clearing event landed late
+  // would page here forever (the flag is written before the state is read, by
+  // design — the C5 race fix).
+  //
+  // The rest of applyFundingCleared's skip states are NOT excluded: this check
+  // caught its first real bug on a FUNDED row, and widening it to every
+  // unwound state would blunt exactly that. A flagged CANCELED or REFUNDED row
+  // with no leg stays a finding, because it is genuinely worth a look.
   const { data: flagged, error: flaggedError } = await supabaseAdmin
     .from('transfers')
     .select('id, state')
     .eq('funding_cleared', true)
+    .neq('state', 'FUNDING_REVERSED')
     .limit(ROW_BOUND)
   if (flaggedError || flagged == null) failClosed('cleared-postings select', flaggedError)
   const rows = flagged as ClearedFlagRow[]

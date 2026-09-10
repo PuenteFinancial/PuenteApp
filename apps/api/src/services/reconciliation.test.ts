@@ -68,7 +68,7 @@ const check = (name: string) => {
 // builder method returns itself, resolving to `result` when awaited.
 function chainResolving(result: { data: unknown; error: unknown }) {
   const c: Record<string, unknown> = {}
-  for (const method of ['select', 'or', 'limit', 'like', 'in', 'eq']) {
+  for (const method of ['select', 'or', 'limit', 'like', 'in', 'eq', 'neq']) {
     c[method] = vi.fn().mockReturnValue(c)
   }
   // Single-row terminal, for the checks that resolve one transfer at a time
@@ -746,6 +746,19 @@ const stripeProcessor = () => ({
 })
 
 describe('cleared_postings — the flag must have its ledger leg', () => {
+  it('never looks at a reversed transfer — its receivable was written off, not settled', async () => {
+    // The loss path's void arm closes funding_receivable directly, so there is
+    // deliberately no funding_cleared leg. Without the exclusion every reversed
+    // transfer whose clearing landed late would page here forever, because the
+    // flag is written before the state is read (the C5 race fix).
+    const c = chainResolving({ data: [], error: null })
+    from.mockReturnValue(c)
+
+    await check('cleared_postings').run()
+
+    expect(c['neq']).toHaveBeenCalledWith('state', 'FUNDING_REVERSED')
+  })
+
   const flagged = (rows: { id: string; state: string }[]) => chainResolving({ data: rows, error: null })
   const posted = (ids: string[]) => chainResolving({ data: ids.map((transfer_id) => ({ transfer_id })), error: null })
 

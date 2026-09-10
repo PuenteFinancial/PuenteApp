@@ -435,6 +435,19 @@ export async function applyFundingCleared(input: {
     row.state === 'PENDING_PAYMENT' ||
     row.state === 'PAYMENT_FAILED' ||
     row.state === 'CANCELED' ||
+    // The loss path already closed it. A dispute on an UNCLEARED transfer posts
+    // `CR funding_receivable` (the void arm of the reversal), writing the
+    // receivable off directly. A clearing event arriving afterwards — a late
+    // or redelivered one, or the out-of-order catch-up in
+    // applyFundingSucceeded — would credit that same receivable a SECOND time
+    // while debiting cash once, leaving the transfer's ledger unbalanced and
+    // funding_receivable negative. Found by security-reviewer, 2026-09-10.
+    //
+    // Skipping is right for the cleared arm too: that one credited cash, and
+    // the receivable's own leg had already posted, so there is nothing left to
+    // settle either way. The final position is identical whether the money
+    // cleared then reversed, or never cleared at all.
+    row.state === 'FUNDING_REVERSED' ||
     (row.state === 'REFUNDED' &&
       (row.refund_payment_ref === null || undoModeForRef(row.refund_payment_ref) === 'voided'))
 

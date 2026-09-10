@@ -44,6 +44,7 @@ const {
   recordManualFunding,
   applyFundingSucceeded,
   applyFundingReversed,
+  applyFundingCleared,
   applyOnrampFunded,
   applyOnrampSettlement,
 } = await import('./funding-apply.js')
@@ -864,5 +865,21 @@ describe('applyFundingReversed', () => {
     stubReversal(reversibleRow())
     transitionTransfer.mockRejectedValue(new TransferRpcError('transition_conflict'))
     expect(await reverse()).toEqual({ outcome: 'stale' })
+  })
+})
+
+describe('applyFundingCleared — the loss path already closed the receivable', () => {
+  it('skips the cash leg on a FUNDING_REVERSED transfer, never crediting the receivable twice', async () => {
+    // The double-credit: a dispute on an UNCLEARED transfer writes the
+    // receivable off (CR funding_receivable). A clearing arriving afterwards —
+    // late, redelivered, or via the out-of-order catch-up — would credit the
+    // SAME receivable again while debiting cash once. Unbalanced ledger,
+    // negative funding_receivable.
+    stubReversal(reversibleRow({ state: 'FUNDING_REVERSED' }))
+
+    const out = await applyFundingCleared({ transferId: TRANSFER_ID })
+
+    expect(out).toEqual({ outcome: 'skipped', state: 'FUNDING_REVERSED' })
+    expect(postLedgerTransaction).not.toHaveBeenCalled()
   })
 })
