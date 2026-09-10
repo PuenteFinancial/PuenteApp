@@ -142,7 +142,19 @@ export async function applyFundingSucceeded(input: {
   //
   // Reported, never thrown: FUNDED is committed and cannot be unwound, and a
   // funded transfer must still get its payout. Same posture as the enqueue.
-  if (transfer.funding_cleared) {
+  //
+  // The flag is RE-READ here rather than taken from the load at the top: that
+  // load happened before the transition, and a cleared event processed in the
+  // gap would have flipped the flag after we looked. The transition RPC held
+  // the row lock, so a concurrent applyFundingCleared's UPDATE queued behind
+  // it and has committed (or will fail loudly) by the time this read runs.
+  const { data: after, error: afterError } = await supabaseAdmin
+    .from('transfers')
+    .select('funding_cleared')
+    .eq('id', transfer.id)
+    .maybeSingle()
+  if (afterError) Sentry.captureException(new Error(`post-FUNDED re-read failed: ${afterError.message}`))
+  if ((after as { funding_cleared?: boolean } | null)?.funding_cleared) {
     try {
       await applyFundingCleared({ transferId: transfer.id })
     } catch (clearErr) {
@@ -217,13 +229,6 @@ export type ApplyFundingClearedOutcome =
 export async function applyFundingCleared(input: {
   transferId: string
 }): Promise<ApplyFundingClearedOutcome> {
-  const { data: clearedRow, error: loadError } = await supabaseAdmin
-    .from('transfers')
-    .select('state, send_amount_minor, fee_amount_minor, margin_minor, refund_payment_ref')
-    .eq('id', input.transferId)
-    .maybeSingle()
-  if (loadError) throw new Error(`funding_cleared load failed: ${loadError.message}`)
-
   // A flag, not a state: recorded for the WAIT_FOR_CLEARING policy. The one
   // sanctioned guarded UPDATE outside the transition RPC.
   const { error: updateError } = await supabaseAdmin
@@ -231,6 +236,22 @@ export async function applyFundingCleared(input: {
     .update({ funding_cleared: true })
     .eq('id', input.transferId)
   if (updateError) throw new Error(`funding_cleared update failed: ${updateError.message}`)
+
+  // READ AFTER THE UPDATE, NOT BEFORE. This used to load the row first and
+  // judge "is the receivable open?" from that stale read, which lost the
+  // clearing leg under concurrency: a FUNDED transition committing between the
+  // load and the update left this branch believing the row was still
+  // PENDING_PAYMENT. The UPDATE above takes the row lock and so serializes
+  // behind any in-flight transition — a read taken now sees whatever state
+  // that transition committed. Together with the post-commit re-read in
+  // applyFundingSucceeded, the two appliers now agree whichever order they
+  // run in, including at the same instant.
+  const { data: clearedRow, error: loadError } = await supabaseAdmin
+    .from('transfers')
+    .select('state, send_amount_minor, fee_amount_minor, margin_minor, refund_payment_ref')
+    .eq('id', input.transferId)
+    .maybeSingle()
+  if (loadError) throw new Error(`funding_cleared load failed: ${loadError.message}`)
 
   // Skipped when the receivable was never opened or is already closed:
   // PENDING_PAYMENT/PAYMENT_FAILED never posted FUNDED; CANCELED and a

@@ -33,7 +33,7 @@ vi.mock('../services/transfers.js', async (importOriginal) => {
 // of the processor is a controllable fake.
 const getPaymentStatus = vi.hoisted(() => vi.fn())
 const processorMock = vi.hoisted(() => ({
-  current: { provider: 'mock' } as { provider: string; getPaymentStatus?: unknown },
+  current: { provider: 'mock' } as { provider: string; getPaymentStatus?: unknown; expireFunding?: unknown },
 }))
 vi.mock('../services/funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/funding/index.js')>()
@@ -45,6 +45,11 @@ vi.mock('../services/funding/index.js', async (importOriginal) => {
     // "No X export is defined on the mock" suite error.
     ...actual,
     getFundingProcessor: () => processorMock.current,
+    // The reaper asks the ROW's rail (audit corner 1) via processorFor, which
+    // calls getFundingProcessor through the module's own binding — the line
+    // above does not reach it. Same fake, or the expire tests below would run
+    // against the real mock-rail adapter and never see expireFunding.
+    processorFor: () => processorMock.current,
   }
 })
 
@@ -336,5 +341,75 @@ describe('reconcilePendingTransfers — per-row rail', () => {
     const [input] = transition.mock.calls[0] as [Record<string, unknown>]
     expect(input.transferId).toBe('tr-crypto-dead')
     expect(input.reason).toBe('funding_not_received_within_4_hours')
+  })
+})
+
+describe('reconcilePendingTransfers — closing the processor object before failing the row', () => {
+  // C5: the reaper failed our row but left the Checkout Session open for its
+  // full 24h. A Payment Element still mounted in a stale tab could then take
+  // the money for a PAYMENT_FAILED transfer — the webhook hits
+  // transition_conflict and is acked. Charge, no transfer. So on rails that
+  // can, the processor's object is closed FIRST, and its answer decides
+  // whether the row is ours to fail at all.
+  const expireFunding = vi.fn()
+  beforeEach(() => {
+    expireFunding.mockReset()
+    processorMock.current = { provider: 'stripe_checkout', expireFunding }
+  })
+  afterEach(() => {
+    processorMock.current = { provider: 'mock' }
+  })
+
+  it('expires the session, THEN fails the row', async () => {
+    expireFunding.mockResolvedValue('expired')
+    mockPendingSelect([row('tr-stale', 5 * 60 * MINUTES, 'cs_test_stale')])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    expect(expireFunding).toHaveBeenCalledWith({ paymentRef: 'cs_test_stale' })
+    expect(transition).toHaveBeenCalledTimes(1)
+    // Order is the point: nothing may be payable by the time the row is failed.
+    expect(expireFunding.mock.invocationCallOrder[0]!).toBeLessThan(
+      transition.mock.invocationCallOrder[0]!,
+    )
+  })
+
+  it("a session that is not open is not ours to fail — the sender paid, the webhook is coming", async () => {
+    expireFunding.mockResolvedValue('not_open')
+    mockPendingSelect([row('tr-paid-late', 5 * 60 * MINUTES, 'cs_test_paid')])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(0)
+    expect(transition).not.toHaveBeenCalled()
+  })
+
+  it('a transport failure skips that row this tick and still handles the others', async () => {
+    expireFunding
+      .mockRejectedValueOnce(new Error('stripe unreachable'))
+      .mockResolvedValueOnce('expired')
+    mockPendingSelect([
+      row('tr-flaky', 5 * 60 * MINUTES, 'cs_test_a'),
+      row('tr-fine', 5 * 60 * MINUTES, 'cs_test_b'),
+    ])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    expect(transition).toHaveBeenCalledTimes(1)
+    expect((transition.mock.calls[0] as [Record<string, unknown>])[0]).toMatchObject({
+      transferId: 'tr-fine',
+    })
+  })
+
+  it('a rail with no expireFunding behaves exactly as before', async () => {
+    processorMock.current = { provider: 'mock' }
+    mockPendingSelect([row('tr-old', 31 * MINUTES)])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    expect(expireFunding).not.toHaveBeenCalled()
   })
 })

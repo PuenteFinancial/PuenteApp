@@ -357,6 +357,22 @@ export interface FundingProcessor {
    * A full page from listRecentPayments means TRUNCATED, not "everything".
    */
   getPaymentStatus?(input: { paymentRef: string }): Promise<FundingPaymentStatus>
+  /**
+   * Close the processor's payment object for a row we are about to abandon,
+   * so a sender with a STALE TAB cannot pay it afterwards. Found during C5:
+   * the reaper failed our row but left the Checkout Session open for its
+   * full 24h, so a Payment Element still mounted from the morning could take
+   * the money for a transfer we had already marked PAYMENT_FAILED — the
+   * webhook then hits transition_conflict and is acked. Charge, no transfer.
+   *
+   * 'expired'  — closed now; safe to fail the row.
+   * 'not_open' — the object was already complete/expired at the processor. A
+   *              completed one means a payment webhook is coming: the reaper
+   *              must NOT fail the row, and leaves it to that webhook.
+   * Throws on a transport failure — the reaper skips the row this tick and
+   * the age window backstops the next one.
+   */
+  expireFunding?(input: { paymentRef: string }): Promise<'expired' | 'not_open'>
   listRecentPayments?(input: { createdAfter: Date; limit: number }): Promise<FundingPaymentListItem[]>
   /**
    * OPTIONAL — only rails whose persisted funding_payment_ref can diverge

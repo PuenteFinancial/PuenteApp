@@ -252,6 +252,22 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
   }
 
   /**
+   * Expire an unpaid Session so the reaper can fail its row without leaving a
+   * payable form alive somewhere. Status is READ FIRST rather than relying on
+   * Stripe's error for a non-open session: `complete` means the sender paid in
+   * the window between our sweep's select and this call, and the
+   * checkout.session.completed webhook is on its way — that row must not be
+   * failed. `expired` is Stripe's own 24h clock having beaten ours; nothing to
+   * do. Only `open` is ours to close.
+   */
+  async expireFunding(input: { paymentRef: string }): Promise<'expired' | 'not_open'> {
+    const session = await this.client.checkout.sessions.retrieve(input.paymentRef)
+    if (session.status !== 'open') return 'not_open'
+    await this.client.checkout.sessions.expire(input.paymentRef)
+    return 'expired'
+  }
+
+  /**
    * The route's fallback-join escape hatch (FundingProcessor doc comment):
    * charge.dispute.created and a dashboard-issued refund carry the underlying
    * PaymentIntent id as paymentRef, but funding_payment_ref on THIS rail's

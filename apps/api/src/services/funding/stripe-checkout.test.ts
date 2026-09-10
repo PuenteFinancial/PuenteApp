@@ -306,6 +306,32 @@ describe('StripeCheckoutFundingProcessor — undos resolve the session first', (
   })
 })
 
+describe("StripeCheckoutFundingProcessor — expireFunding (the reaper's stale-tab guard)", () => {
+  const client = (status: string) => {
+    const expire = vi.fn().mockResolvedValue({ id: SESSION_ID, status: 'expired' })
+    const retrieve = vi.fn().mockResolvedValue({ id: SESSION_ID, status, payment_status: 'unpaid' })
+    return { expire, retrieve, processor: make({ checkout: { sessions: { create: vi.fn(), retrieve, expire } } }) }
+  }
+
+  it('expires an open session and says so', async () => {
+    const { expire, processor } = client('open')
+    await expect(processor.expireFunding({ paymentRef: SESSION_ID })).resolves.toBe('expired')
+    expect(expire).toHaveBeenCalledWith(SESSION_ID)
+  })
+
+  it('a completed session is NOT ours to close — the sender paid, the webhook is coming', async () => {
+    const { expire, processor } = client('complete')
+    await expect(processor.expireFunding({ paymentRef: SESSION_ID })).resolves.toBe('not_open')
+    expect(expire).not.toHaveBeenCalled()
+  })
+
+  it("an already-expired session is Stripe's clock having won; nothing to do", async () => {
+    const { expire, processor } = client('expired')
+    await expect(processor.expireFunding({ paymentRef: SESSION_ID })).resolves.toBe('not_open')
+    expect(expire).not.toHaveBeenCalled()
+  })
+})
+
 describe('StripeCheckoutFundingProcessor — resolveAlternateFundingRef', () => {
   // The route's fallback join (charge.dispute.created / a dashboard-issued
   // refund) compares funding_payment_ref against a PaymentIntent id — a miss

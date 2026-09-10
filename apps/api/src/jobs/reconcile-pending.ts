@@ -4,6 +4,7 @@ import {
   getFundingProcessor,
   isOnrampSessionRail,
   pendingFundingWindowMs,
+  processorFor,
   processorNameFor,
   type RailRow,
 } from '../services/funding/index.js'
@@ -115,6 +116,24 @@ export async function reconcilePendingTransfers(): Promise<number> {
   let transitioned = 0
   const failures: string[] = []
   for (const row of rows) {
+    // CLOSE THE PROCESSOR'S OBJECT BEFORE FAILING OURS, on rails that can.
+    // Otherwise a stale tab keeps a payable form alive after we've given up:
+    // the Checkout Session lives 24h at Stripe against our 4h clock, and a
+    // payment landing on a PAYMENT_FAILED row is a charge with no transfer.
+    // Order matters — expire FIRST, so the moment we fail the row nothing can
+    // pay it; and if the processor says the object is already complete, the
+    // sender beat us and the webhook is coming: leave the row alone. Keyed on
+    // the ROW's rail (audit corner 1), never the process's.
+    const processor = processorFor(row)
+    if (processor.expireFunding && row.funding_payment_ref) {
+      let closed: 'expired' | 'not_open'
+      try {
+        closed = await processor.expireFunding({ paymentRef: row.funding_payment_ref })
+      } catch {
+        continue // transport failure — the age window backstops the next tick
+      }
+      if (closed === 'not_open') continue // paid or already expired upstream; not ours to fail
+    }
     try {
       await transitionTransfer({
         transferId: row.id,
