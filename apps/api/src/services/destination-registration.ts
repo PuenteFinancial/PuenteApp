@@ -65,6 +65,24 @@ async function registerOne(
   } catch (err) {
     if (!(err instanceof BridgeApiError)) return { error: 'bridge_unreachable' }
     const bridgeCode = (err.body as { code?: string } | null)?.code
+
+    // Bridge gates MXN external accounts on the customer's SPEI endorsement:
+    // POST external_accounts answers 403 `missing_required_endorsements`
+    // ("'spei' endorsement required") until that endorsement is `approved`.
+    // The endorsement is the PRECONDITION for registering a CLABE, not a
+    // consequence of it (verified in sandbox 2026-09-10).
+    //
+    // Critically, customer-level `active` does NOT imply it — a customer can
+    // sit at spei=`incomplete` with `active` status — so this is the ORDINARY
+    // answer for a sender whose destinations are registered the moment their
+    // customer is approved, not a defect. Retrying this call cannot fix it;
+    // the endorsement landing does, and Bridge announces that with another
+    // `customer.updated`, which runs this pass again (routes/v1/webhooks.ts).
+    // Named rather than folded into bridge_rejected_403 because an operator
+    // reading a held payout needs to tell "wait for Bridge" apart from
+    // "something is wrong".
+    if (bridgeCode === 'missing_required_endorsements') return { error: 'endorsement_missing' }
+
     if (bridgeCode !== 'duplicate_external_account') {
       return { error: err.status < 500 ? `bridge_rejected_${err.status}` : 'bridge_unavailable' }
     }

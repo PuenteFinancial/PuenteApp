@@ -60,11 +60,18 @@ vi.mock('../services/risk.js', () => ({
 
 const captureMessage = vi.hoisted(() => vi.fn())
 const setFingerprint = vi.hoisted(() => vi.fn())
+const setContext = vi.hoisted(() => vi.fn())
 vi.mock('@sentry/node', () => ({
-  withScope: (fn: (scope: unknown) => void) =>
-    fn({ setFingerprint, setContext: vi.fn() }),
+  withScope: (fn: (scope: unknown) => void) => fn({ setFingerprint, setContext }),
   captureMessage: (...args: unknown[]) => captureMessage(...args),
   captureException: vi.fn(),
+}))
+
+// The deferred-registration self-heal. Mocked so a hold's recorded cause can
+// be asserted: its failure reasons used to be discarded (see the tests below).
+const registerDestinations = vi.hoisted(() => vi.fn())
+vi.mock('../services/destination-registration.js', () => ({
+  registerPendingDestinations: (...args: unknown[]) => registerDestinations(...args),
 }))
 
 const envMock = vi.hoisted(() => ({
@@ -320,6 +327,60 @@ describe('submitPayout — holds', () => {
     expect(hold.update).toHaveBeenCalled()
     expect(captureMessage).not.toHaveBeenCalled() // the winner's signal stands alone
     expect(createPayout).not.toHaveBeenCalled()
+  })
+
+  it('self-heal failure → its reason rides the payability hold instead of vanishing', async () => {
+    // provider_account_ref_missing is the ONE payability reason the self-heal
+    // can fix, so registration runs — and when it cannot, the hold must carry
+    // WHY. Discarding this is what made a 403 endorsement gate and a Bridge
+    // outage look identical on the ops board.
+    const load = chain({ data: baseTransfer, error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
+    route('transfers', load, hold)
+    payability.mockResolvedValue({ payable: false, reason: 'provider_account_ref_missing' })
+    registerDestinations.mockResolvedValue({
+      registered: 0,
+      failed: [{ destinationId: 'dest-1', reason: 'endorsement_missing' }],
+    })
+
+    expect(await submitPayout('tr-1')).toBe(0)
+    expect(registerDestinations).toHaveBeenCalledWith('user-1', 'cust_1')
+    expect(setContext).toHaveBeenCalledWith(
+      'payout_hold',
+      expect.objectContaining({
+        reason: 'provider_account_ref_missing',
+        registrationFailures: ['endorsement_missing'],
+      }),
+    )
+    expect(createPayout).not.toHaveBeenCalled()
+  })
+
+  it('a self-heal that registers proceeds to submission with no hold', async () => {
+    setupHappy()
+    payability.mockReset()
+    payability
+      .mockResolvedValueOnce({ payable: false, reason: 'provider_account_ref_missing' })
+      .mockResolvedValueOnce({ payable: true, providerAccountRef: 'ext_1' })
+    registerDestinations.mockResolvedValue({ registered: 1, failed: [] })
+
+    expect(await submitPayout('tr-1')).toBe(1)
+    expect(registerDestinations).toHaveBeenCalledTimes(1)
+    expect(captureMessage).not.toHaveBeenCalled()
+  })
+
+  it('a payability reason the self-heal cannot fix never calls registration', async () => {
+    const load = chain({ data: baseTransfer, error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
+    route('transfers', load, hold)
+    payability.mockResolvedValue({ payable: false, reason: 'recipient_not_active' })
+
+    expect(await submitPayout('tr-1')).toBe(0)
+    expect(registerDestinations).not.toHaveBeenCalled()
+    // No registration ran, so the hold carries no registration noise.
+    expect(setContext).toHaveBeenCalledWith(
+      'payout_hold',
+      expect.not.objectContaining({ registrationFailures: expect.anything() }),
+    )
   })
 
   it('float ceiling tripped → NO hold, Sentry alert, no Bridge call', async () => {

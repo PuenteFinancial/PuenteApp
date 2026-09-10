@@ -291,9 +291,22 @@ export async function webhooksRoute(server: FastifyInstance) {
           // K6 decision 8: release the payouts parked on this sender's KYC.
           await releaseSenderKycHolds(userId, server.log)
 
-          // The customer can hold external accounts now (an unverified one
-          // cannot — decisions.md 2026-08-28), so register the destinations the
-          // sender added before verifying. The payout self-heal is the backstop.
+          // Register the destinations the sender added before verifying — an
+          // unverified customer cannot hold external accounts (decisions.md
+          // 2026-08-28).
+          //
+          // Approval is NECESSARY BUT NOT SUFFICIENT. Bridge also requires the
+          // per-rail endorsement, and `spei` can still be `incomplete` on a
+          // customer whose status is already `active` (verified in sandbox
+          // 2026-09-10). Those destinations come back as `endorsement_missing`
+          // and are EXPECTED here, not errors: Bridge sends another
+          // `customer.updated` when the endorsement lands, and this pass runs
+          // again and succeeds. The payout self-heal is the backstop.
+          //
+          // Note the payout is NOT auto-released by that later pass: a row
+          // already parked on a `payability` hold stays held for an operator
+          // (RELEASABLE_HOLD_REASONS). Auto-release on late registration is a
+          // deliberate gap, not an oversight — see the PR discussion.
           try {
             const registration = await registerPendingDestinations(userId, bridgeCustomerId)
             if (registration.registered > 0 || registration.failed.length > 0) {
