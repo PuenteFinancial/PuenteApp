@@ -35,6 +35,11 @@ vi.mock('./payout-holds.js', () => ({
   holdPayoutForDispute: (...a: unknown[]) => holdPayoutForDispute(...a),
 }))
 
+const recordOpsAction = vi.hoisted(() => vi.fn(async (..._a: unknown[]) => true))
+vi.mock('./ops-actions.js', () => ({
+  recordOpsAction: (...a: unknown[]) => recordOpsAction(...a),
+}))
+
 const {
   recordManualFunding,
   applyFundingSucceeded,
@@ -747,6 +752,7 @@ describe('applyFundingReversed', () => {
   beforeEach(() => {
     transitionTransfer.mockReset().mockResolvedValue({})
     holdPayoutForDispute.mockReset().mockResolvedValue(true)
+    recordOpsAction.mockReset().mockResolvedValue(true)
   })
 
   it('COMPLETED + cleared: books the loss against CASH and freezes the sender', async () => {
@@ -825,6 +831,27 @@ describe('applyFundingReversed', () => {
   it('an already-suspended sender reports frozen:false so the page does not repeat', async () => {
     stubReversal(reversibleRow(), false)
     expect(await reverse()).toEqual({ outcome: 'reversed', frozen: false, cleared: true })
+    // And writes no second audit row for a freeze that did not happen.
+    expect(recordOpsAction).not.toHaveBeenCalled()
+  })
+
+  it('the freeze leaves an audit row tying the frozen account to the disputed transfer', async () => {
+    // Without this the only evidence is users.status and a Sentry event: an
+    // auditor could not say when the freeze happened or what caused it.
+    stubReversal(reversibleRow())
+
+    await reverse()
+
+    expect(recordOpsAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'sender_freeze',
+        transferId: TRANSFER_ID,
+        reason: 'fraudulent',
+        before: { status: 'active' },
+        after: { status: 'suspended', eventId: 'evt_1' },
+      }),
+      expect.anything(),
+    )
   })
 
   it('unknown transfer: nothing to act on', async () => {

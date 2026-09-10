@@ -40,6 +40,10 @@ vi.mock('../../services/queue.js', () => ({
 
 const releaseSenderKycHolds = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => [] as string[]))
 const releaseDestinationPayabilityHolds = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => [] as string[]))
+const recordOpsAction = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => true))
+vi.mock('../../services/ops-actions.js', () => ({
+  recordOpsAction: (...args: unknown[]) => recordOpsAction(...args),
+}))
 const holdPayoutForDispute = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => true))
 vi.mock('../../services/payout-holds.js', () => ({
   releaseSenderKycHolds: (...args: unknown[]) => releaseSenderKycHolds(...args),
@@ -138,6 +142,7 @@ beforeEach(() => {
   captureMessage.mockReset()
   captureException.mockReset()
   holdPayoutForDispute.mockClear().mockResolvedValue(true)
+  recordOpsAction.mockClear().mockResolvedValue(true)
   processorOverride.current = null
 })
 

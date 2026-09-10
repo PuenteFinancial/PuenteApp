@@ -4,6 +4,7 @@ import { supabaseAdmin } from './supabase.js'
 import { postLedgerTransaction } from './ledger.js'
 import { enqueuePayoutSubmit } from './queue.js'
 import { recordFloatTopUp } from './payouts.js'
+import { recordOpsAction } from './ops-actions.js'
 import { getFundingProcessor, undoModeForRef } from './funding/index.js'
 import {
   fundedLedgerEntries,
@@ -238,18 +239,46 @@ export type ApplyFundingReversedOutcome =
  * human they were. `status` is the transacting privilege, and that is what a
  * clawback withdraws.
  */
-async function suspendSender(userId: string): Promise<boolean> {
+async function suspendSender(input: {
+  userId: string
+  transferId: string
+  eventId: string
+  actor: string
+  reason?: string
+}): Promise<boolean> {
   const { data, error } = await supabaseAdmin
     .from('users')
     .update({ status: 'suspended' })
-    .eq('id', userId)
+    .eq('id', input.userId)
     .neq('status', 'suspended')
     .select('id')
   // Throws on purpose. A freeze that silently failed is the difference between
   // one loss and several, and the caller is a webhook whose provider will
   // redeliver into a clean attempt.
   if (error) throw new Error(`sender suspend failed: ${error.message}`)
-  return ((data ?? []) as Array<{ id: string }>).length === 1
+  const froze = ((data ?? []) as Array<{ id: string }>).length === 1
+  if (!froze) return false
+
+  // PROVENANCE. Without this the only evidence of the freeze is the users
+  // column and a Sentry event: an auditor could not say when it happened or
+  // what caused it, and an unfreeze would leave no trail. `transferId` is the
+  // DISPUTED transfer, which is exactly the tie that matters. Best-effort by
+  // contract (recordOpsAction never rejects) — a missing audit row must not
+  // undo a freeze that already landed, and it reports its own failure.
+  await recordOpsAction(
+    {
+      actor: input.actor,
+      action: 'sender_freeze',
+      transferId: input.transferId,
+      reason: input.reason ?? 'funding_reversed',
+      note: null,
+      before: { status: 'active' },
+      after: { status: 'suspended', eventId: input.eventId },
+      requestId: null,
+    },
+    { error: (obj, msg) => Sentry.captureMessage(`${msg} ${JSON.stringify(obj)}`, 'error') },
+  )
+  return true
 }
 
 /**
@@ -288,7 +317,13 @@ export async function applyFundingReversed(input: {
   if (!transfer) return { outcome: 'unknown_transfer' }
   if (transfer.state === 'FUNDING_REVERSED') return { outcome: 'replayed' }
 
-  const frozen = await suspendSender(transfer.user_id)
+  const frozen = await suspendSender({
+    userId: transfer.user_id,
+    transferId: transfer.id,
+    eventId: input.eventId,
+    actor: input.actor,
+    ...(input.reason !== undefined && { reason: input.reason }),
+  })
 
   if (transfer.state === 'COMPLETED') {
     // Which asset is credited depends on whether the cash ever arrived. Picking
