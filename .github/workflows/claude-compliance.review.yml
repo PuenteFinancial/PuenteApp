@@ -10,11 +10,15 @@ on:
       - "**/consent/**"
       - "**/credit/**"
       - "**/*auth*"
-      # This workflow reviews itself. Without this line a change to the
-      # reviewer cannot be exercised by the reviewer, which is how both bugs
-      # fixed here survived: every run went green, and nothing that could
-      # have caught them ever ran on a PR that touched this file.
-      - ".github/workflows/claude-compliance.review.yml"
+      # NOT self-triggering, and it cannot be. claude-code-action refuses to
+      # run on any PR that modifies a workflow file ("Action skipped due to
+      # workflow validation error") — the right call, since otherwise a PR
+      # could rewrite the reviewer that guards it. Adding this file to the
+      # paths above only produces a job that runs, skips the action, and
+      # reports a GREEN check with no review behind it, which is the exact
+      # failure class this workflow keeps falling into. Tried on PR #309;
+      # reverted. A change to this file is therefore validated by the NEXT PR
+      # that touches apps/api, never by its own.
 
 jobs:
   review:
@@ -89,8 +93,14 @@ jobs:
       # The per-turn stream never reaches the CI log — only the init and
       # result objects do — so a run that says nothing leaves no trace of what
       # it found. Keep the full transcript for exactly that case.
+      #
+      # The output is EMPTY whenever the action skips (a workflow-modifying
+      # PR, as above). upload-artifact treats an empty `path` as a missing
+      # required input and fails the job, so the guard is load-bearing:
+      # if-no-files-found does not cover it, that is for a path that resolves
+      # but matches nothing.
       - name: Upload Claude execution log
-        if: always()
+        if: always() && steps.claude.outputs.execution_file != ''
         uses: actions/upload-artifact@v4
         with:
           name: claude-review-execution-log
