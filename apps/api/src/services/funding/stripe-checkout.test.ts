@@ -83,6 +83,36 @@ describe('StripeCheckoutFundingProcessor — event mapping', () => {
     expect(result.event.transferRef).toBe(TRANSFER_ID)
   })
 
+  it('acks payment_intent.processing as unhandled — completed is funding here, and processing beats it', () => {
+    // Bank debit emits `processing` ~1s BEFORE `checkout.session.completed`
+    // (cards never emit it). Falling through would fund the row a second
+    // early under the PI's ref — the 2026-09-10 overwrite. The session event
+    // carries everything this rail needs.
+    const piProcessing = Buffer.from(
+      JSON.stringify({
+        id: 'evt_p',
+        type: 'payment_intent.processing',
+        data: { object: { id: 'pi_123', status: 'processing', metadata: { transfer_id: TRANSFER_ID } } },
+      }),
+    )
+    const result = make().parseEvent(piProcessing)
+    expect(result).toEqual({ outcome: 'unhandled', eventId: 'evt_p', eventType: 'payment_intent.processing' })
+  })
+
+  it('still lets payment_intent.payment_failed through to the parent — pre-settlement returns need it', () => {
+    const failed = Buffer.from(
+      JSON.stringify({
+        id: 'evt_f',
+        type: 'payment_intent.payment_failed',
+        data: { object: { id: 'pi_123', metadata: { transfer_id: TRANSFER_ID } } },
+      }),
+    )
+    const result = make().parseEvent(failed)
+    expect(result.outcome).toBe('event')
+    if (result.outcome !== 'event') return
+    expect(result.event.type).toBe('funding_failed')
+  })
+
   // The reachability question this rail's own PRD flags: funding_payment_ref
   // stores the SESSION id (cs_…), but a payment_intent.* event's paymentRef is
   // the PaymentIntent id (pi_…) — a different id space. IF a metadata-less
@@ -207,6 +237,20 @@ describe('StripeCheckoutFundingProcessor — undos resolve the session first', (
       }),
     }
   }
+
+  it('accepts a ref that is already the PaymentIntent — the rows the ACH overwrite left behind', async () => {
+    // Two staging rows carry a pi_ ref from 2026-09-10 (the overwrite is fixed
+    // upstream, the rows remain). Retrieving a Session by a pi_ id 404s, which
+    // would make exactly the transfers that exposed the bug un-refundable.
+    const { retrieveSession, processor } = undoClient({ status: 'processing' })
+    const undo = await processor.voidFunding({
+      transferId: TRANSFER_ID,
+      paymentRef: 'pi_already',
+      idempotencyKey: 'key-pi',
+    })
+    expect(retrieveSession).not.toHaveBeenCalled()
+    expect(undo.mode).toBe('voided')
+  })
 
   it('void translates the stored session ref into a PaymentIntent, then reuses the parent', async () => {
     const { retrieveSession, processor } = undoClient({ status: 'processing' })

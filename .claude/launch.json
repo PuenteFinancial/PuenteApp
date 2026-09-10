@@ -40,6 +40,18 @@
         "dev"
       ],
       "port": 3001
+    },
+    {
+      "name": "web-staging-api",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "INTERNAL_API_URL=https://puenteapi-staging.up.railway.app",
+        "pnpm",
+        "--filter",
+        "@puente/web",
+        "dev"
+      ],
+      "port": 3000
     }
   ]
 }

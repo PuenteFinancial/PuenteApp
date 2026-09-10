@@ -244,6 +244,11 @@ describe('applyOnrampFunded — the amount guard (#213)', () => {
   }
 
   it('a to-the-cent match delegates to the shared FUNDED applier', async () => {
+    // The deferred rail has NO ref until the pay step creates the session, so
+    // at funding time the row's ref is null and the event's is what gets
+    // written. (The shared PENDING fixture carries a manual-rail ref, which a
+    // funding event must never replace — the C5 ref-overwrite guard.)
+    stubTransfer({ ...PENDING, funding_payment_ref: null })
     const result = await funded(MATCHING)
     expect(result).toEqual({ outcome: 'applied', enqueueFailed: false })
     const transition = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
@@ -374,7 +379,7 @@ describe('applyOnrampSettlement (#213)', () => {
   })
 
   it('out-of-order: catches up PENDING_PAYMENT → FUNDED before the cash leg', async () => {
-    row = { ...PENDING, refund_payment_ref: null } // still PENDING_PAYMENT
+    row = { ...PENDING, refund_payment_ref: null, funding_payment_ref: null /* deferred rail: no ref yet */ } // still PENDING_PAYMENT
     transitionTransfer.mockImplementation(async () => {
       row['state'] = 'FUNDED'
       return { id: TRANSFER_ID }
@@ -501,5 +506,120 @@ describe('applyFundingSucceeded outcomes', () => {
       actor: 'webhook:funding',
     })
     expect(result).toEqual({ outcome: 'applied', enqueueFailed: true })
+  })
+})
+
+describe('out-of-order clearing catch-up (C5 — found by the first real payment)', () => {
+  // On the Checkout rail a CARD emits payment_intent.succeeded and
+  // checkout.session.completed about a second apart, in either order. When
+  // clearing wins, applyFundingCleared sets the flag and correctly skips its
+  // ledger leg (no receivable exists yet) — and nothing would ever post that
+  // leg afterwards, because a card sends no further event. The row would claim
+  // cleared while the ledger carried an open receivable, permanently.
+  beforeEach(() => {
+    transitionTransfer.mockReset()
+    postLedgerTransaction.mockReset()
+    enqueuePayoutSubmit.mockReset()
+    transitionTransfer.mockResolvedValue(undefined)
+    postLedgerTransaction.mockResolvedValue(undefined)
+    enqueuePayoutSubmit.mockResolvedValue(undefined)
+  })
+
+  /** The applier reads the row, transitions it, then the catch-up RE-READS it.
+   *  The second read has to see FUNDED — the transition is a committed RPC — or
+   *  the catch-up would judge the receivable still closed. Modelling that is
+   *  the whole point: the fix depends on it. */
+  function stubTransferThenFunded(first: unknown, second: unknown) {
+    let n = 0
+    from.mockImplementation(() => {
+      const b: Record<string, unknown> = {}
+      for (const m of ['select', 'eq', 'update']) b[m] = () => b
+      const read = async () => ({ data: n++ === 0 ? first : second, error: null })
+      b['maybeSingle'] = read
+      b['single'] = read
+      return b
+    })
+  }
+
+  const succeed = () =>
+    applyFundingSucceeded({
+      transferId: TRANSFER_ID,
+      paymentRef: 'cs_test_x',
+      eventId: 'evt_completed',
+      actor: 'webhook:funding',
+    })
+
+  it('posts the clearing leg when the cleared event already landed first', async () => {
+    stubTransferThenFunded(
+      { ...PENDING, funding_cleared: true },
+      { ...PENDING, state: 'FUNDED', funding_cleared: true },
+    )
+
+    const out = await succeed()
+
+    expect(out.outcome).toBe('applied')
+    // FUNDED went through the RPC (which carries its own ledger batch), and the
+    // clearing leg posted separately — the leg that was silently lost.
+    expect(transitionTransfer).toHaveBeenCalledTimes(1)
+    expect(postLedgerTransaction).toHaveBeenCalledTimes(1)
+    expect(postLedgerTransaction.mock.calls[0]![0]).toMatchObject({
+      transferId: TRANSFER_ID,
+      transition: 'funding_cleared',
+    })
+  })
+
+  it('posts nothing extra in the ordinary order — clearing arrives later on its own', async () => {
+    stubTransfer({ ...PENDING, funding_cleared: false })
+
+    const out = await succeed()
+
+    expect(out.outcome).toBe('applied')
+    expect(transitionTransfer).toHaveBeenCalledTimes(1)
+    expect(postLedgerTransaction).not.toHaveBeenCalled()
+  })
+
+  it('still funds and still enqueues the payout when the catch-up itself fails', async () => {
+    // FUNDED is committed and cannot be unwound, so a clearing failure is
+    // reported, never thrown — a funded transfer must still get its payout.
+    stubTransferThenFunded(
+      { ...PENDING, funding_cleared: true },
+      { ...PENDING, state: 'FUNDED', funding_cleared: true },
+    )
+    postLedgerTransaction.mockRejectedValueOnce(new Error('ledger down'))
+
+    const out = await succeed()
+
+    expect(out).toEqual({ outcome: 'applied', enqueueFailed: false })
+    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(TRANSFER_ID, 'api')
+  })
+})
+
+describe('a funding event never replaces the ref initiation persisted (C5 — the ACH overwrite)', () => {
+  beforeEach(() => {
+    transitionTransfer.mockReset()
+    postLedgerTransaction.mockReset()
+    enqueuePayoutSubmit.mockReset()
+    transitionTransfer.mockResolvedValue(undefined)
+    enqueuePayoutSubmit.mockResolvedValue(undefined)
+  })
+
+  const succeedWith = (paymentRef: string) =>
+    applyFundingSucceeded({ transferId: TRANSFER_ID, paymentRef, eventId: 'evt_x', actor: 'webhook:funding' })
+
+  it('keeps the persisted cs_ ref when the funding event carries a pi_ ref', async () => {
+    // The RPC coalesces (new ?? existing); passing the event's ref would win.
+    // On 2026-09-10 payment_intent.processing did exactly that to f07c8e67,
+    // after which void/refund — which retrieve the Session by this ref —
+    // threw on a 404.
+    stubTransfer({ ...PENDING, funding_cleared: false, funding_payment_ref: 'cs_test_persisted' })
+    await succeedWith('pi_from_event')
+    expect(transitionTransfer).toHaveBeenCalledTimes(1)
+    expect(transitionTransfer.mock.calls[0]![0]).toMatchObject({ fundingPaymentRef: 'cs_test_persisted' })
+  })
+
+  it('writes the event ref only when initiation persisted none — the deferred crypto rail', async () => {
+    stubTransfer({ ...PENDING, funding_cleared: false, funding_payment_ref: null })
+    await succeedWith('cos_from_pay_step')
+    expect(transitionTransfer.mock.calls[0]![0]).toMatchObject({ fundingPaymentRef: 'cos_from_pay_step' })
   })
 })

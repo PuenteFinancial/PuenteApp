@@ -247,9 +247,15 @@ and lets the abandonment sweep kill a transfer after the card was charged.
 The abandonment clock is hours, not the 30-minute webhook rule (C4): the identity leg can send a
 sender to Bridge's hosted terms and then to a manual review that tells them to come back later.
 
-Untested end to end as of 2026-09-09. Nobody has paid on this rail — no webhook has ever been
-delivered for a Checkout session, neither clearing leg has run, and reconciliation has never seen a
-`stripe_checkout` transfer. That is C5.
+**Proven end to end on staging 2026-09-09 (C5)** — $5.00 by card, test mode. `completed` posted
+FUNDED before the first 3-second poll, `payment_intent.succeeded` set `funding_cleared`, the ledger
+posted balanced, and all four fatal reconciliation checks pass with the row in the book.
+
+Two things that drive found and no test could: **Link's opt-in is pre-checked and renders a phone
+field, and an empty one makes `checkout.confirm` refuse** ("Your phone number is incomplete") — so a
+sender must give a phone or uncheck Link to pay. And **`stripe_receivables` / `stripe_orphans` skip
+this rail entirely** (they gate on `provider === 'stripe'` and match `pi_` refs), so Stripe-side
+reconciliation is not covering it yet.
 
 ## 2. Payout webhook (Bridge → us)
 

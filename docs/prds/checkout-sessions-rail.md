@@ -2,7 +2,9 @@
 
 **Owner:** Joshua
 **Build target:** Claude Code
-**Status:** 🟡 **PROPOSAL — decision doc, not a build order.** Written 2026-09-08 so the choice gets
+**Status:** 🟢 **C1–C5 BUILT AND PROVEN ON STAGING** (2026-09-09) — the rail has taken a real
+test-mode payment end to end. Gate §5.1 (counsel, flow of funds) is still unanswered and binds
+BEFORE production. Originally written as: 🟡 PROPOSAL — decision doc, not a build order. Written 2026-09-08 so the choice gets
 made deliberately rather than drifting. Three gates in §5 must be answered first; one of them can
 kill it outright.
 **Goal:** Take crypto off the user's path entirely. Senders pay with a Stripe payment form we
@@ -230,6 +232,29 @@ not yet spent. Two things C2 measured that this document had wrong or could not 
   answer.
 - **The 30-minute abandonment clock was wrong for this rail** and is now hours: the identity leg can
   send a sender to Bridge's hosted terms and then to a manual review that says come back later.
+- **C5 DONE 2026-09-09 — the rail has moved money.** First payment ever on it, staging, test mode,
+  $5.00 by card, transfer `681c8e1a`. Proven end to end: a sender Bridge had never seen got through
+  the C4 gate, Bridge's hosted terms, the identity form and Bridge's approval; the Payment Element
+  took a card; `checkout.session.completed` was delivered and posted **FUNDED** before the first
+  3-second poll; `payment_intent.succeeded` set `funding_cleared` — the card leg with no async
+  event, the one the money bug lived on; the ledger posted balanced (receivable 500 debit, payable
+  495 credit, fee 5 credit); and all four fatal reconciliation checks pass with the row in the book.
+  Driven by `apps/web/e2e/drives/checkout-send.drive.mjs`.
+- **⚠ LINK'S PHONE FIELD BLOCKS PAYMENT, and it is on by default.** The Payment Element renders
+  `linkOptIn` pre-checked, which renders `linkMobilePhone`; leaving it empty makes `checkout.confirm`
+  refuse with "Your phone number is incomplete." A sender must supply a phone or uncheck Link to pay
+  at all. Nothing in our code asks for a phone — this is Link's, and it is a real step on the
+  critical path that no test could have found. Decide it deliberately.
+- **⚠ `stripe_receivables` and `stripe_orphans` DO NOT RUN on this rail.** Both hard-compare
+  `processor.provider !== 'stripe'`, and `stripe_receivables` additionally filters
+  `funding_payment_ref LIKE 'pi_%'` while this rail stores `cs_…`, and classifies PaymentIntent
+  status vocabulary rather than the Session's `open/unpaid` shape. So the two checks that catch a
+  payment at Stripe with no transfer, and a receivable open with no match, are silently skipped.
+  Closing it is a real slice, not a gate flip.
+- **Vercel deployment protection blocks driving the staging web app** — a headless browser lands on
+  Vercel's login. The drive therefore runs the LOCAL web against the STAGING API, which loses
+  nothing that matters: the Session is created by staging, the webhook is delivered to staging
+  (deliveries are account-wide, not per-origin), and the row lives in the staging DB.
 - **Locale is fixed at `loadStripe()` on this rail.** The Checkout SDK options carry no `locale`
   field, unlike `<Elements>`. Spanish senders get an English form unless the key is loaded with the
   locale, so `getStripe()` now caches on (key, locale).
