@@ -135,12 +135,22 @@ a{color:inherit;text-decoration:none;}
 /* nav */
 .nav{ position:sticky; top:0; z-index:50; transition:background .2s, backdrop-filter .2s; }
 .nav--scrolled{ background:rgba(44,82,64,.95); backdrop-filter:blur(12px); }
-.nav-inner{ max-width:var(--maxw); margin:0 auto; padding:18px 32px; display:flex; align-items:center; gap:34px; }
-.nav-logo{ height:42px; width:auto; display:block; flex-shrink:0; }
+/* Desktop nav sits on one baseline. The links, the language toggle and the CTA
+   all line up with the bottom of the "Puente" wordmark rather than being
+   centered against the logo box. Two things make that work:
+   - the logo box is 42px tall but the wordmark only fills y 84.7-219.5 of the
+     SVG's 228-unit viewBox, so the image's baseline (its bottom margin edge) is
+     pulled up 1.6px to land on the wordmark instead of the empty space below it;
+   - baseline alignment hangs the CTA button's box below the logo, so the
+     vertical padding drops 18px -> 12px to keep the bar its original ~78px.
+   All three are reverted under 920px, where the links and CTA are hidden and the
+   textless hamburger has no baseline worth aligning to. */
+.nav-inner{ max-width:var(--maxw); margin:0 auto; padding:12px 32px; display:flex; align-items:baseline; gap:34px; }
+.nav-logo{ height:42px; width:auto; display:block; flex-shrink:0; margin-bottom:-1.6px; }
 .nav-links{ display:flex; gap:30px; margin-left:14px; font-weight:600; font-size:15px; color:var(--on-hero-2); }
 .nav-links a{ padding:6px 0; border-bottom:2px solid transparent; transition:border-color .15s, color .15s; }
 .nav-links a:hover{ color:var(--on-hero); border-color:var(--accent); }
-.nav-right{ margin-left:auto; display:flex; align-items:center; gap:14px; }
+.nav-right{ margin-left:auto; display:flex; align-items:baseline; gap:14px; }
 
 /* language toggle */
 .lang{ display:inline-flex; align-items:center; gap:2px; font-family:var(--mono); font-size:13px; font-weight:700; border:1px solid var(--on-hero-line); border-radius:var(--r-sm); padding:2px; }
@@ -383,6 +393,10 @@ a{color:inherit;text-decoration:none;}
   .nav-links{ display:none; }
   .nav-right .btn{ display:none; }
   .nav-menu-btn{ display:flex; }
+  /* undo the desktop baseline nav — nothing left in the bar has text to align */
+  .nav-inner{ padding:18px 32px; align-items:center; }
+  .nav-logo{ margin-bottom:0; }
+  .nav-right{ align-items:center; }
   .vstrip-inner{ justify-content:flex-start; gap:14px 26px; }
   .wl-inner{ max-width:none; }
 }
