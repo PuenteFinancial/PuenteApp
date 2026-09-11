@@ -76,19 +76,81 @@ jobs:
             1. The security-reviewer subagent.
             2. The compliance-reviewer subagent.
 
+            RUN BOTH IN THE FOREGROUND. Pass `run_in_background: false` on
+            every Agent call, and send both calls in ONE message so they run
+            concurrently and this turn blocks until both have reported. Do NOT
+            end your turn while either is still running.
+
+            This is the whole reason the review exists and the single way it
+            has failed: subagents default to BACKGROUND, where the caller is
+            notified later. In CI there is no later. The run ends when this
+            turn ends, so launching them and returning tears the job down
+            mid-review — the comment freezes at "Both subagents are running
+            now" and the check still goes green (observed on PR #311: clean
+            exit, is_error false, 11 turns, 52s, no findings ever posted).
+
             Review the DIFF, not the files at head. Get it with:
               git diff origin/${{ github.base_ref }}...HEAD
             (checkout uses fetch-depth 0, so that ref resolves; `...` already
             means "since the merge base". Read files only to get context on a
             hunk the diff alone does not settle.)
 
-            When both subagents are done, you MUST publish the result by
-            calling mcp__github_comment__update_claude_comment, replacing your
-            progress checklist with the findings grouped by agent. Nothing
-            else posts for you: a run that ends without that call reports
-            success and says nothing, which is the failure this prompt exists
-            to avoid. If both agents report no issues, the comment body is
-            "✅ Security & compliance: no issues."
+            When both subagents have REPORTED BACK, you MUST publish the
+            result by calling mcp__github_comment__update_claude_comment,
+            replacing your progress checklist with the findings grouped by
+            agent. Nothing else posts for you: a run that ends without that
+            call reports success and says nothing, which is the failure this
+            prompt exists to avoid. If both agents report no issues, the body
+            is "✅ Security & compliance: no issues."
+
+            END THE PUBLISHED COMMENT WITH THIS LINE, EXACTLY, ON ITS OWN:
+              <!-- compliance-review-complete -->
+            A step after this one greps the PR for that marker and FAILS the
+            check if it is absent, so a review that did not happen is red
+            instead of green. If you cannot complete a subagent, publish what
+            you have, say which agent did not report and why, and still emit
+            the marker — a stated gap is a review result; silence is not.
+
+      # THE CHECK NOW MEANS SOMETHING. Everything above is prompt-shaped, and
+      # every failure this workflow has had was Claude ending its turn without
+      # publishing while the action reported success — twice, for two unrelated
+      # reasons (#265 forbade the publish call; #311 backgrounded the
+      # subagents). A green check that is not evidence of a review is worse
+      # than no check, because it is the one people trust on the money paths.
+      #
+      # So the gate is no longer "did the action exit 0" but "is there a
+      # published review on this PR". The marker is the contract, and it is
+      # deliberately something only the final publish emits: a frozen progress
+      # checklist does not carry it.
+      #
+      # Guarded on the same condition as the log upload: when the action SKIPS
+      # (a workflow-modifying PR — see the paths note at the top) Claude never
+      # ran, there is nothing to publish, and failing here would be the same
+      # lie in the other direction.
+      - name: Verify the review was actually published
+        if: always() && steps.claude.outputs.execution_file != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Collected to a FILE before grepping, deliberately. `gh api … | grep -q`
+          # looks tidier and is wrong: grep -q exits the moment it matches, gh
+          # takes SIGPIPE and returns 141, and `pipefail` then reports the
+          # pipeline as failed — so a review that WAS published would fail this
+          # check. A false red on the one step whose job is to stop false greens.
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+            --jq '.[].body' > /tmp/pr-comments.txt
+          if grep -qF '<!-- compliance-review-complete -->' /tmp/pr-comments.txt; then
+            echo "Review published."
+            exit 0
+          fi
+          echo "::error::The reviewer ran but published no findings." >&2
+          echo "No comment on this PR carries <!-- compliance-review-complete -->, so the" >&2
+          echo "run ended before the publish call. Read the execution-log artifact on this" >&2
+          echo "job: a turn count in the low teens with is_error false means the turn ended" >&2
+          echo "early (backgrounded subagents), not that the review found nothing." >&2
+          exit 1
 
       # The per-turn stream never reaches the CI log — only the init and
       # result objects do — so a run that says nothing leaves no trace of what
