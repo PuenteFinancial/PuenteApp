@@ -139,13 +139,19 @@ jobs:
           # takes SIGPIPE and returns 141, and `pipefail` then reports the
           # pipeline as failed — so a review that WAS published would fail this
           # check. A false red on the one step whose job is to stop false greens.
+          # AUTHOR-RESTRICTED, both checks. A gate that any PR participant can
+          # satisfy by typing the passphrase is not a gate — and that applies to
+          # the marker too, which until now any commenter could have pasted.
+          # Only comments published by the review bot are read.
           gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
-            --jq '.[].body' > /tmp/pr-comments.txt
+            --jq '[.[] | select(.user.login == "claude[bot]" or .user.login == "github-actions[bot]") | .body]' \
+            > /tmp/review-comments.json
 
-          # The marker is still the STRONGEST signal: the reviewer only emits it
-          # at the end of its publish call, so its presence proves the turn got
-          # there. Checked first, and nothing below weakens it.
-          if grep -qF '<!-- compliance-review-complete -->' /tmp/pr-comments.txt; then
+          # The marker is the STRONGEST signal and is checked first: the reviewer
+          # only emits it inside its publish call, so its presence proves the
+          # turn got there.
+          marker=$(jq '[.[] | select(contains("<!-- compliance-review-complete -->"))] | length' /tmp/review-comments.json)
+          if [ "$marker" -gt 0 ]; then
             echo "Review published (marker)."
             exit 0
           fi
@@ -156,26 +162,29 @@ jobs:
           # emitting an exact token on its own line is an instruction the model
           # has to remember, and it is the very last thing it does.
           #
-          # The guard exists to catch a run that published NOTHING (the turn
-          # ends early while subagents are still backgrounded). It does not need
-          # a magic token to catch that: a run that published nothing has no
-          # review sections either. So accept the structure the prompt mandates
-          # — a security section AND a compliance section — as proof of the same
-          # thing. A silent run still fails, which is the whole point; a real
-          # review that forgot one line no longer blocks a merge.
-          if grep -qiE '(security)[[:space:]]+review' /tmp/pr-comments.txt \
-             && grep -qiE '(compliance)[[:space:]]+review' /tmp/pr-comments.txt; then
+          # The guard exists to catch a run that published NOTHING (the turn ends
+          # early while subagents are still backgrounded). A run that published
+          # nothing has no review sections either, so structure proves the same
+          # thing.
+          #
+          # Matched PER COMMENT BODY, never across the concatenated set: two
+          # unrelated comments, one saying "security review" and another saying
+          # "compliance review", must not compose into a pass. Combined with the
+          # author filter above, the phrases have to appear together in a comment
+          # the bot itself published.
+          structured=$(jq '[.[] | select(test("security\\s+review"; "i") and test("compliance\\s+review"; "i"))] | length' /tmp/review-comments.json)
+          if [ "$structured" -gt 0 ]; then
             echo "::warning::Review published, but WITHOUT the completion marker."
-            echo "Accepted on structure: both review sections are present. If this keeps"
-            echo "happening the prompt's final-line instruction is not landing reliably."
+            echo "Accepted on structure: one bot comment carries both review sections. If this"
+            echo "keeps happening the prompt's final-line instruction is not landing reliably."
             exit 0
           fi
 
           echo "::error::The reviewer ran but published no findings." >&2
-          echo "No comment on this PR carries <!-- compliance-review-complete -->, and none" >&2
-          echo "carries both a security and a compliance review section — so the run ended" >&2
-          echo "before the publish call. Read the execution-log artifact on this job: a turn" >&2
-          echo "count in the low teens with is_error false means the turn ended early" >&2
+          echo "No comment BY THE REVIEW BOT carries <!-- compliance-review-complete -->, and" >&2
+          echo "none carries both a security and a compliance review section — so the run" >&2
+          echo "ended before the publish call. Read the execution-log artifact on this job: a" >&2
+          echo "turn count in the low teens with is_error false means the turn ended early" >&2
           echo "(backgrounded subagents), not that the review found nothing." >&2
           exit 1
 
