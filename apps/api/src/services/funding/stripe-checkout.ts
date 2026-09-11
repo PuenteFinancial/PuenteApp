@@ -69,6 +69,7 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
     currency: 'USD'
     clientIp?: string
     customer?: { firstName?: string; lastName?: string; email?: string }
+    customerRef?: string
   }): Promise<FundingInitiation> {
     const session = await this.client.checkout.sessions.create(
       {
@@ -110,9 +111,29 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
         // PI it cannot join to a transfer and ack it as unhandled — and a card
         // transfer would never clear. See the note on checkoutEventType.
         payment_intent_data: { metadata: { transfer_id: input.transferId } },
-        // Prefill only. Stripe validates it, and the sender can still change
-        // it in the Contact Details element.
-        ...(input.customer?.email && { customer_email: input.customer.email }),
+        // A Customer is what makes saving possible AND what shows a returning
+        // sender the bank they already linked. `customer` and `customer_email`
+        // are mutually exclusive at Stripe, so the Customer wins when we have
+        // one and the bare email prefill is the fallback.
+        ...(input.customerRef
+          ? {
+              customer: input.customerRef,
+              // The checkbox, offered and UNCHECKED. Saving a bank account is
+              // the sender's decision, not a default we make for them, and the
+              // audience here is exactly the one for whom a silently retained
+              // payment instrument is least welcome.
+              //
+              // `payment_method_remove` is the other half of that bargain: if
+              // they can save it from this screen they can take it off from
+              // this screen, without emailing anyone.
+              saved_payment_method_options: {
+                payment_method_save: 'enabled' as const,
+                payment_method_remove: 'enabled' as const,
+              },
+            }
+          : input.customer?.email
+            ? { customer_email: input.customer.email }
+            : {}),
       },
       // One Session per transfer, ever. Same derivation as the PI rail: the
       // DB-side null-gate on funding_payment_ref is the primary guarantee and
