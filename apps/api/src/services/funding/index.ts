@@ -361,6 +361,12 @@ export interface FundingProcessor {
     /** KYC prefill for the onramp widget (#213) — name/email only, never SSN.
      *  Optional fields because users rows predate profile completion. */
     customer?: { firstName?: string; lastName?: string; email?: string }
+    /** The sender's merchant-scoped Stripe Customer, when one could be minted.
+     *  Only the Checkout rail uses it, to offer saving a payment method and to
+     *  show what a returning sender already saved. Optional and nullable by
+     *  design: saving is a convenience and its absence must never stop a
+     *  payment (services/stripe-customers.ts). */
+    customerRef?: string
   }): Promise<FundingInitiation>
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean
   parseEvent(rawBody: Buffer): FundingParseResult

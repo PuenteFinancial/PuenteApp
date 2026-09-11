@@ -163,6 +163,8 @@ export type Translations = {
       title: string
       body: string
       dataNotice: string
+      prepTitle: string
+      prepItems: string[]
       cta: string
       starting: string
       error: string
@@ -1162,16 +1164,21 @@ const en: Translations = {
       error: 'We couldn’t save your agreement. Please try again.',
       stale: 'This page is out of date. Please reload it and try again.',
     },
-    // NEEDS LEGAL REVIEW (ES): identity-verification requirement wording
+    // NEEDS LEGAL REVIEW (EN + ES): identity-verification requirement wording
     kyc: {
       title: 'Verify your identity',
-      body: 'Federal law requires us to verify your identity before you can send money. Our secure partner Bridge handles this. It takes about 2 minutes. Have your ID handy.',
+      body: 'Like other financial services, we are required to verify your identity before you can send money. Our secure partner Bridge handles this. It takes about two minutes.',
       // NEEDS LEGAL REVIEW (EN + ES): GLBA data-sharing disclosure
       dataNotice:
-        'When you continue, we’ll share your name and email with Bridge (bridge.xyz), a licensed money transmitter that verifies your identity and processes transfers. Bridge will collect the rest (date of birth, address, SSN or ITIN, and an ID photo) directly from you.',
+        'We will share your name and email with Bridge for identity verification and money transmission. Bridge will collect any other required information.',
+      prepTitle: 'Please have these ready:',
+      prepItems: [
+        'A valid government photo ID (valid government ID from outside the U.S. also accepted)',
+        'Your SSN or ITIN (ITIN will be accepted in place of SSN)',
+      ],
       cta: 'Verify my identity',
       starting: 'Starting…',
-      error: 'We couldn’t start verification. Please try again.',
+      error: 'We couldn’t start verification. Please try again or contact support.',
     },
     pending: {
       title: 'Your identity is being verified',
@@ -1332,7 +1339,8 @@ const en: Translations = {
         checkout: {
           title: 'Choose how to pay',
           // NEEDS LEGAL REVIEW (EN + ES)
-          body: 'Paying straight from your bank account is the cheapest way to send. Cards work too, but some card issuers treat a transfer like this as a cash advance and add their own fee.',
+          body:
+            'Paying straight from your bank account is the cheapest way to send. A debit card works too. We do not recommend paying with a credit card, because card issuers often treat a transfer like this as a cash advance and add their own fee and interest from day one.',
           loading: 'Loading payment options…',
           bankNote:
             "If your bank isn't in the list, we can't connect to it yet. You can still pay by card, and you haven't been charged.",
@@ -2164,16 +2172,21 @@ const es: Translations = {
       error: 'No pudimos guardar tu aceptación. Inténtalo de nuevo.',
       stale: 'Esta página no está actualizada. Recárgala e inténtalo de nuevo.',
     },
-    // NEEDS LEGAL REVIEW (ES): texto sobre el requisito de verificación de identidad
+    // NEEDS LEGAL REVIEW (EN + ES): identity-verification requirement wording
     kyc: {
       title: 'Verifica tu identidad',
-      body: 'La ley federal nos exige verificar tu identidad antes de que puedas enviar dinero. Nuestro socio seguro Bridge se encarga de esto. Toma unos 2 minutos. Ten tu identificación a la mano.',
-      // NEEDS LEGAL REVIEW (EN + ES): aviso de compartición de datos (GLBA)
+      body: 'Como otros servicios financieros, estamos obligados a verificar tu identidad antes de que puedas enviar dinero. Nuestro socio seguro Bridge se encarga de esto. Toma unos dos minutos.',
+      // NEEDS LEGAL REVIEW (EN + ES): GLBA data-sharing disclosure
       dataNotice:
-        'Al continuar, compartiremos tu nombre y correo electrónico con Bridge (bridge.xyz), un transmisor de dinero con licencia que verifica tu identidad y procesa las transferencias. Bridge te pedirá el resto (fecha de nacimiento, dirección, SSN o ITIN y una foto de tu identificación) directamente a ti.',
+        'Compartiremos tu nombre y correo electrónico con Bridge para la verificación de identidad y la transmisión de dinero. Bridge recopilará cualquier otra información requerida.',
+      prepTitle: 'Por favor, ten listo lo siguiente:',
+      prepItems: [
+        'Una identificación oficial con foto (también se acepta cualquier identificación oficial de fuera de EE. UU.)',
+        'Tu SSN o ITIN (se aceptará el ITIN en lugar del SSN)',
+      ],
       cta: 'Verificar mi identidad',
       starting: 'Iniciando…',
-      error: 'No pudimos iniciar la verificación. Inténtalo de nuevo.',
+      error: 'No pudimos iniciar la verificación. Inténtalo de nuevo o comunícate con soporte.',
     },
     pending: {
       title: 'Estamos verificando tu identidad',
@@ -2330,7 +2343,8 @@ const es: Translations = {
         checkout: {
           title: 'Elige cómo pagar',
           // NEEDS LEGAL REVIEW (ES)
-          body: 'Pagar directamente desde tu cuenta bancaria es la forma más económica de enviar. También puedes pagar con tarjeta, pero algunos emisores de tarjetas consideran una transferencia como esta un adelanto de efectivo y cobran su propia comisión.',
+          body:
+            'Pagar directamente desde tu cuenta bancaria es la forma más económica de enviar. También puedes pagar con tarjeta de débito. No te recomendamos pagar con tarjeta de crédito, porque los emisores suelen considerar una transferencia como esta un adelanto de efectivo y cobran su propia comisión e intereses desde el primer día.',
           loading: 'Cargando las opciones de pago…',
           bankNote:
             'Si tu banco no aparece en la lista, aún no podemos conectarnos con él; puedes pagar con tarjeta. No se te ha cobrado.',
