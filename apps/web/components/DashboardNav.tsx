@@ -8,9 +8,13 @@ import { useLanguage } from '@/components/LanguageProvider'
 // family (#194, #200, #201): every /dashboard screen shares this chrome, so
 // no screen needs its own back link and none can strand the user again.
 const LINKS = [
-  { href: '/dashboard/send', key: 'send' },
-  { href: '/dashboard/transfers', key: 'transfers' },
-  { href: '/dashboard/recipients', key: 'recipients' },
+  // exact: true because every other link's href is a PREFIX of some
+  // /dashboard/* path (this one's own is /dashboard itself) — without it,
+  // startsWith('/dashboard/') would light up Home on every screen at once.
+  { href: '/dashboard', key: 'home', exact: true },
+  { href: '/dashboard/send', key: 'send', exact: false },
+  { href: '/dashboard/transfers', key: 'transfers', exact: false },
+  { href: '/dashboard/recipients', key: 'recipients', exact: false },
 ] as const
 
 export default function DashboardNav() {
@@ -25,10 +29,10 @@ export default function DashboardNav() {
       // rather than clips.
       style={{ display: 'flex', flexWrap: 'wrap', gap: 8, width: '100%', maxWidth: 480, marginBottom: 24 }}
     >
-      {LINKS.map(({ href, key }) => {
+      {LINKS.map(({ href, key, exact }) => {
         // /dashboard/send/<id> keeps "Send money" active — the tracker is part
         // of the send flow, not a fourth section.
-        const active = pathname === href || pathname.startsWith(`${href}/`)
+        const active = exact ? pathname === href : pathname === href || pathname.startsWith(`${href}/`)
         return (
           <Link
             key={href}

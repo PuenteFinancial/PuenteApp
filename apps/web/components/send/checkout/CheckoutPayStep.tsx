@@ -12,6 +12,7 @@ import { useLanguage } from '@/components/LanguageProvider'
 import { formatUsd } from '@/lib/sendFormat'
 import { classifyCheckoutConfirmError } from '@/lib/payStep'
 import { getStripe } from '@/lib/stripe'
+import { KYC_NEXT_COOKIE } from '@/lib/kycReturn'
 import CheckoutIdentityStep from './CheckoutIdentityStep'
 
 // The Checkout Sessions pay surface (C2 — docs/prds/checkout-sessions-rail.md).
@@ -239,6 +240,13 @@ function CheckoutForm({
     setPayError('')
     posthog.capture('send_payment_submitted', { transfer_id: transferId })
     try {
+      // Stash the way home before confirm — same cookie and reasoning as
+      // CheckoutIdentityStep's Bridge/Persona redirect: the methods that
+      // leave the page never resolve this promise at all (see below), so
+      // there is no "after" to set it in, and Stripe's return_url can't
+      // carry a query param we control. Set unconditionally; harmless for
+      // the far more common case where confirm() never leaves this page.
+      document.cookie = `${KYC_NEXT_COOKIE}=/dashboard/send/${transferId}; path=/; max-age=3600; SameSite=Lax`
       // 'if_required' keeps the flow on our page for bank debit and most
       // cards; the Session's server-side return_url catches the methods that
       // genuinely have to leave (3DS step-up, redirect wallets), and those

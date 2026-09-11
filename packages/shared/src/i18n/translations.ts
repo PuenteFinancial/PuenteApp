@@ -191,6 +191,7 @@ export type Translations = {
     }
   }
   dashNav: {
+    home: string
     send: string
     transfers: string
     recipients: string
@@ -1204,6 +1205,7 @@ const en: Translations = {
   // dead-end family (#194 and friends): every /dashboard screen shares this
   // chrome, so no screen needs its own way out.
   dashNav: {
+    home: 'Dashboard',
     send: 'Send money',
     transfers: 'Transfers',
     recipients: 'Recipients',
@@ -2202,6 +2204,7 @@ const es: Translations = {
     },
   },
   dashNav: {
+    home: 'Inicio',
     send: 'Enviar dinero',
     transfers: 'Transferencias',
     recipients: 'Destinatarios',
