@@ -154,6 +154,13 @@ describe.skipIf(!runDb)('the FUNDING_REVERSED loss path (integration)', () => {
     // first run after all six assertions had already passed. TRUNCATE fires no
     // row triggers.
     await db.query('truncate table public.ops_actions')
+    // Every arm of the loss path freezes the sender, and the freeze writes a
+    // notice row that FKs to the transfer — so these must go before the
+    // transfers they reference, or the delete below raises 23503. Added when
+    // the freeze-notice work landed; the tables this teardown has to clear are
+    // whatever the code under test happens to write today, which is exactly
+    // why it is worth failing loudly rather than deleting with CASCADE.
+    await db.query('truncate table public.sender_notices')
     await db.query(`delete from public.transfers where id = any($1)`, [transferIds])
     await db.query(`delete from public.quotes where user_id = $1`, [userId])
     await db.query(`delete from public.payout_destinations where id = $1`, [destinationId])
