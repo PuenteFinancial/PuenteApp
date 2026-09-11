@@ -1004,7 +1004,10 @@ describe('stripe_disputes', () => {
     expect(outcome.status).toBe('pass')
   })
 
-  it('passes a dispute whose transfer was reversed, and one whose payout was held', async () => {
+  it('passes on the MARK, whatever state or hold the transfer ended up in', async () => {
+    // The mark is what the dispute handler writes; state and hold are what
+    // happened afterwards, and both legitimately vary. A dispute that landed
+    // before the funding leaves a FUNDED row held for an unrelated reason.
     const processor = stripeProcessor()
     processor.listRecentDisputes.mockResolvedValue([dispute(), dispute({ disputeRef: 'du_2', paymentRef: 'pi_2' })])
     getFundingProcessor.mockReturnValue(processor)
@@ -1012,9 +1015,9 @@ describe('stripe_disputes', () => {
       chainResolving({
         data: [
           // the delivered case: loss booked
-          { id: 'tr-1', state: 'FUNDING_REVERSED', payout_hold_reason: null, funding_payment_ref: 'pi_1' },
-          // the undelivered case: payout stopped, nothing booked
-          { id: 'tr-2', state: 'FUNDED', payout_hold_reason: 'funding_disputed', funding_payment_ref: 'pi_2' },
+          { id: 'tr-1', state: 'FUNDING_REVERSED', payout_hold_reason: null, funding_disputed_at: daysAgo(1), funding_payment_ref: 'pi_1' },
+          // arrived BEFORE the funding: still FUNDED, held as sender_suspended
+          { id: 'tr-2', state: 'FUNDED', payout_hold_reason: 'sender_suspended', funding_disputed_at: daysAgo(1), funding_payment_ref: 'pi_2' },
         ],
         error: null,
       }),
@@ -1031,7 +1034,9 @@ describe('stripe_disputes', () => {
     getFundingProcessor.mockReturnValue(processor)
     from.mockReturnValue(
       chainResolving({
-        data: [{ id: 'tr-1', state: 'COMPLETED', payout_hold_reason: null, funding_payment_ref: 'pi_1' }],
+        data: [
+          { id: 'tr-1', state: 'COMPLETED', payout_hold_reason: null, funding_disputed_at: null, funding_payment_ref: 'pi_1' },
+        ],
         error: null,
       }),
     )
@@ -1063,7 +1068,10 @@ describe('stripe_disputes', () => {
     from
       .mockReturnValueOnce(chainResolving({ data: [], error: null }))
       .mockReturnValueOnce(
-        chainResolving({ data: { id: 'tr-1', state: 'FUNDING_REVERSED', payout_hold_reason: null }, error: null }),
+        chainResolving({
+          data: { id: 'tr-1', state: 'FUNDING_REVERSED', payout_hold_reason: null, funding_disputed_at: daysAgo(1) },
+          error: null,
+        }),
       )
 
     const outcome = await check('stripe_disputes').run()
