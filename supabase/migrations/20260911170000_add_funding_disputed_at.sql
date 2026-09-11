@@ -1,5 +1,5 @@
 -- Migration: transfers.funding_disputed_at — a durable mark that this transfer's funding was disputed
--- Created: 20260910190000
+-- Created: 20260911170000 (renumbered from 20260910190000 — see the commit)
 -- Rollback: alter table public.transfers drop column funding_disputed_at;
 
 -- Found by the staging drive 2026-09-10, and it is an ORDERING bug of exactly
