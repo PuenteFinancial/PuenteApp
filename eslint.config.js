@@ -42,6 +42,13 @@ export default [
     files: [
       'packages/shared/src/i18n/translations.ts',
       'apps/web/components/legal/content.ts',
+      // Server-sent customer copy: the account-freeze notice the loss path
+      // raises. It lives in the API rather than translations.ts (nothing
+      // client-side renders it, and the API must not pull the UI copy table
+      // into its boot path) but it is customer copy, so the ban applies. Kept
+      // as a copy table of its own precisely so this rule sees only copy —
+      // in a mixed module it fires on log lines and Sentry messages too.
+      'apps/api/src/services/sender-notice-copy.ts',
     ],
     rules: {
       'no-restricted-syntax': [

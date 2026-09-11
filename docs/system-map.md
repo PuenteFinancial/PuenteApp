@@ -202,7 +202,7 @@ say is the shape of the locks, which changed rather than disappeared:
 | Gap | Status |
 |---|---|
 | **Payment Element rail unproven live** | The onramp rail has made real prod API calls (live sessions, real money). The **Payment Element (ACH debit) rail has not** — adapter written and unit-tested; creating a live payment, refunding, and the payment form under real keys are unproven. |
-| **`FUNDING_REVERSED` has no writer** | An ACH return / chargeback event is logged and acked — nothing transitions the state or books the loss. Today a real reversal is a Sentry page and a human. |
+| **No channel to reach a customer** | Nothing in the system can send a consumer a message. SMS is GoTrue's OTP only (one A2P-registered template; other traffic is unregistered), and no email provider is wired at all. The loss path's account-freeze notice is therefore rendered, stored in `sender_notices`, and paged to an operator to deliver by phone — see `runbooks/proposals/funding-reversal.md`. Unblocking it is external setup (a provider + verified sending domain, or a second A2P campaign), not code. |
 | **Onramp reconciliation is `skipped`, not `pass`** | The recon stripe-legs gate on the Payment Element provider; the onramp rail deliberately implements no recon reads yet (fast-follow). Interim nets: redelivery window + the uncleared-transfer check + the amount guard's page. |
 | **`AUTO_REFUND` is off in prod** | A failed payout parks at `PAYOUT_FAILED` and pages; a human disburses via runbook. Deliberate posture, but it means refund latency is human latency. |
 | **Reg E disclosure wording** | Drafted; counsel sign-off outstanding, plus a native-Spanish review. |
@@ -211,7 +211,10 @@ say is the shape of the locks, which changed rather than disappeared:
 
 *(Resolved since the last edition: SMS — the A2P campaign was approved 2026-08-05 AND the Twilio
 provider is configured in Supabase Auth, so real sign-in works; the "Turning SMS on" section below
-stays as the reference for how it's wired and the spend controls that must stay on.)*
+stays as the reference for how it's wired and the spend controls that must stay on. And
+**`FUNDING_REVERSED` now has a writer** (2026-09-10): the funding webhook reaches
+`applyFundingReversed`, which books the loss, stops what can still be stopped, and freezes the
+sender. What remains human is the decision that follows it, plus delivering the notice above.)*
 
 None of these block the demo. The counsel and mailbox rows still block scaling past trusted users.
 

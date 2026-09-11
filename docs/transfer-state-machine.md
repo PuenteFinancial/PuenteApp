@@ -47,7 +47,10 @@ stateDiagram-v2
   ours); **SUBMITTED/IN_FLIGHT** can neither be stopped nor booked and only page. Every arm
   freezes the sender (`users.status = 'suspended'`, enforced at the onboarded gate and at payout
   submit) and every arm pages. `reconciliation.stripe_disputes` is the backstop for a dispute
-  whose webhook never arrived.
+  whose webhook never arrived. The freeze also raises a `sender_notices` row so the sender is told
+  rather than discovering it on their next action, and it is lifted only by hand
+  (`scripts/unfreeze-sender.ts`, which writes a `sender_unfreeze` ops action and releases the
+  `sender_suspended` holds) — see `runbooks/proposals/funding-reversal.md`.
 - **`CANCELED → REFUNDED` is synchronous only on mock/stripe.** On the manual and onramp rails the
   undo ref (`manualrefund_…` / `onramprefund_…`) is `pending` and requires a human disbursement
   (manual-refund runbook), so the transfer **rests at `CANCELED`** with the ref recorded until

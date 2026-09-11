@@ -28,12 +28,17 @@ export type OpsActionKind =
   // an investigator already looks — see the migration for why it is not a
   // table of its own.
   | 'sender_freeze'
+  // Its human counterpart, and the only one of the pair that is a DECISION:
+  // someone judged a suspected-fraud account safe to transact again. Always
+  // `ops:<operator uuid>` with a typed note (scripts/unfreeze-sender.ts) —
+  // never system-initiated, because no event says a person is trustworthy.
+  | 'sender_unfreeze'
 
 export interface OpsActionInput {
   /** `ops:<admin user id>` — the same vocabulary as transfer_transitions.actor. */
   actor: string
   action: OpsActionKind
-  /** Null only for treasury-level actions (float_topup). */
+  /** Null for the actions that are not about one transfer (float_topup, sender_unfreeze). */
   transferId: string | null
   /** MACHINE vocabulary only (hold reason, decision, outcome) — never free text. */
   reason: string | null
@@ -96,7 +101,7 @@ export interface OpsActivityFeedRow {
   createdAt: string
   actor: string
   action: string
-  /** Null for treasury-level actions (float_topup). */
+  /** Null for the actions that are not about one transfer (float_topup, sender_unfreeze). */
   transferId: string | null
   reason: string | null
 }
