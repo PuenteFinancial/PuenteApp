@@ -49,6 +49,9 @@ export interface FundingTransferRow {
   /** Read so a funding event can never REPLACE the ref initiation persisted —
    *  see the guard on fundingPaymentRef in applyFundingSucceeded. */
   funding_payment_ref: string | null
+  /** Set when a dispute reached us, whenever that was. Read by the FUNDED
+   *  path's catch-up, because a dispute can arrive BEFORE the funding does. */
+  funding_disputed_at: string | null
 }
 
 export type ApplyFundingOutcome =
@@ -65,7 +68,9 @@ export type ApplyFundingOutcome =
 async function loadFundingTransfer(transferId: string): Promise<FundingTransferRow | null> {
   const { data } = await supabaseAdmin
     .from('transfers')
-    .select('id, state, user_id, send_amount_minor, fee_amount_minor, margin_minor, funding_cleared, funding_payment_ref')
+    .select(
+      'id, state, user_id, send_amount_minor, fee_amount_minor, margin_minor, funding_cleared, funding_payment_ref, funding_disputed_at',
+    )
     .eq('id', transferId)
     .single()
   return (data as FundingTransferRow | null) ?? null
@@ -157,15 +162,45 @@ export async function applyFundingSucceeded(input: {
   // it and has committed (or will fail loudly) by the time this read runs.
   const { data: after, error: afterError } = await supabaseAdmin
     .from('transfers')
-    .select('funding_cleared')
+    .select('funding_cleared, funding_disputed_at')
     .eq('id', transfer.id)
     .maybeSingle()
   if (afterError) Sentry.captureException(new Error(`post-FUNDED re-read failed: ${afterError.message}`))
-  if ((after as { funding_cleared?: boolean } | null)?.funding_cleared) {
+  const afterRow = after as { funding_cleared?: boolean; funding_disputed_at?: string | null } | null
+  if (afterRow?.funding_cleared) {
     try {
       await applyFundingCleared({ transferId: transfer.id })
     } catch (clearErr) {
       Sentry.captureException(clearErr)
+    }
+  }
+
+  // OUT-OF-ORDER DISPUTE CATCH-UP — the same trap as the clearing one above,
+  // one door along, and the staging drive walked straight into it (2026-09-10).
+  //
+  // Stripe raised `charge.dispute.created` about two seconds after the charge,
+  // BEFORE `checkout.session.completed`. applyFundingReversed therefore saw a
+  // PENDING_PAYMENT transfer, correctly booked nothing (no exposure yet) and
+  // could not place a payout hold, because a hold only means something on a
+  // FUNDED row. The transfer then funded here, perfectly ordinary, and the
+  // payout was stopped ONLY because the sender happened to be frozen. Remove
+  // the freeze from that story and we pay out against money being clawed back.
+  //
+  // So: the dispute left its mark on the row, and now that FUNDED has
+  // committed, the hold it could not place then is placed now. Re-read for the
+  // same reason the flag above is — the load at the top predates the
+  // transition, and the RPC's row lock means any dispute processed in the gap
+  // has committed by the time this runs.
+  //
+  // Reported, never thrown: FUNDED is committed and cannot be unwound. A hold
+  // that fails here still leaves the sender frozen (every dispute arm freezes),
+  // and reconciliation's stripe_disputes check reads the same mark, so the row
+  // cannot go quiet.
+  if (afterRow?.funding_disputed_at) {
+    try {
+      await holdPayoutForDispute(transfer.id)
+    } catch (holdErr) {
+      Sentry.captureException(holdErr)
     }
   }
 
@@ -231,6 +266,25 @@ export type ApplyFundingReversedOutcome =
   | { outcome: 'replayed' }
   | { outcome: 'stale' }
   | { outcome: 'unknown_transfer' }
+
+/**
+ * Record that this transfer's funding was disputed, whenever the dispute
+ * arrived relative to everything else.
+ *
+ * Idempotent by first-write-wins (`is null`): a redelivered dispute keeps the
+ * original timestamp, which is the one that matters for evidence deadlines.
+ *
+ * Throws, like the freeze and the hold: a mark that silently failed to land is
+ * how a disputed transfer funds and pays out looking perfectly ordinary.
+ */
+async function markFundingDisputed(transferId: string): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from('transfers')
+    .update({ funding_disputed_at: new Date().toISOString() })
+    .eq('id', transferId)
+    .is('funding_disputed_at', null)
+  if (error) throw new Error(`funding_disputed_at update failed: ${error.message}`)
+}
 
 /**
  * Freeze the sender. Idempotent, and returns whether THIS call flipped it, so
@@ -358,6 +412,13 @@ export async function applyFundingReversed(input: {
   const transfer = await loadFundingTransfer(input.transferId)
   if (!transfer) return { outcome: 'unknown_transfer' }
   if (transfer.state === 'FUNDING_REVERSED') return { outcome: 'replayed' }
+
+  // STAMP THE TRANSFER FIRST, in every arm, before deciding what to do about
+  // it. The fact is the same wherever the pesos are: this transfer's funding
+  // was disputed. Recording it here is what makes the PENDING_PAYMENT case
+  // survivable — the funding event that arrives afterwards reads this and
+  // holds the payout, instead of funding a transfer nobody knows is disputed.
+  await markFundingDisputed(transfer.id)
 
   const frozen = await suspendSender({
     userId: transfer.user_id,

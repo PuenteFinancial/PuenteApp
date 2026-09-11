@@ -450,12 +450,12 @@ describe('releaseHold', () => {
 // uses for its own holds, so a row that moved on is left alone.
 function disputeHoldTable(result: { data: unknown; error: unknown }) {
   const select = vi.fn(async (..._args: unknown[]) => result)
-  const is = vi.fn((..._args: unknown[]) => ({ select }))
-  const eq2 = vi.fn((..._args: unknown[]) => ({ is }))
+  const or = vi.fn((..._args: unknown[]) => ({ select }))
+  const eq2 = vi.fn((..._args: unknown[]) => ({ or }))
   const eq1 = vi.fn((..._args: unknown[]) => ({ eq: eq2 }))
   const update = vi.fn((..._args: unknown[]) => ({ eq: eq1 }))
   from.mockReturnValue({ update })
-  return { update, eq1, eq2, is, select }
+  return { update, eq1, eq2, or, select }
 }
 
 describe('holdPayoutForDispute', () => {
@@ -468,9 +468,22 @@ describe('holdPayoutForDispute', () => {
       expect.objectContaining({ payout_hold_reason: 'funding_disputed' }),
     )
     expect(t.eq1).toHaveBeenCalledWith('id', 'tr-1')
-    // Guarded exactly like payout-submit's hold: only a FUNDED, unheld row.
     expect(t.eq2).toHaveBeenCalledWith('state', 'FUNDED')
-    expect(t.is).toHaveBeenCalledWith('payout_hold_reason', null)
+  })
+
+  it('upgrades a sweep-placed sender_suspended hold to the specific reason', async () => {
+    // Found on the staging drive 2026-09-10: the freeze runs first, the 1-min
+    // payout sweep lands in between, and the row gets held as
+    // `sender_suspended` — the less specific of two reasons the SAME dispute
+    // caused. Reconciliation then reported the dispute as unrecorded forever.
+    // Any other hold reason still wins and is left alone.
+    const t = disputeHoldTable({ data: [{ id: 'tr-1' }], error: null })
+
+    await holdPayoutForDispute('tr-1')
+
+    expect(t.or).toHaveBeenCalledWith(
+      'payout_hold_reason.is.null,payout_hold_reason.eq.sender_suspended',
+    )
   })
 
   it('reports false when another actor held or moved the row first', async () => {

@@ -726,6 +726,7 @@ const reversibleRow = (overrides: Record<string, unknown> = {}) => ({
   margin_minor: 0,
   funding_cleared: true,
   funding_payment_ref: 'pi_123',
+  funding_disputed_at: null,
   ...overrides,
 })
 
@@ -745,7 +746,9 @@ function stubReversal(
   let call = 0
   from.mockImplementation((table: unknown) => {
     const b: Record<string, unknown> = {}
-    for (const m of ['select', 'eq', 'update', 'neq']) b[m] = () => b
+    // `is` is the dispute mark's guard (first-write-wins); the table switch is
+    // the freeze reading the sender for its notice language.
+    for (const m of ['select', 'eq', 'update', 'neq', 'is']) b[m] = () => b
     const data = table === 'users' ? sender : row
     b['single'] = async () => ({ data, error: null })
     b['maybeSingle'] = async () => ({ data, error: null })
@@ -991,5 +994,48 @@ describe('applyFundingCleared — the loss path already closed the receivable', 
 
     expect(out).toEqual({ outcome: 'skipped', state: 'FUNDING_REVERSED' })
     expect(postLedgerTransaction).not.toHaveBeenCalled()
+  })
+})
+
+describe('applyFundingSucceeded — the out-of-order DISPUTE catch-up', () => {
+  beforeEach(() => {
+    transitionTransfer.mockReset().mockResolvedValue({})
+    holdPayoutForDispute.mockReset().mockResolvedValue(true)
+    enqueuePayoutSubmit.mockReset().mockResolvedValue('job-1')
+  })
+
+  const fund = () =>
+    applyFundingSucceeded({
+      transferId: TRANSFER_ID,
+      paymentRef: 'cs_test_1',
+      eventId: 'evt_completed',
+      actor: 'webhook:funding',
+    })
+
+  it('a dispute that arrived BEFORE the funding holds the payout once it funds', async () => {
+    // The staging drive, 2026-09-10: Stripe raised charge.dispute.created two
+    // seconds after the charge, beating checkout.session.completed. The loss
+    // path saw PENDING_PAYMENT, could not place a hold, and left only the
+    // sender freeze between us and paying out disputed money.
+    stubTransfer({ ...PENDING, user_id: 'u1', funding_cleared: false, funding_disputed_at: '2026-09-10T22:20:49Z' })
+
+    await fund()
+
+    expect(holdPayoutForDispute).toHaveBeenCalledWith(TRANSFER_ID)
+  })
+
+  it('an ordinary funding never touches the dispute hold', async () => {
+    stubTransfer({ ...PENDING, user_id: 'u1', funding_cleared: false, funding_disputed_at: null })
+
+    await fund()
+
+    expect(holdPayoutForDispute).not.toHaveBeenCalled()
+  })
+
+  it('a hold that fails is reported, never thrown — FUNDED is already committed', async () => {
+    stubTransfer({ ...PENDING, user_id: 'u1', funding_cleared: false, funding_disputed_at: '2026-09-10T22:20:49Z' })
+    holdPayoutForDispute.mockRejectedValue(new Error('db down'))
+
+    await expect(fund()).resolves.toMatchObject({ outcome: 'applied' })
   })
 })

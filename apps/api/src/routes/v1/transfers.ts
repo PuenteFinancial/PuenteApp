@@ -25,6 +25,7 @@ import {
   type CancellationRequestState,
 } from '../../services/cancellations.js'
 import { requireOnboardedUser } from './recipients.js'
+import { ensureStripeCustomer } from '../../services/stripe-customers.js'
 import {
   assessTransferRisk,
   assessUnclearedCap,
@@ -592,6 +593,12 @@ export async function transfersRoute(server: FastifyInstance) {
 
       let funding: FundingInitiation
       try {
+        // Resolved BEFORE the session so the Customer can be attached to it.
+        // Never throws — see ensureStripeCustomer.
+        const stripeCustomerRef = await ensureStripeCustomer({
+          userId,
+          ...(approvedUser.email && { email: approvedUser.email }),
+        })
         funding = await processor.initiateFunding({
           transferId: transfer.id,
           userId,
@@ -603,6 +610,9 @@ export async function transfersRoute(server: FastifyInstance) {
             ...(approvedUser.lastName && { lastName: approvedUser.lastName }),
             ...(approvedUser.email && { email: approvedUser.email }),
           },
+          // Null when Stripe could not be reached, and that is fine: the
+          // session is then created exactly as it was before saving existed.
+          ...(stripeCustomerRef && { customerRef: stripeCustomerRef }),
         })
       } catch (err) {
         if (err instanceof FundingInitiationError) {

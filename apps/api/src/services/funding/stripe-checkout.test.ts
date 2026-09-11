@@ -216,6 +216,50 @@ describe('StripeCheckoutFundingProcessor — session creation', () => {
     expect(JSON.stringify(create.mock.calls[0]![0])).not.toContain('user-secret-1')
   })
 
+  it('attaches the Customer and offers saving when the sender has one', async () => {
+    const create = vi.fn().mockResolvedValue({ id: SESSION_ID, client_secret: 'x' })
+    const processor = make({ checkout: { sessions: { create, retrieve: vi.fn() } } })
+
+    await processor.initiateFunding({
+      transferId: TRANSFER_ID,
+      userId: 'u',
+      totalAmountMinor: 10_200,
+      currency: 'USD',
+      customer: { email: 'sender@example.com' },
+      customerRef: 'cus_123',
+    })
+
+    const body = create.mock.calls[0]![0] as Record<string, unknown>
+    expect(body['customer']).toBe('cus_123')
+    // Mutually exclusive at Stripe: the Customer carries the email already.
+    expect(body).not.toHaveProperty('customer_email')
+    expect(body['saved_payment_method_options']).toEqual({
+      payment_method_save: 'enabled',
+      // If they can save it here they can remove it here.
+      payment_method_remove: 'enabled',
+    })
+  })
+
+  it('falls back to the email prefill and offers nothing to save without a Customer', async () => {
+    // Stripe was unreachable when we tried to mint one. Saving is a
+    // convenience; the payment must still work exactly as it did before.
+    const create = vi.fn().mockResolvedValue({ id: SESSION_ID, client_secret: 'x' })
+    const processor = make({ checkout: { sessions: { create, retrieve: vi.fn() } } })
+
+    await processor.initiateFunding({
+      transferId: TRANSFER_ID,
+      userId: 'u',
+      totalAmountMinor: 10_200,
+      currency: 'USD',
+      customer: { email: 'sender@example.com' },
+    })
+
+    const body = create.mock.calls[0]![0] as Record<string, unknown>
+    expect(body['customer_email']).toBe('sender@example.com')
+    expect(body).not.toHaveProperty('customer')
+    expect(body).not.toHaveProperty('saved_payment_method_options')
+  })
+
   it('throws rather than returning a session the Payment Element cannot mount', async () => {
     const create = vi.fn().mockResolvedValue({ id: SESSION_ID, client_secret: null })
     const processor = make({ checkout: { sessions: { create, retrieve: vi.fn() } } })

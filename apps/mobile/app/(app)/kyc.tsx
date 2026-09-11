@@ -3,9 +3,11 @@ import { useRouter } from 'expo-router'
 import * as SecureStore from 'expo-secure-store'
 import * as WebBrowser from 'expo-web-browser'
 import { useCallback, useState } from 'react'
+import { StyleSheet, Text, View } from 'react-native'
 import { useLanguage } from '@/components/LanguageProvider'
 import { Body, Button, Caption, Card, ErrorText, Heading, Screen } from '@/components/ui'
 import { api } from '@/lib/api'
+import { colors } from '@/lib/theme'
 import { routeAfterSignIn } from '@/lib/auth/routeAfterSignIn'
 import type { MeResponse } from '@/lib/auth/types'
 import {
@@ -160,6 +162,18 @@ export default function Kyc() {
             continue, not after. Do not move this below the button. */}
         <Caption>{s.dataNotice}</Caption>
 
+        <View style={styles.prep}>
+          <Text style={styles.prepTitle}>{s.prepTitle}</Text>
+          {s.prepItems.map((item) => (
+            <View key={item} style={styles.prepRow}>
+              <Body>{'•'}</Body>
+              <View style={styles.prepText}>
+                <Body>{item}</Body>
+              </View>
+            </View>
+          ))}
+        </View>
+
         <Button
           label={status === 'starting' ? s.starting : s.cta}
           onPress={() => void start()}
@@ -171,3 +185,23 @@ export default function Kyc() {
     </Screen>
   )
 }
+
+const styles = StyleSheet.create({
+  prep: {
+    gap: 4,
+  },
+  prepTitle: {
+    fontSize: 15,
+    lineHeight: 22,
+    fontWeight: '600',
+    color: colors.ink,
+  },
+  prepRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  // Wraps under its own first line rather than under the bullet.
+  prepText: {
+    flex: 1,
+  },
+})

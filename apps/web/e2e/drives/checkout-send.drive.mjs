@@ -544,9 +544,18 @@ async function main() {
     }
     console.log('  bridge customer created; kyc =', me.kycStatus)
     const base = process.env.BRIDGE_API_BASE ?? 'https://api.sandbox.bridge.xyz'
+    // Idempotency-Key is REQUIRED on this POST — without it Bridge answers 422
+    // "Missing Idempotency Key" and the approval silently never happens, which
+    // is what every prior run of this drive did (seen again 2026-09-10). The
+    // GET/PUT sandbox recipes need no key; this one does.
     const sim = await fetch(`${base}/v0/customers/${me.bridgeCustomerId}/simulate_kyc_approval`, {
       method: 'POST',
-      headers: { 'Api-Key': process.env.BRIDGE_API_KEY, 'Content-Type': 'application/json' },
+      headers: {
+        'Api-Key': process.env.BRIDGE_API_KEY,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': randomUUID(),
+      },
+      body: '{}',
     })
     console.log('simulate_kyc_approval →', sim.status)
     const approved = await waitForStep(page, ['Choose how to pay', 'still in progress'], 180000)
