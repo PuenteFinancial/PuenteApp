@@ -30,9 +30,18 @@ export default function KycStart({ initialError = false }: { initialError?: bool
       </h1>
       <p style={{ fontSize: 15, color: 'var(--muted)', margin: '0 0 16px', lineHeight: 1.6 }}>{s.body}</p>
       {/* GLBA: disclose the data hand-off to Bridge before the user continues */}
-      <p style={{ fontSize: 13, color: 'var(--muted)', margin: '0 0 24px', lineHeight: 1.5 }}>
+      <p style={{ fontSize: 13, color: 'var(--muted)', margin: '0 0 20px', lineHeight: 1.5 }}>
         {s.dataNotice}
       </p>
+
+      <p style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)', margin: '0 0 8px', lineHeight: 1.5 }}>
+        {s.prepTitle}
+      </p>
+      <ul style={{ listStyle: 'disc', fontSize: 15, color: 'var(--muted)', margin: '0 0 24px', paddingLeft: 20, lineHeight: 1.6 }}>
+        {s.prepItems.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
 
       <button
         className="btn btn--accent"
