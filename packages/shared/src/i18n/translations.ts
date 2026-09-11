@@ -1337,7 +1337,8 @@ const en: Translations = {
         checkout: {
           title: 'Choose how to pay',
           // NEEDS LEGAL REVIEW (EN + ES)
-          body: 'Paying straight from your bank account is the cheapest way to send. Cards work too, but some card issuers treat a transfer like this as a cash advance and add their own fee.',
+          body:
+            'Paying straight from your bank account is the cheapest way to send. A debit card works too. We do not recommend paying with a credit card, because card issuers often treat a transfer like this as a cash advance and add their own fee and interest from day one.',
           loading: 'Loading payment options…',
           bankNote:
             "If your bank isn't in the list, we can't connect to it yet. You can still pay by card, and you haven't been charged.",
@@ -2339,7 +2340,8 @@ const es: Translations = {
         checkout: {
           title: 'Elige cómo pagar',
           // NEEDS LEGAL REVIEW (ES)
-          body: 'Pagar directamente desde tu cuenta bancaria es la forma más económica de enviar. También puedes pagar con tarjeta, pero algunos emisores de tarjetas consideran una transferencia como esta un adelanto de efectivo y cobran su propia comisión.',
+          body:
+            'Pagar directamente desde tu cuenta bancaria es la forma más económica de enviar. También puedes pagar con tarjeta de débito. No te recomendamos pagar con tarjeta de crédito, porque los emisores suelen considerar una transferencia como esta un adelanto de efectivo y cobran su propia comisión e intereses desde el primer día.',
           loading: 'Cargando las opciones de pago…',
           bankNote:
             'Si tu banco no aparece en la lista, aún no podemos conectarnos con él; puedes pagar con tarjeta. No se te ha cobrado.',
