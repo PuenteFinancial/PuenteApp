@@ -21,8 +21,8 @@ slice, so the lending stack and richer risk controls slot in later without migra
   is a defense-in-depth backstop, not the primary control. Clients never touch the DB directly.
 - **Append-only tables** (no UPDATE/DELETE — trigger + role-level revoke): `ledger_transactions`,
   `ledger_entries`, `transfer_transitions`, `disclosures`, `reconciliation_runs`, `consents`,
-  `kyc_verifications`, `ops_actions`, and `otp_send_attempts` (no UPDATE; DELETE only for the
-  retention prune). Retention posture for all of them: `compliance/records-retention-policy.md`.
+  `kyc_verifications`, `ops_actions`, `sender_notices`, and `otp_send_attempts` (no UPDATE; DELETE
+  only for the retention prune). Retention posture for all of them: `compliance/records-retention-policy.md`.
 - **`payment_events`** is the **status-mutable event inbox**: its raw `payload` is immutable, but
   `status` / `processed_at` / `error` are updated in place as the worker processes each event (it
   carries a `moddatetime` `updated_at` trigger) — so it is **not** append-only.
@@ -160,8 +160,11 @@ this records the operator's stated why, what they saw, and actions that change n
 hold release). Written best-effort after the primary write; a failed insert pages Sentry and never
 turns a completed money movement into a 500.
 - `actor` TEXT — `ops:<admin user id>` (the transition vocabulary; CHECK 1–100)
-- `action` TEXT — CHECK-pinned to the seven routes; an eighth is a migration
-- `transfer_id` FK → transfers (**RESTRICT**; null only for `float_topup`)
+- `action` TEXT — CHECK-pinned to the known set: the seven ops routes plus `sender_freeze`
+  (system-written by the loss path) and `sender_unfreeze` (`scripts/unfreeze-sender.ts`, the only
+  action that reverses another); a tenth is a migration
+- `transfer_id` FK → transfers (**RESTRICT**; null for `float_topup` and `sender_unfreeze` — both
+  are about something other than one transfer)
 - `reason` TEXT — MACHINE vocabulary only (the hold reason, the decision, the outcome; CHECK ≤ 100)
 - `note` TEXT — the operator's typed note where the route requires one (CHECK 1–500); free text,
   guided "no names, no account numbers", never copied to `transfer_transitions.reason` or logs
@@ -172,6 +175,32 @@ turns a completed money movement into a 500.
 - **RLS:** deny-all (service-role only). Retention: see `compliance/records-retention-policy.md`.
 - **Test gotcha:** the RESTRICT FK means every DB test that `TRUNCATE`s `transfers` must name
   `ops_actions` in the same statement (0A000 otherwise).
+
+### sender_notices  *(append-only — built 2026-09-10; compliance follow-up to the loss path)*
+One row per customer-facing notice the system owes a sender. Today there is exactly one kind: the
+account freeze the loss path applies automatically. Before this the freeze was silent and the
+sender met it as an error string on their next action; compliance called proactive notice strongly
+advisable on a UDAAP-unfairness basis. The row stores the RENDERED text, so "what did we tell this
+person, and when" survives a later copy change.
+- `user_id` FK → users (**RESTRICT** — the proof we notified someone outlives their row)
+- `transfer_id` FK → transfers (**RESTRICT**; nullable, for a future account-level notice)
+- `kind` TEXT — CHECK `account_frozen`
+- `language` TEXT — `en` | `es` (CHECK); chosen from `users.preferred_language`
+- `channel` TEXT — CHECK `manual` **only**, and that is infrastructural, not a preference: the API
+  cannot send SMS (GoTrue holds the Twilio credentials and sends OTP against one A2P-registered
+  template) and no email provider is wired. The notice is rendered, stored, and paged to an
+  operator who delivers it. An `email` channel is one adapter and one CHECK value away.
+- `status` TEXT — `pending` | `sent` | `failed`, written at insert: the dispatch outcome at the
+  moment the notice was generated, **not** a mutable delivery tracker (the table is append-only).
+  A `manual` notice is always `pending`.
+- `subject` / `body` TEXT (CHECK ≤ 200 / ≤ 2000) — fixed copy per (kind, language), nothing
+  interpolated: **no PII by construction**, which is what makes storing the text safe
+- `created_at` timestamptz; indexes `(user_id, created_at desc)`, `(transfer_id)`, `(created_at desc)`
+- `forbid_mutation` trigger — append-only
+- **RLS:** deny-all (service-role only) — even the subject of the notice has no direct read; the
+  web tier has no Supabase access.
+- **Test gotcha:** same RESTRICT rule as `ops_actions` — a DB test that `TRUNCATE`s `transfers` or
+  deletes a user must clear `sender_notices` first.
 
 ## Money movement
 

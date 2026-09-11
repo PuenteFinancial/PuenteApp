@@ -40,6 +40,12 @@ vi.mock('./ops-actions.js', () => ({
   recordOpsAction: (...a: unknown[]) => recordOpsAction(...a),
 }))
 
+const recordAccountFrozenNotice = vi.hoisted(() => vi.fn(async (..._a: unknown[]) => true))
+vi.mock('./sender-notices.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./sender-notices.js')>()
+  return { ...actual, recordAccountFrozenNotice: (...a: unknown[]) => recordAccountFrozenNotice(...a) }
+})
+
 const {
   recordManualFunding,
   applyFundingSucceeded,
@@ -723,15 +729,26 @@ const reversibleRow = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 
-/** The transfer read, then the sender-freeze update. `frozen` false means the
- *  sender was ALREADY suspended (a second dispute), which must not re-page. */
-function stubReversal(row: unknown, frozen = true) {
+/**
+ * The transfer read, then the sender pre-read, then the sender-freeze update.
+ * `frozen` false means the sender was ALREADY suspended (a second dispute),
+ * which must not re-page. `sender` is the pre-read row: its status is what the
+ * audit row must report as the `before`, and its language is what the notice
+ * must be written in. Passing null models a failed pre-read, which must NOT
+ * stop the freeze.
+ */
+function stubReversal(
+  row: unknown,
+  frozen = true,
+  sender: { status: string; preferred_language: string } | null = { status: 'active', preferred_language: 'en' },
+) {
   let call = 0
-  from.mockImplementation(() => {
+  from.mockImplementation((table: unknown) => {
     const b: Record<string, unknown> = {}
     for (const m of ['select', 'eq', 'update', 'neq']) b[m] = () => b
-    b['single'] = async () => ({ data: row, error: null })
-    b['maybeSingle'] = async () => ({ data: row, error: null })
+    const data = table === 'users' ? sender : row
+    b['single'] = async () => ({ data, error: null })
+    b['maybeSingle'] = async () => ({ data, error: null })
     ;(b as { then?: unknown }).then = (r: (v: unknown) => void) =>
       r({ data: frozen ? [{ id: USER_ID }] : [], error: null })
     call += 1
@@ -754,6 +771,7 @@ describe('applyFundingReversed', () => {
     transitionTransfer.mockReset().mockResolvedValue({})
     holdPayoutForDispute.mockReset().mockResolvedValue(true)
     recordOpsAction.mockReset().mockResolvedValue(true)
+    recordAccountFrozenNotice.mockReset().mockResolvedValue(true)
   })
 
   it('COMPLETED + cleared: books the loss against CASH and freezes the sender', async () => {
@@ -851,6 +869,98 @@ describe('applyFundingReversed', () => {
         before: { status: 'active' },
         after: { status: 'suspended', eventId: 'evt_1' },
       }),
+      expect.anything(),
+    )
+  })
+
+  it('records the status the freeze ACTUALLY replaced, not an assumed active', async () => {
+    // A sender can reach a funded transfer while still 'waitlist' (nothing
+    // gates on active), and an audit row that asserts 'active' either way is a
+    // record that quietly lies about what changed.
+    stubReversal(reversibleRow(), true, { status: 'waitlist', preferred_language: 'en' })
+
+    await reverse()
+
+    expect(recordOpsAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'sender_freeze', before: { status: 'waitlist' } }),
+      expect.anything(),
+    )
+  })
+
+  // ── The sender is TOLD (2026-09-10 compliance follow-up) ──────────────────
+  //
+  // The freeze used to be silent: the sender met it as an error string the next
+  // time they tried to act. Compliance called proactive notice strongly
+  // advisable on a UDAAP-unfairness basis.
+
+  it("raises the notice in the sender's own language", async () => {
+    stubReversal(reversibleRow(), true, { status: 'active', preferred_language: 'es' })
+
+    await reverse()
+
+    expect(recordAccountFrozenNotice).toHaveBeenCalledWith(
+      { userId: USER_ID, transferId: TRANSFER_ID, language: 'es' },
+      expect.anything(),
+    )
+  })
+
+  it('tells the sender on every arm, including the ones where no money moved', async () => {
+    // FUNDED means nothing was lost yet, but the account still stopped, so the
+    // person still needs to know.
+    stubReversal(reversibleRow({ state: 'FUNDED' }))
+    await reverse()
+    expect(recordAccountFrozenNotice).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not re-notify a sender who was already frozen', async () => {
+    // The idempotency is the caller's: only the call that flipped the row
+    // notifies, so a redelivered dispute does not send a second notice.
+    stubReversal(reversibleRow(), false)
+    await reverse()
+    expect(recordAccountFrozenNotice).not.toHaveBeenCalled()
+  })
+
+  it('a notice that failed to record changes nothing about the freeze', async () => {
+    // The service reports its own failure and returns false (it never rejects
+    // — sender-notices.test.ts pins that). What matters here is that the
+    // freeze's outcome does not depend on the answer.
+    stubReversal(reversibleRow())
+    recordAccountFrozenNotice.mockResolvedValue(false)
+
+    expect(await reverse()).toEqual({ outcome: 'reversed', frozen: true, cleared: true })
+  })
+
+  it('notifies only after the freeze and its audit row have landed', async () => {
+    // Order is the guarantee: the notice runs last, so nothing it does can
+    // precede the protective act or stand between the freeze and its
+    // provenance.
+    const order: string[] = []
+    recordOpsAction.mockImplementation(async () => {
+      order.push('audit')
+      return true
+    })
+    recordAccountFrozenNotice.mockImplementation(async () => {
+      order.push('notice')
+      return true
+    })
+    stubReversal(reversibleRow())
+
+    await reverse()
+
+    expect(order).toEqual(['audit', 'notice'])
+  })
+
+  it('a failed sender pre-read still freezes, in the default language', async () => {
+    // The freeze is the protective act and must not gain a new way to fail.
+    stubReversal(reversibleRow(), true, null)
+
+    expect(await reverse()).toEqual({ outcome: 'reversed', frozen: true, cleared: true })
+    expect(recordOpsAction).toHaveBeenCalledWith(
+      expect.objectContaining({ before: { status: 'unknown' } }),
+      expect.anything(),
+    )
+    expect(recordAccountFrozenNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ language: 'en' }),
       expect.anything(),
     )
   })

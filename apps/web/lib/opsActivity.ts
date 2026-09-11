@@ -16,6 +16,12 @@ export const OPS_ACTION_KINDS = [
   'deposit_instructions_attach',
   'deposit_landed',
   'float_topup',
+  // Account-level, not transfer-level (the loss path). `sender_freeze` is
+  // written by the system on a dispute; `sender_unfreeze` only ever by a
+  // person, from the CLI. Neither has a button here, and both must still be
+  // legible in the feed.
+  'sender_freeze',
+  'sender_unfreeze',
 ] as const
 export type OpsActionKind = (typeof OPS_ACTION_KINDS)[number]
 
@@ -24,7 +30,7 @@ export interface OpsActivityFeedRow {
   createdAt: string
   actor: string
   action: string
-  /** Null for treasury-level actions (float_topup). */
+  /** Null for the actions that are not about one transfer (float_topup, sender_unfreeze). */
   transferId: string | null
   reason: string | null
 }
@@ -82,8 +88,15 @@ export function actorShort(actor: string): string {
   return prefix ? `${prefix}:${short}` : short
 }
 
-/** Money-moving actions read as progress; the rest are neutral bookkeeping. */
+/**
+ * Money-moving actions read as progress; a freeze reads as trouble; the rest are
+ * neutral bookkeeping. `sender_freeze` gets `error` because it is the one row in
+ * this feed that means something went wrong for a real person, and it must not
+ * scan the same as a deposit landing. The UNFREEZE is deliberately neutral, not
+ * success: it is a decision someone made, and colouring it green would editorialise.
+ */
 export function activityTone(action: string): BadgeTone {
+  if (action === 'sender_freeze') return 'error'
   return action === 'refund' || action === 'hold_release' ? 'progress' : 'neutral'
 }
 

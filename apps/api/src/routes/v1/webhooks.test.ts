@@ -84,6 +84,11 @@ const captureException = vi.hoisted(() => vi.fn())
 vi.mock('@sentry/node', () => ({
   captureMessage: (...args: unknown[]) => captureMessage(...args),
   captureException: (...args: unknown[]) => captureException(...args),
+  // The loss path's freeze notice reports through withScope and breadcrumbs.
+  // Stubbed rather than omitted: an undefined helper would surface as a 500
+  // from a path whose whole contract is that it cannot fail loudly.
+  withScope: (fn: (scope: unknown) => void) => fn({ setFingerprint: vi.fn(), setContext: vi.fn() }),
+  addBreadcrumb: vi.fn(),
 }))
 
 // Overridable funding processor: null → the real mock processor; tests set
@@ -617,19 +622,32 @@ const reversedRow = {
   funding_payment_ref: 'pi_123',
 }
 
-/** The two reads applyFundingReversed makes before it branches: the transfer,
- *  then the sender freeze. Kept together so a test that only cares about the
- *  branch does not have to remember the order. */
+/** The three reads applyFundingReversed makes before it branches: the transfer,
+ *  the sender pre-read (status for the audit row, language for the freeze
+ *  notice), then the freeze UPDATE itself. Kept together so a test that only
+ *  cares about the branch does not have to remember the order. */
 const reversalReads = (row: Record<string, unknown> = reversedRow, frozen = true) => {
   from
     .mockReturnValueOnce(selectChain({ data: row }))
+    .mockReturnValueOnce(selectChain({ data: { status: 'active', preferred_language: 'en' } }))
     .mockReturnValueOnce(selectChain({ data: frozen ? [{ id: USER_ID }] : [] }))
+  // The freeze notice insert, only on the call that actually froze.
+  if (frozen) from.mockReturnValueOnce(noticeInsert())
 }
+
+/** The sender_notices insert the freeze raises. Captures the row so a test can
+ *  assert the sender was told, not just that money was booked. */
+const noticeInsert = () => {
+  const chain = selectChain({ data: null })
+  noticeRows.push(chain)
+  return chain
+}
+const noticeRows: Array<Record<string, ReturnType<typeof vi.fn>>> = []
 
 function selectChain(result: { data?: unknown; error?: unknown }) {
   const resolved = { data: result.data ?? null, error: result.error ?? null }
   const b: Record<string, ReturnType<typeof vi.fn>> = {} as never
-  for (const m of ['select', 'update', 'eq', 'is', 'neq'] as const) b[m] = vi.fn(() => b)
+  for (const m of ['select', 'update', 'insert', 'eq', 'is', 'neq'] as const) b[m] = vi.fn(() => b)
   b['single'] = vi.fn(async () => resolved)
   b['maybeSingle'] = vi.fn(async () => resolved)
   ;(b as { then?: (r: (v: unknown) => void) => void }).then = (r) => r(resolved)
@@ -1599,6 +1617,7 @@ describe('POST /v1/webhooks/funding — funding_reversed (the loss path)', () =>
   beforeEach(() => {
     transitionTransfer.mockReset()
     captureMessage.mockReset()
+    noticeRows.length = 0
   })
 
   const postDispute = async () => {
@@ -1633,6 +1652,32 @@ describe('POST /v1/webhooks/funding — funding_reversed (the loss path)', () =>
         tags: expect.objectContaining({ senderFrozen: 'true', fundingCleared: 'true' }),
       }),
     )
+  })
+
+  it('the sender is TOLD, in one write, on the same event that froze them', async () => {
+    // The freeze used to be silent: the sender met it as an error string on
+    // their next action. This asserts the whole chain end to end — dispute
+    // webhook in, sender_notices row out — because the compliance claim is that
+    // the notice exists, not that a service could produce one.
+    from.mockReturnValueOnce(selectChain({ data: { id: TRANSFER_ID } }))
+    reversalReads()
+    transitionTransfer.mockResolvedValue({ ...reversedRow, state: 'FUNDING_REVERSED' })
+
+    expect((await postDispute()).status).toBe(200)
+
+    expect(from).toHaveBeenCalledWith('sender_notices')
+    expect(noticeRows).toHaveLength(1)
+    const row = noticeRows[0]!['insert']!.mock.calls[0]![0] as Record<string, unknown>
+    expect(row).toMatchObject({
+      user_id: USER_ID,
+      transfer_id: TRANSFER_ID,
+      kind: 'account_frozen',
+      language: 'en',
+      // No automated channel exists: the row records what was owed and what it
+      // said, never that anything was sent.
+      channel: 'manual',
+      status: 'pending',
+    })
   })
 
   it('an undelivered transfer is held, books nothing, and pages at error', async () => {

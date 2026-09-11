@@ -61,6 +61,11 @@ describe('activity derivations (slice 2)', () => {
     expect(activityTone('refund')).toBe('progress')
     expect(activityTone('hold_release')).toBe('progress')
     expect(activityTone('float_topup')).toBe('neutral')
+    // The loss path's freeze is the one row that means something went wrong for
+    // a real person; it must not scan like a deposit landing.
+    expect(activityTone('sender_freeze')).toBe('error')
+    // The unfreeze is a decision, not a win: neutral, never success.
+    expect(activityTone('sender_unfreeze')).toBe('neutral')
     expect(activityTone('unknown_kind')).toBe('neutral')
   })
 
