@@ -159,6 +159,9 @@ export interface OpsCheck {
   status: string
   findingsCount: number
   error?: string
+  /** The check's own counts/refs for the run. The route's response schema is
+   *  the allowlist that decides which of these keys actually reach the wire. */
+  summary?: Record<string, unknown>
 }
 
 export interface OpsReconciliationRun {
@@ -328,7 +331,13 @@ interface RunRow {
   created_at: string
   status: string
   findings_count: number
-  checks: Array<{ name: string; status: string; findings_count: number; error?: string }>
+  checks: Array<{
+    name: string
+    status: string
+    findings_count: number
+    error?: string
+    summary?: Record<string, unknown>
+  }>
   balances: Record<string, { amount_minor: number; currency: string }>
 }
 
@@ -355,6 +364,7 @@ async function readReconciliationRuns(): Promise<{
       status: check.status,
       findingsCount: Number(check.findings_count ?? 0),
       ...(typeof check.error === 'string' && { error: check.error }),
+      ...(check.summary != null && typeof check.summary === 'object' && { summary: check.summary }),
     })),
   }))
   // Balance snapshot rides the NEWEST RUN THAT ACTUALLY CARRIES ONE (free;

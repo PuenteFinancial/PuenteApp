@@ -46,6 +46,56 @@ import {
 // re-exported here so existing imports of opsWriteEnabled do not move.
 export { opsWriteEnabled } from './ops-gate.js'
 
+// A check's own summary of its run, so the board can say WHAT it found and not
+// just how many. Every key is enumerated for the same reason the rest of this
+// file is: the schema is the output allowlist, so a future check's new summary
+// key stays off this wire until someone adds it here on purpose. Counts, money
+// in minor units, and fixed developer strings only — `firstReadFailure` is
+// deliberately absent, being a raw upstream error message that belongs in
+// Sentry rather than on an ops page.
+const checkSummarySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    // transfer_aging: which buckets fired, the question "1 findings" cannot answer.
+    buckets: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        'pending-payment-autofail-dead': { type: 'number' },
+        'funded-unheld-stuck': { type: 'number' },
+        'funded-held-overdue': { type: 'number' },
+        'payout-in-transit-stuck': { type: 'number' },
+        'payout-failed-unrefunded': { type: 'number' },
+        'under-review-aging': { type: 'number' },
+        'funding-uncleared-overdue': { type: 'number' },
+      },
+    },
+    openRows: { type: 'number' },
+    flagged: { type: 'number' },
+    unposted: { type: 'number' },
+    synthesized: { type: 'number' },
+    listed: { type: 'number' },
+    inWindow: { type: 'number' },
+    windowDays: { type: 'number' },
+    truncated: { type: 'boolean' },
+    checked: { type: 'number' },
+    readFailures: { type: 'number' },
+    unrecorded: { type: 'number' },
+    walletMinor: { type: 'number' },
+    ledgerMinor: { type: 'number' },
+    diffMinor: { type: 'number' },
+    dustDropped: { type: 'boolean' },
+    invoices: { type: 'number' },
+    booked: { type: 'number' },
+    paid: { type: 'number' },
+    unbilledAccruedMinor: { type: 'number' },
+    unbilledOverdue: { type: 'boolean' },
+    // Why a check skipped — a fixed string from the check itself, never input.
+    reason: { type: 'string' },
+  },
+} as const
+
 const moneyPanelSchema = {
   type: 'object',
   properties: {
@@ -148,6 +198,7 @@ const overviewResponseSchema = {
                 status: { type: 'string' },
                 findingsCount: { type: 'number' },
                 error: { type: 'string' },
+                summary: checkSummarySchema,
               },
             },
           },

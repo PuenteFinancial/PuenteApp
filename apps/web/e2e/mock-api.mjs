@@ -581,10 +581,21 @@ const server = createServer(async (req, res) => {
         {
           createdAt: '2026-08-01T06:00:00.000Z',
           status: 'findings',
-          findingsCount: 1,
+          findingsCount: 2,
           checks: [
             { name: 'ledger_net_zero', status: 'pass', findingsCount: 0 },
-            { name: 'bridge_wallet_float', status: 'findings', findingsCount: 1 },
+            {
+              name: 'bridge_wallet_float',
+              status: 'findings',
+              findingsCount: 1,
+              summary: { walletMinor: 9492, ledgerMinor: 9092, diffMinor: 400, dustDropped: false },
+            },
+            {
+              name: 'transfer_aging',
+              status: 'findings',
+              findingsCount: 1,
+              summary: { openRows: 1, buckets: { 'funded-unheld-stuck': 1 } },
+            },
           ],
         },
         { createdAt: '2026-07-31T06:00:00.000Z', status: 'pass', findingsCount: 0, checks: [] },

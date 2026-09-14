@@ -254,8 +254,10 @@ describe('GET /v1/ops/overview', () => {
               name: 'bridge_wallet_float',
               status: 'findings',
               findingsCount: 1,
-              // simulated future leak: a check field the schema does not know
-              summary: { providerBody: 'SENSITIVE' },
+              // The summary reaches the wire, but key by key: `diffMinor` is
+              // enumerated, `providerBody` is the simulated future leak and is
+              // stripped the same way an unknown top-level field is.
+              summary: { diffMinor: 400, providerBody: 'SENSITIVE' },
             },
           ],
         },
@@ -277,7 +279,9 @@ describe('GET /v1/ops/overview', () => {
       name: 'bridge_wallet_float',
       status: 'findings',
       findingsCount: 1,
+      summary: { diffMinor: 400 },
     })
+    expect(JSON.stringify(res.body)).not.toContain('providerBody')
     await app.close()
   })
 })

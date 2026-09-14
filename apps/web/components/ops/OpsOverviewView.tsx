@@ -22,6 +22,7 @@ import {
   agingReviews,
   latestRun,
   latestFindings,
+  summaryPairs,
   latestSkipped,
   formatBalance,
   workerHeartbeatAlarm,
@@ -312,6 +313,28 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
               {check.error != null && (
                 <div style={{ marginTop: 6, fontSize: 12, color: 'var(--muted)', fontFamily: 'var(--mono)' }}>
                   {check.error}
+                </div>
+              )}
+              {/* What the check actually found. Without this the card is a
+                  count and a name, and the only way to the substance was
+                  opening Sentry. */}
+              {summaryPairs(check.summary).length > 0 && (
+                <div
+                  style={{
+                    marginTop: 6,
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: '2px 12px',
+                    fontSize: 12,
+                    fontFamily: 'var(--mono)',
+                    color: 'var(--muted)',
+                  }}
+                >
+                  {summaryPairs(check.summary).map(([key, value]) => (
+                    <span key={key}>
+                      {key} <span style={{ color: 'var(--ink)' }}>{value}</span>
+                    </span>
+                  ))}
                 </div>
               )}
             </Card>
