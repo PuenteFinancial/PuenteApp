@@ -19,12 +19,21 @@ const envMock = vi.hoisted(() => ({
   MANUAL_PENDING_MAX_AGE_DAYS: 7,
   FLOAT_CEILING_MINOR: undefined as number | undefined,
   FUNDING_PROCESSOR: 'manual' as string,
+  // The fx_drift hold's age arm — the detail read derives the release verdict
+  // from it (services/payouts.ts assessQuoteAge).
+  FX_MAX_QUOTE_AGE_MINUTES: 240,
 }))
 vi.mock('../config/env.js', () => ({ env: envMock }))
 
 // ops-overview's other panel seams — imported for dwellFor, never called here.
 vi.mock('./cancellation-review.js', () => ({ listPendingReviews: vi.fn() }))
-vi.mock('./payouts.js', () => ({ isFloatCeilingTripped: vi.fn() }))
+// assessQuoteAge is REAL here on purpose: the point of the holdRelease verdict
+// is that the board and the submit gate share one definition of "stale", and a
+// stubbed age would let this suite agree with a mock instead of with the gate.
+vi.mock('./payouts.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./payouts.js')>()),
+  isFloatCeilingTripped: vi.fn(),
+}))
 vi.mock('./ledger.js', () => ({ getAccountBalance: vi.fn() }))
 
 // refunds.ts drags the Bridge client in; the two seams this service uses are
@@ -490,6 +499,60 @@ describe('buildOpsTransferDetail', () => {
 // Slice 2: the history is read for THIS transfer and passed through as the
 // service shaped it; a failed read fails the whole detail (no silent
 // "nobody touched this").
+// The Release-hold verdict (2026-09-14). The hold REASON cannot say whether a
+// release would accomplish anything: fx_drift is placed by either of two
+// conditions, and only the drift one is something a release resolves.
+describe('holdRelease — whether releasing could clear the hold', () => {
+  const heldFxDrift = (quoteMinutesOld: number) => {
+    results.transfers = {
+      data: transferRow({ state: 'FUNDED', payout_hold_reason: 'fx_drift', payout_held_at: minutesAgo(30) }),
+      error: null,
+    }
+    const quote = results.quotes?.data as Record<string, unknown>
+    results.quotes = { data: { ...quote, created_at: minutesAgo(quoteMinutesOld) }, error: null }
+  }
+
+  it('names stale_quote when the quote is past the bound — the release would only loop', async () => {
+    // The staging shape, 2026-09-14: quotes ~6,900 minutes old, released by
+    // hand at 17:33 and re-held as fx_drift 33 seconds later.
+    heldFxDrift(6_900)
+    const detail = await buildOpsTransferDetail(T)
+    expect(detail!.holdRelease).toEqual({
+      blocker: 'stale_quote',
+      quoteAgeMinutes: 6_900,
+      maxQuoteAgeMinutes: 240,
+    })
+  })
+
+  it('reports no blocker for a fresh quote — a drift hold IS releasable', async () => {
+    heldFxDrift(30)
+    const detail = await buildOpsTransferDetail(T)
+    expect(detail!.holdRelease).toEqual({ blocker: null, quoteAgeMinutes: 30, maxQuoteAgeMinutes: 240 })
+  })
+
+  it('measures the age on the same clock as generatedAt', async () => {
+    heldFxDrift(300)
+    const detail = await buildOpsTransferDetail(T)
+    expect(detail!.generatedAt).toBe(NOW.toISOString())
+    expect(detail!.holdRelease!.quoteAgeMinutes).toBe(300)
+  })
+
+  it.each(['payability', 'velocity_review', 'submit_error', 'sender_kyc_pending'])(
+    'is null for a %s hold — only fx_drift has two arms',
+    async (reason) => {
+      results.transfers = {
+        data: transferRow({ state: 'FUNDED', payout_hold_reason: reason, payout_held_at: minutesAgo(30) }),
+        error: null,
+      }
+      expect((await buildOpsTransferDetail(T))!.holdRelease).toBeNull()
+    },
+  )
+
+  it('is null when there is no hold at all', async () => {
+    expect((await buildOpsTransferDetail(T))!.holdRelease).toBeNull()
+  })
+})
+
 describe('activity history (slice 2)', () => {
   it('reads the history for the transfer and passes it through', async () => {
     const rows = [

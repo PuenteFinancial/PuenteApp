@@ -3,6 +3,7 @@ import {
   isOpsTransferDetailShape,
   ledgerBalanced,
   releasableHoldReason,
+  holdReleaseBlocker,
   refundPreflight,
   detailActions,
   formatOpsTimestamp,
@@ -50,6 +51,7 @@ const detail = (over: Partial<OpsTransferDetail> = {}): OpsTransferDetail => ({
   },
   quote: null,
   destination: null,
+  holdRelease: null,
   refund: {
     claimStatus: 'unclaimed',
     claimedAt: null,
@@ -83,6 +85,56 @@ describe('isOpsTransferDetailShape', () => {
     expect(isOpsTransferDetailShape({ ...detail(), transitions: 'nope' })).toBe(false)
     expect(isOpsTransferDetailShape({ ...detail(), refund: { claimStatus: 'maybe' } })).toBe(false)
     expect(isOpsTransferDetailShape({ ...detail(), actionsEnabled: 'yes' })).toBe(false)
+  })
+
+  it('accepts an absent or null holdRelease (deploy skew) but not a malformed one', () => {
+    expect(isOpsTransferDetailShape(detail({ holdRelease: undefined }))).toBe(true)
+    expect(isOpsTransferDetailShape(detail({ holdRelease: null }))).toBe(true)
+    expect(
+      isOpsTransferDetailShape(
+        detail({ holdRelease: { blocker: 'stale_quote', quoteAgeMinutes: 6_900, maxQuoteAgeMinutes: 240 } }),
+      ),
+    ).toBe(true)
+    // A malformed verdict must not be read as "no blocker" — that is the exact
+    // failure this guard exists to prevent.
+    expect(isOpsTransferDetailShape({ ...detail(), holdRelease: { blocker: 'whatever' } })).toBe(false)
+    expect(isOpsTransferDetailShape({ ...detail(), holdRelease: 'stale' })).toBe(false)
+    expect(
+      isOpsTransferDetailShape({ ...detail(), holdRelease: { blocker: null, quoteAgeMinutes: '30' } }),
+    ).toBe(false)
+  })
+})
+
+// The board must not offer an action that can only loop (staging 2026-09-14:
+// two fx_drift rows released by hand at 17:33, re-held 33 seconds later).
+describe('holdReleaseBlocker', () => {
+  const stale = { blocker: 'stale_quote' as const, quoteAgeMinutes: 6_900, maxQuoteAgeMinutes: 240 }
+
+  it('reports the API verdict on a releasable hold', () => {
+    expect(holdReleaseBlocker(withTransfer({ payoutHoldReason: 'fx_drift' }, { holdRelease: stale }))).toBe(
+      'stale_quote',
+    )
+    expect(
+      holdReleaseBlocker(
+        withTransfer(
+          { payoutHoldReason: 'fx_drift' },
+          { holdRelease: { blocker: null, quoteAgeMinutes: 30, maxQuoteAgeMinutes: 240 } },
+        ),
+      ),
+    ).toBeNull()
+  })
+
+  it('is null when the verdict is absent — an older API reports nothing, and the API still refuses', () => {
+    expect(
+      holdReleaseBlocker(withTransfer({ payoutHoldReason: 'fx_drift' }, { holdRelease: undefined })),
+    ).toBeNull()
+  })
+
+  it('is null on a row that has no releasable hold to begin with', () => {
+    expect(holdReleaseBlocker(detail({ holdRelease: stale }))).toBeNull()
+    expect(
+      holdReleaseBlocker(withTransfer({ state: 'SUBMITTED', payoutHoldReason: 'fx_drift' }, { holdRelease: stale })),
+    ).toBeNull()
   })
 })
 
@@ -176,6 +228,28 @@ describe('detailActions', () => {
         ),
       ),
     ).toEqual(['refund'])
+  })
+
+  it('withholds holdRelease when releasing could not clear the hold', () => {
+    // Same posture as the abandoned refund claim below: when the action cannot
+    // do its job, the page shows the path that can (cancel + refund) instead of
+    // a button that spends the operator's action on a loop.
+    expect(
+      detailActions(
+        withTransfer(
+          { payoutHoldReason: 'fx_drift' },
+          { holdRelease: { blocker: 'stale_quote', quoteAgeMinutes: 6_900, maxQuoteAgeMinutes: 240 } },
+        ),
+      ),
+    ).toEqual([])
+    expect(
+      detailActions(
+        withTransfer(
+          { payoutHoldReason: 'fx_drift' },
+          { holdRelease: { blocker: null, quoteAgeMinutes: 30, maxQuoteAgeMinutes: 240 } },
+        ),
+      ),
+    ).toEqual(['holdRelease'])
   })
 
   it('never offers refund on an abandoned claim — the STOP state has no button', () => {

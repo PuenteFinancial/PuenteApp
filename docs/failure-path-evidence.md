@@ -53,6 +53,7 @@ coverage that passed.
 | Treasury wallet drained | Bridge sync 400; retries freely until the ceiling, then `submit_error` | **Driven** — sandbox, 2026-07-15, real 400, no overdraw |
 | Retry ceiling exhausted | `submit_error` hold after 30 min of 400s | **Unit** |
 | FX drift or stale quote | `fx_drift` hold, no claim, no Bridge call | **Unit** |
+| Release of a stale-quote `fx_drift` hold | refused `hold_cannot_clear`, no write, no ops_actions row — the release would loop (staging 2026-09-14) | **Unit** |
 | Velocity / amount limits | `velocity_review` hold at submit; 403 at confirm | **DB** |
 | Float ceiling tripped | No hold by design; the sweep retries as exposure drains | **DB** |
 | Uncleared-exposure cap | No hold; older-wins ordering makes it deterministic | **DB** |

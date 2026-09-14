@@ -15,6 +15,11 @@ vi.mock('./ops-actions.js', () => ({
   recordOpsAction: (...args: unknown[]) => recordOpsAction(...args),
 }))
 
+// assessQuoteAge (services/payouts.js) reads the bound at call time; releaseHold
+// reaches it for fx_drift holds only.
+const envStub = vi.hoisted(() => ({ FX_MAX_QUOTE_AGE_MINUTES: 240 }))
+vi.mock('../config/env.js', () => ({ env: envStub }))
+
 const captureMessage = vi.hoisted(() => vi.fn())
 const setFingerprint = vi.hoisted(() => vi.fn())
 vi.mock('@sentry/node', () => ({
@@ -45,6 +50,7 @@ function transfersTable(result: { data: unknown; error: unknown }) {
 }
 
 beforeEach(() => {
+  envStub.FX_MAX_QUOTE_AGE_MINUTES = 240
   from.mockReset()
   enqueuePayoutSubmit.mockReset().mockResolvedValue('job-1')
   recordOpsAction.mockReset().mockResolvedValue(true)
@@ -281,16 +287,39 @@ const ACTOR = 'ops:aaaaaaaa-1111-4222-8333-444444444444'
 const HELD_AT = '2026-09-08T11:00:00.000Z'
 const NOTE = 'Spoke with the sender; both sends today are legitimate.'
 
-type HoldRow = { id: string; state: string; payout_hold_reason: string | null; payout_held_at: string | null }
+type HoldRow = {
+  id: string
+  state: string
+  payout_hold_reason: string | null
+  payout_held_at: string | null
+  quote_id: string
+}
+
+const QUOTE = 'dddddddd-1111-4222-8333-444444444444'
+// Comfortably inside the 240-minute bound unless a case says otherwise.
+const freshQuoteAt = () => new Date(Date.now() - 5 * 60_000).toISOString()
+const staleQuoteAt = () => new Date(Date.now() - 6_900 * 60_000).toISOString()
 
 // The service reads (select().eq().maybeSingle()) then writes (update chain).
 // `reads` is consumed in order: pre-read first, then the optional post-CAS
 // re-read. `updated` is the UPDATE's returned rows.
-function holdScenario(reads: Array<HoldRow | null>, updated: Array<{ id: string }> | { error: { message: string } }) {
+function holdScenario(
+  reads: Array<HoldRow | null>,
+  updated: Array<{ id: string }> | { error: { message: string } },
+  // The quotes read the fx_drift release refusal makes. `undefined` means the
+  // case never expects one; a null row means the required join came back empty.
+  quote?: { created_at: string } | null | { error: { message: string } },
+) {
   const readQueue = [...reads]
   const maybeSingle = vi.fn(async () => ({ data: readQueue.shift() ?? null, error: null }))
   const selectEq = vi.fn(() => ({ maybeSingle }))
   const select = vi.fn(() => ({ eq: selectEq }))
+
+  const quoteResult =
+    quote != null && 'error' in quote ? { data: null, error: quote.error } : { data: quote ?? null, error: null }
+  const quoteMaybeSingle = vi.fn(async () => quoteResult)
+  const quoteEq = vi.fn(() => ({ maybeSingle: quoteMaybeSingle }))
+  const quoteSelect = vi.fn(() => ({ eq: quoteEq }))
 
   const updateResult = 'error' in updated ? { data: null, error: updated.error } : { data: updated, error: null }
   const updateSelect = vi.fn(async (..._args: unknown[]) => updateResult)
@@ -299,8 +328,22 @@ function holdScenario(reads: Array<HoldRow | null>, updated: Array<{ id: string 
   const eq1 = vi.fn((..._args: unknown[]) => ({ eq: eq2 }))
   const update = vi.fn((..._args: unknown[]) => ({ eq: eq1 }))
 
-  from.mockImplementation(() => ({ select, update }))
-  return { select, selectEq, maybeSingle, update, eq1, eq2, eq3, updateSelect }
+  from.mockImplementation((table: string) =>
+    table === 'quotes' ? { select: quoteSelect } : { select, update },
+  )
+  return {
+    select,
+    selectEq,
+    maybeSingle,
+    update,
+    eq1,
+    eq2,
+    eq3,
+    updateSelect,
+    quoteSelect,
+    quoteEq,
+    quoteMaybeSingle,
+  }
 }
 
 const held = (reason: string | null, state = 'FUNDED'): HoldRow => ({
@@ -308,6 +351,7 @@ const held = (reason: string | null, state = 'FUNDED'): HoldRow => ({
   state,
   payout_hold_reason: reason,
   payout_held_at: reason ? HELD_AT : null,
+  quote_id: QUOTE,
 })
 
 const input = { transferId: TRANSFER, reason: 'velocity_review' as const, actor: ACTOR, note: NOTE, requestId: 'req-1' }
@@ -336,7 +380,7 @@ describe('releaseHold', () => {
 
     expect(out).toEqual({ done: true, outcome: 'released', enqueued: true })
     // Pre-read columns: the four the classification and the `before` need.
-    expect(s.select).toHaveBeenCalledWith('id, state, payout_hold_reason, payout_held_at')
+    expect(s.select).toHaveBeenCalledWith('id, state, payout_hold_reason, payout_held_at, quote_id')
     expect(s.selectEq).toHaveBeenCalledWith('id', TRANSFER)
     // The CAS, verbatim from docs/runbooks/payout-holds.md.
     expect(s.update).toHaveBeenCalledWith({ payout_hold_reason: null, payout_held_at: null })
@@ -398,6 +442,99 @@ describe('releaseHold', () => {
       expect(s.update).not.toHaveBeenCalled()
       expect(recordOpsAction).not.toHaveBeenCalled()
       expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // hold_cannot_clear: the reason is releasable, the row has not moved, and
+  // releasing it STILL cannot work (staging 2026-09-14 — released 17:33,
+  // re-held as fx_drift 33 seconds later, quotes ~6,900 minutes old).
+  // -------------------------------------------------------------------------
+  describe('a release that could only loop', () => {
+    const fxInput = { ...input, reason: 'fx_drift' as const }
+
+    it('refuses a stale-quote fx_drift before writing, and names the numbers', async () => {
+      const s = holdScenario([held('fx_drift')], [{ id: TRANSFER }], { created_at: staleQuoteAt() })
+
+      const out = await releaseHold(fxInput, log)
+
+      expect(out).toMatchObject({
+        done: false,
+        reason: 'hold_cannot_clear',
+        cause: 'stale_quote',
+      })
+      expect((out as { quoteAge: { stale: boolean; maxAgeMinutes: number } }).quoteAge).toMatchObject({
+        stale: true,
+        maxAgeMinutes: 240,
+      })
+      // The whole point: nothing was written, so the operator's action is
+      // refused rather than spent.
+      expect(s.update).not.toHaveBeenCalled()
+      expect(recordOpsAction).not.toHaveBeenCalled()
+      expect(enqueuePayoutSubmit).not.toHaveBeenCalled()
+      // Still audited — a refused ops action is an ops action.
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({ audit: true, transferId: TRANSFER, cause: 'stale_quote' }),
+        'payout hold release refused — releasing cannot clear this hold',
+      )
+    })
+
+    it('releases an fx_drift hold whose quote is still fresh — drift is the case the button is FOR', async () => {
+      const s = holdScenario([held('fx_drift')], [{ id: TRANSFER }], { created_at: freshQuoteAt() })
+
+      expect(await releaseHold(fxInput, log)).toEqual({ done: true, outcome: 'released', enqueued: true })
+      expect(s.quoteSelect).toHaveBeenCalledWith('created_at')
+      expect(s.quoteEq).toHaveBeenCalledWith('id', QUOTE)
+      expect(s.eq3).toHaveBeenCalledWith('payout_hold_reason', 'fx_drift')
+      expect(recordOpsAction).toHaveBeenCalledTimes(1)
+    })
+
+    it('raising FX_MAX_QUOTE_AGE_MINUTES makes the same row releasable — the escape hatch is real', async () => {
+      const createdAt = staleQuoteAt()
+      holdScenario([held('fx_drift')], [{ id: TRANSFER }], { created_at: createdAt })
+      expect(await releaseHold(fxInput, log)).toMatchObject({ reason: 'hold_cannot_clear' })
+
+      recordOpsAction.mockClear()
+      envStub.FX_MAX_QUOTE_AGE_MINUTES = 10_000
+      holdScenario([held('fx_drift')], [{ id: TRANSFER }], { created_at: createdAt })
+      expect(await releaseHold(fxInput, log)).toMatchObject({ done: true, outcome: 'released' })
+    })
+
+    it.each(['velocity_review', 'payability', 'submit_error', 'funding_disputed', 'sender_suspended'] as const)(
+      '%s never reads the quote — only fx_drift has two arms',
+      async (reason) => {
+        const s = holdScenario([held(reason)], [{ id: TRANSFER }])
+        expect(await releaseHold({ ...input, reason }, log)).toMatchObject({ done: true, outcome: 'released' })
+        expect(s.quoteSelect).not.toHaveBeenCalled()
+      },
+    )
+
+    it('the CAS refusals still win: a row that MOVED reports that, not the quote', async () => {
+      // Ordering matters. "The hold changed underneath you" tells the operator
+      // to refresh; hold_cannot_clear tells them to stop and cancel. A row that
+      // re-held under another reason must get the first message even though its
+      // quote is ancient.
+      const s = holdScenario([held('submit_error')], [{ id: TRANSFER }], { created_at: staleQuoteAt() })
+      expect(await releaseHold(fxInput, log)).toEqual({
+        done: false,
+        reason: 'hold_reason_mismatch',
+        actual: 'submit_error',
+      })
+      expect(s.quoteSelect).not.toHaveBeenCalled()
+    })
+
+    describe('fails closed rather than releasing on an unknown quote age', () => {
+      it('throws when the quote read errors', async () => {
+        holdScenario([held('fx_drift')], [{ id: TRANSFER }], { error: { message: 'boom' } })
+        await expect(releaseHold(fxInput, log)).rejects.toThrow('hold release quote load failed')
+        expect(recordOpsAction).not.toHaveBeenCalled()
+      })
+
+      it('throws when the required quote join returns no row', async () => {
+        holdScenario([held('fx_drift')], [{ id: TRANSFER }], null)
+        await expect(releaseHold(fxInput, log)).rejects.toThrow('no row for a required join')
+        expect(recordOpsAction).not.toHaveBeenCalled()
+      })
     })
   })
 

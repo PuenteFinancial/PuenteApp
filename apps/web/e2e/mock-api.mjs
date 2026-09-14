@@ -213,6 +213,10 @@ const OPS_FAILED_ABANDONED = 'fa11ed02-0000-4000-8000-000000000006'
 // POST refuses, standing in for "the row moved after the page loaded".
 const OPS_FAILED_RACED = 'fa11ed03-0000-4000-8000-000000000007' // POST → 409 claim_abandoned
 const OPS_FAILED_STUCK = 'fa11ed04-0000-4000-8000-000000000008' // POST → 409 principal_not_returned
+// 2026-09-14: an fx_drift hold whose quote is past FX_MAX_QUOTE_AGE_MINUTES.
+// Releasing it would re-hold the row within a minute, so the API reports the
+// blocker and the page must withhold the button entirely.
+const OPS_HELD_STALE_QUOTE = '4e1d0002-0000-4000-8000-000000000009'
 
 function opsDetailBase(id, over = {}) {
   return {
@@ -309,6 +313,9 @@ function opsDetailBase(id, over = {}) {
     disclosures: [{ type: 'prepayment', locale: 'es', presentedAt: '2026-08-01T07:46:00.000Z' }],
     // Slice 2: the transfer's ops history (note + derived changes ride here).
     activity: over.activity ?? [],
+    // 2026-09-14: whether Release hold could clear the hold. Null unless the
+    // hold is fx_drift — the one reason with two arms.
+    holdRelease: over.holdRelease ?? null,
   }
 }
 
@@ -334,6 +341,14 @@ function opsDetailFixture(id) {
           requestId: 'req-e2e-1',
         },
       ],
+    })
+  }
+  if (id === OPS_HELD_STALE_QUOTE) {
+    return opsDetailBase(id, {
+      transfer: { payoutHoldReason: 'fx_drift', payoutHeldAt: '2026-08-01T08:01:00.000Z' },
+      // The staging shape, 2026-09-14: quote ~6,900 minutes old against a
+      // 240-minute bound. blocker non-null ⇒ no Release hold button at all.
+      holdRelease: { blocker: 'stale_quote', quoteAgeMinutes: 6900, maxQuoteAgeMinutes: 240 },
     })
   }
   if (id === OPS_FAILED_1 || id === OPS_FAILED_RACED || id === OPS_FAILED_STUCK) {
@@ -677,6 +692,19 @@ const server = createServer(async (req, res) => {
     if (typeof body?.transferId !== 'string' || !OPS_RELEASABLE.includes(body?.reason) || !opsNoteOk(body?.note)) {
       return json(res, 400, {
         error: { code: 'validation_error', message: 'mock: transferId, a releasable reason, and a 10–500 char note are required', requestId: 'mock' },
+      })
+    }
+    // The board hides the button for this row; a stale tab (or a direct caller)
+    // still gets the API's own refusal, which is NOT `conflict` — nothing
+    // changed underneath, so refreshing would not help.
+    if (body.transferId === OPS_HELD_STALE_QUOTE) {
+      return json(res, 409, {
+        error: {
+          code: 'hold_cannot_clear',
+          message: 'mock: Releasing cannot clear this hold — cancel and refund it instead',
+          requestId: 'mock',
+          details: [{ path: 'reason', issue: 'stale_quote; quote age 6900min > max 240min' }],
+        },
       })
     }
     if (body.transferId !== OPS_HELD_1) {

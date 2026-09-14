@@ -238,7 +238,11 @@ sentence per term, linking to the doc that owns it. Read once early; refer back 
   are service-role only and never logged.
 - **FX submission backstop** — the pre-submission guard that holds a payout (`fx_drift`) when the
   live Bridge buy rate drifts more than `FX_MAX_DRIFT_BPS` from the quote's `source_rate` or the
-  quote is older than `FX_MAX_QUOTE_AGE_MINUTES`; never submit on unknown or dislocated rates.
+  quote is older than `FX_MAX_QUOTE_AGE_MINUTES`; never submit on unknown or dislocated rates. The
+  two arms are not equally releasable: drift moves back, **quote age only grows**, so a release on a
+  stale quote re-holds the row on the next sweep. The board refuses that one (`hold_cannot_clear`)
+  and points at raising the bound or cancel + refund — see
+  [runbooks/payout-holds.md](runbooks/payout-holds.md).
 - **Quote as our commitment** — Bridge's rate is indicative only, but Reg E requires firm numbers,
   so a Puente quote is *our* time-boxed offer (source rate minus a buffer) and we absorb the
   variance. See [erd.md](erd.md) quotes + ledger `fx_slippage`.

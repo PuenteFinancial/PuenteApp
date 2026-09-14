@@ -1,4 +1,5 @@
 import { supabaseAdmin } from './supabase.js'
+import { assessQuoteAge } from './payouts.js'
 import { processorNameFor } from './funding/index.js'
 import { dwellFor, type OpsDwell } from './ops-overview.js'
 import { classifyRefundClaim, recordedReturnEvent, type ClaimStatus } from './refunds.js'
@@ -81,6 +82,20 @@ export interface OpsTransferDetail {
     status: string
     hasProviderAccountRef: boolean
     recipientStatus: string | null
+  } | null
+  // Whether the Release hold button can accomplish anything on THIS row, which
+  // the hold reason alone cannot say: `fx_drift` covers two conditions and only
+  // one of them is something a release resolves (services/payouts.ts
+  // assessQuoteAge). Null when there is no hold, or when the reason has no
+  // arm-level distinction — the board treats null as "no blocker known".
+  // Derived at read time from the quote's age against the live env bound, never
+  // from anything persisted: the bound is config and the age only grows, so a
+  // verdict recorded when the hold was placed would go stale in the direction
+  // that matters.
+  holdRelease: {
+    blocker: 'stale_quote' | null
+    quoteAgeMinutes: number
+    maxQuoteAgeMinutes: number
   } | null
   refund: {
     claimStatus: ClaimStatus
@@ -533,6 +548,19 @@ export async function buildOpsTransferDetail(transferId: string): Promise<OpsTra
 
   const ledgerKeySet = new Set(ledger.map((batch) => batch.idempotencyKey))
 
+  // Same clock as generatedAt, so the age the operator reads and the verdict
+  // beside it cannot disagree. Only fx_drift has two arms today; every other
+  // reason reports null rather than a fabricated "no blocker".
+  let holdRelease: OpsTransferDetail['holdRelease'] = null
+  if (transfer.payout_hold_reason === 'fx_drift' && quote != null) {
+    const age = assessQuoteAge(quote.createdAt, nowMs)
+    holdRelease = {
+      blocker: age.stale ? 'stale_quote' : null,
+      quoteAgeMinutes: Math.round(age.ageMinutes),
+      maxQuoteAgeMinutes: age.maxAgeMinutes,
+    }
+  }
+
   return {
     generatedAt: new Date(nowMs).toISOString(),
     activity,
@@ -567,6 +595,7 @@ export async function buildOpsTransferDetail(transferId: string): Promise<OpsTra
     },
     quote,
     destination,
+    holdRelease,
     refund: {
       claimStatus: classifyRefundClaim(transfer.refund_claimed_at),
       claimedAt: transfer.refund_claimed_at,

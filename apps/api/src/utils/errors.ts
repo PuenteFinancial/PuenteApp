@@ -36,6 +36,14 @@ export type ApiErrorCode =
   // the principal is stuck AT Bridge). Never retry from the UI: the operator
   // reads the Bridge dashboard and follows runbooks/manual-refund.md.
   | 'principal_not_returned'
+  // Ops hold-release (2026-09-14), 409: the hold is one an operator MAY release
+  // and the row has not moved — but releasing it cannot clear it, because the
+  // condition that placed it is one the submit job re-measures identically on
+  // the next sweep (a `fx_drift` hold whose quote is past
+  // FX_MAX_QUOTE_AGE_MINUTES: quote age only grows). Its own code because the
+  // operator reaction is the opposite of `conflict`: not "refresh and look
+  // again" but "release is not the exit for this row — cancel and refund it".
+  | 'hold_cannot_clear'
   // Onramp supportability refusal (#213): the funding processor can't serve
   // this sender's location/profile. 403 at confirm; permanent for the sender
   // from this network location, not retryable-later like not_configured.
