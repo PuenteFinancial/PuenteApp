@@ -24,7 +24,7 @@ stateDiagram-v2
     PENDING_PAYMENT --> FUNDED: funding rail confirms (five doors — see Funding rails)
     PENDING_PAYMENT --> PAYMENT_FAILED: rail rejects / rail-aware staleness reaper
     FUNDED --> SUBMITTED: submit job claims + creates Bridge payout
-    FUNDED --> CANCELED: user cancels (pre-claim only — slice 6)
+    FUNDED --> CANCELED: user cancels (pre-claim, in-window) OR ops cancels an undeliverable held payout
     SUBMITTED --> IN_FLIGHT: Bridge accepts payout
     SUBMITTED --> PAYOUT_FAILED: Bridge rejects
     IN_FLIGHT --> COMPLETED: SPEI delivered to recipient
@@ -40,6 +40,17 @@ stateDiagram-v2
 ```
 
 **Honesty notes on the diagram (2026-08-26):**
+- **`FUNDED → CANCELED` has TWO writers (2026-09-14).** The sender's own cancel (`cancel_transfer`,
+  guarded on `submit_attempted_at IS NULL` **and** the Reg E window) and the OPERATOR's cancel of a
+  payout that can never be delivered (`ops_cancel_held_transfer`, same race guard, no window, plus a
+  compare-and-swap on `payout_hold_reason` so it can only touch a row ops is already holding). They
+  post DIFFERENT ledger batches — see the two `CANCELED` blocks in
+  [ledger-rules.md](ledger-rules.md). The operator path is
+  `scripts/cancel-held-transfer.ts` → `services/ops-cancel.ts`; the corner it closes is that a
+  `payability` hold whose cause never resolves had **no exit at all**: releasing re-holds on the
+  next preflight, the ops refund route takes only `PAYOUT_FAILED`, and the sender's window closed
+  30 minutes after they paid ([runbooks/payout-holds.md](runbooks/payout-holds.md), "When a hold
+  can never clear").
 - **`FUNDING_REVERSED` is written by the funding webhook (2026-09-10).** `funding_reversed`
   (Stripe `charge.dispute.created`, mock) reaches `applyFundingReversed`, which branches on where
   the pesos are: **COMPLETED** transitions here and posts the loss batch; **FUNDED** places a
@@ -106,7 +117,7 @@ payment* (new debit against Puente), not a reversal of the original entries. The
 | `IN_FLIGHT` | Bridge is executing the FX + SPEI payout. | no |
 | `COMPLETED` | Recipient credited at their CLABE. | ✅ success |
 | `PAYMENT_FAILED` | The rail rejected collection (Stripe decline, onramp `rejected`) or the staleness reaper fired; no funds collected. Terminal — no retry against this transfer. User returns to the quote screen; a new quote + new transfer is required. | ✅ |
-| `CANCELED` | User canceled while still pre-delivery; triggers the void/refund. On mock/stripe the undo settles synchronously → `REFUNDED`. On manual/onramp the undo needs a human disbursement, so this is a **resting state** until the runbook runs. | → REFUNDED |
+| `CANCELED` | The transfer was stopped pre-delivery — by the sender inside their Reg E window, or by an operator whose payout could never be delivered (2026-09-14) — and the void/refund follows. On mock/stripe the undo settles synchronously → `REFUNDED`. On manual/onramp the undo needs a human disbursement, so this is a **resting state** until the runbook runs; on the ops path `refunds_payable` stays open while it rests, which is the ledger saying the sender has not been paid. | → REFUNDED |
 | `PAYOUT_FAILED` | Bridge could not deliver (bad CLABE, bank reject); triggers refund. | → REFUNDED |
 | `REFUNDED` | Funds returned to sender (from CANCELED, PAYOUT_FAILED, or UNDER_REVIEW). | ✅ |
 | `FUNDING_REVERSED` | ACH return / card chargeback **after** payout — our loss/recovery path. Written by the funding webhook via `applyFundingReversed`; the loss is booked straight to `loss_funding_reversed` at dispute creation, and a win is a correcting credit rather than a rewrite. | ✅ (ops) |

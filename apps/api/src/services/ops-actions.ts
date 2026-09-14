@@ -28,6 +28,13 @@ export type OpsActionKind =
   // an investigator already looks — see the migration for why it is not a
   // table of its own.
   | 'sender_freeze'
+  // An operator judged a held payout undeliverable, canceled it and returned
+  // the sender's money (services/ops-cancel.ts). Its own action rather than a
+  // 'hold_release' with a different note — a release says "this payout may now
+  // go", this says "it never will" — and not a 'refund' either, which means
+  // the PAYOUT_FAILED tail and entitles a reader to assume a bridge_return
+  // posting exists. Always `ops:<operator uuid>` with a typed note.
+  | 'transfer_cancel'
   // Its human counterpart, and the only one of the pair that is a DECISION:
   // someone judged a suspected-fraud account safe to transact again. Always
   // `ops:<operator uuid>` with a typed note (scripts/unfreeze-sender.ts) —

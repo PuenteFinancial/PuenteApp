@@ -153,7 +153,7 @@ against an open `funding_receivable`** — that gap is your ACH exposure, sittin
 ### Exceptions
 
 ```
-CANCELED  (ACH not yet in flight — reverse the FUNDED batch cleanly)
+CANCELED  (the SENDER's cancel, inside the Reg E window — reverse the FUNDED batch cleanly)
   DR transfer_payable        98
   DR fee_revenue              2    ← reverses the FUNDED credit; fee not earned on a cancel
   CR funding_receivable     100
@@ -162,18 +162,41 @@ CANCELED  (ACH not yet in flight — reverse the FUNDED batch cleanly)
    inflow and the refund outflow both go unbooked: they offset exactly, end-state books stay
    correct, and the transient Stripe-balance mismatch is a KNOWN recon timing window (logged
    `cancel void fell back to a refund`). If the fallback refund then BOUNCES, refund.failed
-   pages and the runbook re-disbursement carries its own posting.)
+   pages and the runbook re-disbursement carries its own posting.
+   WHY THE SHORTCUT IS SAFE HERE and nowhere else: the window is 30 minutes and ACH settles
+   in days, so `funding_cleared` provably has NOT posted on this row. See the ops cancel
+   below, where that is false.)
 
-CANCELED  (ACH already in flight — keep funding_receivable open; owe refund from float)
+CANCELED → REFUNDED  (the OPERATOR's cancel of an undeliverable payout — IMPLEMENTED 2026-09-14,
+  services/ops-cancel.ts. Specified here from the beginning as "ACH already in flight"; nothing
+  reached the case until a `payability` hold whose cause could never resolve left two staging
+  transfers funded and unpayable.)
+
+  Recognize the debt, at CANCELED — mode-free, so it can be posted BEFORE the processor is
+  called. That order is the safety property: once the state leaves FUNDED no payout can be
+  created by any path, and the batch that PAYS the sender cannot be chosen until the processor
+  says how it made them whole.
   DR transfer_payable        98
   DR fee_revenue              2
   CR refunds_payable        100
-  ── pay the refund immediately from float:
+
+  Pay it, at REFUNDED — the credited ASSET is the undo mode, same distinction as every other
+  refund pair in this file:
+  ── undo mode REFUNDED (the pull had settled; a real credit goes back):
   DR refunds_payable        100
   CR cash_clearing          100
-  ── ACH clears independently (may be days later):
-  DR cash_clearing          100
+  ── undo mode VOIDED (the pull was canceled; the sender is never debited):
+  DR refunds_payable        100
   CR funding_receivable     100
+
+  DO NOT post the sender-cancel reversal above on one of these. It credits `funding_receivable`,
+  which the `funding_cleared` leg has usually already settled on a row this old — driving the
+  receivable NEGATIVE (an arithmetic impossibility the open-item guard flags) and leaving the
+  cash we still hold unaccounted for. Asserted as a counterfactual in
+  `services/ops-cancel.db.test.ts`.
+
+  A transfer whose undo needs a HUMAN (manual / onramp rails) rests at CANCELED with
+  `refunds_payable` open — the honest statement that the sender has not been paid.
 
 PAYOUT_FAILED → REFUNDED  (after SUBMITTED; Bridge returns principal; undo mode REFUNDED —
   the funding had settled, so a real Stripe Refund pays the sender back)

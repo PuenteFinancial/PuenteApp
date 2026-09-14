@@ -60,6 +60,64 @@ go through migrations only). Background: [transfer-state-machine.md](../transfer
     where transfer_id = '<transfer-id>' order by created_at;
    ```
 
+## When a hold can never clear — cancel + refund (2026-09-14)
+
+**Release is still the default answer.** This is the other exit, for the case where the cause is
+not going to be fixed: the destination is one Bridge will never pay to, the quote is far past any
+drift the gate will accept, the sender's burst is not one we will honour. Releasing such a row does
+nothing — the submit job re-runs the same preflight and parks it again within a minute — and the
+transfer sits FUNDED forever with the sender's money collected and undelivered. Before 2026-09-14
+nothing in the system could end that state, which is exactly how two $5.00 staging transfers came
+to sit held since 2026-09-09.
+
+```bash
+doppler run -- pnpm exec tsx scripts/cancel-held-transfer.ts --list
+```
+
+```bash
+doppler run -- pnpm exec tsx scripts/cancel-held-transfer.ts <transfer-id> --operator <your user uuid> --hold <reason> --note "<what you verified>"
+```
+
+Dry run by default; add `--confirm` to execute. Run it from `apps/api/`.
+
+**What it does**, all through the owning services (`services/ops-cancel.ts`) — never a bare UPDATE:
+
+1. `FUNDED → CANCELED` through `ops_cancel_held_transfer`, which carries the same compare-and-swap
+   as a release (`payout_hold_reason = '<reason as shown>'`) plus the slice-6 race guard
+   (`submit_attempted_at IS NULL`). The state leaves FUNDED **first**, which is what makes it
+   impossible for a concurrent release to let the sweep pay out a transfer being refunded.
+   Posts `DR transfer_payable / DR fee_revenue / CR refunds_payable` — the obligation moves from
+   the recipient to the sender. The hold column is cleared; the reason is kept in the transition's
+   metadata and in the `ops_actions` row.
+2. Takes the **refund claim** (the same lock the other two refund tails take) and calls the row's
+   funding processor to undo the pull.
+3. `CANCELED → REFUNDED`, posting `DR refunds_payable / CR cash_clearing` when the pull had
+   settled, or `CR funding_receivable` when it was canceled before settling.
+
+**Which holds it will discharge:** `payability`, `velocity_review`, `fx_drift`, `submit_error` —
+the four where a human owes an action and the money is still honestly ours to give back. It
+**refuses** `funding_disputed` and `sender_suspended` (the funding is being clawed back; refunding
+the sender pays them twice — see [proposals/funding-reversal.md](proposals/funding-reversal.md))
+and `sender_kyc_pending` (it auto-releases on Bridge's approval webhook; cancelling bets against an
+approval that may be minutes away).
+
+**It refuses a row the submit job has claimed or that already has a Bridge payout.** Those belong
+to the payout-failure tail — let the payout resolve, then `scripts/trigger-refund.ts`.
+
+**It also refuses a transfer already `CANCELED` by the SENDER** (`not_our_cancel`). That row's
+books are square — the sender's cancel posts the FUNDED-batch reversal — so finishing it here
+would post a second refund batch against a liability that was never recognized. What such a row
+is waiting for is the disbursement: [manual-refund.md](manual-refund.md).
+
+**Verify afterwards:** the tool prints both ledger keys (`<id>:CANCELED`, `<id>:REFUNDED`) and the
+transition query. The `ops_actions` row is `action = 'transfer_cancel'`.
+
+**The one outcome that is not finished:** on the manual and onramp rails the undo is `pending` —
+the funds were collected somewhere we do not operate, so a human has to send them back. The
+transfer **rests at `CANCELED`** with `refunds_payable` open (which is the honest statement that
+the sender is owed), and a Sentry page fires. Finish it per
+[manual-refund.md](manual-refund.md); nothing else watches a resting `CANCELED` row.
+
 ## `sender_kyc_pending` — sender's Bridge KYC not approved at payout time (AUTO-RELEASED, K6)
 
 **Look at the customer in Bridge, not the transfer.** Under KYC-at-first-send the Bridge customer
@@ -152,6 +210,12 @@ The pre-submission joined check failed: `payout_destinations.status != 'active'`
    path and the Bridge dashboard).
 3. Only release once the joined condition would pass; otherwise the submit job will re-hold
    immediately.
+4. If the condition can **never** pass — a Bridge destination that will not be endorsed, a
+   recipient record that cannot be made active — releasing is not an exit. Cancel and refund:
+   `scripts/cancel-held-transfer.ts --hold payability` (see **When a hold can never clear** above).
+   Check first that the cause is not the SPEI-endorsement window, which resolves itself:
+   Bridge's `customer.updated` webhook registers the destination and auto-releases the hold
+   ([spei endorsement, #307/#308](../decisions.md)).
 
 ## `submit_error` — payout submission held for engineering
 
@@ -218,8 +282,10 @@ the window rolls — hence the hold.
    - **Legitimate** (trusted sender, honest burst) → release; the payout submits within a minute. If
      they will routinely exceed the pilot caps, raise the `RISK_*` env values **with Joshua's
      sign-off** rather than releasing repeatedly.
-   - **Error or suspicious** → do not release; cancel the transfer and refund the sender (the Reg E
-     cancel/refund path), then follow up.
+   - **Error or suspicious** → do not release; cancel the transfer and refund the sender with
+     `scripts/cancel-held-transfer.ts --hold velocity_review` (see **When a hold can never clear**
+     above — the sender's own Reg E cancel window closed 30 minutes after they paid), then follow
+     up.
 3. Release is the standard procedure above (the detail page's **Release hold**; break-glass SQL
    with `payout_hold_reason = 'velocity_review'`).
 
