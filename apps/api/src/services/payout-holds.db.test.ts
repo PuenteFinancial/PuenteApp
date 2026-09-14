@@ -74,6 +74,14 @@ describe.skipIf(!runDb)('releaseDestinationPayabilityHolds (integration, local S
     notFunded: string
   }
   let released: string[]
+  // The submit enqueues are SNAPSHOTTED in beforeAll rather than read from the
+  // mock inside the `it` below. Vitest 5 clears mock call history before every
+  // test (`clearMocks` defaults to true), and this file acts ONCE in beforeAll
+  // and then asserts many facets of that single pass — so by the time any `it`
+  // runs, the history of that act is already gone. Snapshotting keeps the
+  // assertion tied to the act that produced it, and reads the same under
+  // vitest 4 and 5.
+  let submitCalls: unknown[][]
 
   const seedDestination = async (userId: string): Promise<string> => {
     const recipient = await db.query(
@@ -191,6 +199,7 @@ describe.skipIf(!runDb)('releaseDestinationPayabilityHolds (integration, local S
       },
       log,
     )
+    submitCalls = enqueuePayoutSubmit.mock.calls.map((call: unknown[]) => [...call])
   })
 
   afterAll(async () => {
@@ -257,8 +266,9 @@ describe.skipIf(!runDb)('releaseDestinationPayabilityHolds (integration, local S
   })
 
   it('re-enqueues the submit for the released transfer only', () => {
-    expect(enqueuePayoutSubmit).toHaveBeenCalledTimes(1)
-    expect(enqueuePayoutSubmit).toHaveBeenCalledWith(transfers.target, 'api')
+    // One call, and for the target row only — "the released transfer ONLY" is
+    // the whole point, so assert the full call list rather than a count.
+    expect(submitCalls).toEqual([[transfers.target, 'api']])
   })
 
   it('is a no-op on a second pass — the CAS finds nothing left to release', async () => {
