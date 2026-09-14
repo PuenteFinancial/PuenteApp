@@ -60,8 +60,8 @@ importers:
         specifier: ^2.116.0
         version: 2.116.0(@opentelemetry/api@1.9.1)
       fastify:
-        specifier: ^5.12.3
-        version: 5.12.3
+        specifier: ^5.12.4
+        version: 5.12.4
       fastify-plugin:
         specifier: ^6.0.0
         version: 6.0.0
@@ -3981,8 +3981,8 @@ packages:
   fastify-plugin@6.0.0:
     resolution: {integrity: sha512-fZOty7z3O7vOliF6d8bHE3wiEh1KcNnKEQensSgTk9C1DvN6nRLS++XVd86v33Hw/8u9Un8A1zDrQ8ujcQDHEg==}
 
-  fastify@5.12.3:
-    resolution: {integrity: sha512-reZ8wce5VNCcufIt9AVtzZa3L4u1j8esikn7OEgHWLVpRpL5R7Y2+Xzj70OUkv5zDfzUAxXZT6cu4Rt0zr3EKA==}
+  fastify@5.12.4:
+    resolution: {integrity: sha512-zATD676fP6tBMsn+jQ7Q5/cO/Qo+149TXH0dUqUKel+1/hcZxwIbnflqtPa9EjlrvpY8eCZcL3M1UYrMc31Y7g==}
 
   fastq@1.20.1:
     resolution: {integrity: sha512-GGToxJ/w1x32s/D2EKND7kTil4n8OVk/9mycTc4VDza13lOvpUZTGX3mFSCtV9ksdGBVzvsyAVLM6mHFThxXxw==}
@@ -10580,7 +10580,7 @@ snapshots:
 
   fastify-plugin@6.0.0: {}
 
-  fastify@5.12.3:
+  fastify@5.12.4:
     dependencies:
       '@fastify/ajv-compiler': 4.0.6
       '@fastify/error': 4.2.0
@@ -11364,7 +11364,7 @@ snapshots:
       metro-cache: 0.84.6
       metro-core: 0.84.6
       metro-runtime: 0.84.6
-      yaml: 2.9.1
+      yaml: 2.9.0
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -13518,7 +13518,8 @@ snapshots:
 
   yaml@2.9.0: {}
 
-  yaml@2.9.1: {}
+  yaml@2.9.1:
+    optional: true
 
   yargs-parser@21.1.1: {}
 
