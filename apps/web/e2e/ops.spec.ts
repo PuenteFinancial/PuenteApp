@@ -55,8 +55,13 @@ test('renders the needs-you queue and state-of-world panels', async ({ context, 
   await expect(page.getByText(/^(treasury|tesorería)$/i)).toBeVisible()
   await expect(page.getByText('ops:aaaaaaaa').first()).toBeVisible()
 
-  // Latest recon findings names the failing check.
+  // Latest recon findings names the failing check...
   await expect(page.getByText('bridge_wallet_float').first()).toBeVisible()
+
+  // ...and says WHAT it found, so the card is actionable without opening
+  // Sentry: the float gap in minor units, and the aging bucket that fired.
+  await expect(page.getByText('diffMinor').first()).toBeVisible()
+  await expect(page.getByText('funded-unheld-stuck').first()).toBeVisible()
 
   // State of the world: counts, balances (as-of note), runs strip.
   await expect(page.getByText('COMPLETED')).toBeVisible()

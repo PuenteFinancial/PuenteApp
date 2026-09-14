@@ -62,6 +62,7 @@ export interface OpsCheck {
   status: string
   findingsCount: number
   error?: string
+  summary?: Record<string, unknown>
 }
 
 export interface OpsReconciliationRun {
@@ -346,6 +347,32 @@ export function latestSkipped(overview: OpsOverview): OpsCheck[] {
   const run = latestRun(overview)
   if (!run) return []
   return run.checks.filter((c) => c.status === 'skipped')
+}
+
+/**
+ * A check's summary flattened into display pairs, so a findings card can say
+ * WHAT the check found rather than only how many things it found.
+ *
+ * `buckets` is the one nested shape, and its keys are themselves the finding
+ * names, so they read as their own lines rather than as a nested blob. Values
+ * are rendered verbatim: the API's response schema already decides which keys
+ * reach the wire, and re-interpreting them here (guessing a currency for the
+ * `*Minor` amounts, say) would be the web inventing meaning it does not have.
+ */
+export function summaryPairs(summary: OpsCheck['summary']): Array<[string, string]> {
+  if (summary == null) return []
+  const pairs: Array<[string, string]> = []
+  for (const [key, value] of Object.entries(summary)) {
+    if (key === 'buckets' && value != null && typeof value === 'object') {
+      for (const [bucket, count] of Object.entries(value as Record<string, unknown>)) {
+        pairs.push([bucket, String(count)])
+      }
+      continue
+    }
+    if (value == null || typeof value === 'object') continue
+    pairs.push([key, String(value)])
+  }
+  return pairs
 }
 
 /**
