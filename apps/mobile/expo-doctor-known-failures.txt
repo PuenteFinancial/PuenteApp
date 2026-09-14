@@ -15,13 +15,29 @@
 #   Check that no duplicate dependencies are installed
 #     apps/web's react@19.2.8 seen from apps/mobile's react@19.2.3 — the
 #     intentional monorepo split, not a duplicate inside mobile's own tree. Web is
-#     live in production on ^19.2.8; SDK 57 pins mobile to 19.2.3 exactly, to match
+#     live in production on ^19.3.0; SDK 57 pins mobile to 19.2.3 exactly, to match
 #     react-native's renderer. See the `react` note at the end of dependabot.yml.
 #
 #   Check that packages match versions required by installed Expo SDK
-#     The deliberate expo 57.0.11 pin (docs/decisions.md, 2026-08-10). Timer-bound:
-#     it clears itself when Dependabot bumps the expo group. Delete this line then —
+#     The deliberate expo pin (docs/decisions.md, 2026-08-10). Timer-bound: it
+#     clears itself when Dependabot bumps the expo group. Delete this line then —
 #     the script does not care if a listed failure stops happening.
+#
+#     ⚠️ KNOWN GAP, and it has cost us twice. This entry suppresses the check for
+#     EVERY package it covers, not just expo's own. That is how two Dependabot
+#     leaks of apps/mobile's `react` pin reached main green and unnoticed: #275
+#     took it 19.2.3 -> 19.2.8, and #326 took it 19.2.8 -> 19.3.0, a full MINOR
+#     ahead of the renderer react-native 0.86.x expects. Restored to 19.2.3 on
+#     2026-09-14. `react` cannot be Dependabot-ignored (ignores are
+#     workspace-wide and would freeze apps/web, which is live) — so until this
+#     check is made per-package, the ONLY thing standing between a grouped
+#     `misc` bump and an SDK-mismatched renderer is reading the diff. On any
+#     misc-group PR:
+#       gh pr diff <n> | grep -E '^[+-].*"(react|react-dom|@types/react)"'
+#     and drop the apps/mobile hunks before merge.
+#
+#     Still-open drift this check is currently hiding: react-native 0.86.2
+#     installed vs 0.86.3 wanted by expo 57.0.20's bundledNativeModules.
 #
 # Deliberately NOT listed: the three checks that shell out to `npm explain` (support
 # packages, legacy global CLI, vector-icons). They fail for the same corepack reason,
