@@ -640,6 +640,8 @@ export type Translations = {
       submit_error: string
       velocity_review: string
       sender_kyc_pending: string
+      funding_disputed: string
+      sender_suspended: string
     }
     waitClaimed: string
     waitUncleared: string
@@ -806,6 +808,12 @@ export type Translations = {
         payability: string
         velocity_review: string
         submit_error: string
+        // The loss path (2026-09-10). Keys must cover every entry in the web
+        // RELEASABLE_HOLD_REASONS, which mirrors the API's — a missing one
+        // falls through to releaseNotAvailableKyc, which is about a different
+        // hold entirely.
+        funding_disputed: string
+        sender_suspended: string
       }
       releaseNotAvailableKyc: string
       // 2026-09-14: the hold IS operator-releasable, but releasing it cannot
@@ -1739,6 +1747,8 @@ const en: Translations = {
       submit_error: 'Submit error',
       velocity_review: 'Velocity review',
       sender_kyc_pending: 'Sender KYC pending',
+      funding_disputed: 'Funding disputed',
+      sender_suspended: 'Sender suspended',
     },
     waitClaimed: 'claimed (crash recovery)',
     waitUncleared: 'awaiting ACH clearing',
@@ -1899,6 +1909,10 @@ const en: Translations = {
           'Check the sender’s other in-window sends. A legitimate burst → release. An error or anything suspicious → do NOT release; cancel and refund instead. If this sender will routinely exceed the caps, raise RISK_* with Joshua’s sign-off rather than releasing repeatedly.',
         submit_error:
           'Never routine. Read the Sentry payout_hold context first. A 422 idempotency mismatch is an engineering incident, not a release. cause: recovery_missing_account_ref → restore the Bridge external account, then release. cause: source_amount_parse → NEVER release: money moved with no matching posting; escalate.',
+        funding_disputed:
+          'The funding for this transfer is being clawed back, so the payout stopped before delivery and nothing is booked as a loss — the money is still ours. Release only once a human has won or written off the dispute; that judgement is the whole reason this hold has a button. It is scoped to THIS transfer and outlives the account freeze, so unfreezing the sender does NOT release it — decide it on its own. Start at runbooks/proposals/funding-reversal.md; the dispute window runs to ~60 days.',
+        sender_suspended:
+          'Not about this transfer: a chargeback or ACH return on another of this sender’s sends froze the account, and payout-submit refuses to pay out anything of theirs while it stands. Start at runbooks/proposals/funding-reversal.md and read the sender_freeze row for what caused it. Still frozen → this hold is correct and there is nothing to do here. Unfreezing → scripts/unfreeze-sender.ts releases these holds itself, in the right order, so you do not need this button. Releasing by hand is safe but accomplishes nothing: the next sweep re-reads the sender’s status and re-holds the row. Unfreeze first, then release.',
       },
       releaseNotAvailableKyc:
         'Auto-released by Bridge’s approval webhook — no button by design. Never release while the customer is unverified: Bridge refuses the payout and the row re-holds as submit_error.',
@@ -2726,6 +2740,8 @@ const es: Translations = {
       submit_error: 'Error de env\u00edo',
       velocity_review: 'Revisi\u00f3n de velocidad',
       sender_kyc_pending: 'KYC del remitente pendiente',
+      funding_disputed: 'Fondeo en disputa',
+      sender_suspended: 'Remitente suspendido',
     },
     waitClaimed: 'reclamada (recuperaci\u00f3n tras fallo)',
     waitUncleared: 'esperando liquidaci\u00f3n ACH',
@@ -2891,6 +2907,10 @@ const es: Translations = {
           'Revisa los otros env\u00edos del remitente dentro de la ventana. Una r\u00e1faga leg\u00edtima \u2192 libera. Un error o algo sospechoso \u2192 NO liberes; cancela y reembolsa. Si este remitente superar\u00e1 los l\u00edmites con frecuencia, sube RISK_* con la aprobaci\u00f3n de Joshua en vez de liberar repetidamente.',
         submit_error:
           'Nunca es rutina. Lee primero el contexto payout_hold en Sentry. Un 422 por idempotencia es un incidente de ingenier\u00eda, no una liberaci\u00f3n. cause: recovery_missing_account_ref \u2192 restaura la cuenta externa en Bridge y luego libera. cause: source_amount_parse \u2192 NUNCA liberes: se movi\u00f3 dinero sin asiento correspondiente; escala.',
+        funding_disputed:
+          'El fondeo de esta transferencia est\u00e1 siendo reclamado, as\u00ed que el payout se detuvo antes de la entrega y no se asienta ninguna p\u00e9rdida \u2014 el dinero sigue siendo nuestro. Libera solo cuando una persona haya ganado o dado por perdida la disputa; ese juicio es toda la raz\u00f3n por la que esta retenci\u00f3n tiene bot\u00f3n. Est\u00e1 acotada a ESTA transferencia y sobrevive al congelamiento de la cuenta, as\u00ed que descongelar al remitente NO la libera \u2014 dec\u00eddela por separado. Empieza en runbooks/proposals/funding-reversal.md; la ventana de disputa llega a ~60 d\u00edas.',
+        sender_suspended:
+          'No se trata de esta transferencia: un contracargo o una devoluci\u00f3n ACH en otro env\u00edo de este remitente congel\u00f3 la cuenta, y payout-submit se niega a pagar cualquier env\u00edo suyo mientras siga as\u00ed. Empieza en runbooks/proposals/funding-reversal.md y lee la fila sender_freeze para saber qu\u00e9 lo caus\u00f3. \u00bfSigue congelada? \u2192 esta retenci\u00f3n es correcta y aqu\u00ed no hay nada que hacer. \u00bfLa vas a levantar? \u2192 scripts/unfreeze-sender.ts libera estas retenciones por s\u00ed mismo y en el orden correcto, as\u00ed que no necesitas este bot\u00f3n. Liberar a mano es seguro pero no logra nada: el siguiente barrido vuelve a leer el estado del remitente y vuelve a retener la fila. Descongela primero, luego libera.',
       },
       releaseNotAvailableKyc:
         'Se libera sola con el webhook de aprobaci\u00f3n de Bridge \u2014 sin bot\u00f3n por dise\u00f1o. Nunca liberes con el cliente sin verificar: Bridge rechaza el payout y la fila vuelve a retenerse como submit_error.',
