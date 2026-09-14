@@ -30,6 +30,12 @@ const T_FAV = '00000000-0000-4000-8000-000000000062' // A < S: favorable slippag
 
 const S = 19801 // quoted send principal
 const FEE = 199
+// Bridge's explicit per-send fee, accrued inside the SUBMITTED batch since
+// 2026-09-11: the $1.00 flat SPEI fee + 25bps of the principal
+// (19801 × 25 / 10000 = 49.5025, half-up → 50). Hardcoded rather than
+// re-derived from the same function under test, so a rounding change fails
+// here instead of agreeing with itself. Defaults come from config/env.ts.
+const F = 150
 
 describe.skipIf(!runDb)('payout ledger walk (integration, local Supabase)', () => {
   let db: Client
@@ -149,7 +155,14 @@ describe.skipIf(!runDb)('payout ledger walk (integration, local Supabase)', () =
       due_from_bridge: 0, // recognized at SUBMITTED, extinguished at COMPLETED
       fx_slippage: A - S, // debit: the extra USDC the payout cost us
       bridge_wallet_float: -A, // credit: USDC that left the treasury wallet
+      provider_fees: F, // debit: Bridge's per-send fee, recognized at SUBMITTED
+      bridge_fees_payable: -F, // credit: owed to Bridge until its invoice is paid
     })
+
+    // The accrual is the difference between this transfer's CASH result and
+    // its P&L — the gap that made per-transfer margin wrong before it existed.
+    const cash = -totals['fee_revenue']! - totals['fx_slippage']!
+    expect(cash - totals['provider_fees']!).toBe(FEE - (A - S) - F)
 
     // Every transaction in the walk nets to zero — the DB-level invariant.
     const perTx = await db.query(
@@ -175,6 +188,8 @@ describe.skipIf(!runDb)('payout ledger walk (integration, local Supabase)', () =
       due_from_bridge: 0,
       fx_slippage: A - S, // negative: favorable drift is a credit
       bridge_wallet_float: -A,
+      provider_fees: F, // the accrual does not vary with the slippage sign
+      bridge_fees_payable: -F,
     })
   })
 

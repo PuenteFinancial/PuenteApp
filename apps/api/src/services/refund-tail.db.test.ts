@@ -78,6 +78,9 @@ const T_VOID = '00000000-0000-4000-8000-000000000086'
 const S = 19801 // quoted send principal
 const FEE = 199
 const A = 19855 // actual USDC draw (A > S → +54 unfavorable slippage)
+// Bridge's explicit per-send fee accrued inside the SUBMITTED batch since
+// 2026-09-11: $1.00 flat SPEI + 25bps of S (19801 × 25 / 10000 → 50).
+const F = 150
 
 const toInput = (entries: LedgerEntryJson[]): LedgerEntryInput[] =>
   entries.map((e) => ({
@@ -240,6 +243,13 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       fx_slippage: A - S, // debit STAYS — the slippage is realized, never reversed
       bridge_wallet_float: -A, // USDC that left the treasury wallet at SUBMITTED
       cash_clearing: -FEE, // +S back from Bridge, −(S+F) refunded to sender = −F
+      // Bridge's per-send fee, accrued at SUBMITTED and NOT reversed here even
+      // though the payout failed. Deliberate (ledger-rules.md): if Bridge does
+      // not in fact bill for it, the over-accrual comes back as a credit in the
+      // month's invoice true-up, not as a per-transfer reversal on every refund
+      // path. The refund tail stays a refund tail.
+      provider_fees: F,
+      bridge_fees_payable: -F,
     })
 
     // four posting batches (PAYOUT_FAILED posts nothing), each net-zero
@@ -323,6 +333,8 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
       fx_slippage: A - S,
       bridge_wallet_float: -A,
       cash_clearing: -FEE,
+      provider_fees: F,
+      bridge_fees_payable: -F,
     })
 
     const perTx = await db.query(

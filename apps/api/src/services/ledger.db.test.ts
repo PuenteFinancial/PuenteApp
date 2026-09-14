@@ -42,6 +42,12 @@ const CHART = {
   // slice-7 PR6b: the Reg E correction-payment expense, deliberately separate
   // from loss_funding_reversed (credit/fraud loss vs compliance cost).
   loss_cancellation_correction: 'debit',
+  // 2026-09-11, the Bridge-invoice slice: Bridge's explicit per-send fees are
+  // real and billed monthly, so they accrue as an expense against a liability
+  // at SUBMITTED. Onboarding fees get their own expense account because they
+  // are per-CUSTOMER, not per-transfer.
+  provider_onboarding_fees: 'debit',
+  bridge_fees_payable: 'credit',
 } as const
 
 describe.skipIf(!runDb)('ledger core (integration, local Supabase)', () => {
@@ -104,11 +110,11 @@ describe.skipIf(!runDb)('ledger core (integration, local Supabase)', () => {
   }
 
   describe('seeded chart of accounts', () => {
-    it('has exactly the 11 accounts from ledger-rules.md with correct normal balances', async () => {
+    it('has exactly the 13 accounts from ledger-rules.md with correct normal balances', async () => {
       const res = await db.query(
         'select code, normal_balance, type, currency from public.ledger_accounts order by code',
       )
-      expect(res.rows).toHaveLength(11)
+      expect(res.rows).toHaveLength(13)
       const byCode = Object.fromEntries(res.rows.map((r) => [r.code, r.normal_balance]))
       expect(byCode).toEqual(CHART)
       for (const row of res.rows) expect(row.currency.trim()).toBe('USD')
