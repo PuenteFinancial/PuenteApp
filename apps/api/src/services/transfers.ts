@@ -370,6 +370,107 @@ export function correctionVoidLedgerEntries(transfer: TransferAmounts): LedgerEn
   ]
 }
 
+// ── The ops cancel of an undeliverable payout (2026-09-14) ──────────────────
+//
+// A FUNDED transfer parked on an operator-actionable hold that can never clear
+// — a destination Bridge will not pay to, a quote too stale to ever pass the
+// drift gate — is canceled by an operator and the sender is made whole
+// (services/ops-cancel.ts). It walks the SAME two edges as a sender cancel,
+// FUNDED → CANCELED → REFUNDED, and posts DIFFERENT batches on them.
+//
+// WHY NOT canceledLedgerEntries. That batch reverses the FUNDED batch, which is
+// only correct while the sender's pull is still UNCLEARED — true by
+// construction inside the 30-minute Reg E window, where the sender cancel
+// lives. These rows are days or weeks old and `funding_cleared` has already
+// posted DR cash_clearing / CR funding_receivable. Reversing FUNDED on top of
+// that credits a receivable that is already settled — driving it NEGATIVE,
+// which reconciliation's open-item guard flags as an arithmetic impossibility —
+// while the cash we actually hold sits unaccounted for. Both staging rows this
+// was built for are exactly that shape (cleared, receivable at zero,
+// transfer_payable open), so this is a measured fact, not a hypothetical.
+//
+// So the exit uses the RECOGNIZE-THEN-PAY pair docs/ledger-rules.md has
+// specified since the beginning under the CANCELED heading "ACH already in
+// flight — keep funding_receivable open; owe refund from float". It was never
+// implemented because nothing reached that case until now.
+//
+// Splitting it across the two transitions is what makes the state order safe.
+// The CANCELED leg must commit BEFORE the processor is called — while the state
+// still reads FUNDED a hold release could let the sweep submit a payout for a
+// transfer we are refunding — but the batch that pays the sender cannot be
+// chosen until the processor says HOW it made them whole (PR-S2). Recognizing
+// the debt at CANCELED needs no such knowledge, so the order works out: cancel
+// first, learn the mode, then pay.
+//
+// It also gives an honest resting state. A row that stops at CANCELED (an
+// out-of-band rail where a human still has to send the money) shows exactly
+// what is true: refunds_payable open, sender not yet paid.
+
+// CANCELED, refund owed: we no longer owe the recipient a delivery, and the fee
+// is not earned on a transfer that never went — but the sender has not been
+// paid yet, so the obligation moves to them rather than vanishing.
+// Zero-revenue transfers omit the fee line (the ledger rejects zero-amount
+// entries) and still post two entries. Nets to zero.
+export function cancelRefundOwedLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  const entries: LedgerEntryJson[] = [
+    {
+      account_code: 'transfer_payable',
+      direction: 'debit',
+      amount_minor: principalMinor(transfer),
+      currency: 'USD',
+    },
+  ]
+  if (revenueMinor(transfer) > 0) {
+    entries.push({
+      account_code: 'fee_revenue',
+      direction: 'debit',
+      amount_minor: revenueMinor(transfer),
+      currency: 'USD',
+    })
+  }
+  entries.push({
+    account_code: 'refunds_payable',
+    direction: 'credit',
+    amount_minor: total,
+    currency: 'USD',
+  })
+  return entries
+}
+
+// CANCELED → REFUNDED, undo mode `refunded`: the funding had settled, so a real
+// disbursement pays the recognized debt out of the cash we are holding.
+export function refundOwedPaidLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  return [
+    { account_code: 'refunds_payable', direction: 'debit', amount_minor: total, currency: 'USD' },
+    { account_code: 'cash_clearing', direction: 'credit', amount_minor: total, currency: 'USD' },
+  ]
+}
+
+// CANCELED → REFUNDED, undo mode `voided`: the pull was canceled before it
+// settled, so the sender is made whole by never being debited and no cash
+// moves. The debt is discharged against the receivable that will now never
+// collect. Same amount, different asset — the same distinction PR-S2 draws
+// between refundedLedgerEntries and voidRefundLedgerEntries.
+//
+// Reaching this arm means the whole chain nets to the same place a plain
+// FUNDED-batch reversal would have: funding_receivable back to zero, nothing
+// else touched. It is the long way round to the same books, which is the price
+// of not having to know the mode at cancel time.
+export function refundOwedVoidedLedgerEntries(transfer: TransferAmounts): LedgerEntryJson[] {
+  const total = transfer.send_amount_minor + transfer.fee_amount_minor
+  return [
+    { account_code: 'refunds_payable', direction: 'debit', amount_minor: total, currency: 'USD' },
+    {
+      account_code: 'funding_receivable',
+      direction: 'credit',
+      amount_minor: total,
+      currency: 'USD',
+    },
+  ]
+}
+
 // ── The loss path: COMPLETED -> FUNDING_REVERSED (docs/ledger-rules.md) ──────
 //
 // A dispute or ACH return AFTER the pesos were delivered. Unlike every other
@@ -515,6 +616,43 @@ export async function cancelTransfer(input: {
   if (error) throwMapped(error.message, 'cancel_transfer')
   const row = (Array.isArray(data) ? data[0] : data) as TransferRow | undefined
   if (!row) throw new Error('cancel_transfer failed: no row returned')
+  return row
+}
+
+// The OPERATOR's cancel of a held, undeliverable payout (2026-09-14). A sibling
+// of cancelTransfer, not a flag on it: it keeps that function's binding race
+// guard (`submit_attempted_at IS NULL`) and drops the Reg E window, which is
+// the sender's statutory right and has no business gating an admission that a
+// payout cannot be delivered. In exchange it adds the guard that bounds it —
+// `payout_hold_reason = p_hold_reason`, so it can only ever touch a row an
+// operator is already holding for exactly the reason they confirmed — and
+// clears the hold in the same statement.
+//
+// Maps 'transfer_not_cancelable' (the state moved, the hold changed, or the
+// submit job claimed it) and 'transfer_not_found'; an already-CANCELED row is a
+// replay no-op returning the row. The caller re-reads to say WHICH — see
+// services/ops-cancel.ts.
+export async function opsCancelHeldTransfer(input: {
+  transferId: string
+  /** `ops:<operator uuid>` */
+  actor: string
+  /** The hold the operator confirmed — the compare-and-swap, never inferred. */
+  holdReason: string
+  reason?: string
+  ledgerDescription?: string
+  ledgerEntries: LedgerEntryJson[]
+}): Promise<TransferRow> {
+  const { data, error } = await supabaseAdmin.rpc('ops_cancel_held_transfer', {
+    p_transfer_id: input.transferId,
+    p_actor: input.actor,
+    p_hold_reason: input.holdReason,
+    p_reason: input.reason ?? null,
+    p_ledger_description: input.ledgerDescription ?? null,
+    p_ledger_entries: input.ledgerEntries,
+  })
+  if (error) throwMapped(error.message, 'ops_cancel_held_transfer')
+  const row = (Array.isArray(data) ? data[0] : data) as TransferRow | undefined
+  if (!row) throw new Error('ops_cancel_held_transfer failed: no row returned')
   return row
 }
 

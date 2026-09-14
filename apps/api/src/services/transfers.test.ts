@@ -21,6 +21,10 @@ const {
   voidRefundLedgerEntries,
   correctionRefundLedgerEntries,
   correctionVoidLedgerEntries,
+  cancelRefundOwedLedgerEntries,
+  refundOwedPaidLedgerEntries,
+  refundOwedVoidedLedgerEntries,
+  opsCancelHeldTransfer,
   toApiTransfer,
   TransferRpcError,
 } = await import('./transfers.js')
@@ -323,6 +327,141 @@ describe('correctionVoidLedgerEntries (PR-S2 — correction payment on a voided 
   })
 })
 
+describe('the ops cancel of an undeliverable payout (CANCELED → REFUNDED)', () => {
+  // The shape of the rows this was built for: cleared funding, revenue carried
+  // in margin_minor (staging 681c8e1a / f07c8e67 — $5.00, 5c margin).
+  const t = { send_amount_minor: 500, fee_amount_minor: 0, margin_minor: 5 }
+
+  it('CANCELED moves the obligation from the recipient to the sender', () => {
+    expect(cancelRefundOwedLedgerEntries(t)).toEqual([
+      { account_code: 'transfer_payable', direction: 'debit', amount_minor: 495, currency: 'USD' },
+      { account_code: 'fee_revenue', direction: 'debit', amount_minor: 5, currency: 'USD' },
+      { account_code: 'refunds_payable', direction: 'credit', amount_minor: 500, currency: 'USD' },
+    ])
+    expect(netsToZero(cancelRefundOwedLedgerEntries(t))).toBe(0)
+  })
+
+  it('omits the fee line at zero revenue and still posts two entries', () => {
+    const entries = cancelRefundOwedLedgerEntries({
+      send_amount_minor: 500,
+      fee_amount_minor: 0,
+      margin_minor: 0,
+    })
+    expect(entries).toHaveLength(2)
+    expect(entries.map((e) => e.account_code)).not.toContain('fee_revenue')
+    expect(netsToZero(entries)).toBe(0)
+  })
+
+  it('pays the recognized debt out of cash when the undo REFUNDED', () => {
+    expect(refundOwedPaidLedgerEntries(t)).toEqual([
+      { account_code: 'refunds_payable', direction: 'debit', amount_minor: 500, currency: 'USD' },
+      { account_code: 'cash_clearing', direction: 'credit', amount_minor: 500, currency: 'USD' },
+    ])
+    expect(netsToZero(refundOwedPaidLedgerEntries(t))).toBe(0)
+  })
+
+  it('writes the receivable off instead when the undo VOIDED the pull', () => {
+    expect(refundOwedVoidedLedgerEntries(t)).toEqual([
+      { account_code: 'refunds_payable', direction: 'debit', amount_minor: 500, currency: 'USD' },
+      {
+        account_code: 'funding_receivable',
+        direction: 'credit',
+        amount_minor: 500,
+        currency: 'USD',
+      },
+    ])
+    expect(netsToZero(refundOwedVoidedLedgerEntries(t))).toBe(0)
+  })
+
+  // THE BUG THIS PAIR EXISTS TO AVOID. A cleared row already has
+  // DR cash_clearing / CR funding_receivable posted, so the sender-cancel
+  // reversal on top of it drives the receivable NEGATIVE — an arithmetic
+  // impossibility reconciliation's open-item guard flags — and leaves the cash
+  // we still hold unaccounted. The recognize-then-pay pair lands everything on
+  // zero instead.
+  it('lands a CLEARED transfer on zero everywhere, where the FUNDED reversal would not', () => {
+    const chain = [
+      ...fundedLedgerEntries(t),
+      ...fundingClearedLedgerEntries(t),
+      ...cancelRefundOwedLedgerEntries(t),
+      ...refundOwedPaidLedgerEntries(t),
+    ]
+    expect(signedNet(chain)).toEqual({
+      funding_receivable: 0,
+      cash_clearing: 0,
+      transfer_payable: 0,
+      fee_revenue: 0,
+      refunds_payable: 0,
+    })
+
+    const withTheWrongBatch = [
+      ...fundedLedgerEntries(t),
+      ...fundingClearedLedgerEntries(t),
+      ...canceledLedgerEntries(t),
+    ]
+    expect(signedNet(withTheWrongBatch)['funding_receivable']).toBe(-500)
+  })
+
+  it('lands an UNCLEARED transfer on zero through the voided arm', () => {
+    const chain = [
+      ...fundedLedgerEntries(t),
+      ...cancelRefundOwedLedgerEntries(t),
+      ...refundOwedVoidedLedgerEntries(t),
+    ]
+    expect(signedNet(chain)).toEqual({
+      funding_receivable: 0,
+      transfer_payable: 0,
+      fee_revenue: 0,
+      refunds_payable: 0,
+    })
+    // …i.e. the same end state a plain FUNDED reversal reaches, taken the long
+    // way round so the mode need not be known at cancel time.
+    expect(signedNet([...fundedLedgerEntries(t), ...canceledLedgerEntries(t)])).toEqual({
+      funding_receivable: 0,
+      transfer_payable: 0,
+      fee_revenue: 0,
+    })
+  })
+})
+
+describe('opsCancelHeldTransfer', () => {
+  it('passes the hold reason as the compare-and-swap and returns the row', async () => {
+    rpc.mockResolvedValue({ data: { ...transferRow, state: 'CANCELED' }, error: null })
+
+    const row = await opsCancelHeldTransfer({
+      transferId: 'tr-1',
+      actor: 'ops:admin-1',
+      holdReason: 'payability',
+      reason: 'ops cancel — payout undeliverable (hold: payability)',
+      ledgerDescription: 'transfer CANCELED — payout undeliverable; refund owed to sender',
+      ledgerEntries: cancelRefundOwedLedgerEntries(transferRow),
+    })
+
+    expect(row.state).toBe('CANCELED')
+    const [name, args] = rpc.mock.calls[0] as [string, Record<string, unknown>]
+    expect(name).toBe('ops_cancel_held_transfer')
+    expect(args['p_transfer_id']).toBe('tr-1')
+    expect(args['p_actor']).toBe('ops:admin-1')
+    expect(args['p_hold_reason']).toBe('payability')
+    expect(args['p_ledger_entries']).toEqual(cancelRefundOwedLedgerEntries(transferRow))
+  })
+
+  it.each(['transfer_not_cancelable', 'transfer_not_found'] as const)(
+    'maps %s raises to typed errors',
+    async (code) => {
+      rpc.mockResolvedValue({ data: null, error: { message: code } })
+      const err = await opsCancelHeldTransfer({
+        transferId: 'tr-1',
+        actor: 'ops:admin-1',
+        holdReason: 'payability',
+        ledgerEntries: [],
+      }).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(TransferRpcError)
+      expect((err as InstanceType<typeof TransferRpcError>).code).toBe(code)
+    },
+  )
+})
+
 describe('generation equivalence (#193 — fee era vs merged-rate era)', () => {
   // The same $200.00 transfer, priced by each generation. At equal bps the
   // batches must be BYTE-IDENTICAL: the customer pays the same, the recipient
@@ -341,6 +480,9 @@ describe('generation equivalence (#193 — fee era vs merged-rate era)', () => {
     ['voidRefundLedgerEntries', voidRefundLedgerEntries],
     ['correctionRefundLedgerEntries', correctionRefundLedgerEntries],
     ['correctionVoidLedgerEntries', correctionVoidLedgerEntries],
+    ['cancelRefundOwedLedgerEntries', cancelRefundOwedLedgerEntries],
+    ['refundOwedPaidLedgerEntries', refundOwedPaidLedgerEntries],
+    ['refundOwedVoidedLedgerEntries', refundOwedVoidedLedgerEntries],
   ] as const)('%s books identical batches for both generations', (_name, build) => {
     expect(build(mergedEra)).toEqual(build(feeEra))
     expect(netsToZero(build(mergedEra))).toBe(0)
