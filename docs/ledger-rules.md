@@ -1,6 +1,7 @@
 # Double-Entry Ledger Rules — USD → MXN Remittance
 
-**Date:** 2026-06-26 · **Updated:** 2026-08-26 (float top-up writers + the manual/onramp rail note)
+**Date:** 2026-06-26 · **Updated:** 2026-09-11 (Bridge's explicit per-send fees are real and
+invoiced monthly — accrual at SUBMITTED, monthly true-up, and the acquisition-cost split)
 **Status:** Documents shipped, test-pinned behavior through funding-ops slices 1–4 + the onramp
 rail's settlement legs
 **Pairs with:** `transfer-state-machine.md` (every money-moving transition posts here)
@@ -42,7 +43,9 @@ All accounts are company-level (one row each). Per-transfer attribution is via `
 | `transfer_payable` | liability | credit | Our obligation to complete the transfer (owed until delivered). |
 | `refunds_payable` | liability | credit | Owed back to a sender on cancel/failure. |
 | `fee_revenue` | revenue | credit | Puente's fee (plus any FX spread, realized in USD). |
-| `provider_fees` | expense | debit | What we pay Bridge + Stripe. |
+| `provider_fees` | expense | debit | Per-transaction cost of moving the money: Bridge's explicit per-send fees (accrued at `SUBMITTED`, trued up monthly) plus Stripe's funding fees. |
+| `provider_onboarding_fees` | expense | debit | ONE-TIME per-customer provider cost (Bridge's $2.00 Individual Compliance fee, $0.25 wallet fee). Acquisition cost, not transfer cost — deliberately outside `provider_fees` so a customer's onboarding bill never lands in one transfer's margin. |
+| `bridge_fees_payable` | liability | credit | Bridge fees accrued but not yet invoiced, plus invoiced but not yet paid. Bridge-specific on purpose: the monthly true-up compares ONE provider's accrual stream against ONE provider's invoice. |
 | `fx_slippage` | expense | debit | Variance between the quoted USD send and Bridge's actual USD cost at execution (Bridge doesn't lock). Can be a credit when favorable. |
 | `loss_funding_reversed` | expense | debit | Write-offs from post-delivery ACH returns / chargebacks. |
 
@@ -52,8 +55,9 @@ Convention: **assets & expenses increase on debit; liabilities & revenue increas
 
 Worked example: sender pays **$100** ($98 to send + **$2** Puente fee); at payout Bridge draws a
 *variable* USDC amount — here **$98.08** against a quoted **$98.00** send, so **$0.08** books to
-`fx_slippage` (Bridge charges no explicit per-transfer fee — see FX & provider economics); MVP
-instant-ACH policy (we front from `cash_clearing` before the ACH clears).
+`fx_slippage`, and Bridge's explicit per-send fee (**$1.25** = $1.00 flat SPEI + 25bps of the
+principal) accrues to `provider_fees` against `bridge_fees_payable` — see FX & provider economics;
+MVP instant-ACH policy (we front from `cash_clearing` before the ACH clears).
 
 > **Merged-rate rows (#193, 2026-08-17).** Since the fee merged into the displayed FX rate,
 > new quotes/transfers carry `send_amount_minor` = the FULL charge, `fee_amount_minor` = 0, and
@@ -78,6 +82,8 @@ SUBMITTED  (payout drawn from the pre-funded treasury wallet; obligation stays o
   DR due_from_bridge         98.00  ← quoted send principal S (what Bridge now owes us)
   DR fx_slippage              0.08  ← D = A − S > 0 (unfavorable: actual draw exceeded the quote)
   CR bridge_wallet_float     98.08  ← actual USDC draw A Bridge reported at execution
+  DR provider_fees            1.25  ← F, Bridge's explicit per-send fee, ACCRUED (no cash moves)
+  CR bridge_fees_payable      1.25  ← owed to Bridge until its monthly invoice is paid
 
 WALLET REPLENISHMENT / FLOAT TOP-UP  (independent event, not a state transition — top up the
   treasury wallet)
@@ -110,15 +116,36 @@ ACH CLEARS  (independent later event — funding actually lands)
 
 The `SUBMITTED` slippage line flips with the sign of `D = A − S`: a **debit** when unfavorable
 (A > S, shown above), a **credit** of |D| when favorable (A < S), and omitted entirely when A = S
-(the ledger rejects zero-amount entries). There is **no `provider_fees` line** in the SUBMITTED
-batch — Bridge charges no explicit per-transfer fee (see FX & provider economics).
+(the ledger rejects zero-amount entries). The `provider_fees` / `bridge_fees_payable` pair is
+likewise omitted when F = 0 (both contract-rate knobs off).
+
+> **The accrual joined this batch on 2026-09-11** (see FX & provider economics). Until then this
+> document asserted that Bridge charged no explicit per-transfer fee, on the strength of receipts
+> that report `developer_fee`, `exchange_fee` and `gas_fee` all `0.0`. Bridge charges plenty — it
+> bills **monthly, out of band**. The claim was wrong in the most expensive direction: per-transfer
+> P&L understated cost by roughly **$2 a send**, which at pilot size is larger than the margin.
+>
+> F is an **estimate** from the contract rates, and is never revised per transfer — not even when
+> the payout later fails and no SPEI ever executes. The monthly true-up is the correction
+> mechanism, and it absorbs over-accrual from a failed payout by exactly the arithmetic that
+> catches a Bridge price change. Reversing per transfer would add a posting key to every refund
+> path for an error the true-up already handles.
 
 End state for this transfer: `funding_receivable` 0, `transfer_payable` 0, `due_from_bridge` 0,
-`fee_revenue` +2, `fx_slippage` +0.08, and **cash across its two locations net +1.92**
-(with the $500 replenishment batch included: `cash_clearing` −400, `bridge_wallet_float` +401.92 —
-cash is split across locations since the wallet adoption; their sum is the cash position).
-Conservation check: `cash +1.92 = fee_revenue 2 − fx_slippage 0.08`. ✓ (Pinned by the
-production-path test in `apps/api/src/services/payout-ledger.db.test.ts`.)
+`fee_revenue` +2, `fx_slippage` +0.08, `provider_fees` +1.25, `bridge_fees_payable` +1.25, and
+**cash across its two locations net +1.92** (with the $500 replenishment batch included:
+`cash_clearing` −400, `bridge_wallet_float` +401.92 — cash is split across locations since the
+wallet adoption; their sum is the cash position).
+
+Two different true statements, and the gap between them is the whole point of the accrual:
+
+- **Cash**, today: `+1.92 = fee_revenue 2 − fx_slippage 0.08`. ✓ The accrual moves no cash, so
+  this identity is unchanged. (Pinned by the production-path test in
+  `apps/api/src/services/payout-ledger.db.test.ts`.)
+- **P&L**, this transfer: `+0.67 = fee_revenue 2 − fx_slippage 0.08 − provider_fees 1.25`. The
+  $1.25 leaves as cash when Bridge's invoice is paid, discharging `bridge_fees_payable`.
+
+Before 2026-09-11 only the first line existed, and it was read as margin.
 
 Note the exposure the design surfaces: between `SUBMITTED` and `ACH CLEARS`, you're **−$98.08 of float
 against an open `funding_receivable`** — that gap is your ACH exposure, sitting on the balance sheet.
@@ -160,7 +187,9 @@ PAYOUT_FAILED → REFUNDED  (after SUBMITTED; Bridge returns principal; undo mod
   3) Pay the refund:
      DR refunds_payable     100
      CR cash_clearing       100
-  (Bridge's $0.50 is typically non-refundable → stays as provider_fees expense, our cost.
+  (Bridge's per-send fee is typically non-refundable → the accrual stays as provider_fees
+   expense, our cost. If Bridge does not in fact bill for a payout that failed, the
+   over-accrual comes back as a CREDIT in the month's invoice true-up, not as a reversal here.
    The funding_receivable / ACH-clearing leg settles independently per the happy-path entries.
    The Stripe refund is ASYNC — issued now, settles in ~5–10 business days; REFUNDED means
    issued. A later refund.failed webhook pages ops (sender still owed) and never auto-adjusts.)
@@ -268,9 +297,14 @@ its own key, so out-of-order and redelivered webhooks replay clean.
   `(transfer_id, transition)`. Enforced by a `UNIQUE(transfer_id, transition)` constraint on
   `ledger_transactions`; a conflicting insert is a no-op (`ON CONFLICT DO NOTHING`), so retried
   workers are safe.
-- **Conservation:** across a completed transfer, cash gained = `fee_revenue − provider_fees − fx_slippage`.
-  Per transfer `provider_fees` is 0 (Bridge bills a periodic invoice, not per-transfer), so in practice
-  cash = `fee_revenue − fx_slippage` (a favorable slippage credit adds to cash).
+- **Conservation:** across a completed transfer, P&L = `fee_revenue − provider_fees − fx_slippage`
+  (a favorable slippage credit adds to it). **CASH** gained is `fee_revenue − fx_slippage` until
+  Bridge's invoice is paid, because `provider_fees` accrues against `bridge_fees_payable` rather
+  than moving money; paying the invoice closes the gap. The two identities differed by roughly the
+  whole margin at pilot size, which is why the accrual exists.
+- `provider_onboarding_fees` is deliberately **outside** both identities: it is a one-time cost of
+  acquiring a customer, not a cost of any one transfer, and averaging it into per-transfer margin
+  would make unit economics unreadable (on the first invoice it was 63% of the bill).
 
 ## Float exposure & the ceiling
 
@@ -281,26 +315,77 @@ bookkeeping.
 
 ## FX & provider economics
 
-**Bridge's take is the FX spread, not a per-transfer fee (production PoC receipts, 2026-07-13).** Both
-PoC legs (ACH→USDC onramp `9f1acb84…`, USDC→ACH payout `b3746f1a…`) returned `developer_fee`,
-`exchange_fee`, and `gas_fee` all **0.0** with `final_amount = initial_amount`. Bridge's margin on
-cross-currency is the spread baked into its rate (`buy_rate` vs `midmarket_rate`; ~0.5% on the sandbox
-USD→MXN rate). Receipt math is `final_amount = initial_amount − fees`, so any fees are **netted inside
-the transfer**; if explicit Bridge line items ever appear (pricing change, `developer_fee`), they book
-to `provider_fees` within the transfer's own posting, `final_amount` being what arrives.
+**⚠️ Bridge's take is the FX spread PLUS explicit per-transaction fees, billed monthly (first real
+invoice INV19341, 2026-09-11, $10.30).** This paragraph used to say the opposite, on the strength
+of PoC receipts (ACH→USDC onramp `9f1acb84…`, USDC→ACH payout `b3746f1a…`) that returned
+`developer_fee`, `exchange_fee` and `gas_fee` all **0.0** with `final_amount = initial_amount`. The
+receipts are accurate and the inference from them was wrong: **Bridge's per-transfer receipts are
+not where its per-transfer fees appear.** They appear on a monthly invoice, and the read-it-off-the-
+receipt expectation encoded here is why `provider_fees` sat at **zero entries in production** while
+a real bill existed.
+
+The FX spread half is still true — Bridge's cross-currency margin is baked into `buy_rate` vs
+`midmarket_rate` — it is simply not the whole cost. What the first invoice actually charged:
+
+| Line | Qty | Rate | Amount | Books to |
+|---|---|---|---|---|
+| SPEI Fee | 2 | $1.00 | $2.00 | `provider_fees` (accrued per payout) |
+| Orchestration Volume Fee | $118.05 | 0.25% | $0.30 | `provider_fees` (accrued per payout) |
+| Next Day ACH Fee | 3 | $0.50 | $1.50 | `provider_fees` (at invoice — attaches to treasury top-ups, not sends) |
+| Gas | 0.006472 | $1.00 | $0.01 | `provider_fees` (at invoice — unpredictable) |
+| Individual Compliance Fee (created accounts) | 3 | $2.00 | $6.00 | `provider_onboarding_fees` |
+| Wallet Fee (active/created) | 2 | $0.25 | $0.50 | `provider_onboarding_fees` |
+
+**`SPEI $1.00 per payout` is the load-bearing number for pricing.** It is flat and never amortizes
+— 100bps at $100, 25bps at $400, 10bps at $1,000 — which is why every competitor charges a flat fee
+and why a pure-bps price cannot work.
+
+Note the printed lines sum to **$10.31** while the invoice bills **$10.30**: Bridge rounds the
+TOTAL, not each line (orchestration is $0.295125, gas $0.006472). The invoice total is what we pay
+and is therefore authoritative; the recorder absorbs the difference into the unaccrued bucket rather
+than rejecting its own bill (`INVOICE_ROUNDING_TOLERANCE_MINOR`).
 
 **Quote basis.** Quotes are built from Bridge's **`buy_rate`** (the executable side), not
 `midmarket_rate`; the ERD's `source_rate` = buy_rate at quote time, and customer rate = buy_rate − our
 buffer. We do **not** use `developer_fee` to collect Puente's fee inside the transfer — Stripe collects
 `total_amount` including our fee, so `developer_fee` is `"0"` and `fee_revenue` books at `FUNDED`.
 
-**`provider_fees` is invoice-time, ~0 per transfer.** Bridge bills **bps on volume at the account
-level** (rate per the Bridge agreement, confirmed 2026-07-13) — a periodic invoice-style expense, not
-a per-transfer receipt line (receipts stay zero). Book it when invoiced; optionally accrue
-per-transfer once volume matters. `provider_fees` therefore stays in the chart mainly for **Stripe's**
-funding fees plus this Bridge invoice — the worked example's $0.50 Bridge fee is illustrative only.
+**`provider_fees` is ACCRUED per transfer and trued up monthly.** Booking Bridge's cost only when
+the invoice lands would leave per-transfer margin unknowable until the following month, and the flat
+SPEI fee is the single biggest input to whether a send is profitable at all. So the cost the
+transfer itself predicts is recognized at `SUBMITTED`, and the invoice corrects the estimate:
+
+```
+SUBMITTED     DR provider_fees        F          ← F = BRIDGE_SPEI_FEE_MINOR
+              CR bridge_fees_payable  F               + BRIDGE_ORCHESTRATION_BPS × principal
+
+INVOICE BOOKED  (scripts/record-provider-invoice.ts, key provider_invoice:<id>:booked)
+              DR provider_onboarding_fees  O     ← one-time per-customer lines
+              DR provider_fees             X + V ← unaccrued lines + variance; a CREDIT when we
+              CR bridge_fees_payable       O+X+V   over-accrued (e.g. a payout that never ran)
+              (V = invoiced accruable − accrued in the service period. Nothing posts at all when
+               O, X and V are all zero — the accrual already carried the whole invoice.)
+
+INVOICE PAID  (--pay, key provider_invoice:<id>:paid)
+              DR bridge_fees_payable  T          ← T = the invoice total
+              CR cash_clearing        T
+```
+
 Unit economics per transfer:
-`fee_revenue − (Bridge FX spread inside buy_rate + bps accrual + Stripe funding fee)`.
+`fee_revenue − (Bridge FX spread inside buy_rate + accrued provider_fees + Stripe funding fee)`,
+with `provider_onboarding_fees` carried separately as acquisition cost.
+
+⚠️ **The orchestration BASIS is unverified.** The first invoice charged 0.25% of **$118.05**, which
+does not reconstruct from the three transfer principals alone — treasury top-ups appear to count
+too. We accrue on the transfer principal as the best available estimate; the monthly variance in
+the `provider_fee_accrual` reconciliation check is the instrument that settles it. Re-aim the basis
+when the variance says so, not before.
+
+**The invoice is recorded by a human, and nothing reconciles what nobody records.** Bridge sends a
+PDF; an operator transcribes it and runs `apps/api/scripts/record-provider-invoice.ts` (dry run by
+default). The daily reconciliation flags both halves of the gap: an invoice that disagrees with the
+accrual, and accrual days that no recorded invoice covers — see
+[runbooks/reconciliation.md](runbooks/reconciliation.md).
 
 **No rate lock — `fx_slippage` absorbs the execution variance.** Bridge gives only an indicative rate,
 so the actual USD cost is known at execution (`SUBMITTED`), not at quote time. We quote a firm rate
@@ -339,3 +424,10 @@ External sources of truth — Stripe balance, Bridge statements, bank — are **
 ledger via `payment_events` + external refs (`bridge_transfer_ref`, Stripe IDs), on a daily job. The
 ledger is Puente's book; these systems are not part of it. Any discrepancy is investigated, never
 auto-adjusted.
+
+Bridge's **monthly invoice** is one of those external truths, and since 2026-09-11 it has a table
+(`provider_invoices`) and a check (`provider_fee_accrual`) rather than living only in an inbox. The
+check compares booked accruals for a service period against the invoice's own accruable lines, so a
+Bridge pricing change surfaces as a variance finding instead of silently eating margin — and flags
+accrual days no recorded invoice covers, because a book that reconciles and a book nobody
+reconciles look identical from the variance side alone.

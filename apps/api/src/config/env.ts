@@ -107,6 +107,49 @@ const envSchema = z.object({
   QUOTE_MARGIN_BPS: z.coerce.number().int().min(0).max(9999).default(100),
   QUOTE_FX_BUFFER_BPS: z.coerce.number().int().min(0).max(9999).default(50),
   QUOTE_EXPIRY_SECONDS: z.coerce.number().int().min(60).max(86400).default(900),
+  // Bridge's EXPLICIT per-transaction fees (2026-09-11, invoice INV19341).
+  // These are charged ON TOP of the FX spread and arrive as a MONTHLY INVOICE,
+  // not as receipt line items — Bridge's per-transfer receipts stay all-zero.
+  // We therefore ACCRUE the predictable per-send ones at SUBMITTED (expense +
+  // bridge_fees_payable) and true them up against the invoice, so per-transfer
+  // unit economics are honest on the day the transfer posts rather than a
+  // month later. Contract rates, not guesses: SPEI $1.00 per payout,
+  // orchestration 0.25% of volume.
+  //
+  //   BRIDGE_SPEI_FEE_MINOR       = flat, per payout. The load-bearing number
+  //                                 for pricing — it never amortizes (100bps
+  //                                 at $100, 10bps at $1,000).
+  //   BRIDGE_ORCHESTRATION_BPS    = bps on volume. ⚠️ BASIS UNVERIFIED: the
+  //                                 first invoice charged 0.25% of $118.05,
+  //                                 which does NOT reconstruct from the three
+  //                                 transfer principals alone — treasury
+  //                                 top-ups appear to count too. We accrue on
+  //                                 the transfer principal as the best
+  //                                 available estimate; the monthly variance
+  //                                 in the provider_fee_accrual check is the
+  //                                 instrument that will settle the basis.
+  //
+  // Setting either to 0 disables that component (the SUBMITTED batch omits a
+  // zero accrual — the ledger rejects zero-amount entries). Both at 0 restores
+  // the pre-2026-09-11 behavior exactly.
+  //
+  // NOT accrued here, by design: the Next Day ACH fee (attaches to treasury
+  // top-ups, not transfers) and gas (unpredictable). Both are real cost and
+  // both are booked at invoice time to provider_fees via the `other`
+  // classification — they are unaccrued, never unbooked.
+  BRIDGE_SPEI_FEE_MINOR: z.coerce.number().int().min(0).max(100_000).default(100),
+  BRIDGE_ORCHESTRATION_BPS: z.coerce.number().int().min(0).max(9999).default(25),
+  // How far the monthly invoice may diverge from what we accrued before the
+  // reconciliation check pages. A provider PRICING CHANGE is exactly what this
+  // exists to surface — silently eating margin is the failure mode. Relative,
+  // with an absolute floor in the check for cent-rounding noise at pilot
+  // volume (where one cent is several hundred bps of a $0.30 line).
+  PROVIDER_FEE_VARIANCE_TOLERANCE_BPS: z.coerce.number().int().min(0).max(10000).default(500),
+  // How long after a service period ends before accruals with no recorded
+  // invoice are a finding. Bridge's first invoice was issued mid-month and due
+  // at month end; 45 days clears an ordinary billing cycle plus a slow week of
+  // someone getting round to recording it.
+  PROVIDER_INVOICE_GRACE_DAYS: z.coerce.number().int().min(1).max(365).default(45),
   // Funding (slice 4; 'stripe' joined in PR-S1, 'manual' in the out-of-band
   // funding slice). Selecting 'stripe' requires both STRIPE_* secrets —
   // enforced by the superRefine below, so a half-configured stripe selection

@@ -1,5 +1,6 @@
 import { env } from '../config/env.js'
 import { getAccountBalance, postLedgerTransaction } from './ledger.js'
+import { accrualLedgerEntries, bridgePerSendFeeMinor } from './provider-fees.js'
 import { supabaseAdmin } from './supabase.js'
 import type { LedgerEntryJson } from './transfers.js'
 
@@ -22,20 +23,38 @@ export class PayoutValidationError extends Error {
 }
 
 // ── SUBMITTED ledger batch ─────────────────────────────────────────────────
-// S = quoted send principal, A = actual USDC draw Bridge reported,
-// D = A − S (Bridge explicit fee = 0). Recognize what Bridge now owes us (S),
-// the wallet outflow (A), and the difference as FX slippage:
+// S = quoted send principal, A = actual USDC draw Bridge reported, D = A − S.
+// Recognize what Bridge now owes us (S), the wallet outflow (A), the difference
+// as FX slippage, and the explicit Bridge fee this payout will be invoiced for:
 //
 //   DR due_from_bridge      S
 //   DR fx_slippage          D     (D > 0, unfavorable — wallet drew more)
 //   CR fx_slippage          |D|   (D < 0, favorable — wallet drew less)
 //   CR bridge_wallet_float  A
+//   DR provider_fees        F     (accrued Bridge per-send fee)
+//   CR bridge_fees_payable  F
 //
-// Nets to zero in all cases; the slippage line is omitted when D = 0 because
-// the ledger rejects zero-amount entries (see ledger.ts).
+// The accrual pair joined this batch on 2026-09-11, when the first Bridge
+// invoice proved that Bridge's all-zero per-transfer receipts do NOT mean
+// Bridge charges nothing per transfer — it bills monthly, out of band, ~$2 a
+// send. The comment that used to sit here ("Bridge explicit fee = 0") was the
+// reason per-transfer P&L was wrong by more than its own margin. F comes from
+// the contract rates in env (SPEI flat + orchestration bps) and is trued up
+// against the invoice; see services/provider-fees.ts.
+//
+// Same batch, not a separate posting: the fee is incurred BY this submission,
+// and sharing the (transfer_id, transition) key makes the accrual exactly as
+// idempotent as the payout it belongs to — a retried submit can no more
+// double-accrue than it can double-draw.
+//
+// Nets to zero in all cases; the slippage line is omitted when D = 0 and the
+// accrual pair when F = 0, because the ledger rejects zero-amount entries
+// (see ledger.ts).
 export function submittedLedgerEntries(input: {
   sendAmountMinor: number
   actualSourceAmountMinor: number
+  /** Test/ops override; defaults to the contract rates in env. */
+  providerFeeMinor?: number
 }): LedgerEntryJson[] {
   const { sendAmountMinor: s, actualSourceAmountMinor: a } = input
   if (!Number.isSafeInteger(s) || s <= 0) {
@@ -59,6 +78,9 @@ export function submittedLedgerEntries(input: {
     amount_minor: a,
     currency: 'USD',
   })
+  entries.push(
+    ...accrualLedgerEntries(input.providerFeeMinor ?? bridgePerSendFeeMinor(s).totalMinor),
+  )
   return entries
 }
 
