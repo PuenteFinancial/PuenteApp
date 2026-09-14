@@ -73,6 +73,10 @@ const USER = crypto.randomUUID()
 const S = 19801 // quoted send principal
 const FEE = 199
 const A = 19855 // actual USDC draw (A > S → +54 unfavorable slippage)
+// Bridge's explicit per-send fee accrued inside the SUBMITTED batch since
+// 2026-09-11: $1.00 flat SPEI + 25bps of S (19801 × 25 / 10000 → 50). The
+// payout DELIVERED here, so Bridge really did charge it.
+const F = 150
 
 describe.skipIf(!runDb)('cancellation review exits (integration, local Supabase)', () => {
   let db: Client
@@ -334,6 +338,8 @@ describe.skipIf(!runDb)('cancellation review exits (integration, local Supabase)
       bridge_wallet_float: -A,
       loss_cancellation_correction: S + FEE,
       cash_clearing: -(S + FEE),
+      provider_fees: F,
+      bridge_fees_payable: -F,
     })
 
     // The request closed under the operator who paid it.
@@ -380,6 +386,8 @@ describe.skipIf(!runDb)('cancellation review exits (integration, local Supabase)
       fx_slippage: A - S,
       bridge_wallet_float: -A,
       loss_cancellation_correction: S + FEE,
+      provider_fees: F,
+      bridge_fees_payable: -F,
     })
     const state = await db.query('select state from public.transfers where id = $1', [transferId])
     expect(state.rows[0].state).toBe('REFUNDED')

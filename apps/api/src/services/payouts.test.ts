@@ -1,8 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 // Mutable env stub: payouts.ts reads env.FLOAT_CEILING_MINOR at call time,
-// so tests flip it per case without re-importing the module.
-const envStub = vi.hoisted(() => ({ FLOAT_CEILING_MINOR: undefined as number | undefined }))
+// so tests flip it per case without re-importing the module. The BRIDGE_*
+// fee knobs are read through services/provider-fees.ts by the SUBMITTED
+// batch; they default to 0 here so the FX-shape cases below stay about FX,
+// and the accrual cases set them explicitly.
+const envStub = vi.hoisted(() => ({
+  FLOAT_CEILING_MINOR: undefined as number | undefined,
+  BRIDGE_SPEI_FEE_MINOR: 0,
+  BRIDGE_ORCHESTRATION_BPS: 0,
+}))
 vi.mock('../config/env.js', () => ({ env: envStub }))
 
 const getBalance = vi.hoisted(() => vi.fn())
@@ -29,6 +36,8 @@ const {
 
 beforeEach(() => {
   envStub.FLOAT_CEILING_MINOR = undefined
+  envStub.BRIDGE_SPEI_FEE_MINOR = 0
+  envStub.BRIDGE_ORCHESTRATION_BPS = 0
   getBalance.mockReset()
   from.mockReset()
 })
@@ -96,6 +105,71 @@ describe('submittedLedgerEntries', () => {
         expect(Number.isInteger(entry.amount_minor)).toBe(true)
         expect(entry.amount_minor).toBeGreaterThan(0)
         expect(entry.currency).toBe('USD')
+      }
+    }
+  })
+
+  it('accrues the Bridge per-send fee alongside the FX lines', () => {
+    // The 2026-09-11 invoice rates: $1.00 flat SPEI + 25bps orchestration.
+    // $3,960.00 principal -> 396000 * 25 / 10000 = 990 minor, + 100 flat.
+    envStub.BRIDGE_SPEI_FEE_MINOR = 100
+    envStub.BRIDGE_ORCHESTRATION_BPS = 25
+    const entries = submittedLedgerEntries({
+      sendAmountMinor: 396000,
+      actualSourceAmountMinor: 396014,
+    })
+    expect(entries).toEqual([
+      { account_code: 'due_from_bridge', direction: 'debit', amount_minor: 396000, currency: 'USD' },
+      { account_code: 'fx_slippage', direction: 'debit', amount_minor: 14, currency: 'USD' },
+      { account_code: 'bridge_wallet_float', direction: 'credit', amount_minor: 396014, currency: 'USD' },
+      { account_code: 'provider_fees', direction: 'debit', amount_minor: 1090, currency: 'USD' },
+      { account_code: 'bridge_fees_payable', direction: 'credit', amount_minor: 1090, currency: 'USD' },
+    ])
+    expect(netMinor(entries)).toBe(0)
+  })
+
+  it('an explicit providerFeeMinor overrides the contract rates', () => {
+    envStub.BRIDGE_SPEI_FEE_MINOR = 100
+    envStub.BRIDGE_ORCHESTRATION_BPS = 25
+    const entries = submittedLedgerEntries({
+      sendAmountMinor: 396000,
+      actualSourceAmountMinor: 396000,
+      providerFeeMinor: 7,
+    })
+    expect(entries.filter((e) => e.account_code === 'provider_fees')).toEqual([
+      { account_code: 'provider_fees', direction: 'debit', amount_minor: 7, currency: 'USD' },
+    ])
+    expect(netMinor(entries)).toBe(0)
+  })
+
+  it('both knobs at zero reproduce the pre-accrual batch exactly', () => {
+    const entries = submittedLedgerEntries({
+      sendAmountMinor: 396000,
+      actualSourceAmountMinor: 396014,
+    })
+    expect(entries.map((e) => e.account_code)).toEqual([
+      'due_from_bridge',
+      'fx_slippage',
+      'bridge_wallet_float',
+    ])
+  })
+
+  it('nets to zero with the accrual on, across many S/A pairs', () => {
+    envStub.BRIDGE_SPEI_FEE_MINOR = 100
+    envStub.BRIDGE_ORCHESTRATION_BPS = 25
+    let seed = 90210
+    const next = () => {
+      seed = (seed * 16807) % 2147483647
+      return seed
+    }
+    for (let i = 0; i < 250; i++) {
+      const s = (next() % 5_000_000) + 1
+      const a = Math.max(1, s + ((next() % 2001) - 1000))
+      const entries = submittedLedgerEntries({ sendAmountMinor: s, actualSourceAmountMinor: a })
+      expect(netMinor(entries)).toBe(0)
+      for (const entry of entries) {
+        expect(Number.isInteger(entry.amount_minor)).toBe(true)
+        expect(entry.amount_minor).toBeGreaterThan(0)
       }
     }
   })

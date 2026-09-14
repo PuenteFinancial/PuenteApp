@@ -53,6 +53,8 @@ erDiagram
 ```
 
 FK-less tables (not drawn): `waitlist`, `reconciliation_runs` (summarizes the whole book),
+`provider_invoices` (FK only to `ledger_accounts`, never to a transfer — a provider bill covers a
+period, not an entity),
 `worker_heartbeat` (one row per dispatcher), `otp_send_attempts` (peppered phone hash, no user FK
 by design — attempts precede accounts), `idempotency_keys` (FK to users only).
 
@@ -298,6 +300,7 @@ slippage (see ledger `fx_slippage`).
 ### ledger_accounts
 - `code` TEXT UNIQUE — `cash_clearing` | `bridge_wallet_float` | `funding_receivable` |
   `due_from_bridge` | `transfer_payable` | `refunds_payable` | `fee_revenue` | `provider_fees` |
+  `provider_onboarding_fees` | `bridge_fees_payable` (2026-09-11, the Bridge-invoice slice) |
   `fx_slippage` | `loss_funding_reversed` | `loss_cancellation_correction` (slice-7 PR6b;
   ledger-rules.md chart is authoritative)
 - `name` TEXT — human label
@@ -313,6 +316,34 @@ slippage (see ledger `fx_slippage`).
 - `idempotency_key` TEXT UNIQUE — `(transfer_id, transition)`; one batch per transition
 - `description` TEXT, `posted_at` timestamptz
 - **Invariant:** child entries net to zero (USD). **RLS:** service-role only.
+
+### provider_invoices  *(received provider bills — built 2026-09-11)*
+The external truth the `provider_fee_accrual` reconciliation check compares accruals against.
+Bridge's per-transaction fees never appear on a per-transfer receipt — they arrive as a monthly PDF
+— so without a table for them `provider_fees` could sit at zero forever beside a real bill (it did:
+INV19341, $10.30). Recorded by an operator via `apps/api/scripts/record-provider-invoice.ts`.
+- `provider` TEXT `CHECK (provider in ('bridge'))`, `invoice_number` TEXT — **UNIQUE together**
+  (re-running the recorder cannot duplicate a bill)
+- `period_start` / `period_end` DATE — the service period; accruals match to it by the **UTC date**
+  of their posting, so the window is timezone-deterministic
+- `issued_at` / `due_at` DATE
+- `total_minor` BIGINT + `currency` CHAR(3) — what we actually owe; authoritative over the lines
+- `accruable_minor` / `onboarding_minor` / `other_minor` BIGINT — the classified rollup,
+  `CHECK (sum = total_minor)` so an unclassified line cannot vanish
+- `lines` JSONB — the invoice verbatim (label/qty/rate/amount + category), for a later pricing
+  argument with the provider
+- `payable_account_code` TEXT FK → `ledger_accounts.code` (default `bridge_fees_payable`) — the
+  accrual stream this invoice trues up. Present so a second invoiced provider is a new account code
+  and new rows, never a rewrite of the reconciliation query.
+- `booked_at` / `booked_transaction_id`, `paid_at` / `paid_transaction_id` — the `*_at` stamps are
+  authoritative; the transaction ids are nullable even when booked, because an invoice the accrual
+  already covered to the cent has nothing left to post. **Deliberately not FKs:** the real link is
+  the deterministic ledger idempotency key (`provider_invoice:<id>:booked` / `:paid`), and an FK
+  here would only make the `truncate ledger_transactions` fixture reset that a dozen db tests run
+  between cases fail — or, under CASCADE, silently delete invoice rows
+- `recorded_by` TEXT
+- **Immutable once booked** (trigger): amounts/period/lines are ledger history by then; a provider
+  correction is a new record, never an edit. **RLS:** service-role only.
 
 ### ledger_entries  *(immutable lines)*
 - `ledger_transaction_id` FK, `account_id` FK
@@ -462,7 +493,7 @@ A queryable audit table remains the future shape if log retention stops being en
 | Access tier | Tables |
 |---|---|
 | **Owner-scoped** (owner SELECTs own; writes via API service role) | `users`, `recipients`, `payout_destinations`, `quotes`, `transfers`, `disclosures`, `disputes`, `cancellation_requests`, `deposit_instructions` |
-| **Deny-all policy** (explicit `USING (false)`) | `sign_in_events`, `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `reconciliation_runs`, `worker_heartbeat`, `otp_send_attempts`, `otp_verify_attempts` |
+| **Deny-all policy** (explicit `USING (false)`) | `sign_in_events`, `ledger_accounts`, `ledger_transactions`, `ledger_entries`, `provider_invoices`, `reconciliation_runs`, `worker_heartbeat`, `otp_send_attempts`, `otp_verify_attempts` |
 | **RLS on, zero policies** (equivalent deny; deliberate) | `transfer_transitions`, `idempotency_keys`, `payment_events` |
 | **Insert-only grant** | `waitlist` (service-role INSERT) |
 

@@ -22,11 +22,14 @@ idempotent worker path.
 | `bridge_state_sweep` | re-runs `payout.poll` (the replay path); any synthesis = poller gap | warning |
 | `bridge_orphans` | Bridge transfers (7-day window) with no `transfers` row by `provider_transfer_ref` **or** `client_reference_id` | error — incident |
 | `bridge_wallet_float` | treasury wallet USDC+USDB at par vs `bridge_wallet_float` balance | warning |
+| `provider_fee_accrual` | accrued Bridge fees for a service period vs the recorded Bridge invoice, + accrual days no invoice covers | warning |
 | `stripe_receivables` | live PI status vs our state + `funding_cleared` (detection only) | error |
 | `stripe_orphans` | PIs (7-day window) with no/unknown `metadata.transfer_id` | error — incident |
 
 Stripe checks report `skipped` unless `FUNDING_PROCESSOR=stripe` with full keys; the float check
-skips without `BRIDGE_TREASURY_WALLET_ID`. Skipped ≠ pass — the run row says which.
+skips without `BRIDGE_TREASURY_WALLET_ID`; `provider_fee_accrual` skips when both
+`BRIDGE_SPEI_FEE_MINOR` and `BRIDGE_ORCHESTRATION_BPS` are 0 (accrual deliberately off, so every
+invoice would read as 100% variance). Skipped ≠ pass — the run row says which.
 
 Sentry fingerprints are `(check, finding-key)` — one issue per episode; the daily re-fire while
 unresolved collapses into it, and resolving while the discrepancy persists reopens next run
@@ -72,6 +75,54 @@ tunable policy.
    money is involved (new transaction, never an edit), and the Sentry issue resolved only when
    the underlying condition is actually gone.
 
+## Bridge's monthly invoice
+
+Bridge's per-transaction fees are **not** on its per-transfer receipts (those report every fee as
+`0.0`). They arrive as a monthly PDF. Until 2026-09-11 nothing in this system had ever seen one:
+`provider_fees` held zero entries in production while invoice INV19341 ($10.30, three completed
+transfers) sat in an inbox, and per-transfer P&L understated cost by ~$2 a send.
+
+The payout path now **accrues** the predictable per-send part at `SUBMITTED`
+(`DR provider_fees / CR bridge_fees_payable`, rates in `BRIDGE_SPEI_FEE_MINOR` +
+`BRIDGE_ORCHESTRATION_BPS`). Recording the real invoice closes the loop.
+
+**When an invoice arrives:**
+
+1. Transcribe it to JSON — every line as printed, plus the stated total. The schema and a worked
+   example are in the header of `apps/api/scripts/record-provider-invoice.ts`.
+2. Dry run (the default — nothing posts):
+   ```
+   doppler run -- pnpm exec tsx scripts/record-provider-invoice.ts --file inv.json
+   ```
+   It prints each line's classification and the true-up it would post.
+3. Record + book: add `--confirm`. Add `--pay` once the payment has actually settled (the ledger
+   records what is true; a payment booked against money still in flight overstates cash).
+
+**An unrecognized line stops the script.** That is the point — it means Bridge is billing for
+something new, which is exactly the change that would otherwise erode margin invisibly. Decide what
+the line is, state its `category` on it (`accruable` | `onboarding` | `other`), and add the label to
+`LINE_PATTERNS` in `services/provider-fees.ts` so the next invoice classifies itself.
+
+**A booked invoice is immutable** (DB trigger): its numbers are ledger history and the ledger cannot
+be edited. A provider correction is a new record, never an edit.
+
+### When `provider_fee_accrual` finds something
+
+- **`provider-fee-variance:<provider>:<invoice>`** — the invoice disagrees with what we accrued by
+  more than the tolerance. Check the finding's `varianceMinor` sign first: **positive** means Bridge
+  charged more than our model predicted (a price change, or the wrong accrual basis — the
+  orchestration basis is the known-unverified one, see ledger-rules.md); **negative** means we
+  over-accrued, most often payouts that were accrued and then failed. Either way the ledger is
+  already correct — the true-up posted the difference — so the action is to re-aim the contract
+  rates in Doppler, not to touch the book.
+- **`provider-invoice-unbooked:<provider>:<invoice>`** — recording and booking happen in one CLI
+  run, so this means that run died between them. Re-run it with `--confirm`; both steps are
+  idempotent.
+- **`provider-fee-unbilled:<date>`** — accrual days older than `PROVIDER_INVOICE_GRACE_DAYS` that no
+  recorded invoice covers. Either the invoice never arrived (ask Bridge) or it arrived and nobody
+  recorded it (record it). A book nobody reconciles looks exactly like a book that reconciles
+  perfectly, which is why this half of the check exists.
+
 ## Reading a run
 
 ```sql
@@ -96,8 +147,10 @@ the row carries counts and refs only, never PII.
   but approximate in timing; a meaningful comparison needs the balance-transaction ingest.
   `cash_clearing` can still sit legitimately negative meanwhile (fee refunds, and payouts fronted
   before their funding settles); the negative-balance guard deliberately excludes it.
-- Fee-line reconciliation (Stripe fees + Bridge invoice bps vs `provider_fees`) — with the
-  cash legs.
+- ~~**Fee-line reconciliation**~~ **— BRIDGE HALF CLOSED 2026-09-11** by `provider_fee_accrual`
+  (see below). **Still open:** the Stripe half. Stripe nets its fees out of settlement rather than
+  invoicing them, so catching them needs the same balance-transaction ingest the `cash_clearing`
+  comparison does.
 - Bridge/Stripe list reads are one bounded page (100); the run summary flags `truncated: true`
   when the window view is incomplete. Fine at pilot volume; paginate when it trips.
 - Weekly `fx_slippage` trend review (prices the FX buffer) — manual, PostHog/SQL.

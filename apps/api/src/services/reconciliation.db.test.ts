@@ -159,7 +159,7 @@ describe.skipIf(!runDb)('reconciliation migration (integration, local Supabase)'
       const { data, error } = await supabaseAdmin.rpc('reconcile_account_balances')
       expect(error).toBeNull()
       const rows = data as Array<{ code: string; amount_minor: number; currency: string }>
-      expect(rows).toHaveLength(11)
+      expect(rows).toHaveLength(13)
       const byCode = Object.fromEntries(rows.map((r) => [r.code, Number(r.amount_minor)]))
       // Four seeded FUNDED batches (20000 each) minus the CANCELED reversal.
       expect(byCode['funding_receivable']).toBe(60000)
