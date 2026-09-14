@@ -104,12 +104,21 @@ jobs:
             is "✅ Security & compliance: no issues."
 
             END THE PUBLISHED COMMENT WITH THIS LINE, EXACTLY, ON ITS OWN:
-              <!-- compliance-review-complete -->
-            A step after this one greps the PR for that marker and FAILS the
-            check if it is absent, so a review that did not happen is red
-            instead of green. If you cannot complete a subagent, publish what
-            you have, say which agent did not report and why, and still emit
-            the marker — a stated gap is a review result; silence is not.
+              <sub>compliance-review-complete</sub>
+            It is a VISIBLE tag on purpose. It used to be an HTML comment, and
+            an HTML comment can never survive: the comment tool runs every body
+            through `sanitizeContent`, whose first act is
+            `stripHtmlComments` — `content.replace(/<!--[\s\S]*?-->/g, "")`
+            (`src/github/utils/sanitizer.ts`). The marker was emitted correctly
+            on PRs #313, #314 and #325 and deleted in transit every time, which
+            false-redded all three.
+
+            If you cannot complete a subagent, publish what you have anyway,
+            say which agent did not report and why, and still emit the marker.
+            The check will go RED regardless — the gate below requires BOTH
+            agents to have reported, and half a review is not a review on a
+            money path — but publishing is what puts the reason in front of a
+            human instead of leaving them a bare red X.
 
       # THE CHECK NOW MEANS SOMETHING. Everything above is prompt-shaped, and
       # every failure this workflow has had was Claude ending its turn without
@@ -118,74 +127,95 @@ jobs:
       # subagents). A green check that is not evidence of a review is worse
       # than no check, because it is the one people trust on the money paths.
       #
-      # So the gate is no longer "did the action exit 0" but "is there a
-      # published review on this PR". The marker is the contract, and it is
-      # deliberately something only the final publish emits: a frozen progress
-      # checklist does not carry it.
+      # So the gate is not "did the action exit 0" but "did both subagents
+      # report, and were their findings published after they did".
+      #
+      # That question is answered from the RUN TRANSCRIPT, not from the text of
+      # the published comment. Reading the comment was the 2026-09-11 design and
+      # it false-redded three COMPLETE reviews (#313, #314, #325). Both of its
+      # accept paths were unreachable: the marker was an HTML comment, which the
+      # comment tool strips in transit (see the prompt above), and the prose
+      # fallback greps `security\s+review` while the reviewer writes
+      # `security-reviewer`.
+      #
+      # Do NOT "fix" that by letting the separator match a hyphen. The progress
+      # checklist written EARLY in the run already says "Run `security-reviewer`
+      # subagent", so a hyphen-tolerant prose match passes on a frozen
+      # checklist — precisely the state this gate exists to catch.
       #
       # Guarded on the same condition as the log upload: when the action SKIPS
       # (a workflow-modifying PR — see the paths note at the top) Claude never
-      # ran, there is nothing to publish, and failing here would be the same
-      # lie in the other direction.
+      # ran, there is nothing to verify, and failing here would be the same lie
+      # in the other direction.
       - name: Verify the review was actually published
         if: always() && steps.claude.outputs.execution_file != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         run: |
           set -euo pipefail
-          # Collected to a FILE before grepping, deliberately. `gh api … | grep -q`
-          # looks tidier and is wrong: grep -q exits the moment it matches, gh
-          # takes SIGPIPE and returns 141, and `pipefail` then reports the
-          # pipeline as failed — so a review that WAS published would fail this
-          # check. A false red on the one step whose job is to stop false greens.
-          # AUTHOR-RESTRICTED, both checks. A gate that any PR participant can
-          # satisfy by typing the passphrase is not a gate — and that applies to
-          # the marker too, which until now any commenter could have pasted.
-          # Only comments published by the review bot are read.
-          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
-            --jq '[.[] | select(.user.login == "claude[bot]" or .user.login == "github-actions[bot]") | .body]' \
-            > /tmp/review-comments.json
 
-          # The marker is the STRONGEST signal and is checked first: the reviewer
-          # only emits it inside its publish call, so its presence proves the
-          # turn got there.
-          marker=$(jq '[.[] | select(contains("<!-- compliance-review-complete -->"))] | length' /tmp/review-comments.json)
-          if [ "$marker" -gt 0 ]; then
-            echo "Review published (marker)."
+          # Three facts together mean a review happened: both Agent calls were
+          # made, both returned a non-error result, and the last publish came
+          # after the last of those results. A torn-down run (#311) has no
+          # agent results and no publish after them; a run frozen at the
+          # checklist has a publish only BEFORE the agents.
+          verdict=$(jq -r '
+            [ to_entries[]
+              | .key as $i
+              | (.value.message.content? // [])
+              | if type == "array"
+                then .[] | {i: $i, t: .type, id: (.id // .tool_use_id), name: .name, err: .is_error}
+                else empty end ] as $ev
+            | ($ev | map(select(.t == "tool_use" and .name == "Agent") | .id)) as $agents
+            | ([ $ev[]
+                 | select(.t == "tool_result" and (.err != true) and (.id as $x | $agents | index($x)))
+                 | .i ]) as $reported
+            | ([ $ev[]
+                 | select(.t == "tool_use" and .name == "mcp__github_comment__update_claude_comment")
+                 | .i ] | max // -1) as $published
+            | if ($agents | length) >= 2
+                 and ($reported | length) >= 2
+                 and $published > ($reported | max)
+              then "ok" else "incomplete" end
+          ' "$EXECUTION_FILE" 2>/dev/null || echo "unreadable")
+
+          if [ "$verdict" = "ok" ]; then
+            echo "Review published: both subagents reported, findings posted after they did."
             exit 0
           fi
 
-          # Fallback, added 2026-09-11 after this step false-redded PRs #313 and
-          # #314. Both carried a COMPLETE review — both subagents run, findings
-          # written, verdict stated — and neither carried the marker, because
-          # emitting an exact token on its own line is an instruction the model
-          # has to remember, and it is the very last thing it does.
+          # Fallback for a transcript this jq no longer understands. The shape
+          # is the action's internal format, not a contract, so a version bump
+          # can change it — and an unreadable transcript is not evidence that
+          # nothing was reviewed. "incomplete" IS evidence, and is never
+          # forgiven here.
           #
-          # The guard exists to catch a run that published NOTHING (the turn ends
-          # early while subagents are still backgrounded). A run that published
-          # nothing has no review sections either, so structure proves the same
-          # thing.
-          #
-          # Matched PER COMMENT BODY, never across the concatenated set: two
-          # unrelated comments, one saying "security review" and another saying
-          # "compliance review", must not compose into a pass. Combined with the
-          # author filter above, the phrases have to appear together in a comment
-          # the bot itself published.
-          structured=$(jq '[.[] | select(test("security\\s+review"; "i") and test("compliance\\s+review"; "i"))] | length' /tmp/review-comments.json)
-          if [ "$structured" -gt 0 ]; then
-            echo "::warning::Review published, but WITHOUT the completion marker."
-            echo "Accepted on structure: one bot comment carries both review sections. If this"
-            echo "keeps happening the prompt's final-line instruction is not landing reliably."
-            exit 0
+          # AUTHOR-RESTRICTED: only comments published by the review bot count.
+          # A gate any PR participant can satisfy by typing the passphrase is
+          # not a gate.
+          if [ "$verdict" = "unreadable" ]; then
+            echo "::warning::Could not read the execution transcript; falling back to the published marker."
+            # Collected to a FILE before grepping, deliberately. `gh api … | grep -q`
+            # looks tidier and is wrong: grep -q exits the moment it matches, gh takes
+            # SIGPIPE and returns 141, and `pipefail` then reports the pipeline as
+            # failed — a false red on the one step whose job is to stop false greens.
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+              --jq '[.[] | select(.user.login == "claude[bot]" or .user.login == "github-actions[bot]") | .body]' \
+              > /tmp/review-comments.json
+            marker=$(jq '[.[] | select(contains("compliance-review-complete"))] | length' /tmp/review-comments.json)
+            if [ "$marker" -gt 0 ]; then
+              echo "Review published (marker)."
+              exit 0
+            fi
           fi
 
-          echo "::error::The reviewer ran but published no findings." >&2
-          echo "No comment BY THE REVIEW BOT carries <!-- compliance-review-complete -->, and" >&2
-          echo "none carries both a security and a compliance review section — so the run" >&2
-          echo "ended before the publish call. Read the execution-log artifact on this job: a" >&2
-          echo "turn count in the low teens with is_error false means the turn ended early" >&2
-          echo "(backgrounded subagents), not that the review found nothing." >&2
+          echo "::error::The reviewer ran but no completed review was published." >&2
+          echo "The transcript does not show both subagents reporting and a comment update after" >&2
+          echo "them (verdict: ${verdict}). Read the execution-log artifact on this job: a turn" >&2
+          echo "count in the low teens with is_error false means the turn ended early with the" >&2
+          echo "subagents still backgrounded, not that the review found nothing." >&2
           exit 1
 
       # The per-turn stream never reaches the CI log — only the init and
