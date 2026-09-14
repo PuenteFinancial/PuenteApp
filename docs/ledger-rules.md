@@ -48,6 +48,7 @@ All accounts are company-level (one row each). Per-transfer attribution is via `
 | `bridge_fees_payable` | liability | credit | Bridge fees accrued but not yet invoiced, plus invoiced but not yet paid. Bridge-specific on purpose: the monthly true-up compares ONE provider's accrual stream against ONE provider's invoice. |
 | `fx_slippage` | expense | debit | Variance between the quoted USD send and Bridge's actual USD cost at execution (Bridge doesn't lock). Can be a credit when favorable. |
 | `loss_funding_reversed` | expense | debit | Write-offs from post-delivery ACH returns / chargebacks. |
+| `loss_cancellation_correction` | expense | debit | Reg E cancellation corrections: the recipient was paid AND §1005.34 still owes the sender. Its own account, not `loss_funding_reversed` — both are post-delivery losses but they have different causes and different reporting. Seeded by the cancellation-requests migration. |
 
 Convention: **assets & expenses increase on debit; liabilities & revenue increase on credit.**
 
@@ -310,14 +311,16 @@ UNDER_REVIEW → REFUNDED  (undo mode VOIDED — PR-S2. The LIKELY correction ca
   the ledger before the payout resolves — an open request is evidence, not a movement.
 ```
 
-### Rail note — manual and onramp funding post the SAME batches (2026-08-26)
+### Rail note — every funding rail posts the SAME batches (2026-08-26, Checkout rail added 2026-09-09)
 
 The manual rail's operator-asserted `FUNDED` and the onramp rail's guard-verified `FUNDED` post
 the standard FUNDED batch above; their cleared assertions post the standard ACH CLEARS leg. What
 differs per rail is the **trigger and its verification** (operator to-the-cent check vs the
 delivered-amount guard), never the accounting. The onramp settlement webhook additionally chains
 the automatic float top-up (previous section) after its cash leg — three legs, each idempotent on
-its own key, so out-of-order and redelivered webhooks replay clean.
+its own key, so out-of-order and redelivered webhooks replay clean. The Checkout Sessions rail —
+the production default since 2026-09-11 — is the same story again: `completed` posts the standard
+FUNDED batch and its own clearing event posts the standard cash leg, for card and bank debit alike.
 
 ## Invariants (must always hold)
 
@@ -438,11 +441,25 @@ MXN-leg fee lines, then fix the quote basis + account mapping. See [decisions.md
 
 ## Pending posting rules (flagged in review 2026-07-10)
 
-- **Card funding (rail #2).** The worked examples assume ACH. Card capture is instant — no
-  `funding_receivable` window; funds land in Stripe balance at `FUNDED` (likely
-  `DR cash_clearing / CR transfer_payable + fee_revenue` directly), and the reversal risk is a
-  **chargeback**, not an ACH return (books to `loss_funding_reversed` the same way). Define fully
-  before enabling card funding; ACH-only for MVP.
+- ~~**Card funding (rail #2).**~~ **DEFINED + LIVE 2026-09-09 (Checkout Sessions rail, C1–C5).**
+  This entry used to read "ACH-only for MVP; define fully before enabling card funding", and
+  guessed the posting would be `DR cash_clearing / CR transfer_payable + fee_revenue` directly,
+  on the reasoning that a card is instant so there is no receivable window. **That guess is a
+  money bug and the rail deliberately does not do it.** `funding_cleared` is a FLAG applied to an
+  already-FUNDED transfer, and `applyFundingCleared` skips its ledger posting when the transfer is
+  still `PENDING_PAYMENT`. Mapping a paid card session straight to "cleared" would set the flag,
+  post nothing, leave the transfer at `PENDING_PAYMENT`, and let the abandonment sweep fail it —
+  after the sender's card was charged. Money taken, transfer dead, no ledger entry.
+
+  **The rule, for both card and bank debit: the two legs stay separate and card takes the standard
+  batches.** `checkout.session.completed` → `FUNDED` (the standard FUNDED batch, opening
+  `funding_receivable` even for a card), then clearing arrives on its own event — a bank debit's
+  `checkout.session.async_payment_succeeded`, or for a card `payment_intent.succeeded` moments
+  later, which is the only clearing signal a card will ever produce. Both post the standard ACH
+  CLEARS leg. A bank debit produces both events; harmless, because that batch is keyed on
+  `(transfer, 'funding_cleared')` and the second is a no-op. Chargebacks book to
+  `loss_funding_reversed` exactly as ACH returns do. See `services/funding/stripe-checkout.ts`
+  (`checkoutEventType`), where this was worked out.
 - ~~**Bridge treasury-wallet float.**~~ **ADOPTED 2026-07-13** — the sandbox spike confirmed the
   pre-funded-wallet topology (no one-transfer fiat→SPEI route exists). `bridge_wallet_float` is now
   in the chart of accounts and the SUBMITTED/replenishment postings above. USDC is treated as USD
