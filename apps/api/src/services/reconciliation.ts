@@ -3,6 +3,7 @@ import { supabaseAdmin } from './supabase.js'
 import { getAccountBalance } from './ledger.js'
 import { getBridgeWalletBalances, listBridgeTransfers } from './bridge.js'
 import { processorFor, getFundingProcessor, pendingReaperDeadAfterMs } from './funding/index.js'
+import { readAccrualReconciliation, readUnbilledAccruals } from './provider-fees.js'
 import { pollPayouts } from '../jobs/payout-poll.js'
 
 // The reconciliation checks registry (slice-8 O2, docs/runbooks/reconciliation.md).
@@ -262,6 +263,11 @@ const OPEN_ITEM_ACCOUNTS = new Set([
   'transfer_payable',
   'refunds_payable',
   'bridge_wallet_float',
+  // Negative means we paid Bridge more than the book ever recognized as owed.
+  // Booking an invoice always raises the payable to cover that invoice's total
+  // before the payment discharges it, so no ordinary sequence — including a
+  // large over-accrual credited back in the true-up — can take this below zero.
+  'bridge_fees_payable',
 ])
 
 interface BalanceRow {
@@ -580,6 +586,124 @@ async function runBridgeWalletFloat(): Promise<CheckOutcome> {
     status: findings.length === 0 ? 'pass' : 'findings',
     findings,
     summary: { walletMinor, ledgerMinor: ledger.amountMinor, diffMinor, dustDropped },
+  }
+}
+
+// ── Provider fee accrual vs the actual provider invoice ─────────────────────
+// The check that would have caught the 2026-09-11 gap. Bridge's per-transaction
+// fees never appear on a per-transfer receipt — they arrive as a monthly
+// invoice — so before this existed there was NO signal, anywhere, that
+// `provider_fees` held zero while a real bill existed. A Bridge price change
+// (or a wrong accrual basis) would silently eat margin for as long as nobody
+// happened to open a PDF.
+//
+// Two failure modes, both covered:
+//   * the invoice disagrees with what we accrued  → variance finding
+//   * no invoice arrives at all                   → unbilled-accruals finding
+//     (a perfectly reconciling book and a book nobody is reconciling look
+//      identical from the variance side alone)
+//
+// Tolerance is relative, with an absolute floor: at pilot volume a single cent
+// of rounding on a $0.30 orchestration line is 300+ bps, which would page every
+// month forever. The floor is what makes the relative bound usable now; the
+// relative bound is what keeps it meaningful at volume.
+const PROVIDER_FEE_VARIANCE_FLOOR_MINOR = 50
+
+export function varianceExceedsTolerance(
+  varianceMinor: number,
+  accruedMinor: number,
+  toleranceBps: number,
+): boolean {
+  const relative = Math.floor((Math.abs(accruedMinor) * toleranceBps) / 10_000)
+  return Math.abs(varianceMinor) > Math.max(PROVIDER_FEE_VARIANCE_FLOOR_MINOR, relative)
+}
+
+export function unbilledIsOverdue(latestDay: string, nowMs: number, graceDays: number): boolean {
+  // `latest_day` is a UTC date string from the accrual scan. An accrual is only
+  // overdue once its whole service period plus the grace window has passed —
+  // the current month is always legitimately unbilled.
+  const latestMs = Date.parse(`${latestDay}T00:00:00Z`)
+  if (Number.isNaN(latestMs)) throw new Error(`unparseable accrual day: ${latestDay}`)
+  return nowMs - latestMs > graceDays * 24 * 60 * 60_000
+}
+
+async function runProviderFeeAccrual(): Promise<CheckOutcome> {
+  if (env.BRIDGE_SPEI_FEE_MINOR === 0 && env.BRIDGE_ORCHESTRATION_BPS === 0) {
+    // Accrual deliberately off: every invoice would show its full accruable
+    // total as variance, which is noise, not news. Skipped, never a fake pass.
+    return { status: 'skipped', findings: [], summary: { reason: 'provider fee accrual disabled' } }
+  }
+
+  const findings: CheckFinding[] = []
+  const invoices = await readAccrualReconciliation()
+  assertBound('provider_fee_accrual invoices', invoices)
+
+  for (const invoice of invoices) {
+    if (!invoice.booked) {
+      // Recording and booking happen in one CLI run, so a recorded-but-unbooked
+      // invoice means that run died between the two — the bill is in the table
+      // and nowhere in the book.
+      findings.push({
+        key: `provider-invoice-unbooked:${invoice.provider}:${invoice.invoice_number}`,
+        detail: {
+          invoiceId: invoice.invoice_id,
+          periodStart: invoice.period_start,
+          periodEnd: invoice.period_end,
+          totalMinor: invoice.total_minor,
+        },
+      })
+    }
+    if (
+      varianceExceedsTolerance(
+        invoice.variance_minor,
+        invoice.accrued_minor,
+        env.PROVIDER_FEE_VARIANCE_TOLERANCE_BPS,
+      )
+    ) {
+      findings.push({
+        key: `provider-fee-variance:${invoice.provider}:${invoice.invoice_number}`,
+        detail: {
+          invoiceId: invoice.invoice_id,
+          periodStart: invoice.period_start,
+          periodEnd: invoice.period_end,
+          accruedMinor: invoice.accrued_minor,
+          invoicedAccruableMinor: invoice.accruable_minor,
+          varianceMinor: invoice.variance_minor,
+          onboardingMinor: invoice.onboarding_minor,
+          otherMinor: invoice.other_minor,
+          toleranceBps: env.PROVIDER_FEE_VARIANCE_TOLERANCE_BPS,
+        },
+      })
+    }
+  }
+
+  const unbilled = await readUnbilledAccruals()
+  const unbilledOverdue =
+    unbilled !== null &&
+    unbilledIsOverdue(unbilled.latest_day, Date.now(), env.PROVIDER_INVOICE_GRACE_DAYS)
+  if (unbilled && unbilledOverdue) {
+    findings.push({
+      key: `provider-fee-unbilled:${unbilled.earliest_day}`,
+      detail: {
+        earliestDay: unbilled.earliest_day,
+        latestDay: unbilled.latest_day,
+        accruedMinor: unbilled.accrued_minor,
+        dayCount: unbilled.day_count,
+        graceDays: env.PROVIDER_INVOICE_GRACE_DAYS,
+      },
+    })
+  }
+
+  return {
+    status: findings.length === 0 ? 'pass' : 'findings',
+    findings,
+    summary: {
+      invoices: invoices.length,
+      booked: invoices.filter((i) => i.booked).length,
+      paid: invoices.filter((i) => i.paid).length,
+      unbilledAccruedMinor: unbilled?.accrued_minor ?? 0,
+      unbilledOverdue,
+    },
   }
 }
 
@@ -955,6 +1079,7 @@ export function buildChecks(): ReconciliationCheck[] {
     { name: 'bridge_state_sweep', severity: 'warning', runbook: RUNBOOK, run: runBridgeStateSweep },
     { name: 'bridge_orphans', severity: 'error', runbook: RUNBOOK, run: runBridgeOrphans },
     { name: 'bridge_wallet_float', severity: 'warning', runbook: RUNBOOK, run: runBridgeWalletFloat },
+    { name: 'provider_fee_accrual', severity: 'warning', runbook: RUNBOOK, run: runProviderFeeAccrual },
     { name: 'stripe_receivables', severity: 'error', runbook: RUNBOOK, run: runStripeReceivables },
     { name: 'stripe_orphans', severity: 'error', runbook: RUNBOOK, run: runStripeOrphans },
     { name: 'stripe_disputes', severity: 'error', runbook: RUNBOOK, run: runStripeDisputes },

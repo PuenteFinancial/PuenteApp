@@ -20,6 +20,10 @@ const envMock = vi.hoisted(() => ({
   FUNDING_PROCESSOR: 'mock' as string,
   MANUAL_PENDING_MAX_AGE_DAYS: 7,
   ONRAMP_PENDING_MAX_AGE_HOURS: 4,
+  BRIDGE_SPEI_FEE_MINOR: 100,
+  BRIDGE_ORCHESTRATION_BPS: 25,
+  PROVIDER_FEE_VARIANCE_TOLERANCE_BPS: 500,
+  PROVIDER_INVOICE_GRACE_DAYS: 45,
 }))
 vi.mock('../config/env.js', () => ({ env: envMock }))
 
@@ -55,8 +59,14 @@ vi.mock('../jobs/payout-poll.js', () => ({
   pollPayouts: (...args: unknown[]) => pollPayouts(...args),
 }))
 
-const { buildChecks, agingFindings, parMinorFromDecimal, classifyStripeStatus } =
-  await import('./reconciliation.js')
+const {
+  buildChecks,
+  agingFindings,
+  parMinorFromDecimal,
+  classifyStripeStatus,
+  varianceExceedsTolerance,
+  unbilledIsOverdue,
+} = await import('./reconciliation.js')
 
 const check = (name: string) => {
   const found = buildChecks().find((c) => c.name === name)
@@ -96,6 +106,10 @@ beforeEach(() => {
   envMock.FUNDING_PROCESSOR = 'mock'
   envMock.MANUAL_PENDING_MAX_AGE_DAYS = 7
   envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 4
+  envMock.BRIDGE_SPEI_FEE_MINOR = 100
+  envMock.BRIDGE_ORCHESTRATION_BPS = 25
+  envMock.PROVIDER_FEE_VARIANCE_TOLERANCE_BPS = 500
+  envMock.PROVIDER_INVOICE_GRACE_DAYS = 45
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(NOW)
 })
@@ -535,9 +549,11 @@ describe('account_balances', () => {
         balanceRow('transfer_payable', -100),
         balanceRow('funding_receivable', 500),
         // legitimately signed accounts must NOT page: cash_clearing goes
-        // negative on fee refunds pre-cash-legs; fx_slippage on favorable fills
+        // negative on fee refunds pre-cash-legs; fx_slippage on favorable fills;
+        // provider_fees on a month we over-accrued and the true-up credited back
         balanceRow('cash_clearing', -199),
         balanceRow('fx_slippage', -12),
+        balanceRow('provider_fees', -30),
       ],
       error: null,
     })
@@ -552,7 +568,19 @@ describe('account_balances', () => {
       funding_receivable: { amount_minor: 500, currency: 'USD' },
       cash_clearing: { amount_minor: -199, currency: 'USD' },
       fx_slippage: { amount_minor: -12, currency: 'USD' },
+      provider_fees: { amount_minor: -30, currency: 'USD' },
     })
+  })
+
+  it('flags a negative bridge_fees_payable — paying more than the book ever owed', async () => {
+    rpc.mockResolvedValue({ data: [balanceRow('bridge_fees_payable', -250)], error: null })
+    const outcome = await check('account_balances').run()
+    expect(outcome.findings).toEqual([
+      {
+        key: 'negative-balance:bridge_fees_payable',
+        detail: { accountCode: 'bridge_fees_payable', amountMinor: -250 },
+      },
+    ])
   })
 
   it('passes with the snapshot attached when nothing is negative', async () => {
@@ -1091,5 +1119,138 @@ describe('stripe_disputes', () => {
     const outcome = await check('stripe_disputes').run()
 
     expect(outcome.findings[0]!.key).toBe('stripe-disputes-truncated')
+  })
+})
+
+// ── The gap that motivated all of this ──────────────────────────────────────
+
+describe('varianceExceedsTolerance', () => {
+  it('ignores cent-scale noise at pilot volume', () => {
+    // 5% of a $2.30 accrual is 11 minor units, so without the absolute floor a
+    // single cent of per-transfer rounding would page every single month.
+    expect(varianceExceedsTolerance(1, 230, 500)).toBe(false)
+    expect(varianceExceedsTolerance(-3, 230, 500)).toBe(false)
+    expect(varianceExceedsTolerance(50, 230, 500)).toBe(false)
+    expect(varianceExceedsTolerance(51, 230, 500)).toBe(true)
+  })
+
+  it('stays relative once the numbers are big enough for the floor to stop mattering', () => {
+    // $500 accrued, 5% tolerance = $25.
+    expect(varianceExceedsTolerance(2_400, 50_000, 500)).toBe(false)
+    expect(varianceExceedsTolerance(2_600, 50_000, 500)).toBe(true)
+    // A doubled SPEI fee is the thing this must not miss.
+    expect(varianceExceedsTolerance(50_000, 50_000, 500)).toBe(true)
+  })
+
+  it('is symmetric — over-accrual is news too', () => {
+    expect(varianceExceedsTolerance(-2_600, 50_000, 500)).toBe(true)
+  })
+})
+
+describe('unbilledIsOverdue', () => {
+  const at = (iso: string) => Date.parse(iso)
+
+  it('leaves the current period alone and flags a period that never got billed', () => {
+    expect(unbilledIsOverdue('2026-09-10', at('2026-09-11T06:00:00Z'), 45)).toBe(false)
+    expect(unbilledIsOverdue('2026-06-30', at('2026-09-11T06:00:00Z'), 45)).toBe(true)
+  })
+
+  it('refuses to guess at an unparseable day', () => {
+    expect(() => unbilledIsOverdue('not-a-day', Date.now(), 45)).toThrow(/unparseable accrual day/)
+  })
+})
+
+describe('provider_fee_accrual', () => {
+  const invoiceRow = (over: Record<string, unknown> = {}) => ({
+    invoice_id: 'inv-1',
+    invoice_number: 'INV19341',
+    provider: 'bridge',
+    period_start: '2026-08-01',
+    period_end: '2026-08-31',
+    total_minor: 1030,
+    accruable_minor: 230,
+    onboarding_minor: 650,
+    other_minor: 150,
+    accrued_minor: 230,
+    variance_minor: 0,
+    booked: true,
+    paid: true,
+    ...over,
+  })
+
+  // The check makes two RPC calls in order: the per-invoice reconciliation,
+  // then the unbilled-accrual scan.
+  const mockRpc = (invoices: unknown[], unbilled: unknown[] = []) => {
+    rpc.mockImplementation(async (name: string) =>
+      name === 'reconcile_provider_fee_accrual'
+        ? { data: invoices, error: null }
+        : { data: unbilled, error: null },
+    )
+  }
+
+  it('passes when the invoice matches what we accrued', async () => {
+    mockRpc([invoiceRow()])
+    const outcome = await check('provider_fee_accrual').run()
+    expect(outcome.status).toBe('pass')
+    expect(outcome.summary).toMatchObject({ invoices: 1, booked: 1, paid: 1, unbilledOverdue: false })
+  })
+
+  it('flags a Bridge price change as an accrual variance', async () => {
+    // SPEI went $1.00 -> $2.00 without telling us: invoiced accruable doubles.
+    mockRpc([invoiceRow({ accruable_minor: 430, variance_minor: 200 })])
+    const outcome = await check('provider_fee_accrual').run()
+    expect(outcome.status).toBe('findings')
+    expect(outcome.findings[0]?.key).toBe('provider-fee-variance:bridge:INV19341')
+    expect(outcome.findings[0]?.detail).toMatchObject({
+      accruedMinor: 230,
+      invoicedAccruableMinor: 430,
+      varianceMinor: 200,
+    })
+  })
+
+  it('flags an invoice recorded but never booked to the ledger', async () => {
+    mockRpc([invoiceRow({ booked: false, paid: false })])
+    const outcome = await check('provider_fee_accrual').run()
+    expect(outcome.findings.map((f) => f.key)).toContain(
+      'provider-invoice-unbooked:bridge:INV19341',
+    )
+  })
+
+  it('flags accruals no invoice covers once the grace window passes', async () => {
+    // The failure mode a variance check alone cannot see: a book that
+    // reconciles perfectly and a book nobody is reconciling look identical.
+    mockRpc(
+      [],
+      [{ earliest_day: '2026-05-01', latest_day: '2026-05-31', accrued_minor: 4_000, day_count: 12 }],
+    )
+    const outcome = await check('provider_fee_accrual').run()
+    expect(outcome.findings[0]?.key).toBe('provider-fee-unbilled:2026-05-01')
+    expect(outcome.summary).toMatchObject({ unbilledAccruedMinor: 4_000, unbilledOverdue: true })
+  })
+
+  it('does not flag the still-open period', async () => {
+    mockRpc(
+      [],
+      [{ earliest_day: '2026-07-01', latest_day: '2026-07-30', accrued_minor: 900, day_count: 4 }],
+    )
+    const outcome = await check('provider_fee_accrual').run()
+    expect(outcome.status).toBe('pass')
+    expect(outcome.summary).toMatchObject({ unbilledAccruedMinor: 900, unbilledOverdue: false })
+  })
+
+  it('skips — never fake-passes — when accrual is switched off', async () => {
+    envMock.BRIDGE_SPEI_FEE_MINOR = 0
+    envMock.BRIDGE_ORCHESTRATION_BPS = 0
+    const outcome = await check('provider_fee_accrual').run()
+    expect(outcome.status).toBe('skipped')
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
+  it('fails closed on a broken read, and pages as a warning', async () => {
+    rpc.mockResolvedValue({ data: null, error: { message: 'boom' } })
+    await expect(check('provider_fee_accrual').run()).rejects.toThrow(
+      /reconcile_provider_fee_accrual failed: boom/,
+    )
+    expect(check('provider_fee_accrual').severity).toBe('warning')
   })
 })
