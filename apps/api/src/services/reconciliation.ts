@@ -358,7 +358,13 @@ export function agingFindings(rows: AgingRow[], nowMs: number): CheckFinding[] {
         break
       case 'FUNDED':
         if (row.payout_hold_reason == null) {
-          if (fundedAge > FUNDED_UNHELD_STALE_MS) flag('funded-unheld-stuck', row, funded)
+          // The 2h bound reads a dwell as "the sweep is down", which only holds
+          // for a row the sweep could actually submit. WAIT_FOR_CLEARING is a
+          // NO-HOLD wait (decisions.md 2026-07-31), so an uncleared ACH row has
+          // no hold reason to exempt it here and would page 4 days before the
+          // receivable bucket below — which is the bound that owns it — was due.
+          if (row.funding_cleared && fundedAge > FUNDED_UNHELD_STALE_MS)
+            flag('funded-unheld-stuck', row, funded)
         } else {
           // Anchor on when the HOLD landed, not on funding: a row funded days
           // ago and held a minute ago is not overdue, but the funding anchor
@@ -425,10 +431,19 @@ async function runTransferAging(): Promise<CheckOutcome> {
   const rows = data as AgingRow[]
   assertBound('transfer-aging', rows)
   const findings = agingFindings(rows, Date.now())
+  // `openRows` counts what was EXAMINED, so a run summarised by it alone says
+  // how much was looked at and nothing about what was wrong — the board showed
+  // "1 findings" with no way to reach the bucket short of opening Sentry. The
+  // bucket names are the check's own vocabulary: counts and refs, never PII.
+  const buckets: Record<string, number> = {}
+  for (const finding of findings) {
+    const bucket = finding.detail.bucket
+    if (typeof bucket === 'string') buckets[bucket] = (buckets[bucket] ?? 0) + 1
+  }
   return {
     status: findings.length === 0 ? 'pass' : 'findings',
     findings,
-    summary: { openRows: rows.length },
+    summary: { openRows: rows.length, buckets },
   }
 }
 

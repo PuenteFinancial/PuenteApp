@@ -270,13 +270,32 @@ describe('agingFindings', () => {
   })
 
   it('flags unheld FUNDED past 2h but leaves held FUNDED alone until the clearing window', () => {
-    const unheldStuck = row({ id: 't-1', payment_at: hoursAgo(3) })
+    const unheldStuck = row({ id: 't-1', payment_at: hoursAgo(3), funding_cleared: true })
     const heldWaiting = row({ id: 't-2', payment_at: daysAgo(5), payout_hold_reason: 'first_transfer_hold' })
     const heldOverdue = row({ id: 't-3', payment_at: daysAgo(9), payout_hold_reason: 'first_transfer_hold' })
     const keys = agingFindings([unheldStuck, heldWaiting, heldOverdue], nowMs).map((f) => f.key)
     expect(keys).toContain('aging:funded-unheld-stuck:t-1')
     expect(keys).not.toContain('aging:funded-held-overdue:t-2')
     expect(keys).toContain('aging:funded-held-overdue:t-3')
+  })
+
+  // The 2h bound assumes the row is READY to submit, so the only thing that can
+  // explain the dwell is a dead sweep. An uncleared ACH row is not ready: it is
+  // parked on WAIT_FOR_CLEARING, a no-hold wait, so it carries no hold reason to
+  // exempt it and fell into the unheld bucket 4 days before its own 8-day bucket
+  // was due. Prod 8bf376a9 paged every 6h from 2026-09-12 on exactly this.
+  it('leaves an unheld FUNDED row alone while its ACH is still clearing', () => {
+    const clearing = row({ id: 't-1', payment_at: hoursAgo(3), funding_cleared: false })
+    expect(agingFindings([clearing], nowMs)).toHaveLength(0)
+  })
+
+  // ...and the wait is bounded, not blind: the receivable bucket still catches
+  // the row that never clears, which is the finding that actually matters.
+  it('still flags an uncleared row once it passes the 8-day receivable bound', () => {
+    const neverCleared = row({ id: 't-1', payment_at: daysAgo(9), funding_cleared: false })
+    const keys = agingFindings([neverCleared], nowMs).map((f) => f.key)
+    expect(keys).toContain('aging:funding-uncleared-overdue:t-1')
+    expect(keys).not.toContain('aging:funded-unheld-stuck:t-1')
   })
 
   // A hold set by payout-submit waits on the RUNBOOK, not on the ACH clock.

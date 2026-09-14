@@ -7,6 +7,7 @@ import {
   agingReviews,
   latestRun,
   latestFindings,
+  summaryPairs,
   isOpsResolveSuccessShape,
   isOpsTransferFundingSuccessShape,
   isOpsAttachSuccessShape,
@@ -167,6 +168,39 @@ describe('derivations', () => {
     // into "latest run was clean" (review finding).
     expect(latestSkipped(o).map((c) => c.name)).toEqual(['stripe_orphans'])
     expect(latestSkipped(overview())).toEqual([])
+  })
+})
+
+describe('summaryPairs', () => {
+  it('reads a float mismatch off the summary the check already wrote', () => {
+    expect(
+      summaryPairs({ walletMinor: 9492, ledgerMinor: 9092, diffMinor: 400, dustDropped: false }),
+    ).toEqual([
+      ['walletMinor', '9492'],
+      ['ledgerMinor', '9092'],
+      ['diffMinor', '400'],
+      ['dustDropped', 'false'],
+    ])
+  })
+
+  // The bucket names ARE the finding, so they get their own lines — the whole
+  // point is a card that says more than "1 findings".
+  it('hoists aging buckets into their own pairs', () => {
+    expect(summaryPairs({ openRows: 3, buckets: { 'funded-unheld-stuck': 2 } })).toEqual([
+      ['openRows', '3'],
+      ['funded-unheld-stuck', '2'],
+    ])
+  })
+
+  it('has nothing to show for a missing or empty summary', () => {
+    expect(summaryPairs(undefined)).toEqual([])
+    expect(summaryPairs({ buckets: {} })).toEqual([])
+  })
+
+  // A future check could nest something the card cannot render; drop it rather
+  // than print "[object Object]" at an operator mid-incident.
+  it('skips nested and null values it cannot render', () => {
+    expect(summaryPairs({ listed: 2, nested: { a: 1 }, missing: null })).toEqual([['listed', '2']])
   })
 })
 

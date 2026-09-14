@@ -478,8 +478,11 @@ describe('buildOpsOverview', () => {
       findingsCount: 2,
       checks: [
         { name: 'ledger_net_zero', status: 'pass', findingsCount: 0 },
-        // summary objects never reach this wire — counts and refs only
-        { name: 'bridge_wallet_float', status: 'findings', findingsCount: 2 },
+        // The summary rides along — it is the check's own counts and refs, and
+        // it is what lets a findings card name the discrepancy instead of
+        // counting it. Which of its keys reach the WIRE is the route response
+        // schema's call, not this service's.
+        { name: 'bridge_wallet_float', status: 'findings', findingsCount: 2, summary: { diffMinor: -500 } },
         { name: 'stripe_receivables', status: 'error', findingsCount: 0, error: 'stripe timeout' },
       ],
     })
