@@ -23,7 +23,7 @@
     "@puente/shared": "workspace:*",
     "@sentry/node": "^10.74.0",
     "@supabase/supabase-js": "^2.116.0",
-    "fastify": "^5.12.3",
+    "fastify": "^5.12.4",
     "fastify-plugin": "^6.0.0",
     "jose": "^6.2.12",
     "pg-boss": "^12.31.0",
@@ -40,6 +40,6 @@
     "tsup": "^8.5.1",
     "tsx": "^4.23.12",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.0"
   }
 }
