@@ -20,6 +20,9 @@ const FAILED_STUCK = 'fa11ed04-0000-4000-8000-000000000008'
 // 2026-09-14: an fx_drift hold on a quote past the max age. Releasing it could
 // only loop, so the page must offer no button at all.
 const HELD_STALE_QUOTE = '4e1d0002-0000-4000-8000-000000000009'
+// The loss path (PR #311): two holds the API accepts a release for.
+const HELD_DISPUTED = '4e1d0003-0000-4000-8000-00000000000a'
+const HELD_SUSPENDED = '4e1d0004-0000-4000-8000-00000000000b'
 
 const NOTE = 'e2e: verified the sender by phone; both sends today are legitimate.'
 
@@ -75,6 +78,51 @@ test('board card id links to the detail page, which shows the hold guidance', as
   // Back link returns to the board.
   await page.getByRole('link', { name: /back to the board|volver al tablero/i }).click()
   await expect(page).toHaveURL(/\/dashboard\/ops$/)
+})
+
+// The regression these two guard: the web RELEASABLE_HOLD_REASONS drifted
+// behind the API's, so a loss-path hold rendered releaseNotAvailableKyc — copy
+// about sender_kyc_pending, false for these — and no Release hold button.
+test('detail: a funding_disputed hold gets its own guidance and a release button, never the KYC copy', async ({
+  context,
+  page,
+}) => {
+  await signIn(context)
+  await page.goto(`/dashboard/ops/transfers/${HELD_DISPUTED}`)
+
+  await expect(page.getByText(/^(funding disputed|fondeo en disputa)$/i)).toBeVisible()
+  await expect(
+    page.getByText(/unfreezing the sender does NOT release it|descongelar al remitente NO la libera/i),
+  ).toBeVisible()
+  // The sender_kyc_pending fallback must not reach this hold.
+  await expect(
+    page.getByText(/while the customer is unverified|con el cliente sin verificar/i),
+  ).toHaveCount(0)
+  // Not in CANCELABLE_HOLD_REASONS — never point the operator at cancel+refund.
+  await expect(page.getByText(/cancel and refund instead|cancela y reembolsa/i)).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^(release hold|liberar retención)$/i })).toBeVisible()
+})
+
+test('detail: a sender_suspended hold says unfreeze first, and the button still releases', async ({
+  context,
+  page,
+}) => {
+  await signIn(context)
+  await page.goto(`/dashboard/ops/transfers/${HELD_SUSPENDED}`)
+
+  await expect(page.getByText(/^(sender suspended|remitente suspendido)$/i)).toBeVisible()
+  // The runbook's point: the unfreeze tool releases these holds itself.
+  await expect(page.getByText(/scripts\/unfreeze-sender\.ts/)).toBeVisible()
+  await expect(
+    page.getByText(/while the customer is unverified|con el cliente sin verificar/i),
+  ).toHaveCount(0)
+  await expect(page.getByText(/cancel and refund instead|cancela y reembolsa/i)).toHaveCount(0)
+
+  // The API accepts the release, so the button must work end to end.
+  await page.getByRole('button', { name: /^(release hold|liberar retención)$/i }).click()
+  await page.getByLabel(/what you verified|qué verificaste/i).fill(NOTE)
+  await page.getByRole('button', { name: /^(confirm release|confirmar liberación)/i }).click()
+  await expect(page.getByText(/payout submission queued|envío del payout en cola/i)).toBeVisible()
 })
 
 test('detail: a failed payout with a recorded return shows refund preflight passing', async ({

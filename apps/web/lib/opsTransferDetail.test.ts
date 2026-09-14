@@ -159,14 +159,60 @@ describe('ledgerBalanced', () => {
 })
 
 describe('releasableHoldReason', () => {
-  it('offers exactly the four human-actioned reasons on a FUNDED row', () => {
+  it('offers every human-actioned reason on a FUNDED row', () => {
     for (const reason of RELEASABLE_HOLD_REASONS) {
       expect(releasableHoldReason(withTransfer({ payoutHoldReason: reason }))).toBe(reason)
     }
   })
 
+  // The list above only proves the loop; this pins WHICH reasons are in it.
+  // It must equal the API's RELEASABLE_HOLD_REASONS (services/payout-holds.ts)
+  // — web cannot import from apps/api, so the literal is the contract. A
+  // reason the API accepts but this list omits renders the sender_kyc_pending
+  // fallback copy (about a different hold entirely) and hides the button.
+  it('matches the API list, loss-path reasons included', () => {
+    expect([...RELEASABLE_HOLD_REASONS]).toEqual([
+      'fx_drift',
+      'payability',
+      'velocity_review',
+      'submit_error',
+      'funding_disputed',
+      'sender_suspended',
+    ])
+  })
+
+  it('offers the loss-path holds — a human wins/writes off the dispute, or unfreezes the sender', () => {
+    expect(releasableHoldReason(withTransfer({ payoutHoldReason: 'funding_disputed' }))).toBe(
+      'funding_disputed',
+    )
+    expect(releasableHoldReason(withTransfer({ payoutHoldReason: 'sender_suspended' }))).toBe(
+      'sender_suspended',
+    )
+  })
+
   it('never offers sender_kyc_pending — it auto-releases on the Bridge webhook', () => {
     expect(releasableHoldReason(withTransfer({ payoutHoldReason: 'sender_kyc_pending' }))).toBeNull()
+  })
+
+  // The view renders d.releaseNotAvailableKyc whenever this returns null on a
+  // held row, and that copy describes sender_kyc_pending ONLY. Enumerated from
+  // the transfers_payout_hold_reason_check constraint
+  // (supabase/migrations/20260910180000_add_loss_path_hold_reasons.sql): of
+  // every reason the DB admits, sender_kyc_pending must be the only fallthrough.
+  it('leaves sender_kyc_pending as the ONLY hold the KYC fallback copy can describe', () => {
+    const ALL_DB_HOLD_REASONS = [
+      'fx_drift',
+      'payability',
+      'submit_error',
+      'velocity_review',
+      'sender_kyc_pending',
+      'funding_disputed',
+      'sender_suspended',
+    ]
+    const fallsThrough = ALL_DB_HOLD_REASONS.filter(
+      (reason) => releasableHoldReason(withTransfer({ payoutHoldReason: reason })) == null,
+    )
+    expect(fallsThrough).toEqual(['sender_kyc_pending'])
   })
 
   it('is null without a hold, and on any state other than FUNDED', () => {
@@ -250,6 +296,17 @@ describe('detailActions', () => {
         ),
       ),
     ).toEqual(['holdRelease'])
+  })
+
+  // The seam between #337 (stale_quote blocker) and #311's loss-path reasons:
+  // holdReleaseBlocker consults detail.holdRelease for ANY releasable reason,
+  // and the API populates it only for fx_drift (ops-transfer-detail.ts), so a
+  // loss-path hold must report no blocker and keep its button.
+  it('offers holdRelease on a loss-path hold — the stale-quote blocker is fx_drift-only', () => {
+    for (const reason of ['funding_disputed', 'sender_suspended'] as const) {
+      expect(holdReleaseBlocker(withTransfer({ payoutHoldReason: reason }))).toBeNull()
+      expect(detailActions(withTransfer({ payoutHoldReason: reason }))).toEqual(['holdRelease'])
+    }
   })
 
   it('never offers refund on an abandoned claim — the STOP state has no button', () => {

@@ -214,15 +214,23 @@ export function ledgerBalanced(detail: OpsTransferDetail): boolean {
   return detail.ledger.every((batch) => batch.netMinor === 0)
 }
 
-// The hold reasons an operator may release from the board (decision
-// 2026-09-08, all four human-actioned reasons). sender_kyc_pending is NOT
-// here: it auto-releases on Bridge's approval webhook and releasing while
-// the customer is unverified only re-holds the row.
+// The hold reasons an operator may release from the board. MUST stay in sync
+// with the API's own RELEASABLE_HOLD_REASONS (services/payout-holds.ts) — the
+// route schema is the policy, and a reason missing here renders the
+// sender_kyc_pending fallback copy and hides a button the API would accept.
+// sender_kyc_pending is NOT here: it auto-releases on Bridge's approval
+// webhook and releasing while the customer is unverified only re-holds the row.
 export const RELEASABLE_HOLD_REASONS = [
+  // Decision 2026-09-08: the four human-actioned reasons.
   'fx_drift',
   'payability',
   'velocity_review',
   'submit_error',
+  // The loss path (2026-09-10, PR #311). Both are human-judgement releases;
+  // neither is in the API's CANCELABLE_HOLD_REASONS, so the cancel+refund exit
+  // is deliberately not an alternative for them.
+  'funding_disputed',
+  'sender_suspended',
 ] as const
 export type ReleasableHoldReason = (typeof RELEASABLE_HOLD_REASONS)[number]
 
