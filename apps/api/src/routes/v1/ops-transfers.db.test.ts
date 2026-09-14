@@ -232,6 +232,15 @@ describe.skipIf(!runDb)('ops write routes end to end (integration, local Supabas
     })
 
     it('replays the 200 for the same key + body and writes NOTHING twice', async () => {
+      // Counted as a DELTA around the replay, not as a running total. The
+      // property under test is "the replay enqueues nothing" — the first
+      // request's enqueue is asserted in the test above, where it happens.
+      // Stated as a total it also silently depended on mock history surviving
+      // from the previous test, which vitest 5 ends: `clearMocks` now defaults
+      // to true, so a total reads 1 under vitest 4 and 0 under vitest 5. The
+      // delta is the same statement under both.
+      const enqueuedBefore = enqueuePayoutSubmit.mock.calls.length
+
       const res = await post('/v1/ops/transfers/hold-release', 'db-release-1').send({
         transferId: T_HELD,
         reason: 'velocity_review',
@@ -240,7 +249,7 @@ describe.skipIf(!runDb)('ops write routes end to end (integration, local Supabas
       expect(res.status).toBe(200)
       expect(res.body).toEqual({ transferId: T_HELD, outcome: 'released', enqueued: true })
       expect(await opsActions(T_HELD)).toHaveLength(1)
-      expect(enqueuePayoutSubmit).toHaveBeenCalledTimes(1)
+      expect(enqueuePayoutSubmit.mock.calls.length).toBe(enqueuedBefore)
     })
 
     it('a fresh attempt on the now-unheld row is refused with 409 conflict and leaves no provenance', async () => {
