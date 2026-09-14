@@ -17,6 +17,7 @@ import { formatUsd, formatMxn } from '@/lib/sendFormat'
 import { formatBalance } from '@/lib/opsOverview'
 import {
   ledgerBalanced,
+  holdReleaseBlocker,
   releasableHoldReason,
   refundPreflight,
   detailActions,
@@ -41,6 +42,7 @@ export default function OpsTransferDetailView({ detail }: { detail: OpsTransferD
   const yesNo = (v: boolean) => (v ? L.yes : L.no)
 
   const releasable = releasableHoldReason(detail)
+  const releaseBlocker = holdReleaseBlocker(detail)
   const preflight = refundPreflight(detail)
   const actions = detailActions(detail)
   const activity = activityRows(detail)
@@ -121,6 +123,23 @@ export default function OpsTransferDetailView({ detail }: { detail: OpsTransferD
                 {releasable != null ? d.holdGuidance[releasable] : d.releaseNotAvailableKyc}
               </p>
             </div>
+            {/* The release is releasable by POLICY but cannot clear this row
+                (2026-09-14). Stands WHERE the button would be, with the two
+                real exits, so the operator is never left looking for one. */}
+            {releaseBlocker != null && (
+              <div style={{ marginTop: 10, fontSize: 13 }}>
+                <div style={{ fontWeight: 700, marginBottom: 4, color: 'var(--color-error)' }}>
+                  {d.holdCannotClearTitle}
+                </div>
+                <p style={{ margin: 0, color: 'var(--muted)' }}>{d.holdCannotClear[releaseBlocker]}</p>
+                {detail.holdRelease != null && (
+                  <Row label={L.quoteAge} mono>
+                    {detail.holdRelease.quoteAgeMinutes}m / {s.threshold}:{' '}
+                    {detail.holdRelease.maxQuoteAgeMinutes}m
+                  </Row>
+                )}
+              </div>
+            )}
             {actions.includes('holdRelease') && releasable != null && (
               <HoldReleaseAction transferId={tr.transferId} reason={releasable} />
             )}

@@ -9,6 +9,7 @@ const envStub = vi.hoisted(() => ({
   FLOAT_CEILING_MINOR: undefined as number | undefined,
   BRIDGE_SPEI_FEE_MINOR: 0,
   BRIDGE_ORCHESTRATION_BPS: 0,
+  FX_MAX_QUOTE_AGE_MINUTES: 240,
 }))
 vi.mock('../config/env.js', () => ({ env: envStub }))
 
@@ -27,6 +28,7 @@ vi.mock('./supabase.js', () => ({
 const {
   submittedLedgerEntries,
   computeDriftBps,
+  assessQuoteAge,
   parseDecimalToMinor,
   minorToDecimal,
   checkPayability,
@@ -38,6 +40,7 @@ beforeEach(() => {
   envStub.FLOAT_CEILING_MINOR = undefined
   envStub.BRIDGE_SPEI_FEE_MINOR = 0
   envStub.BRIDGE_ORCHESTRATION_BPS = 0
+  envStub.FX_MAX_QUOTE_AGE_MINUTES = 240
   getBalance.mockReset()
   from.mockReset()
 })
@@ -221,6 +224,60 @@ describe('computeDriftBps', () => {
     expect(() => computeDriftBps('0', '20')).toThrow(PayoutValidationError)
     expect(() => computeDriftBps('20', '0')).toThrow(PayoutValidationError)
     expect(() => computeDriftBps('0.00000000', '20')).toThrow(PayoutValidationError)
+  })
+})
+
+// The OTHER arm of the fx_drift gate. It exists as its own function because
+// three callers must agree on what "stale" means — the submit job's gate, the
+// ops release refusal, and the board's read — and because unlike drift it is
+// MONOTONE, which is the whole reason a release cannot clear a hold it placed.
+describe('assessQuoteAge', () => {
+  const NOW = Date.parse('2026-09-14T18:00:00.000Z')
+  const minutesAgo = (m: number) => new Date(NOW - m * 60_000).toISOString()
+
+  it('is fresh below the bound and reports the age it measured', () => {
+    expect(assessQuoteAge(minutesAgo(30), NOW)).toEqual({
+      stale: false,
+      ageMinutes: 30,
+      maxAgeMinutes: 240,
+    })
+  })
+
+  it('is strict >, matching the gate in payout-submit exactly at the bound', () => {
+    // A quote AT the bound still submits. This is not a nicety: the release
+    // refusal and the submit gate must agree on the boundary, or the board
+    // refuses a release the job would have honoured (or worse, the reverse).
+    expect(assessQuoteAge(minutesAgo(240), NOW).stale).toBe(false)
+    expect(assessQuoteAge(minutesAgo(241), NOW).stale).toBe(true)
+  })
+
+  it('reads the bound at call time, so raising it un-stales an existing quote', () => {
+    // The escape hatch the board's copy points at: FX_MAX_QUOTE_AGE_MINUTES is
+    // config, not a fact recorded on the row, so a sign-off can make a quote
+    // fresh again and the release goes through. Nothing is written down to
+    // contradict it.
+    const old = minutesAgo(6_900) // the staging rows, 2026-09-14
+    expect(assessQuoteAge(old, NOW).stale).toBe(true)
+    envStub.FX_MAX_QUOTE_AGE_MINUTES = 10_000
+    expect(assessQuoteAge(old, NOW)).toEqual({
+      stale: false,
+      ageMinutes: 6_900,
+      maxAgeMinutes: 10_000,
+    })
+  })
+
+  it('only ever grows — the same quote goes stale with nothing else changing', () => {
+    // The property the fix rests on. A hold placed on the DRIFT arm at minute
+    // 10 becomes un-releasable by minute 241 with no new event, which is why
+    // the cause is derived now and never recorded at hold time.
+    const quote = minutesAgo(10)
+    expect(assessQuoteAge(quote, NOW).stale).toBe(false)
+    expect(assessQuoteAge(quote, NOW + 240 * 60_000).stale).toBe(true)
+  })
+
+  it('throws on an unparseable timestamp rather than reading it as fresh', () => {
+    expect(() => assessQuoteAge('not-a-date', NOW)).toThrow(PayoutValidationError)
+    expect(() => assessQuoteAge('', NOW)).toThrow(PayoutValidationError)
   })
 })
 

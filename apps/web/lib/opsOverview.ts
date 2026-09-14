@@ -208,9 +208,12 @@ export function isOpsResolveSuccessShape(v: unknown): v is OpsResolveSuccess {
 // permanent legal refusal; evidence_conflict → correct the input in place;
 // principal_not_returned → read the Bridge dashboard, never retry from here;
 // provider_unavailable → Bridge could not be asked, nothing changed, retry in
-// a minute — the one refusal where retrying IS the instruction).
+// a minute — the one refusal where retrying IS the instruction;
+// hold_cannot_clear → releasing this hold loops forever, cancel and refund
+// instead — the one refusal a REFRESH will never change).
 export type ResolveErrorKind =
   | 'claim_abandoned'
+  | 'hold_cannot_clear'
   | 'principal_not_returned'
   | 'provider_unavailable'
   | 'refund_owed'
@@ -230,6 +233,7 @@ export function resolveErrorKind(status: number, body: unknown): ResolveErrorKin
     if (code === 'principal_not_returned') return 'principal_not_returned'
     if (code === 'refund_owed') return 'refund_owed'
     if (code === 'deposit_evidence_conflict') return 'evidence_conflict'
+    if (code === 'hold_cannot_clear') return 'hold_cannot_clear'
     if (code === 'conflict' || code === 'idempotency_conflict') return 'conflict'
     return 'generic'
   }

@@ -2,6 +2,7 @@ import * as Sentry from '@sentry/node'
 import { supabaseAdmin } from './supabase.js'
 import { enqueuePayoutSubmit } from './queue.js'
 import { recordOpsAction } from './ops-actions.js'
+import { assessQuoteAge, type QuoteAgeVerdict } from './payouts.js'
 
 // Payout holds, released.
 //
@@ -54,15 +55,23 @@ export type ReleaseHoldOutcome =
   // The row IS held, but not for the reason the operator saw — covers a
   // re-hold under another reason and sender_kyc_pending alike.
   | { done: false; reason: 'hold_reason_mismatch'; actual: string }
+  // The reason matches and the row is releasable in principle, but releasing it
+  // cannot clear the hold: the condition that placed it is one the submit job
+  // will re-measure identically on the next sweep. Today the only such cause is
+  // a `fx_drift` hold whose quote is past FX_MAX_QUOTE_AGE_MINUTES — see
+  // assessQuoteAge. The exit for these rows is cancel + refund
+  // (services/ops-cancel.ts), not release.
+  | { done: false; reason: 'hold_cannot_clear'; cause: 'stale_quote'; quoteAge: QuoteAgeVerdict }
 
 interface HoldRow {
   id: string
   state: string
   payout_hold_reason: string | null
   payout_held_at: string | null
+  quote_id: string
 }
 
-const HOLD_COLUMNS = 'id, state, payout_hold_reason, payout_held_at'
+const HOLD_COLUMNS = 'id, state, payout_hold_reason, payout_held_at, quote_id'
 
 async function readHoldRow(transferId: string): Promise<HoldRow | null> {
   const { data, error } = await supabaseAdmin
@@ -82,6 +91,46 @@ function classify(row: HoldRow | null, reason: ReleasableHoldReason): ReleaseHol
     return { done: false, reason: 'hold_reason_mismatch', actual: row.payout_hold_reason }
   }
   return null
+}
+
+/**
+ * Whether a release of THIS hold could actually clear it.
+ *
+ * `RELEASABLE_HOLD_REASONS` answers a policy question — may an operator act on
+ * this reason at all. It cannot answer the mechanical one, because one reason
+ * does not mean one condition: `fx_drift` is placed by either of two arms, and
+ * only one of them is something a release resolves (jobs/payout-submit.ts, and
+ * the long note on assessQuoteAge). A quote past FX_MAX_QUOTE_AGE_MINUTES makes
+ * the submit job's next sweep re-place the identical hold within a minute, so
+ * the release is a loop the operator pays for and the row never leaves.
+ *
+ * Only the age arm is checked, and deliberately not the drift arm: re-measuring
+ * drift would put a live Bridge rate call on an ops write path to answer a
+ * question the submit job asks again a minute later — and a drifted-but-
+ * tolerable quote is exactly the case the button exists FOR.
+ *
+ * Reads throw (fail closed): an unreadable quote must refuse the release, not
+ * wave it through on the assumption the quote is fresh.
+ */
+async function assessReleaseCanClear(
+  row: HoldRow,
+  reason: ReleasableHoldReason,
+): Promise<Extract<ReleaseHoldOutcome, { reason: 'hold_cannot_clear' }> | null> {
+  if (reason !== 'fx_drift') return null
+
+  const { data, error } = await supabaseAdmin
+    .from('quotes')
+    .select('created_at')
+    .eq('id', row.quote_id)
+    .maybeSingle()
+  if (error) throw new Error(`hold release quote load failed: ${error.message}`)
+  // transfers.quote_id is NOT NULL + FK (ops-transfer-detail.ts precedent): no
+  // row means the read is broken, never an absent condition.
+  if (data == null) throw new Error('hold release quote load failed: no row for a required join')
+
+  const quoteAge = assessQuoteAge((data as { created_at: string }).created_at)
+  if (!quoteAge.stale) return null
+  return { done: false, reason: 'hold_cannot_clear', cause: 'stale_quote', quoteAge }
 }
 
 /**
@@ -105,8 +154,28 @@ export async function releaseHold(
   // Pre-read: an honest refusal for the common cases, and the `before` the
   // operator saw for the provenance row. The UPDATE below is still the guard.
   const before = await readHoldRow(input.transferId)
+  if (before == null) return { done: false, reason: 'transfer_not_found' }
   const early = classify(before, input.reason)
   if (early != null) return early
+
+  // Ordered AFTER classify on purpose: "the hold changed underneath you" and
+  // "not FUNDED" are statements about the row the operator was looking at, and
+  // they must win — a row that already moved needs a refresh, not a lecture
+  // about the quote.
+  const cannotClear = await assessReleaseCanClear(before, input.reason)
+  if (cannotClear != null) {
+    log.info(
+      {
+        audit: true,
+        transferId: input.transferId,
+        reason: input.reason,
+        actor: input.actor,
+        cause: cannotClear.cause,
+      },
+      'payout hold release refused — releasing cannot clear this hold',
+    )
+    return cannotClear
+  }
 
   const { data, error } = await supabaseAdmin
     .from('transfers')
@@ -134,7 +203,7 @@ export async function releaseHold(
       transferId: input.transferId,
       reason: input.reason,
       note: input.note,
-      before: { payoutHoldReason: input.reason, payoutHeldAt: before?.payout_held_at ?? null },
+      before: { payoutHoldReason: input.reason, payoutHeldAt: before.payout_held_at },
       after: { payoutHoldReason: null, payoutHeldAt: null },
       requestId: input.requestId,
     },

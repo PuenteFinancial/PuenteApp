@@ -133,6 +133,20 @@ export interface OpsDetailDisclosure {
   presentedAt: string
 }
 
+/**
+ * Whether Release hold can accomplish anything on this row (2026-09-14). The
+ * hold REASON cannot answer that on its own: `fx_drift` is placed by either of
+ * two conditions and only one of them is something a release resolves. The API
+ * derives this from the quote's age against its own FX_MAX_QUOTE_AGE_MINUTES —
+ * a bound the browser does not have — so the verdict is read, never recomputed
+ * here.
+ */
+export interface OpsDetailHoldRelease {
+  blocker: 'stale_quote' | null
+  quoteAgeMinutes: number
+  maxQuoteAgeMinutes: number
+}
+
 export interface OpsTransferDetail {
   generatedAt: string
   // Same deploy-skew semantics as the overview: absent = read-only.
@@ -140,6 +154,11 @@ export interface OpsTransferDetail {
   transfer: OpsDetailTransfer
   quote: OpsDetailQuote | null
   destination: OpsDetailDestination | null
+  // Absent on an older API (deploy skew) and null when the reason carries no
+  // arm-level distinction. Both mean "no blocker reported" and the button
+  // stays — the API refuses with 409 hold_cannot_clear regardless, so the
+  // worst case is the status quo, never a release that should not happen.
+  holdRelease?: OpsDetailHoldRelease | null
   refund: OpsDetailRefund
   transitions: OpsDetailTransition[]
   ledger: OpsDetailLedgerBatch[]
@@ -170,6 +189,15 @@ export function isOpsTransferDetailShape(v: unknown): v is OpsTransferDetail {
     if (!Array.isArray(v[list])) return false
   }
   if (v.actionsEnabled !== undefined && typeof v.actionsEnabled !== 'boolean') return false
+  // Structural, not semantic: a malformed verdict must not be read as "no
+  // blocker". Absent or null is the honest "not reported" (deploy skew).
+  if (v.holdRelease !== undefined && v.holdRelease !== null) {
+    if (!isRecord(v.holdRelease)) return false
+    const b = v.holdRelease.blocker
+    if (b !== null && b !== 'stale_quote') return false
+    if (typeof v.holdRelease.quoteAgeMinutes !== 'number') return false
+    if (typeof v.holdRelease.maxQuoteAgeMinutes !== 'number') return false
+  }
   if (v.activity !== undefined && !(Array.isArray(v.activity) && v.activity.every(isOpsActivityRowShape))) {
     return false
   }
@@ -206,6 +234,22 @@ export function releasableHoldReason(detail: OpsTransferDetail): ReleasableHoldR
     : null
 }
 
+/**
+ * Why releasing this hold could not clear it, or null.
+ *
+ * Distinct from `releasableHoldReason`, which is about POLICY — may an operator
+ * act on this reason. This is about MECHANISM: a `fx_drift` hold whose quote is
+ * past the API's max age re-lands within a minute of any release, because the
+ * submit job re-measures the same growing number (observed on staging
+ * 2026-09-14: released 17:33, re-held 33 seconds later). Offering the button
+ * there spends an operator's action on a loop. The exit for those rows is
+ * cancel + refund, which the page says instead.
+ */
+export function holdReleaseBlocker(detail: OpsTransferDetail): 'stale_quote' | null {
+  if (releasableHoldReason(detail) == null) return null
+  return detail.holdRelease?.blocker ?? null
+}
+
 // Why a refund cannot be offered right now. Mirrors the CLI's dry run: state
 // gate, the claim, and the RECORDED half of the principal-returned interlock
 // (the live Bridge half runs only inside the action). A pre-submit row
@@ -233,7 +277,11 @@ export type OpsDetailAction = 'holdRelease' | 'refund'
 export function detailActions(detail: OpsTransferDetail): OpsDetailAction[] {
   if (detail.actionsEnabled !== true) return []
   const actions: OpsDetailAction[] = []
-  if (releasableHoldReason(detail) != null) actions.push('holdRelease')
+  // A blocked release is NOT offered — same posture as the abandoned refund
+  // claim: when the action cannot do its job, the page shows the path that can.
+  if (releasableHoldReason(detail) != null && holdReleaseBlocker(detail) == null) {
+    actions.push('holdRelease')
+  }
   if (refundPreflight(detail).blockers.length === 0) actions.push('refund')
   return actions
 }

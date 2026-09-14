@@ -3,6 +3,7 @@ import { env } from '../config/env.js'
 import { supabaseAdmin } from '../services/supabase.js'
 import { transitionTransfer, TransferRpcError } from '../services/transfers.js'
 import {
+  assessQuoteAge,
   checkPayability,
   computeDriftBps,
   isFloatCeilingTripped,
@@ -322,11 +323,20 @@ export async function submitPayout(transferId: string): Promise<number> {
     // are ~2 digits + ≤8dp, far inside double precision, never exponent form)
     // and computeDriftBps re-validates the grammar.
     driftBps = computeDriftBps(live.buyRate, String(quote.source_rate))
-    const quoteAgeMinutes = (Date.now() - new Date(quote.created_at).getTime()) / 60_000
-    if (driftBps > env.FX_MAX_DRIFT_BPS || quoteAgeMinutes > env.FX_MAX_QUOTE_AGE_MINUTES) {
+    // The age half of the gate lives in assessQuoteAge (services/payouts.ts) so
+    // that THIS comparison and the one the ops board uses to decide whether a
+    // release can clear the hold are literally the same code. Two conditions,
+    // one reason: only the drift half is releasable — the age half only grows,
+    // so a release re-lands here within the minute (see assessQuoteAge).
+    const quoteAge = assessQuoteAge(quote.created_at)
+    if (driftBps > env.FX_MAX_DRIFT_BPS || quoteAge.stale) {
       await placeHold(transfer.id, 'fx_drift', {
         driftBps,
-        quoteAgeMinutes: Math.round(quoteAgeMinutes),
+        quoteAgeMinutes: Math.round(quoteAge.ageMinutes),
+        // Which arm(s) tripped, for the Sentry reader. Recorded nowhere
+        // durable on purpose: releasability is re-derived from the quote's age
+        // at read time, never from a snapshot of what was true at hold time.
+        staleQuote: quoteAge.stale,
       })
       return 0
     }

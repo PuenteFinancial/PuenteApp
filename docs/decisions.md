@@ -6,6 +6,40 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-09-14 · `fx_drift` is one hold reason with two conditions, and the board now offers Release
+hold only for the one it can resolve.** `payout-submit` places `fx_drift` when the live Bridge rate
+drifted past `FX_MAX_DRIFT_BPS` **or** the quote is older than `FX_MAX_QUOTE_AGE_MINUTES` (default
+240), and `RELEASABLE_HOLD_REASONS` — a list of reason STRINGS — could not tell them apart. The
+first is releasable: rates move back, and a release is exactly how an operator says "absorb this as
+`fx_slippage`". The second cannot be: a quote only ages, so the 1-minute sweep re-measures the same
+growing number and re-places the identical hold. Measured on staging 2026-09-14 — two transfers
+released by hand at 17:33 were re-held 33 seconds later, quotes ~6,900 minutes old. No money moves
+(the gate returns before `claimForSubmission` and before any Bridge call), so this was never a money
+bug; it was the board offering an action that could only loop.
+
+**Derived at read time, NOT recorded at hold time** — the choice worth writing down, because
+persisting which arm tripped is the more obvious fix and it is wrong. Which arm fired first is a
+fact about the past; whether a release can work is a fact about the present, and they diverge: a
+hold placed purely on drift becomes un-releasable the moment its quote crosses the bound, with no
+new event to record. A hold-time cause would have reported "releasable" for exactly the two staging
+rows, and would have said nothing at all about every row already held. `quotes.created_at` against
+the live env bound is the whole computation, it needs no column and no migration, and it re-reads
+the bound — which is also the **escape hatch**: raising `FX_MAX_QUOTE_AGE_MINUTES` (with sign-off,
+like every other risk bound) makes the same quote fresh and the button returns.
+
+Three surfaces, one comparison — `assessQuoteAge` in `services/payouts.ts`, called by the submit
+gate, the release refusal, and the board's read, so the gate and the button cannot disagree about
+what "stale" means. Only the AGE arm is re-checked on release: re-measuring drift would put a live
+Bridge call on an ops write path to answer a question the submit job asks again a minute later, and
+a drifted-but-tolerable quote is the case the button exists FOR. The refusal is its own code,
+`409 hold_cannot_clear`, not `conflict` — `conflict` means the board is stale and a refresh may
+help, and this means the opposite. The detail page withholds the button (the abandoned-refund-claim
+posture: when an action cannot do its job, show the path that can) and names the two exits: raise
+the bound, or `scripts/cancel-held-transfer.ts --hold fx_drift`, the cancel+refund tail that landed
+the same day (#333). Ordering: the compare-and-swap refusals still win — a row that MOVED gets
+"the hold changed underneath you", because that one wants a refresh. The break-glass SQL bypasses
+all of this by construction, and the runbook now says so.
+
 **2026-09-08 · Ops board slice 1: a per-transfer detail page, a refund backlog panel, and the
 PII rule restated for the wire that carries the most.** The board listed transfers as cards with no
 way in; "what happened to this transfer" was answered from the terminal plus the Supabase and Bridge

@@ -550,6 +550,30 @@ describe('POST /v1/ops/transfers/hold-release', () => {
       expect(res.body.error.details).toEqual([detail])
     })
 
+    it('409 hold_cannot_clear — its OWN code, because refreshing will never help', async () => {
+      // `conflict` tells the operator the board is stale and to look again.
+      // This refusal is the opposite instruction: the row has NOT changed, and
+      // releasing it will loop forever (staging 2026-09-14). The operator needs
+      // the other exit — cancel + refund — not a refresh, so the client must be
+      // able to branch on the code rather than parse the message.
+      releaseHold.mockResolvedValue({
+        done: false,
+        reason: 'hold_cannot_clear',
+        cause: 'stale_quote',
+        quoteAge: { stale: true, ageMinutes: 6_912.4, maxAgeMinutes: 240 },
+      })
+      const app = await buildApp()
+      const res = await post(app, ADMIN).send({ ...BODY, reason: 'fx_drift' })
+      expect(res.status).toBe(409)
+      expect(res.body.error.code).toBe('hold_cannot_clear')
+      // Points at the runbook section that has the real exit.
+      expect(res.body.error.message).toContain('cancel and refund')
+      expect(res.body.error.details).toEqual([
+        { path: 'reason', issue: 'stale_quote; quote age 6912min > max 240min' },
+      ])
+      expect(recordOpsAction).not.toHaveBeenCalled()
+    })
+
     it('500s (fail closed, message off the wire) when the service throws', async () => {
       releaseHold.mockRejectedValue(new Error('hold release update failed: pii-free message'))
       const app = await buildApp()

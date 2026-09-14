@@ -752,6 +752,10 @@ export type Translations = {
         cancellationRequestedAt: string
         heldAt: string
         holdReason: string
+        // The fx_drift hold's age arm, beside the reason: the quote's age
+        // against FX_MAX_QUOTE_AGE_MINUTES, which decides whether a release
+        // can do anything at all.
+        quoteAge: string
         claimStatus: string
         claimedAt: string
         claimedBy: string
@@ -804,6 +808,13 @@ export type Translations = {
         submit_error: string
       }
       releaseNotAvailableKyc: string
+      // 2026-09-14: the hold IS operator-releasable, but releasing it cannot
+      // clear it. One key per blocker; `holdCannotClearTitle` heads the block
+      // that stands where the Release hold button would be.
+      holdCannotClearTitle: string
+      holdCannotClear: {
+        stale_quote: string
+      }
       refundPreflightTitle: string
       refundReady: string
       refundBlocked: {
@@ -863,6 +874,7 @@ export type Translations = {
       }
       errors: {
         claim_abandoned: string
+        hold_cannot_clear: string
         principal_not_returned: string
         provider_unavailable: string
         refund_owed: string
@@ -1658,6 +1670,8 @@ const en: Translations = {
       errors: {
         claim_abandoned:
           'DANGER: a prior refund run abandoned its claim and may have disbursed without recording it. Do NOT retry — follow runbooks/manual-refund.md (abandoned claims).',
+        hold_cannot_clear:
+          'Releasing cannot clear this hold — the submit job re-measures the same condition and re-holds the row within a minute. Refreshing will not change that. If the payout can never go out, cancel and refund it: runbooks/payout-holds.md, “When a hold can never clear”.',
         principal_not_returned:
           'STOP: the principal is not confirmed back from Bridge — the recorded return event and Bridge’s live state must agree before a refund can post. Do NOT retry from here: read the Bridge dashboard, then follow runbooks/manual-refund.md.',
         provider_unavailable:
@@ -1832,6 +1846,7 @@ const en: Translations = {
         cancellationRequestedAt: 'Cancellation requested at',
         heldAt: 'Held since',
         holdReason: 'Reason',
+        quoteAge: 'Quote age',
         claimStatus: 'Refund claim',
         claimedAt: 'Claimed at',
         claimedBy: 'Claimed by',
@@ -1887,6 +1902,11 @@ const en: Translations = {
       },
       releaseNotAvailableKyc:
         'Auto-released by Bridge’s approval webhook — no button by design. Never release while the customer is unverified: Bridge refuses the payout and the row re-holds as submit_error.',
+      holdCannotClearTitle: 'Release cannot clear this hold',
+      holdCannotClear: {
+        stale_quote:
+          'The quote is past FX_MAX_QUOTE_AGE_MINUTES, and a quote only ages. The submit job re-measures the same number on the next 1-minute sweep, so any release re-holds the row as fx_drift \u2014 no button by design. Two exits: raise FX_MAX_QUOTE_AGE_MINUTES with Joshua\u2019s sign-off if this payout should still go out at the quoted amount (it is a firm Reg E commitment \u2014 never re-quote), or end the transfer with scripts/cancel-held-transfer.ts --hold fx_drift, which cancels and refunds the sender (runbooks/payout-holds.md, \u201cWhen a hold can never clear\u201d).',
+      },
       refundPreflightTitle: 'Refund preflight',
       refundReady:
         'Recorded checks pass. The live Bridge check runs when the refund is triggered.',
@@ -2634,6 +2654,8 @@ const es: Translations = {
       errors: {
         claim_abandoned:
           'PELIGRO: una ejecuci\u00f3n anterior abandon\u00f3 su claim de reembolso y pudo haber desembolsado sin registrarlo. NO reintentes \u2014 sigue runbooks/manual-refund.md (claims abandonados).',
+        hold_cannot_clear:
+          'Liberar no puede quitar esta retenci\u00f3n \u2014 el job de env\u00edo vuelve a medir la misma condici\u00f3n y retiene la fila otra vez en un minuto. Actualizar no lo cambia. Si el payout nunca podr\u00e1 salir, cancela y reembolsa: runbooks/payout-holds.md, \u201cWhen a hold can never clear\u201d.',
         principal_not_returned:
           'ALTO: no est\u00e1 confirmado que el principal haya regresado de Bridge \u2014 el evento de retorno registrado y el estado en vivo de Bridge deben coincidir antes de asentar un reembolso. NO reintentes desde aqu\u00ed: revisa el panel de Bridge y sigue runbooks/manual-refund.md.',
         provider_unavailable:
@@ -2814,6 +2836,7 @@ const es: Translations = {
         cancellationRequestedAt: 'Cancelaci\u00f3n solicitada',
         heldAt: 'Retenida desde',
         holdReason: 'Motivo',
+        quoteAge: 'Antig\u00fcedad de la cotizaci\u00f3n',
         claimStatus: 'Claim de reembolso',
         claimedAt: 'Reclamado',
         claimedBy: 'Reclamado por',
@@ -2871,6 +2894,11 @@ const es: Translations = {
       },
       releaseNotAvailableKyc:
         'Se libera sola con el webhook de aprobaci\u00f3n de Bridge \u2014 sin bot\u00f3n por dise\u00f1o. Nunca liberes con el cliente sin verificar: Bridge rechaza el payout y la fila vuelve a retenerse como submit_error.',
+      holdCannotClearTitle: 'Liberar no puede quitar esta retenci\u00f3n',
+      holdCannotClear: {
+        stale_quote:
+          'La cotizaci\u00f3n super\u00f3 FX_MAX_QUOTE_AGE_MINUTES, y una cotizaci\u00f3n solo envejece. El job de env\u00edo vuelve a medir el mismo n\u00famero en el barrido del pr\u00f3ximo minuto, as\u00ed que cualquier liberaci\u00f3n vuelve a retener la fila como fx_drift \u2014 sin bot\u00f3n por dise\u00f1o. Dos salidas: subir FX_MAX_QUOTE_AGE_MINUTES con la aprobaci\u00f3n de Joshua si este payout a\u00fan debe salir al monto cotizado (es un compromiso firme bajo Reg E \u2014 nunca recotices), o terminar la transferencia con scripts/cancel-held-transfer.ts --hold fx_drift, que cancela y reembolsa al remitente (runbooks/payout-holds.md, \u201cWhen a hold can never clear\u201d).',
+      },
       refundPreflightTitle: 'Verificaci\u00f3n previa al reembolso',
       refundReady:
         'Las verificaciones registradas pasan. La verificaci\u00f3n en vivo contra Bridge corre al disparar el reembolso.',

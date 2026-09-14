@@ -112,6 +112,17 @@ const detailResponseSchema = {
         recipientStatus: nullableString,
       },
     },
+    // Whether Release hold can accomplish anything here (2026-09-14). Null when
+    // the hold reason carries no arm-level distinction; `blocker` names the
+    // condition a release cannot resolve.
+    holdRelease: {
+      type: ['object', 'null'],
+      properties: {
+        blocker: { type: ['string', 'null'], enum: ['stale_quote', null] },
+        quoteAgeMinutes: { type: 'number' },
+        maxQuoteAgeMinutes: { type: 'number' },
+      },
+    },
     refund: {
       type: 'object',
       properties: {
@@ -414,6 +425,24 @@ export const opsTransfersRoute: FastifyPluginAsync = async (server) => {
             return sendError(reply, 409, 'conflict', 'The hold changed underneath you', [
               { path: 'reason', issue: `hold is ${outcome.actual}` },
             ])
+          case 'hold_cannot_clear':
+            // NOT `conflict`: nothing changed underneath the operator and
+            // refreshing will not help. The submit job re-measures this exact
+            // condition on the next sweep, so a release loops forever (staging
+            // 2026-09-14). The board hides the button for these rows; this is
+            // the backstop for a stale page and for direct API callers.
+            return sendError(
+              reply,
+              409,
+              'hold_cannot_clear',
+              'Releasing cannot clear this hold — the submit job re-holds it within a minute. If the payout can never go out, cancel and refund it (runbooks/payout-holds.md, "When a hold can never clear").',
+              [
+                {
+                  path: 'reason',
+                  issue: `${outcome.cause}; quote age ${Math.round(outcome.quoteAge.ageMinutes)}min > max ${outcome.quoteAge.maxAgeMinutes}min`,
+                },
+              ],
+            )
         }
       } catch (err) {
         request.log.error(

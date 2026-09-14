@@ -262,7 +262,11 @@ releases itself (see below).
 
 - **`fx_drift`** — the FX submission backstop tripped: live Bridge buy rate drifted more than
   `FX_MAX_DRIFT_BPS` from the quote's `source_rate`, or the quote is older than
-  `FX_MAX_QUOTE_AGE_MINUTES`. Never submit on unknown or dislocated rates.
+  `FX_MAX_QUOTE_AGE_MINUTES`. Never submit on unknown or dislocated rates. **One reason, two
+  conditions, and only the drift one is releasable** — rates move back, quote age only grows, so a
+  release on a stale quote re-holds the row on the next sweep. The board withholds the button and
+  the API answers `409 hold_cannot_clear` for that case; the exits are raising the bound or
+  cancel + refund (2026-09-14, [runbooks/payout-holds.md](runbooks/payout-holds.md)).
 - **`payability`** — destination or recipient not `active`, or no `provider_account_ref`.
 - **`submit_error`** — Bridge rejected the payout with a non-retryable 4xx (422 idempotency
   mismatch or similar).

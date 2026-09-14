@@ -254,6 +254,10 @@ describe('resolveErrorKind', () => {
     expect(resolveErrorKind(502, '<html>bad gateway</html>')).toBe('generic')
     expect(resolveErrorKind(409, envelope('refund_owed'))).toBe('refund_owed')
     expect(resolveErrorKind(409, envelope('deposit_evidence_conflict'))).toBe('evidence_conflict')
+    // Distinct from 'conflict' on purpose: 'conflict' means the board is stale
+    // and a refresh may help; this one means releasing can never work and the
+    // operator needs the cancel + refund exit instead.
+    expect(resolveErrorKind(409, envelope('hold_cannot_clear'))).toBe('hold_cannot_clear')
     expect(resolveErrorKind(409, envelope('conflict'))).toBe('conflict')
     expect(resolveErrorKind(409, envelope('idempotency_conflict'))).toBe('conflict')
     expect(resolveErrorKind(404, envelope('not_found'))).toBe('not_found')

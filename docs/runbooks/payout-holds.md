@@ -2,7 +2,7 @@
 
 Held rows are listed with their reasons on the ops board at `/dashboard/ops` (8.5-v1); each card's id
 opens `/dashboard/ops/transfers/<id>` (ops board slice 1), which shows the hold, this runbook's
-per-reason guidance inline, the quote's Bridge buy rate (for `fx_drift`), the destination and
+per-reason guidance inline, the quote's Bridge buy rate and age (for `fx_drift`), the destination and
 recipient statuses (for `payability`), the full transition timeline, ledger postings, and provider
 events — the investigation inputs below, on one page — and, since slice O-B, the **Release hold**
 button that performs the release and records who did it and why.
@@ -30,7 +30,9 @@ go through migrations only). Background: [transfer-state-machine.md](../transfer
    compare-and-swap as the SQL below (`FUNDED` and `payout_hold_reason = '<reason as shown>'`), so a
    hold that changed underneath you is refused with *"the hold changed underneath you"* — refresh,
    re-read the reason, decide again. `sender_kyc_pending` has **no button by design** (it auto-releases
-   on Bridge's approval webhook; releasing by hand only re-holds the row as `submit_error`).
+   on Bridge's approval webhook; releasing by hand only re-holds the row as `submit_error`), and
+   neither does an `fx_drift` hold whose quote is past `FX_MAX_QUOTE_AGE_MINUTES` — releasing that
+   one cannot clear it, so the page shows the two real exits instead (see `fx_drift` below).
 
    **Break-glass (board down):** the SQL in the **Supabase SQL editor** (staging or prod project as
    appropriate):
@@ -43,7 +45,9 @@ go through migrations only). Background: [transfer-state-machine.md](../transfer
 
    The `payout_hold_reason = '<reason>'` guard makes the release a no-op if the hold has already
    changed or been cleared — expect exactly 1 row updated. A SQL release leaves no `ops_actions` row;
-   note it in the incident channel.
+   note it in the incident channel. **Break-glass bypasses the can-this-clear check too** — the SQL
+   will happily clear an `fx_drift` hold on a stale quote, and the sweep will re-place it within the
+   minute. Read the `fx_drift` section before reaching for it.
 3. Verify: the success line says whether the submit was enqueued directly (`enqueued: false` = the
    sweep picks it up); within ~1 minute the transfer should move to `SUBMITTED` — the detail page's
    Timeline shows `FUNDED → SUBMITTED` with the `worker:payout` actor.
@@ -69,6 +73,12 @@ nothing — the submit job re-runs the same preflight and parks it again within 
 transfer sits FUNDED forever with the sender's money collected and undelivered. Before 2026-09-14
 nothing in the system could end that state, which is exactly how two $5.00 staging transfers came
 to sit held since 2026-09-09.
+
+**The board now refuses the release it cannot honour**, for the one case it can prove: an
+`fx_drift` hold whose quote is past `FX_MAX_QUOTE_AGE_MINUTES` (see the `fx_drift` section below).
+The button is not rendered and the API answers `409 hold_cannot_clear`. Every other
+never-clearing cause is still a judgement you make from the evidence on the page — the system
+cannot tell a destination that is merely inactive from one that will never be endorsed.
 
 ```bash
 doppler run -- pnpm exec tsx scripts/cancel-held-transfer.ts --list
@@ -185,18 +195,51 @@ we missed entirely.
 
 ## `fx_drift` — FX submission backstop tripped
 
-The live Bridge buy rate drifted more than `FX_MAX_DRIFT_BPS` (default 200) from the quote's
-`source_rate`, or the quote is older than `FX_MAX_QUOTE_AGE_MINUTES` (default 240). This fires
-only on genuine dislocation or a transfer stuck for hours.
+**One reason, two conditions — and only one of them is releasable.** The live Bridge buy rate
+drifted more than `FX_MAX_DRIFT_BPS` (default 200) from the quote's `source_rate`, **or** the quote
+is older than `FX_MAX_QUOTE_AGE_MINUTES` (default 240). Read that sentence as two different jobs:
 
-1. Read the Sentry alert: it carries the drift value (bps) and transfer id (no PII).
-2. Compare the quote's `source_rate` and `created_at` against the current Bridge buy rate.
-   Remember the quote is our firm Reg E commitment — the customer amount cannot change.
+| Arm | Does it move back? | Does releasing work? |
+|---|---|---|
+| **Drift** — live rate vs `source_rate` | Yes, rates move | **Yes.** This is what the button is for |
+| **Age** — quote older than the bound | **No. A quote only ages** | **No.** The next sweep re-holds it |
+
+The age arm is why the **Release hold** button disappears on some `fx_drift` rows. Releasing one
+clears the hold columns for about a second: the 1-minute `payout.sweep` re-runs the same comparison
+against the same growing number and parks the row again, forever. Measured on staging 2026-09-14 —
+two transfers released by hand at 17:33 were re-held as `fx_drift` 33 seconds later, with quotes
+~6,900 minutes old. No money moves (the gate returns before the claim and before any Bridge call),
+so the only cost is the operator's action; the board no longer offers it.
+
+What you see instead, when the quote is past the bound: a **Release cannot clear this hold** block
+where the button was, with the quote's age against the bound. The API refuses the same release with
+`409 hold_cannot_clear` — so a stale browser tab cannot spend the action either. Note this is
+*derived from the quote's age right now*, not from which arm tripped originally: a hold placed
+purely on drift becomes un-releasable once it sits past the bound, which is exactly what happened to
+the staging rows.
+
+1. Read the Sentry alert: it carries the drift value (bps), the quote age in minutes, `staleQuote`,
+   and the transfer id (no PII).
+2. Compare the quote's `source_rate` and `created_at` against the current Bridge buy rate. The
+   detail page's Quote section has both, and the Hold section shows the age against the bound.
+   Remember the quote is our firm Reg E commitment — **the customer amount cannot change**, so
+   re-quoting is never one of the options below.
 3. Decide:
-   - **Drift is tolerable** (we absorb it as `fx_slippage`, the normal mechanism) → release.
-   - **Genuine market dislocation** → escalate to Joshua before releasing; the loss lands on us.
-   - **Quote merely stale** (transfer stuck for hours, rate fine) → find out *why* it was stuck
-     first, then release.
+   - **Drift is tolerable, quote fresh** (we absorb it as `fx_slippage`, the normal mechanism) →
+     release. This is the ordinary case.
+   - **Genuine market dislocation, quote fresh** → escalate to Joshua before releasing; the loss
+     lands on us.
+   - **Quote past the bound** → releasing is not available, and would not have worked. Two exits,
+     and they are a real decision, not a formality:
+     - *This payout should still go out at the quoted amount* → raise `FX_MAX_QUOTE_AGE_MINUTES`
+       **with Joshua's sign-off** (it is a risk bound, like `RISK_*` and `FLOAT_CEILING_MINOR`, not
+       a tuning knob — and it applies to every transfer, not just this one). The same quote is then
+       fresh by the new bound and the button comes back.
+     - *This payout can never go out* → end the transfer:
+       `scripts/cancel-held-transfer.ts --hold fx_drift` cancels and refunds the sender (see **When
+       a hold can never clear** above).
+   - Either way, still find out **why the transfer was stuck for hours** — a quote does not reach
+     240 minutes on a healthy path.
 
 ## `payability` — destination or recipient not payable
 

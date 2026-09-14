@@ -171,6 +171,65 @@ export function computeDriftBps(liveRate: string, sourceRate: string): number {
   return Number(bps)
 }
 
+/**
+ * The OTHER arm of the `fx_drift` gate: how old the quote is, and whether that
+ * age alone is enough to hold the payout.
+ *
+ * `fx_drift` is one hold reason covering two conditions (jobs/payout-submit.ts),
+ * and they are not equally releasable — the difference decides whether the ops
+ * board's Release hold button can accomplish anything at all.
+ *
+ *   DRIFT is not monotone. Rates move back, the next sweep re-measures, and a
+ *   release is precisely how an operator says "absorb this as fx_slippage".
+ *
+ *   AGE only ever grows. Once a quote is past FX_MAX_QUOTE_AGE_MINUTES no
+ *   release can clear the hold: the submit job re-runs this same comparison on
+ *   the next 1-minute sweep and parks the row again, forever. Measured on
+ *   staging 2026-09-14 — two transfers released by hand at 17:33 were re-held
+ *   as `fx_drift` 33 seconds later, with quotes ~6,900 minutes old. No money
+ *   moves (the gate returns before claimForSubmission and before any Bridge
+ *   call), so it costs the operator an action and nothing else; that is still
+ *   an action the board should not have offered.
+ *
+ * EVALUATED NOW, NEVER RECORDED AT HOLD TIME. Which arm tripped first is a fact
+ * about the past; whether a release can work is a fact about the present. A
+ * hold placed purely on drift becomes un-releasable the moment its quote ages
+ * past the bound — so a cause persisted at hold time would report "releasable"
+ * for a row that demonstrably is not, and would say nothing at all about the
+ * rows already sitting held. `quotes.created_at` against the live env bound is
+ * the whole computation, and it needs no new column.
+ *
+ * ONE COMPARISON, THREE CALLERS. The submit job's gate, the release refusal
+ * (services/payout-holds.ts) and the board's read (services/ops-transfer-detail.ts)
+ * all come through here, so the gate and the button cannot disagree about what
+ * "stale" means. Strict `>`, matching the gate it replaced.
+ *
+ * The escape hatch is the bound itself: raising FX_MAX_QUOTE_AGE_MINUTES (with
+ * Joshua's sign-off, like every other risk bound) makes the same quote fresh
+ * and the release goes through. Nothing here is written down to contradict it.
+ */
+export interface QuoteAgeVerdict {
+  /** Past FX_MAX_QUOTE_AGE_MINUTES — the submit job will re-hold on this alone. */
+  stale: boolean
+  ageMinutes: number
+  maxAgeMinutes: number
+}
+
+export function assessQuoteAge(quoteCreatedAt: string, nowMs: number = Date.now()): QuoteAgeVerdict {
+  const createdMs = Date.parse(quoteCreatedAt)
+  // Corrupt data, not a market condition: throwing keeps every caller failing
+  // closed rather than treating an unparseable timestamp as "fresh".
+  if (Number.isNaN(createdMs)) {
+    throw new PayoutValidationError(`quote created_at is not a parseable timestamp`)
+  }
+  const ageMinutes = (nowMs - createdMs) / 60_000
+  return {
+    stale: ageMinutes > env.FX_MAX_QUOTE_AGE_MINUTES,
+    ageMinutes,
+    maxAgeMinutes: env.FX_MAX_QUOTE_AGE_MINUTES,
+  }
+}
+
 // ── Decimal ↔ minor-unit converters (2-dp currencies) ──────────────────────
 
 // The plan's "strict 2-dp; alert on more precision" gate for Bridge

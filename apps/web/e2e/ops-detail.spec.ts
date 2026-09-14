@@ -17,6 +17,9 @@ const FAILED_ABANDONED = 'fa11ed02-0000-4000-8000-000000000006'
 // O-B: detail passes preflight, the POST refuses — "the row moved".
 const FAILED_RACED = 'fa11ed03-0000-4000-8000-000000000007'
 const FAILED_STUCK = 'fa11ed04-0000-4000-8000-000000000008'
+// 2026-09-14: an fx_drift hold on a quote past the max age. Releasing it could
+// only loop, so the page must offer no button at all.
+const HELD_STALE_QUOTE = '4e1d0002-0000-4000-8000-000000000009'
 
 const NOTE = 'e2e: verified the sender by phone; both sends today are legitimate.'
 
@@ -128,6 +131,29 @@ test('release hold: the confirm button stays disabled until a real note is typed
   await expect(page.getByText(/payout submission queued|envío del payout en cola/i)).toBeVisible()
   await page.getByRole('button', { name: /^(close|cerrar)$/i }).click()
   await expect(page.getByRole('button', { name: /^(release hold|liberar retención)$/i })).toBeVisible()
+})
+
+test('release hold: a stale-quote fx_drift hold offers NO button, and says what to do instead', async ({
+  context,
+  page,
+}) => {
+  // The staging bug, 2026-09-14: two transfers released by hand at 17:33 were
+  // re-held as fx_drift 33 seconds later because the quote was ~6,900 minutes
+  // old and a quote only ages. The board must not offer that action.
+  await signIn(context)
+  await page.goto(`/dashboard/ops/transfers/${HELD_STALE_QUOTE}`)
+
+  await expect(page.getByText(/^(fx drift|deriva de tipo de cambio)$/i)).toBeVisible()
+  await expect(
+    page.getByText(/release cannot clear this hold|liberar no puede quitar esta retención/i),
+  ).toBeVisible()
+  // The two real exits are named, not implied.
+  await expect(page.getByText(/FX_MAX_QUOTE_AGE_MINUTES/)).toBeVisible()
+  await expect(page.getByText(/cancel-held-transfer\.ts/)).toBeVisible()
+  // The age against the bound, so the operator can judge the first exit.
+  await expect(page.getByText(/6900m/)).toBeVisible()
+
+  await expect(page.getByRole('button', { name: /^(release hold|liberar retención)$/i })).toHaveCount(0)
 })
 
 test('refund: happy path restates the amount, then shows the outcome and both ledger batches', async ({
