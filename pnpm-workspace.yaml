@@ -15,15 +15,24 @@ allowBuilds:
 # versions. Each entry exists because no direct dependency will pull the fix
 # in on its own; revisit whenever the parent package catches up.
 overrides:
-  sharp: ^0.35.0            # High: inherited libvips CVEs; next pins 0.34.5
   postcss: ^8.5.26          # High: path traversal + arbitrary file read; next pins 8.4.31
   nanoid: ^3.3.18           # High: infinite loop in custom generators (<3.3.17)
-  js-yaml: ^4.3.1           # High: quadratic CPU in !!omap resolution
+  js-yaml: ^4.3.2           # High: quadratic CPU in !!omap resolution (4.3.1 is IN range)
   shell-quote: ^1.9.0       # High: quadratic-complexity DoS in parse()
-  # Medium: IN_PLACE hook removal leaves a detached subtree executable.
-  # posthog-js 1.414+ pulls this in on its own — drop this entry once the
-  # misc-group bump lands and posthog-js is past 1.409.
-  dompurify: ^3.4.13
-  # Scoped by range on purpose: 1.1.16 is outside the advisory (>=3.0.0 <5.0.7)
-  # and forcing it to 5.x would jump a major for whatever still needs v1.
+  # Low, dev-only (Windows dev-server SSRF): 0.28.1 is already in the tree via
+  # tsx and vite's range is ^0.27.0 || ^0.28.0, so this just dedupes the 0.27.7
+  # copy that tsup -> bundle-require pulls in. List hygiene, not risk reduction.
+  esbuild: ^0.28.1
+  # TWO entries, one per major line, because the two lines have separate
+  # advisories with separate patches — and neither can be fixed by moving to
+  # the other without crossing a major for whatever depends on it.
+  #   v3/v4: DoS via quadratic expansion. 1.1.x is OUTSIDE this range, which is
+  #          why it is scoped rather than a bare `^5.0.9`.
   brace-expansion@>=3.0.0 <5.0.7: ^5.0.9
+  #   v1:    two DoS advisories landed 2026-09-14 (unbounded expansion length
+  #          -> OOM crash, patched 1.1.17; then unbounded intermediate arrays
+  #          bypassing that mitigation, patched 1.1.18). Both are ON the v1
+  #          line, so v1 can be fixed IN PLACE — 1.1.16 -> ^1.1.18, no major
+  #          jump. This is what the note above used to say was impossible;
+  #          it stopped being true when upstream backported to v1.
+  brace-expansion@<2.0.0: ^1.1.18
