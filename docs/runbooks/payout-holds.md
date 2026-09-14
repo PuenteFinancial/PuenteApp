@@ -114,6 +114,23 @@ approval that may be minutes away).
 **It refuses a row the submit job has claimed or that already has a Bridge payout.** Those belong
 to the payout-failure tail — let the payout resolve, then `scripts/trigger-refund.ts`.
 
+**It refuses a transfer whose funding was CHARGED BACK** (`funding_disputed`) — the dispute
+interlock, added 2026-09-14 after this exact case stranded two staging rows. Before the cancel
+commits it asks two independent sources whether the funding is still ours to give back: our own
+record (`funding_disputed_at`, a `funding_disputed` hold, `FUNDING_REVERSED`) **and** the live
+charge at the provider. A disputed charge has already returned the sender's money through the card
+network, so refunding on top pays them twice.
+
+The provider half is the one that earns its keep: on staging all three disputes left **no trace on
+our side at all** (the loss-path handler shipped hours after they arrived), so a gate reading our
+record alone would have waved all three through. If the refusal says the **provider** caught it,
+that is a second finding — the dispute is not recorded on our side, so check the
+`charge.dispute.created` handling and reconciliation's `stripe_disputes` output.
+
+It **fails closed**: a provider that cannot be reached stops the run rather than passing. A rail
+that exposes no dispute check at all (mock, `manual`) is different — there is nothing to dispute —
+and proceeds on our record, which the dry run states explicitly.
+
 **It also refuses a transfer already `CANCELED` by the SENDER** (`not_our_cancel`). That row's
 books are square — the sender's cancel posts the FUNDED-batch reversal — so finishing it here
 would post a second refund batch against a liability that was never recognized. What such a row

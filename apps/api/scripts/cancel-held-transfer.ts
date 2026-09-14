@@ -56,6 +56,7 @@
 import { formatMoney } from '@puente/shared'
 import {
   cancelHeldTransfer,
+  verifyFundingNotDisputed,
   listHeldTransfers,
   cancelLedgerBatches,
   CANCELABLE_HOLD_REASONS,
@@ -299,6 +300,20 @@ export function refusalMessage(outcome: Extract<OpsCancelOutcome, { done: false 
         `the hold is now "${outcome.actual}", not the one you confirmed. It changed underneath ` +
         'you — re-read the transfer and decide again. Nothing was written.'
       )
+    case 'funding_disputed':
+      return (
+        `the funding for this transfer has been CHARGED BACK${outcome.disputeRef ? ` (${outcome.disputeRef})` : ''} — ` +
+        `${outcome.detail}. The sender already has their money back through the card network, so ` +
+        'there is nothing here to return: refunding would pay them twice, and booking a refund the ' +
+        'processor will refuse would leave the ledger claiming a debt that does not exist.\n' +
+        (outcome.source === 'provider'
+          ? '  The PROVIDER caught this, not our records — so the dispute is not recorded on our\n' +
+            '  side at all (no funding_disputed hold, no funding_disputed_at). That is its own\n' +
+            '  problem: check whether the charge.dispute.created webhook was handled, and see\n' +
+            "  reconciliation's stripe_disputes findings.\n"
+          : '') +
+        '  This row belongs to the loss path: docs/runbooks/proposals/funding-reversal.md.'
+      )
     case 'not_our_cancel':
       return (
         'the transfer is CANCELED, but by the SENDER\'s own cancel — not by this tool. Its books ' +
@@ -377,7 +392,37 @@ export async function cancel(args: Extract<ParsedArgs, { mode: 'cancel' }>): Pro
     }
   }
 
-  // 2) The claim. Reported BEFORE the dry run returns, so an operator learns a
+  // 2) The dispute interlock, reported before --confirm so an operator sees a
+  //    chargeback while deciding rather than as a mid-tail throw. The service
+  //    runs it again for real; this is the preview, and it is deliberately the
+  //    same function rather than a second implementation that could disagree.
+  begin('dispute interlock — is this funding still ours to give back?')
+  const candidate = (await listHeldTransfers()).find((r) => r.id === transferId)
+  if (!candidate) {
+    pass('not in the held list — skipping the probe; the service will say why')
+  } else {
+    const verdict = await verifyFundingNotDisputed({
+      state: 'FUNDED',
+      payout_hold_reason: candidate.payout_hold_reason,
+      funding_disputed_at: candidate.funding_disputed_at,
+      funding_payment_ref: candidate.funding_payment_ref,
+      funding_processor: candidate.funding_processor,
+    })
+    if (verdict.disputed) {
+      fail(
+        `funding CHARGED BACK — ${verdict.detail}` +
+          `${verdict.disputeRef ? ` (${verdict.disputeRef})` : ''}. Nothing was written. ` +
+          'This row belongs to the loss path, not here.',
+      )
+    }
+    pass(
+      verdict.checked === 'record_and_provider'
+        ? 'not disputed — our records and the live provider agree'
+        : 'not disputed by our records; this rail exposes no provider check (nothing to dispute)',
+    )
+  }
+
+  // 3) The claim. Reported BEFORE the dry run returns, so an operator learns a
   //    claim is abandoned while they are still deciding — not after --confirm.
   begin('check the refund claim')
   const claim = await refundClaimStatus(transferId)

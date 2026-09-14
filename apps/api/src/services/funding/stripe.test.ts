@@ -613,3 +613,45 @@ describe('normalizePiStatus — the PI in reconciliation\'s vocabulary', () => {
     expect(normalizePiStatus('some_future_status')).toBe('awaiting')
   })
 })
+
+describe('stripe getDisputeStatus (the dispute interlock, 2026-09-14)', () => {
+  it('reports no dispute when the exact-filtered query comes back empty', async () => {
+    const list = vi.fn(async () => ({ data: [] }))
+    const p = new StripeFundingProcessor({ disputes: { list } } as unknown as Stripe)
+
+    await expect(p.getDisputeStatus({ paymentRef: 'pi_123' })).resolves.toEqual({
+      paymentRef: 'pi_123',
+      disputed: false,
+    })
+    // Filtered by payment_intent, NOT by a created-after window: a dispute from
+    // any date must be found, so "empty" genuinely means none. The windowed
+    // listRecentDisputes is for recon, where a miss is retried in six hours.
+    expect(list).toHaveBeenCalledWith({ payment_intent: 'pi_123', limit: 1 })
+  })
+
+  it('reports the dispute id and status when the charge was clawed back', async () => {
+    const list = vi.fn(async () => ({
+      data: [{ id: 'du_1UEAUGIbCQghJX8LxAXiQE5S', status: 'needs_response' }],
+    }))
+    const p = new StripeFundingProcessor({ disputes: { list } } as unknown as Stripe)
+
+    await expect(p.getDisputeStatus({ paymentRef: 'pi_123' })).resolves.toEqual({
+      paymentRef: 'pi_123',
+      disputed: true,
+      disputeRef: 'du_1UEAUGIbCQghJX8LxAXiQE5S',
+      status: 'needs_response',
+    })
+  })
+
+  // The contract the seam documents: an implemented check that cannot answer
+  // must throw, never resolve to `disputed: false`. Swallowing a timeout here
+  // turns the interlock into a rubber stamp at the only moment it matters.
+  it('propagates a provider failure instead of answering "not disputed"', async () => {
+    const list = vi.fn(async () => {
+      throw new Error('stripe timeout')
+    })
+    const p = new StripeFundingProcessor({ disputes: { list } } as unknown as Stripe)
+
+    await expect(p.getDisputeStatus({ paymentRef: 'pi_123' })).rejects.toThrow('stripe timeout')
+  })
+})

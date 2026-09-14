@@ -21,12 +21,24 @@ vi.mock('./transfers.js', async (importOriginal) => {
 })
 
 const processorRefund = vi.hoisted(() => vi.fn())
+// Mutable so a test can make the rail expose a dispute check, or not expose one.
+const disputeStatus = vi.hoisted(() => ({ impl: null as null | ((...a: unknown[]) => unknown) }))
 vi.mock('./funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./funding/index.js')>()
   // real undoModeForRef / undoRequiresManualDisbursement — the settle picks its
   // batch off the ref prefix on the crash-recovery path
-  const fake = { refund: (...a: unknown[]) => processorRefund(...a) }
-  return { ...actual, getFundingProcessor: () => fake, processorFor: () => fake }
+  // Built PER CALL, not once: the absence of getDisputeStatus is itself a case
+  // (a rail that cannot be disputed must still be cancelable), so a test needs
+  // to add and remove the method between runs. A single object captured in this
+  // factory would freeze whatever `disputeStatus.impl` was at import time —
+  // which it did, and every interlock test silently fell through to the claim.
+  const make = () => ({
+    refund: (...a: unknown[]) => processorRefund(...a),
+    ...(disputeStatus.impl
+      ? { getDisputeStatus: (...a: unknown[]) => disputeStatus.impl!(...a) }
+      : {}),
+  })
+  return { ...actual, getFundingProcessor: make, processorFor: make }
 })
 
 const recordOpsAction = vi.hoisted(() => vi.fn())
@@ -43,6 +55,7 @@ vi.mock('@sentry/node', () => ({
 
 const {
   cancelHeldTransfer,
+  verifyFundingNotDisputed,
   cancelRefusal,
   listHeldTransfers,
   CANCELABLE_HOLD_REASONS,
@@ -98,6 +111,7 @@ const held = (over: Record<string, unknown> = {}) => ({
     funding_payment_ref: 'cs_test_1',
     funding_processor: 'stripe_checkout',
     funding_cleared: true,
+    funding_disputed_at: null,
     idempotency_key: 'bridge-key-1',
     refund_payment_ref: null,
     refund_claimed_at: null,
@@ -147,6 +161,7 @@ beforeEach(() => {
     mode: 'refunded',
   })
   recordOpsAction.mockResolvedValue(true)
+  disputeStatus.impl = null
   from.mockImplementation((table: string) =>
     chain(table, queues[table]?.shift() ?? { data: null, error: null }),
   )
@@ -540,16 +555,180 @@ describe('cancelHeldTransfer', () => {
     expect(transition).not.toHaveBeenCalled()
   })
 
-  it('refuses before any write when the row is not cancelable', async () => {
+  // A funding_disputed HOLD is caught by the interlock before the hold
+  // allowlist ever runs, and that precedence is deliberate: "this funding was
+  // charged back, here is the loss path" tells an operator what is true, where
+  // "that hold is not in my list" only tells them what the tool declines.
+  it('refuses a funding_disputed hold as a CHARGEBACK, not merely an uncancelable hold', async () => {
     q('transfers', held({ payout_hold_reason: 'funding_disputed' }))
 
     await expect(cancelHeldTransfer(input(), log)).resolves.toEqual({
       done: false,
-      reason: 'hold_not_cancelable',
-      actual: 'funding_disputed',
+      reason: 'funding_disputed',
+      source: 'record',
+      disputeRef: null,
+      detail: "the payout is held on 'funding_disputed'",
     })
     expect(opsCancel).not.toHaveBeenCalled()
     expect(recordOpsAction).not.toHaveBeenCalled()
+  })
+
+  it('still refuses the other excluded holds on the allowlist, not the interlock', async () => {
+    q('transfers', held({ payout_hold_reason: 'sender_suspended' }))
+
+    await expect(cancelHeldTransfer(input(), log)).resolves.toEqual({
+      done: false,
+      reason: 'hold_not_cancelable',
+      actual: 'sender_suspended',
+    })
+    expect(opsCancel).not.toHaveBeenCalled()
+  })
+})
+
+describe('verifyFundingNotDisputed (the dispute interlock)', () => {
+  const row = (over: Record<string, unknown> = {}) =>
+    ({
+      state: 'FUNDED',
+      payout_hold_reason: 'payability',
+      funding_disputed_at: null,
+      funding_payment_ref: 'cs_test_1',
+      funding_processor: 'stripe_checkout',
+      ...over,
+    }) as never
+
+  it('consults BOTH halves and says so when neither reports a dispute', async () => {
+    disputeStatus.impl = async () => ({ paymentRef: 'cs_test_1', disputed: false })
+
+    await expect(verifyFundingNotDisputed(row())).resolves.toEqual({
+      disputed: false,
+      checked: 'record_and_provider',
+    })
+  })
+
+  it.each([
+    ['funding_disputed_at is set', { funding_disputed_at: '2026-09-10T16:06:08.000Z' }],
+    ['the hold says so', { payout_hold_reason: 'funding_disputed' }],
+    ['the state is FUNDING_REVERSED', { state: 'FUNDING_REVERSED' }],
+  ])('catches a dispute from OUR record when %s — without calling the provider', async (_l, over) => {
+    const probe = vi.fn()
+    disputeStatus.impl = probe
+
+    await expect(verifyFundingNotDisputed(row(over))).resolves.toMatchObject({
+      disputed: true,
+      source: 'record',
+    })
+    expect(probe).not.toHaveBeenCalled()
+  })
+
+  // THE STAGING CASE, 2026-09-14. Three disputes left no trace on our side —
+  // the handler that writes funding_disputed_at shipped hours after they
+  // arrived — so the record half passes and only the live charge knows.
+  it('catches a dispute our record knows NOTHING about', async () => {
+    disputeStatus.impl = async () => ({
+      paymentRef: 'cs_test_1',
+      disputed: true,
+      disputeRef: 'du_1UEAUGIbCQghJX8LxAXiQE5S',
+      status: 'needs_response',
+    })
+
+    await expect(verifyFundingNotDisputed(row())).resolves.toEqual({
+      disputed: true,
+      source: 'provider',
+      disputeRef: 'du_1UEAUGIbCQghJX8LxAXiQE5S',
+      detail: 'the funding charge is disputed at the provider (needs_response)',
+    })
+  })
+
+  // Silence is not confirmation: an implemented check that cannot answer must
+  // stop the operation, never wave it through.
+  it('FAILS CLOSED when the provider is unreachable', async () => {
+    disputeStatus.impl = async () => {
+      throw new Error('stripe timeout')
+    }
+
+    await expect(verifyFundingNotDisputed(row())).rejects.toThrow('stripe timeout')
+  })
+
+  // …but an ABSENT capability is not a failure. The mock cannot be disputed and
+  // `manual` collects on a rail we do not operate; refusing those would make
+  // every non-Stripe rail uncancelable.
+  it('proceeds on our record alone for a rail with no dispute check, and labels it', async () => {
+    disputeStatus.impl = null
+
+    await expect(verifyFundingNotDisputed(row({ funding_processor: 'mock' }))).resolves.toEqual({
+      disputed: false,
+      checked: 'record_only',
+    })
+  })
+
+  it('does not ask about a row with no funding ref to ask about', async () => {
+    const probe = vi.fn()
+    disputeStatus.impl = probe
+
+    await expect(verifyFundingNotDisputed(row({ funding_payment_ref: null }))).resolves.toEqual({
+      disputed: false,
+      checked: 'record_only',
+    })
+    expect(probe).not.toHaveBeenCalled()
+  })
+
+  // The guard that broke every fixture the moment it landed: an unselected
+  // column arrives as undefined, which `!== null` reads as "disputed".
+  it('treats an UNSELECTED funding_disputed_at as unknown, not as disputed', async () => {
+    disputeStatus.impl = async () => ({ paymentRef: 'cs_test_1', disputed: false })
+
+    await expect(verifyFundingNotDisputed(row({ funding_disputed_at: undefined }))).resolves.toEqual(
+      { disputed: false, checked: 'record_and_provider' },
+    )
+  })
+})
+
+describe('cancelHeldTransfer + the interlock', () => {
+  it('refuses BEFORE the cancel commits when the provider reports a chargeback', async () => {
+    disputeStatus.impl = async () => ({
+      paymentRef: 'cs_test_1',
+      disputed: true,
+      disputeRef: 'du_1',
+      status: 'needs_response',
+    })
+    q('transfers', held())
+
+    await expect(cancelHeldTransfer(input(), log)).resolves.toMatchObject({
+      done: false,
+      reason: 'funding_disputed',
+      source: 'provider',
+      disputeRef: 'du_1',
+    })
+    // The whole point: nothing moved. No CANCELED transition, no claim, no
+    // processor call, no provenance row — the row is exactly as it was.
+    expect(opsCancel).not.toHaveBeenCalled()
+    expect(processorRefund).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+    expect(recordOpsAction).not.toHaveBeenCalled()
+  })
+
+  it('lets an unreachable provider stop the run rather than cancel blind', async () => {
+    disputeStatus.impl = async () => {
+      throw new Error('stripe timeout')
+    }
+    q('transfers', held())
+
+    await expect(cancelHeldTransfer(input(), log)).rejects.toThrow('stripe timeout')
+    expect(opsCancel).not.toHaveBeenCalled()
+  })
+
+  // A settled transfer is done; a dispute arriving afterwards is the loss
+  // path's business, so the interlock must not re-open it.
+  it('skips the interlock entirely on an already-REFUNDED row', async () => {
+    const probe = vi.fn()
+    disputeStatus.impl = probe
+    q('transfers', held({ state: 'REFUNDED', refund_payment_ref: 're_1' }))
+
+    await expect(cancelHeldTransfer(input(), log)).resolves.toEqual({
+      done: true,
+      outcome: 'already_settled',
+    })
+    expect(probe).not.toHaveBeenCalled()
   })
 })
 
