@@ -25,8 +25,29 @@ feature/* ──PR──▶ main ──auto──▶ staging (Railway + Vercel m
    - Railway builds + health-check-gated cutover of `puenteapi-staging.up.railway.app`
    - Vercel deploys `landingpage-git-main-puente-financial.vercel.app` (behind Vercel
      Authentication — anonymous requests get an SSO 302; automation needs a Protection Bypass
-     token, not yet generated)
+     token, not yet generated) — **unless the commit cannot have changed the web app**, in which
+     case the Ignored Build Step cancels it and the previous deployment keeps serving. See
+     [Skipped web deployments](#skipped-web-deployments).
    - Migrations workflow applies pending migrations to the **staging** DB for real
+
+## Skipped web deployments
+
+`apps/web/vercel.json` points Vercel's Ignored Build Step at
+`apps/web/scripts/vercel-ignore-build.sh`, which asks turbo whether `@puente/web` or anything it
+depends on changed. An `apps/api` fix or a `.github/workflows` bump is cancelled before it builds,
+so it stores no function bundles — the thing Vercel meters as Functions Storage, and the reason a
+landing page reached 75% of the 10 GB free-tier allowance.
+
+What this means in practice:
+
+- **The `production` branch is never skipped**, by an explicit guard in the script. Promote always
+  produces a real deployment to run the verification drill against.
+- **A skipped deployment is CANCELED, not failed.** The branch alias stays on the last built
+  deployment, which is serving the same web code. Nothing is broken; the URL is just older.
+- **Env-var-only changes are invisible to it.** Syncing a new Doppler variable to Vercel changes no
+  files, so a staging web deploy will not pick it up until a commit touches `apps/web` or
+  `packages/shared`. To force it: Deployments → ⋯ → **Redeploy**, with **Use project's Ignore Build
+  Step** unchecked.
 
 ## Promote to production
 
@@ -110,6 +131,8 @@ promote → then flip the var.
 
 - Vercel Environments → Production → Branch Tracking has its **own Save button**; unsaved = merges
   to main still deploy to www.
+- A **CANCELED** Vercel deployment on a non-`production` branch is usually the Ignored Build Step
+  doing its job, not a failure — check the build log for `ignore-build:` before investigating.
 - DB URLs in CI are **session pooler** strings (GitHub runners are IPv4-only; the direct `db.<ref>`
   host is IPv6).
 - Vercel sensitive env vars are write-only — verify by overwriting, not reading.
