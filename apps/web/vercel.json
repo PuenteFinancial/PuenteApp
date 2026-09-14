@@ -1,5 +1,6 @@
 {
   "installCommand": "pnpm install",
   "buildCommand": "cd ../.. && pnpm turbo run build --filter=@puente/web",
-  "framework": "nextjs"
+  "framework": "nextjs",
+  "ignoreCommand": "bash scripts/vercel-ignore-build.sh"
 }
