@@ -28,6 +28,7 @@ import {
   workerHeartbeatAlarm,
   refundBacklogRows,
   activityFeedRows,
+  needsDepositInstructions,
   opsTransferHref,
   type OpsOverview,
   type OpsOpenTransfer,
@@ -74,9 +75,9 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
     if (tr.cancellationRequested) notes.push(s.waitCancelRequested)
     // A confirmed manual transfer whose sender still has nowhere to pay — the
     // attach step is the operator's move (slice 3 automates it; until then
-    // this is the loudest "your move" on a PENDING_PAYMENT row).
-    if (tr.state === 'PENDING_PAYMENT' && tr.fundingInitiated === true && tr.onrampRef == null)
-      notes.push(s.waitNoInstructions)
+    // this is the loudest "your move" on a PENDING_PAYMENT row). The rail gate
+    // lives in the lib beside transferActions', which it must match.
+    if (needsDepositInstructions(tr)) notes.push(s.waitNoInstructions)
     // Slice 4: the sender claims they paid — verify the deposit at the
     // provider, then release. Only meaningful while the row still waits on
     // funding; later states carry the fact in the audit trail instead.
