@@ -118,12 +118,29 @@ than a builder nobody wrote.
 
 ## Empty cells and boundaries
 
-**Gap 1 — loss while the principal is at Bridge.** `applyFundingReversed`
-(`services/funding-apply.ts`) books the loss for `COMPLETED`, holds the payout for
-`FUNDED`, and for `SUBMITTED` / `IN_FLIGHT` returns `in_flight` and **posts
-nothing**. A chargeback landing while `due_from_bridge` is open recognizes no loss
-at the moment it becomes true. This is the cell production is most likely to find
-next, because it only needs a dispute to arrive a few minutes earlier.
+**Gap 1 — a disputed in-flight payout never books its loss.** `applyFundingReversed`
+(`services/funding-apply.ts`) books the loss for `COMPLETED`, holds the payout for `FUNDED`, and for
+`SUBMITTED` / `IN_FLIGHT` returns `in_flight` and posts nothing.
+
+**Posting nothing there is correct.** The loss is not yet a known quantity: if the payout completes
+the recipient keeps the pesos and we are out `send + fee`, but if it fails Bridge returns the
+principal and we are out only the fee. Booking `send + fee` at in-flight would overstate the loss on
+every payout that later fails.
+
+The hole is one step later — **nothing books it when delivery resolves.** `payment-event-process.ts`
+never reads `funding_disputed_at`, so a disputed transfer reaching `COMPLETED` or `PAYOUT_FAILED`
+posts its ordinary batch and no loss at all. The only backstop is reconciliation's `stripe_disputes`
+check paging a human.
+
+Worse, the two coupled failure modes have no guard between them: `refunds.ts` never reads
+`funding_disputed_at` either, so a disputed transfer whose payout then FAILS runs the ordinary refund
+tail and **pays back a sender whose funding was already clawed back** — the money leaves twice. Today
+`AUTO_REFUND` being off in prod means that parks at `PAYOUT_FAILED` for a human, so the guard is a
+person, not the code.
+
+The fix is therefore two things, and neither is "book it at in-flight": recognize the loss at the
+transition that resolves delivery, when the amount is finally known, and refuse a refund on a
+transfer whose funding was reversed.
 
 **Boundary 1 — partial amounts.** Every builder posts `send + fee`. A partial
 dispute or partial refund has no representation and deliberately pages instead
