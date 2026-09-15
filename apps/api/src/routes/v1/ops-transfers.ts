@@ -12,6 +12,7 @@ import {
 import { BridgeApiError, isBridgeUnreachable } from '../../services/bridge.js'
 import { recordOpsAction } from '../../services/ops-actions.js'
 import { errorResponseSchema, sendError } from '../../utils/errors.js'
+import { assertNever } from '../../utils/assert-never.js'
 import {
   opsWriteEnabled,
   opsReadAllowed,
@@ -443,6 +444,13 @@ export const opsTransfersRoute: FastifyPluginAsync = async (server) => {
                 },
               ],
             )
+          default:
+            // Without this, a new ReleaseHoldOutcome refusal falls out of the
+            // switch and out of the enclosing `if`, and the handler returns
+            // undefined — Fastify never sends a reply and the operator's request
+            // hangs. The `never` parameter means that future arm cannot compile
+            // until it is handled here.
+            return assertNever(outcome, 'ops/transfers/hold-release refusal')
         }
       } catch (err) {
         request.log.error(
@@ -606,6 +614,15 @@ export const opsTransfersRoute: FastifyPluginAsync = async (server) => {
                 'The funding behind this transfer was disputed — refunding would pay the sender twice',
                 [{ path: 'transferId', issue: outcome.detail }],
               )
+            default:
+              // The worst fall-through in the file, and the reason this helper
+              // was written. Without it a new RefundOutcome refusal drops out of
+              // the switch, out of the enclosing `if (!outcome.done)`, and lands
+              // in step 4 below — which reads the ledger for a refund that never
+              // happened, finds no batches, and pages "expected ledger batch
+              // missing after refund". A REFUSED refund would be reported to the
+              // operator as a success and to on-call as a ledger corruption.
+              return assertNever(outcome, 'ops/transfers/refund refusal')
           }
         }
 
