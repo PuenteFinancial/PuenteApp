@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import * as Sentry from '@sentry/node'
 import type { FastifyInstance } from 'fastify'
 import { env } from '../../config/env.js'
+import { bookRef } from '../../config/book.js'
 import { BRIDGE_KYC_STATUS_MAP } from '../../services/bridge.js'
 import { registerPendingDestinations } from '../../services/destination-registration.js'
 import { bridgeKycToVerificationStatus, recordKycVerification } from '../../services/kyc-verifications.js'
@@ -742,6 +743,32 @@ export async function webhooksRoute(server: FastifyInstance) {
           { webhook: 'funding', transferId, eventId: event.eventId },
           'funding event for unknown transfer',
         )
+        // …and PAGE, unless the payment belongs to another book. Until
+        // 2026-09-15 this branch was the log line alone: a `funding_succeeded`
+        // for a transfer we do not have — money collected against nothing —
+        // was acked with 200, stored nowhere (payment_events.transfer_id is a
+        // FK, so no row can name a transfer that does not exist), and left for
+        // the 6-hourly stripe_orphans check to find from Stripe's side. The
+        // dispute path has always paged for exactly this class
+        // ('dispute unmatched to any transfer').
+        //
+        // What kept the page out was noise, and the book stamp is what removes
+        // it: one Stripe TEST account is shared, and its endpoint delivers a
+        // local stack's events here too (NODE-26). A foreign stamp is someone
+        // else's business. An ABSENT stamp pages — a pre-stamp payment is
+        // exactly the kind we most need to hear about.
+        if (event.bookRef == null || event.bookRef === bookRef()) {
+          Sentry.captureMessage('funding event for unknown transfer', {
+            level: 'error',
+            fingerprint: ['funding-unknown-transfer', transferId],
+            tags: {
+              transferId,
+              eventType: event.type,
+              paymentRef: event.paymentRef,
+              bookRef: event.bookRef ?? 'unstamped',
+            },
+          })
+        }
       } else if (result.outcome === 'stale') {
         // the transfer has already moved past this event
         server.log.warn(

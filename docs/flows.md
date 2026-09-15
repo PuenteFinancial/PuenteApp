@@ -255,7 +255,7 @@ Two things that drive found and no test could: **Link's opt-in is pre-checked an
 field, and an empty one makes `checkout.confirm` refuse** ("Your phone number is incomplete") — so a
 sender must give a phone or uncheck Link to pay. And **`stripe_receivables` / `stripe_orphans` skip
 this rail entirely** (they gate on `provider === 'stripe'` and match `pi_` refs), so Stripe-side
-reconciliation is not covering it yet.
+reconciliation is not covering it yet — **closed by #304**; both checks cover this rail now.
 
 ## 2. Payout webhook (Bridge → us)
 

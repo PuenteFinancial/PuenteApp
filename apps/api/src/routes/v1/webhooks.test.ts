@@ -847,7 +847,7 @@ describe('POST /v1/webhooks/funding', () => {
     await app.close()
   })
 
-  it('acks unknown transfers (nothing a retry can fix) without transitioning', async () => {
+  it('acks unknown transfers (nothing a retry can fix) without transitioning, and PAGES', async () => {
     from.mockReturnValueOnce(selectChain({ data: null }))
     const app = await buildApp()
 
@@ -856,6 +856,53 @@ describe('POST /v1/webhooks/funding', () => {
 
     expect(res.status).toBe(200)
     expect(transitionTransfer).not.toHaveBeenCalled()
+    // Money arrived for a transfer we do not have. Until 2026-09-15 this was a
+    // log line and a 200 — nothing alarmed, and nothing was stored, because
+    // payment_events.transfer_id is a FK to the row that does not exist. The
+    // mock rail stamps no book, and unstamped is exactly the case that must
+    // still be heard.
+    expect(captureMessage).toHaveBeenCalledWith(
+      'funding event for unknown transfer',
+      expect.objectContaining({
+        level: 'error',
+        fingerprint: ['funding-unknown-transfer', TRANSFER_ID],
+        tags: expect.objectContaining({ transferId: TRANSFER_ID, bookRef: 'unstamped' }),
+      }),
+    )
+    await app.close()
+  })
+
+  it('stays quiet when the unknown transfer belongs to ANOTHER book', async () => {
+    // NODE-26: one Stripe TEST account is shared, so this endpoint receives a
+    // local stack's events too. Paging on those would make the alarm above
+    // fire on every developer's test card — the noise that kept it absent.
+    from.mockReturnValueOnce(selectChain({ data: null }))
+    processorOverride.current = fakeStripeProcessor({
+      parseEvent: vi.fn(() => ({
+        outcome: 'event',
+        event: {
+          eventId: 'evt_elsewhere',
+          type: 'funding_succeeded',
+          transferRef: TRANSFER_ID,
+          paymentRef: 'pi_elsewhere',
+          bookRef: 'ffffffff',
+        },
+      })),
+    })
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/webhooks/funding')
+      .set('Content-Type', 'application/json')
+      .set('Stripe-Signature', 'sig_v1')
+      .send('{}')
+
+    expect(res.status).toBe(200)
+    // Reached the same branch — the transfer WAS looked up and was not there.
+    // Without this the silence below could be the route bailing out earlier.
+    expect(from).toHaveBeenCalledWith('transfers')
+    expect(transitionTransfer).not.toHaveBeenCalled()
+    expect(captureMessage).not.toHaveBeenCalled()
     await app.close()
   })
 

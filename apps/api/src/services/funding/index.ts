@@ -51,6 +51,16 @@ export interface FundingEvent {
   deliveredAmountMicro?: number
   /** Failure / ACH return code on funding_failed | funding_reversed | refund_failed. */
   reason?: string
+  /**
+   * The book the payment was created for, echoed back in the same metadata as
+   * transferRef (config/book.ts). Read for exactly one decision: whether an
+   * event about a transfer we do not have is OUR missing money or another
+   * environment's business — one Stripe TEST account is shared, and its
+   * webhook endpoint delivers every environment's events to us. Absent on
+   * processors with no book concept (mock) and on payments created before
+   * stamping shipped; absent is NOT foreign.
+   */
+  bookRef?: string | null
 }
 
 // A signed webhook body parses to exactly one of three things: an actionable
@@ -134,6 +144,11 @@ export interface FundingPaymentListItem {
   paymentRef: string
   /** Our transfers.id echoed in processor metadata; null = orphan candidate. */
   transferRef: string | null
+  /** The book (database) this payment was created for — config/book.ts. A ref
+   *  that is not ours means another environment sharing this provider account;
+   *  null means unstamped (created before stamping, or not by us at all) and
+   *  is NOT a pass — see runStripeOrphans. */
+  bookRef: string | null
   status: string
   createdAt: string
 }

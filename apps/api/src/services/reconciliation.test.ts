@@ -1,4 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { bookRefFor } from '../config/book.js'
+
+// The book these checks run against — envMock.SUPABASE_URL, fingerprinted the
+// same way config/book.js does it on first use.
+const OUR_BOOK = bookRefFor('https://book-under-test.supabase.co')
 
 // The O2 checks registry. Harness mirrors correction-watch.test.ts: per-query
 // chain mocks + frozen clock. The pure helpers (aging buckets, PI status
@@ -16,6 +21,8 @@ vi.mock('./supabase.js', () => ({
 }))
 
 const envMock = vi.hoisted(() => ({
+  // Read at import time by config/book.js — the book these checks run against.
+  SUPABASE_URL: 'https://book-under-test.supabase.co',
   BRIDGE_TREASURY_WALLET_ID: 'wallet-1' as string | undefined,
   FUNDING_PROCESSOR: 'mock' as string,
   MANUAL_PENDING_MAX_AGE_DAYS: 7,
@@ -1015,6 +1022,66 @@ describe('stripe_orphans', () => {
       'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
       '99999999-8888-4777-8666-555555555554',
     ])
+  })
+
+  // NODE-26 (2026-09-15): one Stripe TEST account is shared by staging and any
+  // local stack pointed at it. A session paid against a local database that was
+  // later torn down leaves a succeeded PI whose transfer exists nowhere — and
+  // read as ours, that is exactly the shape of money we collected and lost.
+  it('does not page a payment stamped with another book, but counts it', async () => {
+    const processor = stripeProcessor()
+    processor.listRecentPayments.mockResolvedValue([
+      {
+        paymentRef: 'pi_local',
+        transferRef: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+        bookRef: bookRefFor('http://127.0.0.1:54321'),
+        status: 'succeeded',
+        createdAt: daysAgo(1),
+      },
+      // Same unknown echo, OUR book: still money we cannot place.
+      {
+        paymentRef: 'pi_ghost',
+        transferRef: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+        bookRef: OUR_BOOK,
+        status: 'succeeded',
+        createdAt: daysAgo(1),
+      },
+      // Unstamped — created before stamping shipped. Absence is not an answer.
+      { paymentRef: 'pi_old', transferRef: null, bookRef: null, status: 'succeeded', createdAt: daysAgo(1) },
+    ])
+    getFundingProcessor.mockReturnValue(processor)
+    from.mockReturnValue(chainResolving({ data: [], error: null }))
+
+    const outcome = await check('stripe_orphans').run()
+    expect(outcome.findings.map((f) => f.key)).toEqual([
+      'stripe-orphan:pi_ghost',
+      'stripe-orphan:pi_old',
+    ])
+    // Visible, not silent: a foreign book on a rail nothing else should share
+    // is worth seeing even when it is nobody's emergency.
+    expect(outcome.summary).toMatchObject({ listed: 3, book: OUR_BOOK, foreignBook: 1 })
+  })
+
+  it('leaves a foreign-book payment out of the transfers lookup entirely', async () => {
+    const processor = stripeProcessor()
+    processor.listRecentPayments.mockResolvedValue([
+      {
+        paymentRef: 'pi_local',
+        transferRef: '99999999-8888-4777-8666-555555555554',
+        bookRef: bookRefFor('http://127.0.0.1:54321'),
+        status: 'succeeded',
+        createdAt: daysAgo(1),
+      },
+    ])
+    getFundingProcessor.mockReturnValue(processor)
+    const c = chainResolving({ data: [], error: null })
+    from.mockReturnValue(c)
+
+    const outcome = await check('stripe_orphans').run()
+    expect(outcome.status).toBe('pass')
+    // Not just unpaged — never asked about. Another book's ids are not ours to
+    // look up, and a collision would read as a reassuring match.
+    expect(from).not.toHaveBeenCalled()
   })
 })
 

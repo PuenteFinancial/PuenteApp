@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import Stripe from 'stripe'
 import { StripeCheckoutFundingProcessor, normalizeCheckoutStatus } from './stripe-checkout.js'
 import { undoModeForRef } from './index.js'
+import { bookRef } from '../../config/book.js'
 
 // The Checkout Sessions rail. Mirrors stripe.test.ts's harness — a real Stripe
 // client with a dummy key so verifySignature exercises the SDK's genuine HMAC
@@ -186,9 +187,14 @@ describe('StripeCheckoutFundingProcessor — session creation', () => {
     expect(params.mode).toBe('payment')
     expect(params.line_items[0].price_data.unit_amount).toBe(10_200)
     // The echo has to be on the PaymentIntent too, or card clearing can never
-    // be joined back to a transfer.
-    expect(params.metadata).toEqual({ transfer_id: TRANSFER_ID })
-    expect(params.payment_intent_data.metadata).toEqual({ transfer_id: TRANSFER_ID })
+    // be joined back to a transfer. book_ref rides with it on BOTH objects:
+    // reconciliation lists PaymentIntents, so a stamp left on the Session
+    // alone would never be read.
+    expect(params.metadata).toEqual({ transfer_id: TRANSFER_ID, book_ref: bookRef() })
+    expect(params.payment_intent_data.metadata).toEqual({
+      transfer_id: TRANSFER_ID,
+      book_ref: bookRef(),
+    })
     // Micro-deposits take days and outlive both the abandonment clock and the
     // FX quote, so this rail never offers them.
     expect(params.payment_method_options.us_bank_account.verification_method).toBe('instant')

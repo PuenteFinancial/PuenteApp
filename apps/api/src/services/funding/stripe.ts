@@ -1,5 +1,6 @@
 import Stripe from 'stripe'
 import { env } from '../../config/env.js'
+import { bookRef } from '../../config/book.js'
 import type {
   IdentityFlow,
   NormalizedPaymentStatus,
@@ -95,7 +96,10 @@ export class StripeFundingProcessor implements FundingProcessor {
   }): Promise<FundingInitiation> {
     // metadata.transfer_id is the routing echo (locked decision: sender→
     // recipient routing lives on the transfers row, never in money-following;
-    // the PI carries only the join key — no user id, no PII). The idempotency
+    // the PI carries only the join key — no user id, no PII). book_ref says
+    // WHICH database that join key belongs to, so reconciliation can tell
+    // another environment's payment from one of ours (config/book.ts); it
+    // fingerprints the deployment, never the sender. The idempotency
     // key is derived from the transfer: one PaymentIntent per transfer, ever —
     // the DB-side funding_payment_ref null-gate is the primary guarantee, and
     // the Stripe key closes the crash-between-create-and-persist window
@@ -112,7 +116,7 @@ export class StripeFundingProcessor implements FundingProcessor {
           // error for unsupported banks.
           us_bank_account: { verification_method: 'instant' },
         },
-        metadata: { transfer_id: input.transferId },
+        metadata: { transfer_id: input.transferId, book_ref: bookRef() },
       },
       { idempotencyKey: `funding_init_${input.transferId}` },
     )
@@ -176,9 +180,11 @@ export class StripeFundingProcessor implements FundingProcessor {
     })
     return page.data.map((pi) => {
       const transferRef = pi.metadata?.['transfer_id']
+      const bookRef = pi.metadata?.['book_ref']
       return {
         paymentRef: pi.id,
         transferRef: typeof transferRef === 'string' && transferRef !== '' ? transferRef : null,
+        bookRef: typeof bookRef === 'string' && bookRef !== '' ? bookRef : null,
         status: pi.status,
         createdAt: new Date(pi.created * 1000).toISOString(),
       }
@@ -321,6 +327,7 @@ export class StripeFundingProcessor implements FundingProcessor {
       // decline_code when present, generic cause in code. Pass through
       // whichever exists; exact sandbox values get pinned in PR-S4's e2e.
       const reason = lastError?.['decline_code'] ?? lastError?.['code']
+      const bookRefEcho = metadata?.['book_ref']
       return {
         outcome: 'event',
         event: {
@@ -328,6 +335,7 @@ export class StripeFundingProcessor implements FundingProcessor {
           type: piEventType,
           transferRef,
           paymentRef: object['id'],
+          bookRef: typeof bookRefEcho === 'string' && bookRefEcho !== '' ? bookRefEcho : null,
           ...(piEventType === 'funding_failed' &&
             typeof reason === 'string' && { reason }),
         },
