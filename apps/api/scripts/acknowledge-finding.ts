@@ -39,6 +39,7 @@
 // Runbook: docs/runbooks/reconciliation.md ("Acknowledging a finding").
 import {
   acknowledgeFinding,
+  findAcknowledgeRefusal,
   listAcknowledgements,
   revokeAcknowledgement,
   MAX_ACK_DAYS,
@@ -141,6 +142,37 @@ function describe(ack: Acknowledgement, nowMs: number): string {
   return `  ${ack.id}  ${ack.checkName} — ${ack.findingKey}\n      ${state}  by ${ack.actor}\n      "${ack.note}"`
 }
 
+function reportRefusal(
+  refusal: Awaited<ReturnType<typeof findAcknowledgeRefusal>> & object,
+  checkName: string,
+  nowMs: number,
+): void {
+  if (refusal.reason === 'unknown_check') {
+    console.log(`\nRefused: no check named "${checkName}".`)
+    console.log(
+      'A typo here would write a row that silences nothing and reads, forever after, as though\n' +
+        'someone had handled the finding. Known checks:',
+    )
+    for (const name of refusal.known) console.log(`  ${name}`)
+    return
+  }
+  if (refusal.reason === 'fatal_check') {
+    console.log(
+      `\nRefused: ${checkName} is a FATAL check and cannot be acknowledged.\n` +
+        'These are the invariants the whole book rests on. If one fires, the answer is a human,\n' +
+        'now — not a note and a date.',
+    )
+    return
+  }
+  if (refusal.reason === 'already_acknowledged') {
+    console.log('\nRefused: an acknowledgement is already in force for this finding:')
+    console.log(describe(refusal.existing, nowMs))
+    console.log('\nRead that note before deciding this is handled. Revoke it first to replace it.')
+    return
+  }
+  console.log(`\nRefused: ${refusal.reason}. Nothing changed.`)
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const nowMs = Date.now()
@@ -192,6 +224,23 @@ async function main(): Promise<void> {
     return
   }
 
+  // REFUSE BEFORE PRINTING THE PREVIEW, so a dry run and a --confirm run reach the same verdict.
+  // These used to run only after the dry-run return, which meant `--check stripe_disputez` or a
+  // fatal check previewed as though it would work and was rejected only once you committed. A
+  // preview that does not run the real decision is worse than none, because it is believed.
+  const refusal = await findAcknowledgeRefusal({
+    checkName: args.checkName,
+    findingKey: args.findingKey,
+    note: args.note,
+    days: args.days,
+    nowMs,
+  })
+  if (refusal !== null) {
+    reportRefusal(refusal, args.checkName, nowMs)
+    process.exitCode = 1
+    return
+  }
+
   console.log(`check:  ${args.checkName}`)
   console.log(`key:    ${args.findingKey}`)
   console.log(`silent: ${args.days} day(s) from now`)
@@ -218,34 +267,8 @@ async function main(): Promise<void> {
   })
 
   if (!outcome.done) {
-    const refusal = outcome.refusal
-    if (refusal.reason === 'unknown_check') {
-      console.log(`\nRefused: no check named "${args.checkName}".`)
-      console.log(
-        'A typo here would write a row that silences nothing and reads, forever after, as though\n' +
-          'someone had handled the finding. Known checks:',
-      )
-      for (const name of refusal.known) console.log(`  ${name}`)
-      process.exitCode = 1
-      return
-    }
-    if (refusal.reason === 'fatal_check') {
-      console.log(
-        `\nRefused: ${args.checkName} is a FATAL check and cannot be acknowledged.\n` +
-          'These are the invariants the whole book rests on. If one fires, the answer is a human,\n' +
-          'now — not a note and a date.',
-      )
-      process.exitCode = 1
-      return
-    }
-    if (refusal.reason === 'already_acknowledged') {
-      console.log('\nRefused: an acknowledgement is already in force for this finding:')
-      console.log(describe(refusal.existing, nowMs))
-      console.log('\nRead that note before deciding this is handled. Revoke it first to replace it.')
-      process.exitCode = 1
-      return
-    }
-    console.log(`\nRefused: ${refusal.reason}. Nothing changed.`)
+    // Reachable despite the check above when someone acknowledges the same finding in the gap.
+    reportRefusal(outcome.refusal, args.checkName, nowMs)
     process.exitCode = 1
     return
   }
