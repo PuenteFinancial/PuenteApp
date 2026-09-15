@@ -169,9 +169,24 @@ export type RefundOutcome =
   // unable to collapse them: `claim_taken` is silent and `claim_abandoned`
   // pages, and getting that backwards means either an alert storm on healthy
   // concurrency or a sender stranded with no signal. Separate arms make
-  // `Extract<RefundOutcome, {reason:'claim_abandoned'}>` usable and let the job
-  // switch exhaustively with an assertNever default, so a future third refusal
-  // breaks the build instead of silently taking someone else's branch.
+  // `Extract<RefundOutcome, {reason:'claim_abandoned'}>` usable.
+  //
+  // WHO IS ACTUALLY FORCED TO HANDLE A NEW ARM, as of 2026-09-15. This comment
+  // used to promise "the job switches exhaustively with an assertNever default,
+  // so a future third refusal breaks the build" — and no assertNever existed
+  // anywhere in the API. #346 added that exact third refusal (funding_disputed);
+  // nothing broke, and the ops route was updated by hand. The claim is now true,
+  // but for a different and smaller set of callers than it named:
+  //   routes/v1/ops-transfers.ts — BOTH switches end in assertNever. Compiler-
+  //     enforced; this is where a missed arm used to report a refused refund as
+  //     a success and page a false ledger corruption.
+  //   scripts/trigger-refund.ts  — refusalMessage returns `string`, so an
+  //     unhandled arm is an implicit-return error. Enforced, incidentally.
+  //   jobs/payment-event-process.ts — NOT a switch and deliberately not one.
+  //     Its second branch is a negative catch-all, so an unrecognised refusal
+  //     falls into the generic payout-refund-refused page rather than out of the
+  //     chain. Fail-loud by construction; a switch there would trade a safe
+  //     default for a compile-time one and could only make it quieter.
   | { done: false; reason: 'claim_taken'; claimedAt: string | null; claimedBy: string | null }
   | { done: false; reason: 'claim_abandoned'; claimedAt: string | null; claimedBy: string | null }
 
