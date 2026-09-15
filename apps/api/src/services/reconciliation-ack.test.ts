@@ -18,6 +18,7 @@ vi.mock('./supabase.js', () => ({
 const {
   ackKey,
   acknowledgeRefusal,
+  findAcknowledgeRefusal,
   partitionFindings,
   loadActiveAcknowledgements,
   acknowledgeFinding,
@@ -147,6 +148,53 @@ describe('loadActiveAcknowledgements', () => {
     from.mockReturnValue({ select: () => ({ is: () => ({ gt }) }) })
 
     await expect(loadActiveAcknowledgements(NOW)).rejects.toThrow(/read failed: denied/)
+  })
+})
+
+describe('findAcknowledgeRefusal', () => {
+  // This exists so the CLI's DRY RUN reaches the same verdict as --confirm. It previously did
+  // not: a misspelled check name or a fatal one previewed as though it would work, and was
+  // rejected only once you committed. A preview that does not run the real decision is worse
+  // than no preview, because it is believed.
+  const args = {
+    checkName: 'stripe_disputes',
+    findingKey: 'dispute:du_1',
+    note: 'investigated — predates the loss path',
+    days: 30,
+    nowMs: NOW,
+  }
+  const mockLoad = (rows: Array<Record<string, unknown>>) => ({
+    select: () => ({ is: () => ({ gt: () => Promise.resolve({ data: rows, error: null }) }) }),
+  })
+
+  it('reports a typo WITHOUT touching the database', async () => {
+    from.mockImplementation(() => {
+      throw new Error('should not reach the database')
+    })
+    await expect(findAcknowledgeRefusal({ ...args, checkName: 'stripe_disputez' })).resolves.toMatchObject({
+      reason: 'unknown_check',
+    })
+  })
+
+  it('reports a fatal check WITHOUT touching the database', async () => {
+    from.mockImplementation(() => {
+      throw new Error('should not reach the database')
+    })
+    await expect(findAcknowledgeRefusal({ ...args, checkName: 'ledger_net_zero' })).resolves.toEqual({
+      reason: 'fatal_check',
+    })
+  })
+
+  it('reports an acknowledgement already in force', async () => {
+    from.mockReturnValue(mockLoad([row({ note: 'someone else already looked' })]))
+    await expect(findAcknowledgeRefusal(args)).resolves.toMatchObject({
+      reason: 'already_acknowledged',
+    })
+  })
+
+  it('returns null when the acknowledgement would be accepted', async () => {
+    from.mockReturnValue(mockLoad([]))
+    await expect(findAcknowledgeRefusal(args)).resolves.toBeNull()
   })
 })
 
