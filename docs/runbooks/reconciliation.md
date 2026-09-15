@@ -98,6 +98,14 @@ So every PaymentIntent we create carries `metadata.book_ref`, an 8-hex fingerpri
 The run summary carries `book` (ours) beside `foreignBook`, which is how you turn a fingerprint
 seen in the Stripe dashboard back into a name.
 
+The stamp also un-silences the webhook. A `funding_succeeded` for a transfer we do not have used
+to be one log line and a 200 — nothing paged, and nothing was stored (`payment_events.transfer_id`
+is a FK, so no row can name a transfer that does not exist), which left `stripe_orphans` as the
+only watcher, up to six hours behind. The route now pages **`funding event for unknown transfer`**
+(fingerprint `funding-unknown-transfer:<transferId>`, tagged with the `bookRef`) unless the payment
+carries another book's stamp. Same class as the dispute path's long-standing
+"dispute unmatched to any transfer".
+
 **The one way this can hide a real orphan:** if a deployment's database HOST changes, payments
 stamped by the old host read as another book. Nothing else does this — the stamp ignores scheme,
 port, path and case — so treat `foreignBook` going non-zero in **production** (where no other

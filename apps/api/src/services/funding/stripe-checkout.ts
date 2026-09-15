@@ -239,12 +239,14 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
     const type = checkoutEventType(envelope.type)
     if (!type) return unhandled
 
+    const bookRefEcho = metadata?.['book_ref']
     return {
       outcome: 'event',
       event: {
         eventId: envelope.id,
         type,
         transferRef,
+        bookRef: typeof bookRefEcho === 'string' && bookRefEcho !== '' ? bookRefEcho : null,
         // The SESSION id, matching what initiateFunding persisted. The route
         // joins on funding_payment_ref, so the two must agree.
         paymentRef: object['id'],

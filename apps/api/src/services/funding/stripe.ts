@@ -327,6 +327,7 @@ export class StripeFundingProcessor implements FundingProcessor {
       // decline_code when present, generic cause in code. Pass through
       // whichever exists; exact sandbox values get pinned in PR-S4's e2e.
       const reason = lastError?.['decline_code'] ?? lastError?.['code']
+      const bookRefEcho = metadata?.['book_ref']
       return {
         outcome: 'event',
         event: {
@@ -334,6 +335,7 @@ export class StripeFundingProcessor implements FundingProcessor {
           type: piEventType,
           transferRef,
           paymentRef: object['id'],
+          bookRef: typeof bookRefEcho === 'string' && bookRefEcho !== '' ? bookRefEcho : null,
           ...(piEventType === 'funding_failed' &&
             typeof reason === 'string' && { reason }),
         },

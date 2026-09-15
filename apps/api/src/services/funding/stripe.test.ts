@@ -200,9 +200,21 @@ describe('stripe parseEvent — locked event mapping', () => {
         eventId: 'evt_1',
         type: fundingType,
         transferRef: TRANSFER_ID,
+        // The fixture PI carries no book stamp — null, and the route reads
+        // null as "unstamped", never as "another book's".
+        bookRef: null,
         paymentRef: 'pi_123',
       },
     })
+  })
+
+  it('carries the book stamp through to the route that has to decide whose money it is', () => {
+    const parsed = processor.parseEvent(
+      piEventBody('payment_intent.processing', {
+        metadata: { transfer_id: TRANSFER_ID, book_ref: 'deadbeef' },
+      }),
+    )
+    expect(parsed.outcome === 'event' && parsed.event.bookRef).toBe('deadbeef')
   })
 
   it('carries the ACH failure cause through on payment_failed (decline_code over code)', () => {
