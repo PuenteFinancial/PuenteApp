@@ -311,11 +311,16 @@ const refundBodySchema = {
   },
 } as const
 
-const refundResponseSchema = {
+export const refundResponseSchema = {
   type: 'object',
   properties: {
     transferId: { type: 'string' },
-    outcome: { type: 'string', enum: ['refunded', 'already_disbursed', 'already_settled'] },
+    // Every `done: true` arm of RefundOutcome — see the note on
+    // resolveResponseSchema in ops.ts, and outcome-wire.test.ts.
+    outcome: {
+      type: 'string',
+      enum: ['refunded', 'already_disbursed', 'already_settled', 'awaiting_disbursement'],
+    },
     // Whether every expected refund batch is on the ledger (bridge_return only
     // when the payout had reached Bridge). False is paged server-side; the
     // operator sees it too.
@@ -628,11 +633,21 @@ export const opsTransfersRoute: FastifyPluginAsync = async (server) => {
 
         // 4) Prove the batches landed. Money has moved by now, so an incomplete
         //    ledger is paged, not turned into a 500 the operator would retry.
+        //
+        //    EXCEPT when the undo awaits an out-of-band disbursement: on the
+        //    manual and onramp rails the service stops before the settle, so no
+        //    REFUNDED batch exists and none should. This branch is not
+        //    defensive tidying — without it the route pages "expected ledger
+        //    batch missing after refund" on a run that did precisely the right
+        //    thing, and a ledger-corruption alarm that cries wolf is worse than
+        //    no alarm at all.
+        const awaiting = outcome.outcome === 'awaiting_disbursement'
         const batches = await refundLedgerBatches(transferId)
         const ledgerKeys = batches.map((b) => b.idempotency_key)
-        const expected = preSubmit
-          ? [`${transferId}:REFUNDED`]
-          : [`${transferId}:bridge_return`, `${transferId}:REFUNDED`]
+        const expected = [
+          ...(preSubmit ? [] : [`${transferId}:bridge_return`]),
+          ...(awaiting ? [] : [`${transferId}:REFUNDED`]),
+        ]
         const ledgerComplete = expected.every((key) => ledgerKeys.includes(key))
         if (!ledgerComplete) {
           request.log.error(
@@ -656,7 +671,14 @@ export const opsTransfersRoute: FastifyPluginAsync = async (server) => {
             reason: outcome.outcome,
             note: note.trim(),
             before: { state: 'PAYOUT_FAILED', claimStatus: claim.claimStatus, preSubmit },
-            after: { state: 'REFUNDED', outcome: outcome.outcome, ledgerComplete },
+            // The state this run actually left behind. `awaiting_disbursement`
+            // rests at PAYOUT_FAILED — recording REFUNDED here would put the
+            // lie in the one table that exists to be believed later.
+            after: {
+              state: awaiting ? 'PAYOUT_FAILED' : 'REFUNDED',
+              outcome: outcome.outcome,
+              ledgerComplete,
+            },
             requestId: request.id,
           },
           request.log,

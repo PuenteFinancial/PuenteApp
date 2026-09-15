@@ -4,7 +4,7 @@ import {
   correctionRefundLedgerEntries,
   correctionVoidLedgerEntries,
 } from './transfers.js'
-import {  undoModeForRef, processorFor } from './funding/index.js'
+import { undoModeForRef, processorFor, undoRequiresManualDisbursement } from './funding/index.js'
 import { claimRefund, isClaimAbandoned } from './refunds.js'
 import { verifyFundingNotDisputed } from './dispute-interlock.js'
 import { pendingCancellationFor, resolveCancellationRequest } from './cancellations.js'
@@ -64,6 +64,18 @@ export type ReviewOutcome =
   // PAYOUT_FAILED tail distinguishes them: a tool that says "sender paid" for
   // a run that moved no money is lying about the only fact that matters here.
   | { done: true; outcome: 'refunded' | 'already_disbursed' | 'already_refunded' | 'denied' }
+  /**
+   * The correction payment is RECORDED but the money has not moved: the funding
+   * was collected on a rail we do not operate (manual, onramp), so `refund`
+   * answered `pending` and a human still has to send it. The transfer rests at
+   * UNDER_REVIEW with the ref persisted, and the cancellation request stays
+   * OPEN — the sender has not been made whole, so the decision is not finished.
+   *
+   * Same arm and same reasoning as OpsCancelOutcome and RefundOutcome. Settling
+   * REFUNDED here would tell the sender their correction payment arrived when
+   * nobody has sent it.
+   */
+  | { done: true; outcome: 'awaiting_disbursement'; refundRef: string }
   | { done: false; reason: 'transfer_not_found' }
   | { done: false; reason: 'not_under_review'; state: string }
   | { done: false; reason: 'no_pending_request' }
@@ -231,6 +243,23 @@ export async function refundCancellation(input: {
     // Unreachable — see the identical guard in refundPayoutFailure.
     throw new Error(`correction settle reached with no disbursement ref for ${transfer.id}`)
   }
+  // AN UNDO THE PROVIDER CANNOT ACTUALLY PERFORM has issued nothing — the same
+  // branch the other two tails carry, and for the same reason. On the manual and
+  // onramp rails `refund` answers `pending` and a human wires the money; booking
+  // REFUNDED over that would tell the sender their correction payment arrived.
+  //
+  // The cancellation request stays OPEN here, unlike every other exit from this
+  // function. That is the point: the request is the record of a decision owed to
+  // the sender, and the decision is not honoured until the money is sent. An
+  // operator seeing it still open is seeing the truth.
+  //
+  // No Sentry page, matching refunds.ts: UNDER_REVIEW is inside reconciliation's
+  // AGING_OR_FILTER, so this row is surfaced by the aging check already.
+  // ops-cancel.ts pages only because its resting CANCELED is watched by nothing.
+  if (undoRequiresManualDisbursement(disbursedRef)) {
+    return { done: true, outcome: 'awaiting_disbursement', refundRef: disbursedRef }
+  }
+
   const undoMode = undoModeForRef(disbursedRef)
   await transitionTransfer({
     transferId: transfer.id,

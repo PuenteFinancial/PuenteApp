@@ -333,20 +333,32 @@ export async function resolve(args: Extract<ParsedArgs, { mode: 'resolve' }>): P
   if (!outcome.done) {
     fail(`${args.action} refused: ${outcome.reason} — ${refusalMessage(outcome)}`)
   }
-  pass(
-    {
-      refunded: 'sender paid the correction payment (send + fee) and state settled REFUNDED',
-      // The disbursement pre-existed (a prior run crashed after paying) — this
-      // run settled the state and closed the request but moved NO money.
-      // Confirm the original payment in the funding processor.
-      already_disbursed:
-        'disbursement already existed — this run settled REFUNDED and closed the request; ' +
-        'no money moved. Confirm the original payment in the funding processor.',
-      already_refunded:
-        'ALREADY REFUNDED before this run — any dangling request was closed; no payment was made by this run',
-      denied: 'request denied and closed; the transfer remains COMPLETED',
-    }[outcome.outcome],
-  )
+  if (outcome.outcome === 'awaiting_disbursement') {
+    // NOT a success message, matching cancel-held-transfer.ts. The decision was
+    // made and recorded; the sender has not been paid.
+    console.log(
+      `⚠ the correction payment is recorded (${outcome.refundRef}) but the funds were collected on\n` +
+        '  a rail we do not operate — a human must send them. The transfer rests at UNDER_REVIEW and\n' +
+        '  THE REQUEST STAYS OPEN, deliberately: a Reg E decision is not honoured until the money is\n' +
+        '  sent, and an open request is the honest record of that.\n' +
+        '  Follow docs/runbooks/manual-refund.md, then re-run to settle.',
+    )
+  } else {
+    pass(
+      {
+        refunded: 'sender paid the correction payment (send + fee) and state settled REFUNDED',
+        // The disbursement pre-existed (a prior run crashed after paying) — this
+        // run settled the state and closed the request but moved NO money.
+        // Confirm the original payment in the funding processor.
+        already_disbursed:
+          'disbursement already existed — this run settled REFUNDED and closed the request; ' +
+          'no money moved. Confirm the original payment in the funding processor.',
+        already_refunded:
+          'ALREADY REFUNDED before this run — any dangling request was closed; no payment was made by this run',
+        denied: 'request denied and closed; the transfer remains COMPLETED',
+      }[outcome.outcome],
+    )
+  }
 
   // Never claim credit for a run that wrote nothing: the verify query would show
   // a different actor and make the tool look like it lied.

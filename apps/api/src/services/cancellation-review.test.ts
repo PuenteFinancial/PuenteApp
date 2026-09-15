@@ -142,6 +142,28 @@ describe('refundCancellation — the dispute interlock', () => {
     expect(claimRefund).not.toHaveBeenCalled()
   })
 
+  it('rests at UNDER_REVIEW when the correction needs a human to move the money', async () => {
+    // Same branch as the other two tails. What differs here is the REQUEST: it
+    // stays open, because a Reg E decision is not honoured until the money is
+    // sent, and an open request is the honest record of that.
+    q('transfers', reviewing(), { data: null, error: null })
+    refund.mockResolvedValue({
+      provider: 'manual',
+      ref: 'manualrefund_1',
+      status: 'pending',
+      mode: 'refunded',
+    })
+
+    await expect(refundCancellation({ transferId: T, operator: 'jphelps' })).resolves.toEqual({
+      done: true,
+      outcome: 'awaiting_disbursement',
+      refundRef: 'manualrefund_1',
+    })
+
+    expect(transition).not.toHaveBeenCalled()
+    expect(resolveCancellationRequest).not.toHaveBeenCalled()
+  })
+
   it('still settles a row whose correction payment ALREADY left, dispute or not', async () => {
     // Matches the two siblings since #350: the interlock asks only while there
     // is still something to give back. A row carrying refund_payment_ref is the

@@ -182,9 +182,9 @@ Four paths hand a sender their money back. Three guards are meant to apply to al
 
 | | `claimRefund` | dispute interlock | manual-disbursement |
 |---|---|---|---|
-| `refundPayoutFailure` — the PAYOUT_FAILED tail | ✅ | ✅ | ❌ **B6** |
+| `refundPayoutFailure` — the PAYOUT_FAILED tail | ✅ | ✅ | ✅ |
 | `cancelHeldTransfer` — undeliverable payout | ✅ | ✅ | ✅ |
-| `refundCancellation` — the Reg E correction | ✅ | ✅ | ❌ **B6** |
+| `refundCancellation` — the Reg E correction | ✅ | ✅ | ✅ |
 | the sender's own cancel route | ⬜ *by design* | ⬜ *by design* | ✅ |
 
 **What each one asks, and what it costs to skip:**
@@ -205,11 +205,18 @@ it is the only path whose undo is a void rather than a refund. And it runs insid
 window, where a card dispute (days) cannot plausibly have arrived yet. Revisit the second if that
 window is ever widened.
 
-**The two ❌ cells are real and open** (B6). Both rest in states inside reconciliation's
-`AGING_OR_FILTER` — `PAYOUT_FAILED` and `UNDER_REVIEW` — so the rows stay visible while the sender
-waits, which is why this is a lie told to the sender rather than a row lost entirely. That is also
-why the fix is simpler than it was for `cancelHeldTransfer`, whose resting `CANCELED` nothing watches
-and which therefore needed a Sentry page of its own.
+**All three guards now cover all four paths.** The last two cells closed 2026-09-15: both tails rest
+rather than settle when the rail answers `pending`, at `PAYOUT_FAILED` and `UNDER_REVIEW`
+respectively. Neither pages, and that asymmetry with `cancelHeldTransfer` is deliberate — those two
+states are inside reconciliation's `AGING_OR_FILTER`, so the rows are surfaced by the aging check
+already, while `cancelHeldTransfer` rests at `CANCELED`, which nothing watches, so its Sentry page IS
+the follow-up. A second alarm for a row already on the board is how ops learns to ignore the board.
+
+One thing worth knowing if you add a fifth arm to any of these unions: the route response schemas
+carry an `enum` of outcome strings, and TypeScript cannot connect a runtime schema object to a union.
+Adding `awaiting_disbursement` typechecked clean and passed the whole suite while BOTH enums would
+have rejected it at response time, inside `fast-json-stringify`, on a money route.
+`routes/v1/outcome-wire.test.ts` is what holds those together now.
 
 **This table is enforced, not decorative.** `services/money-return-guards.test.ts` fails if a fifth
 disbursing path appears, if a declared path loses a guard, or if an exemption outlives the gap it
