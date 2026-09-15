@@ -109,9 +109,15 @@ vi.mock('../../services/funding/index.js', async (importOriginal) => {
     // factory does not rebind — so without this it would read the real
     // (mock-rail) processor and answer 'none' while the fake says otherwise.
     currentIdentityFlow: () => identityFlow(),
-    // Per-row accessor (audit corner 1): rows in this suite are unstamped,
-    // so it resolves to the same fake the process would.
-    processorFor: fakeProcessor,
+    // Per-row accessor (audit corner 1): rows in this suite are unstamped, so
+    // it resolves to the same fake the process would. Recorded, though —
+    // otherwise it is indistinguishable from getFundingProcessor here, and a
+    // route that consults the PROCESS rail about a persisted row looks
+    // identical to one that consults the ROW's (2026-09-15).
+    processorFor: (row: unknown) => {
+      processorForRows(row)
+      return fakeProcessor()
+    },
   }
 })
 
@@ -119,6 +125,8 @@ vi.mock('../../services/funding/index.js', async (importOriginal) => {
 // ok by default so existing paths stay green; the trip cases flip them. The
 // factory replaces the module, so it must also export the message constant the
 // routes render (a sentinel — tests branch on `code`, never on copy).
+const processorForRows = vi.hoisted(() => vi.fn())
+
 const assessTransferRisk = vi.fn()
 const assessUnclearedCap = vi.fn()
 vi.mock('../../services/risk.js', () => ({
@@ -244,6 +252,7 @@ async function buildApp() {
 }
 
 beforeEach(() => {
+  processorForRows.mockReset()
   from.mockReset()
   createTransferFromQuote.mockReset()
   cancelTransfer.mockReset()
@@ -1434,6 +1443,39 @@ describe('GET /v1/transfers/:id/funding-session', () => {
       status: 'requires_payment_method',
     })
     expect(getClientSession).toHaveBeenCalledWith({ paymentRef: 'pi_123' })
+    await app.close()
+  })
+
+  // 2026-09-15: this route asked getFundingProcessor() — the PROCESS rail —
+  // about an already-persisted row, where the cancel path in the same file
+  // already asked processorFor(transfer). It broke both ways across a
+  // FUNDING_PROCESSOR flip. Harmless direction: a manual-stamped row under a
+  // checkout process 500s, because Stripe is handed a `manualpay_` id to
+  // retrieve. DANGEROUS direction: a Checkout-stamped row under a rolled-back
+  // manual process gets ManualProcessor.getClientSession(), which takes NO
+  // paymentRef — it ignores the live Session and answers with bank-transfer
+  // copy, so a sender can wire money for a transfer that still has an open
+  // Checkout Session and pay twice.
+  it("resolves the processor from THIS ROW's rail stamp, not the process rail", async () => {
+    const stamped = {
+      ...transferRow,
+      funding_payment_ref: 'cs_test_1',
+      funding_processor: 'stripe_checkout',
+    }
+    from.mockReturnValueOnce(chain({ data: stamped }))
+    getClientSession.mockResolvedValue({
+      provider: 'stripe_checkout',
+      fields: { clientSecret: 'cs_test_1_secret_x', publishableKey: 'pk_test_x' },
+    })
+    const app = await buildApp()
+
+    const res = await get(app)
+
+    expect(res.status).toBe(200)
+    // The row — carrying its stamp — is what chose the adapter.
+    expect(processorForRows).toHaveBeenCalledWith(
+      expect.objectContaining({ funding_processor: 'stripe_checkout' }),
+    )
     await app.close()
   })
 
