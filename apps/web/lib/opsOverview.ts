@@ -305,6 +305,26 @@ export function transferActions(tr: OpsOpenTransfer): OpsTransferAction[] {
   return tr.fundingCleared ? [] : ['depositLanded']
 }
 
+/**
+ * Whether the board should tell an operator to attach deposit coordinates.
+ *
+ * Manual rail ONLY, the same gate `transferActions` applies — and it was
+ * ungated until 2026-09-14. `deposit_instructions` is the manual rail's table,
+ * so `onrampRef` is null for every Checkout row while `fundingInitiated` is
+ * true (that row carries a Checkout Session ref). Every `stripe_checkout`
+ * PENDING_PAYMENT row therefore wore an operator instruction naming
+ * coordinates that do not exist on its rail, and — because `transferActions`
+ * WAS gated — offered no button with which to act on it.
+ *
+ * Absent `fundingProcessor` (older API) keeps the previous behaviour, which is
+ * `transferActions`' deploy-skew rule too.
+ */
+export function needsDepositInstructions(tr: OpsOpenTransfer): boolean {
+  if (tr.state !== 'PENDING_PAYMENT') return false
+  if (tr.fundingInitiated !== true || tr.onrampRef != null) return false
+  return tr.fundingProcessor === undefined || tr.fundingProcessor === 'manual'
+}
+
 // ── Treasury float top-up (funding-ops-automation slice 2) ───────────────────
 
 export interface OpsFloatTopUpSuccess {

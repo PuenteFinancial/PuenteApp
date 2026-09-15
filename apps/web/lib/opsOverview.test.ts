@@ -12,6 +12,7 @@ import {
   isOpsTransferFundingSuccessShape,
   isOpsAttachSuccessShape,
   transferActions,
+  needsDepositInstructions,
   isOpsFloatTopUpSuccessShape,
   resolveErrorKind,
   firstDetailIssue,
@@ -312,6 +313,51 @@ describe('worker heartbeat derivations', () => {
       ],
     })
     expect(stalestHeartbeat(o)?.worker).toBe('b')
+  })
+})
+
+describe('needsDepositInstructions', () => {
+  const pending = (over: Partial<OpsOpenTransfer> = {}): OpsOpenTransfer =>
+    openTransfer({
+      state: 'PENDING_PAYMENT',
+      feeAmountMinor: 500,
+      fundingInitiated: true,
+      onrampRef: null,
+      ...over,
+    })
+
+  // The bug, 2026-09-14: ungated, this fired for EVERY rail. deposit_instructions
+  // is the manual rail's table, so onrampRef is null on a Checkout row while
+  // fundingInitiated is true — the board told the operator to attach
+  // coordinates that rail has no concept of, with no button to do it (because
+  // transferActions was already gated). Must match transferActions' gate.
+  it('never asks for deposit instructions on a rail that has none', () => {
+    for (const rail of ['stripe', 'stripe_checkout', 'stripe_onramp', 'stripe_crypto', 'mock']) {
+      expect(needsDepositInstructions(pending({ fundingProcessor: rail }))).toBe(false)
+    }
+  })
+
+  it('asks on the manual rail — the operator attach step is real there', () => {
+    expect(needsDepositInstructions(pending({ fundingProcessor: 'manual' }))).toBe(true)
+  })
+
+  it('stops asking once coordinates are attached', () => {
+    expect(
+      needsDepositInstructions(pending({ fundingProcessor: 'manual', onrampRef: 'bridge_tr_1' })),
+    ).toBe(false)
+  })
+
+  it('stays quiet before the sender confirms, and outside PENDING_PAYMENT', () => {
+    expect(needsDepositInstructions(pending({ fundingProcessor: 'manual', fundingInitiated: false }))).toBe(
+      false,
+    )
+    expect(needsDepositInstructions(pending({ fundingProcessor: 'manual', state: 'FUNDED' }))).toBe(false)
+  })
+
+  // Deploy skew, transferActions' rule: an older API omits the rail, so keep
+  // the pre-fix behaviour rather than blanking a manual operator's cue.
+  it('falls back to asking when the API omits the rail', () => {
+    expect(needsDepositInstructions(pending())).toBe(true)
   })
 })
 

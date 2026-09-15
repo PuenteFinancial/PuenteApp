@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { pendingFundingWindowMs } from './funding/index.js'
 
 // The 8.5-v1 ops overview aggregate. Harness: per-table chain mocks + frozen
 // clock (stuck-watch/reconciliation style); the panel seams (pending reviews,
@@ -20,7 +21,12 @@ const envMock = vi.hoisted(() => ({
   STUCK_SUBMITTED_AFTER_MINUTES: 30,
   STUCK_IN_FLIGHT_AFTER_MINUTES: 60,
   STUCK_UNDER_REVIEW_AFTER_HOURS: 24,
+  // Both rail windows pendingFundingWindowMs can return. A key missing here
+  // makes the threshold NaN, and `dwellMs > NaN` is false — i.e. a row that
+  // silently never flags. Real env is Zod-defaulted, so this hazard is the
+  // mock's alone; keep the two in step when a new rail window appears.
   MANUAL_PENDING_MAX_AGE_DAYS: 7,
+  ONRAMP_PENDING_MAX_AGE_HOURS: 4,
   FLOAT_CEILING_MINOR: undefined as number | undefined,
   // processorNameFor's fallback for a pre-K6a null funding_processor.
   FUNDING_PROCESSOR: 'manual' as string,
@@ -273,6 +279,83 @@ describe('buildOpsOverview', () => {
     const overview = await buildOpsOverview()
 
     expect(overview.openTransfers[0]).toMatchObject({ transferId: 't-old', overThreshold: true })
+  })
+
+  // 2026-09-14: the threshold was hardcoded to MANUAL_PENDING_MAX_AGE_DAYS for
+  // EVERY rail, so a stripe_checkout row the reaper fails at 4h rendered a
+  // 10080m threshold — 28x too generous, and it could never cross the board's
+  // line before being reaped. These three pin the board to the reaper's own
+  // pendingFundingWindowMs, one case per branch of it.
+  it('uses the ROW RAIL\'s abandonment window on PENDING_PAYMENT — interactive pay step', async () => {
+    transfersResult = {
+      data: [
+        openRow({
+          id: 't-checkout',
+          state: 'PENDING_PAYMENT',
+          payment_at: null,
+          funding_processor: 'stripe_checkout',
+          funding_payment_ref: 'cs_test_pp',
+          created_at: minutesAgo(250), // past the 4h window, inside the old 7d one
+        }),
+      ],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+
+    expect(overview.openTransfers[0]).toMatchObject({
+      transferId: 't-checkout',
+      thresholdMinutes: 4 * 60, // ONRAMP_PENDING_MAX_AGE_HOURS — the reaper's clock
+      overThreshold: true, // and it would have read `false` under the manual window
+    })
+  })
+
+  it('uses the ROW RAIL\'s abandonment window on PENDING_PAYMENT — webhook rail', async () => {
+    transfersResult = {
+      data: [
+        openRow({
+          id: 't-webhook',
+          state: 'PENDING_PAYMENT',
+          payment_at: null,
+          funding_processor: 'stripe',
+          funding_payment_ref: 'pi_pp',
+          created_at: minutesAgo(45), // a webhook should have arrived by 30m
+        }),
+      ],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+
+    expect(overview.openTransfers[0]).toMatchObject({
+      transferId: 't-webhook',
+      thresholdMinutes: 30,
+      overThreshold: true,
+    })
+  })
+
+  it('falls back to the process rail when the row carries no processor', async () => {
+    transfersResult = {
+      data: [
+        openRow({
+          id: 't-null-rail',
+          state: 'PENDING_PAYMENT',
+          payment_at: null,
+          funding_processor: null,
+          created_at: minutesAgo(10),
+        }),
+      ],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+
+    // Whatever the process rail is, the board must report ITS window — never a
+    // fabricated one. processorNameFor owns the fallback; this only pins that
+    // the threshold is not silently the manual 7 days again.
+    expect(overview.openTransfers[0]).toMatchObject({
+      thresholdMinutes: Math.round(pendingFundingWindowMs({ funding_processor: null }) / 60_000),
+    })
   })
 
   it('maps onramp refs from deposit_instructions and reports unconfirmed rows', async () => {

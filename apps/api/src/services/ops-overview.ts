@@ -4,7 +4,7 @@ import { listPendingReviews } from './cancellation-review.js'
 import { isFloatCeilingTripped } from './payouts.js'
 import { getAccountBalance } from './ledger.js'
 import { coarseAnchor, thresholdMs, WATCHED_STATES } from '../jobs/stuck-watch.js'
-import { processorNameFor } from './funding/index.js'
+import { pendingFundingWindowMs, processorNameFor } from './funding/index.js'
 import { listRefundBacklog, type ClaimStatus } from './refunds.js'
 import { listRecentOpsActions, ACTIVITY_FEED_LIMIT, type OpsActivityFeedRow } from './ops-actions.js'
 
@@ -70,6 +70,11 @@ export interface DwellRow {
   submit_attempted_at: string | null
   cancellation_requested_at: string | null
   created_at: string
+  // The rail owns how long a PENDING_PAYMENT row may legitimately sit, so the
+  // dwell threshold needs it. Optional to match RailRow: absent falls back to
+  // env.FUNDING_PROCESSOR inside processorNameFor, exactly as every other
+  // rail-aware read does.
+  funding_processor?: string | null
 }
 
 export function dwellFor(row: DwellRow, nowMs: number): OpsDwell | null {
@@ -83,7 +88,7 @@ export function dwellFor(row: DwellRow, nowMs: number): OpsDwell | null {
       ? row.created_at
       : coarseAnchor({ ...row, state, id: '', user_id: '' })
   const dwellMs = nowMs - new Date(enteredStateAt).getTime()
-  const threshold = overviewThresholdMs(state)
+  const threshold = overviewThresholdMs(row, state)
   return {
     enteredStateAt,
     dwellMinutes: Math.max(0, Math.round(dwellMs / 60_000)),
@@ -222,12 +227,22 @@ interface OpenRow {
 
 // PENDING_PAYMENT precedes every lifecycle stamp coarseAnchor folds in, so its
 // dwell runs from creation (see dwellFor); every other state keeps the pager's
-// own anchor. PENDING_PAYMENT's threshold mirrors the reconcile-pending sweep's
-// abandonment window (MANUAL_PENDING_MAX_AGE_DAYS) the same way the other
-// states mirror the stuck-watch pager — the board must tick with the clock
-// that actually acts on the row.
-function overviewThresholdMs(state: OpsOverviewState): number {
-  if (state === 'PENDING_PAYMENT') return env.MANUAL_PENDING_MAX_AGE_DAYS * 24 * 60 * 60_000
+// own anchor. PENDING_PAYMENT's threshold is the reconcile-pending sweep's
+// abandonment window for THIS ROW'S RAIL the same way the other states mirror
+// the stuck-watch pager — the board must tick with the clock that actually
+// acts on the row.
+//
+// It hardcoded MANUAL_PENDING_MAX_AGE_DAYS until 2026-09-14, which was right
+// only for the manual rail and 28x too generous for a stripe_checkout row: the
+// board showed "Dwell 40m / Threshold 10080m" on a row the reaper fails at 4h
+// (ONRAMP_PENDING_MAX_AGE_HOURS, via hasInteractivePayStep). So a genuinely
+// abandoned Checkout row could never cross the board's threshold before the
+// reaper killed it. Calling pendingFundingWindowMs is the fix AND the
+// prevention — it is the same function the reaper acts on, so there is no
+// local copy left to drift. Identical failure to the one #242 fixed between
+// the reaper and its alert; the board was the third consumer, missed then.
+function overviewThresholdMs(row: DwellRow, state: OpsOverviewState): number {
+  if (state === 'PENDING_PAYMENT') return pendingFundingWindowMs(row)
   return thresholdMs(state)
 }
 

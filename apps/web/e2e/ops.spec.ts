@@ -76,6 +76,18 @@ test('renders the needs-you queue and state-of-world panels', async ({ context, 
     page.getByText(/heartbeat stopped|latido del worker se detuvo/i),
   ).toHaveCount(0)
 
+  // A stripe_checkout PENDING_PAYMENT row must NOT wear the manual rail's
+  // operator cue (2026-09-14): deposit_instructions is a manual-rail table, so
+  // that note named coordinates this rail has no concept of — and offered no
+  // button to supply them, since the actions were already rail-gated.
+  await expect(page.getByText('0e171d83')).toBeVisible()
+  await expect(
+    page.getByText(/no deposit instructions attached|sin instrucciones de depósito/i),
+  ).toHaveCount(0)
+  // Its dwell reads against the rail's own 4h reaper window, not the manual 7d.
+  // Label is localized (ES by default here); the numbers are not.
+  await expect(page.getByText(/40m \/ .+: 240m/)).toBeVisible()
+
   // v1.1: actionsEnabled is true in the fixture, so each pending-cancellation
   // row carries exactly its Refund + Deny pair — and nothing else grew buttons.
   await expect(page.getByRole('button', { name: /^(refund|reembolsar)$/i })).toHaveCount(2)
