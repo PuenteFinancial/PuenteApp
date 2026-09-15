@@ -1444,7 +1444,19 @@ export async function transfersRoute(server: FastifyInstance) {
         return sendError(reply, 409, 'conflict', 'Transfer is no longer awaiting payment')
       }
 
-      const processor = getFundingProcessor()
+      // THIS ROW'S rail, not the process's (2026-09-15). A persisted row keeps
+      // the semantics of the rail that created it across a FUNDING_PROCESSOR
+      // flip — the same rule funding-apply, the reaper and the board follow,
+      // and the same call the cancel path above already makes. Serving the
+      // process rail here broke both ways: a manual-stamped row under a
+      // flipped-to-checkout process 500s the pay step (Stripe is asked to
+      // retrieve a `manualpay_` id), and — the dangerous direction — a
+      // Checkout-stamped row under a rolled-back-to-manual process gets
+      // ManualProcessor.getClientSession(), which takes NO paymentRef, ignores
+      // the live Session entirely and answers with bank-transfer copy. A sender
+      // shown wire instructions for a transfer that still has an open Checkout
+      // Session can pay twice.
+      const processor = processorFor(transfer)
 
       // Deferred rails (K5) always answer with the SDK bootstrap — provider,
       // publishable key, and the treasury address the client must register —
