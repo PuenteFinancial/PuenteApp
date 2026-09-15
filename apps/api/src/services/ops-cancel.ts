@@ -125,6 +125,16 @@ export type OpsCancelOutcome =
   // The row is CANCELED, but by the SENDER's own cancel, not this tool. Its
   // books are already square; finishing it here would double-book.
   | { done: false; reason: 'not_our_cancel' }
+  // THE DISPUTE INTERLOCK refused: this funding has been clawed back, so the
+  // sender already has their money and there is nothing here to give back.
+  // `source` says which half caught it — our own record, or the live provider.
+  | {
+      done: false
+      reason: 'funding_disputed'
+      source: 'record' | 'provider'
+      disputeRef: string | null
+      detail: string
+    }
   // The guarded UPDATE refused and a re-read agrees with nothing above: the row
   // moved between the read and the write. Never forced.
   | { done: false; reason: 'changed_underneath'; state: string }
@@ -146,6 +156,9 @@ export interface CancelableTransfer {
   funding_payment_ref: string | null
   funding_processor?: string | null
   funding_cleared: boolean
+  /** Our MIRROR of a dispute webhook — half of the dispute interlock, and the
+   *  half that can be silently absent (it was, for three staging rows). */
+  funding_disputed_at: string | null
   idempotency_key: string
   refund_payment_ref: string | null
   refund_claimed_at: string | null
@@ -159,7 +172,7 @@ export interface CancelableTransfer {
 // GenericStringError. Column list is also a PII decision — ids, amounts,
 // statuses and timestamps only; never the recipient or where the money goes.
 const CANCELABLE_COLUMNS =
-  'id, state, send_amount_minor, fee_amount_minor, margin_minor, payout_hold_reason, payout_held_at, submit_attempted_at, provider_transfer_ref, funding_payment_ref, funding_processor, funding_cleared, idempotency_key, refund_payment_ref, refund_claimed_at, refund_claimed_by, payout_destination_id, created_at'
+  'id, state, send_amount_minor, fee_amount_minor, margin_minor, payout_hold_reason, payout_held_at, submit_attempted_at, provider_transfer_ref, funding_payment_ref, funding_processor, funding_cleared, funding_disputed_at, idempotency_key, refund_payment_ref, refund_claimed_at, refund_claimed_by, payout_destination_id, created_at'
 
 async function loadCancelable(transferId: string): Promise<CancelableTransfer | null> {
   const { data, error } = await supabaseAdmin
@@ -197,6 +210,98 @@ async function canceledByOps(transferId: string): Promise<boolean> {
   const metadata = (data as Array<{ metadata: unknown }>)[0]?.metadata
   if (typeof metadata !== 'object' || metadata === null) return false
   return typeof (metadata as Record<string, unknown>)['payout_hold_reason'] === 'string'
+}
+
+/**
+ * THE DISPUTE INTERLOCK (2026-09-14). Is this funding still ours to give back?
+ *
+ * Asked before the cancel commits, because a disputed charge has ALREADY
+ * returned the sender's money through the card network. Refunding on top of
+ * that pays twice; booking a refund the processor will refuse leaves the ledger
+ * asserting a debt that does not exist.
+ *
+ * Two independent sources, and the second is the one that earns the name:
+ *
+ *   OUR RECORD    `funding_disputed_at`, a `funding_disputed` hold, or the
+ *                 FUNDING_REVERSED state. Free to read and usually right — but
+ *                 it is a MIRROR of a webhook, and a mirror can be empty. On
+ *                 staging three disputes left no trace at all, because the
+ *                 handler that writes these fields shipped hours after they
+ *                 arrived. A gate that trusted this alone would have passed all
+ *                 three.
+ *   THE PROVIDER  the live charge. Costs a call and cannot be stale.
+ *
+ * FAILS CLOSED. A processor that implements getDisputeStatus and then throws —
+ * timeout, 5xx, transport — is a refusal, not a pass: silence is not
+ * confirmation (verifyPrincipalReturned, same rule). The caller turns the throw
+ * into a stop.
+ *
+ * A rail that does NOT implement getDisputeStatus is a different case, and
+ * treating it as a failure would be wrong. The mock cannot be disputed and
+ * `manual` collects funds on a rail we do not operate, so there is no question
+ * for them to answer — those proceed on our record alone, and `checked` says so
+ * rather than leaving the caller to assume the provider was consulted.
+ *
+ * NOT A SAFETY GUARANTEE, and it should not be described as one. A dispute can
+ * land a second after this returns. What makes the operation safe is the refund
+ * claim and the ordering; this makes the common failure loud and early instead
+ * of a mid-tail throw that strands the row.
+ */
+export type DisputeVerdict =
+  | { disputed: false; checked: 'record_and_provider' | 'record_only' }
+  | { disputed: true; source: 'record' | 'provider'; disputeRef: string | null; detail: string }
+
+export async function verifyFundingNotDisputed(
+  transfer: Pick<
+    CancelableTransfer,
+    'state' | 'payout_hold_reason' | 'funding_disputed_at' | 'funding_payment_ref' | 'funding_processor'
+  >,
+): Promise<DisputeVerdict> {
+  // 1) Our record. Cheapest, and decisive when it is set.
+  //
+  // `!= null`, not `!== null`: an UNDEFINED value means the column was not
+  // selected, not that a dispute exists. Strict equality here read every
+  // caller that did not ask for the column as disputed and refused the lot —
+  // caught by the fixtures the moment this landed. Undefined falls through to
+  // the provider half, which is the half that can actually answer.
+  if (transfer.funding_disputed_at != null) {
+    return {
+      disputed: true,
+      source: 'record',
+      disputeRef: null,
+      detail: `funding_disputed_at is set (${transfer.funding_disputed_at})`,
+    }
+  }
+  if (transfer.payout_hold_reason === 'funding_disputed' || transfer.state === 'FUNDING_REVERSED') {
+    return {
+      disputed: true,
+      source: 'record',
+      disputeRef: null,
+      detail:
+        transfer.state === 'FUNDING_REVERSED'
+          ? 'the transfer is FUNDING_REVERSED'
+          : "the payout is held on 'funding_disputed'",
+    }
+  }
+
+  // 2) The provider. A null funding ref cannot be looked up — the caller
+  //    already refuses such a row before disbursing, so this only avoids
+  //    asking an unanswerable question.
+  const processor = processorFor(transfer)
+  if (!processor.getDisputeStatus || transfer.funding_payment_ref === null) {
+    return { disputed: false, checked: 'record_only' }
+  }
+  // No try/catch: a throw IS the refusal. See the doc comment.
+  const live = await processor.getDisputeStatus({ paymentRef: transfer.funding_payment_ref })
+  if (live.disputed) {
+    return {
+      disputed: true,
+      source: 'provider',
+      disputeRef: live.disputeRef ?? null,
+      detail: `the funding charge is disputed at the provider${live.status ? ` (${live.status})` : ''}`,
+    }
+  }
+  return { disputed: false, checked: 'record_and_provider' }
 }
 
 /**
@@ -302,6 +407,27 @@ export async function cancelHeldTransfer(
   if (loaded.state === 'REFUNDED') {
     await recordCancel(input, before, { outcome: 'already_settled', undoMode: null }, log)
     return { done: true, outcome: 'already_settled' }
+  }
+
+  // ── 0) the dispute interlock ───────────────────────────────────────────────
+  // BEFORE the cancel, not after: the cancel is the irreversible half, and a
+  // refusal that arrives later leaves the row stranded at CANCELED with a
+  // refunds_payable it will never discharge. That is exactly what happened on
+  // staging when nothing asked at all (2026-09-14) — Stripe refused the refund
+  // mid-tail and two transfers had to be corrected by hand.
+  //
+  // Placed after the REFUNDED early-return above: a settled transfer is done,
+  // and a dispute arriving afterwards is the loss path's business, not this
+  // tail's.
+  const verdict = await verifyFundingNotDisputed(loaded)
+  if (verdict.disputed) {
+    return {
+      done: false,
+      reason: 'funding_disputed',
+      source: verdict.source,
+      disputeRef: verdict.disputeRef,
+      detail: verdict.detail,
+    }
   }
 
   // ── 1) the cancel ──────────────────────────────────────────────────────────
@@ -558,6 +684,11 @@ export interface HeldCandidate {
   payout_held_at: string | null
   funding_cleared: boolean
   refund_payment_ref: string | null
+  /** The dispute interlock's inputs, so the CLI can preview the verdict
+   *  without a second read of the same row. */
+  funding_disputed_at: string | null
+  funding_payment_ref: string | null
+  funding_processor: string | null
   /** So a caller can re-probe the live cause without a second query. */
   payout_destination_id: string
   created_at: string
@@ -566,7 +697,7 @@ export interface HeldCandidate {
 }
 
 const CANDIDATE_COLUMNS =
-  'id, send_amount_minor, fee_amount_minor, payout_hold_reason, payout_held_at, funding_cleared, refund_payment_ref, payout_destination_id, created_at'
+  'id, send_amount_minor, fee_amount_minor, payout_hold_reason, payout_held_at, funding_cleared, refund_payment_ref, funding_disputed_at, funding_payment_ref, funding_processor, payout_destination_id, created_at'
 
 const ROW_BOUND = 1000
 

@@ -8,6 +8,7 @@ import type {
   FundingInitiation,
   FundingParseResult,
   FundingDisputeListItem,
+  FundingDisputeStatus,
   FundingPaymentListItem,
   FundingPaymentStatus,
   FundingProcessor,
@@ -202,6 +203,41 @@ export class StripeFundingProcessor implements FundingProcessor {
       status: d.status,
       createdAt: new Date(d.created * 1000).toISOString(),
     }))
+  }
+
+  /**
+   * The dispute interlock's provider half. Reads the LIVE charge behind the
+   * PaymentIntent — never `transfers.funding_disputed_at`, which is a mirror of
+   * a webhook that may never have arrived (and on staging, for three disputes,
+   * never did).
+   *
+   * `latest_charge` is expanded in the same round trip: a PI carries the
+   * dispute only through its charge, and a second call would be a second chance
+   * to fail. A PI with NO charge (never confirmed) cannot have been disputed,
+   * so it answers false rather than throwing — that is an answer, not silence.
+   *
+   * Nothing is caught here on purpose. A transport error, a timeout or a 5xx
+   * propagates to the caller, which must read it as a refusal.
+   */
+  async getDisputeStatus(input: { paymentRef: string }): Promise<FundingDisputeStatus> {
+    // Queried by `payment_intent` rather than read off the charge. Both work
+    // against the API, but `Charge.dispute` is not in this SDK's types (the
+    // REST response carries it; the typings do not), so reading it needs a
+    // cast — and a cast is how a field silently becomes undefined after an SDK
+    // bump, which here would mean answering "not disputed" about a charge that
+    // is. This is one typed call with no such failure mode.
+    //
+    // The filter is exact, unlike listRecentDisputes' window: a dispute from
+    // any date is found, so "empty" genuinely means none.
+    const page = await this.client.disputes.list({ payment_intent: input.paymentRef, limit: 1 })
+    const dispute = page.data[0]
+    if (!dispute) return { paymentRef: input.paymentRef, disputed: false }
+    return {
+      paymentRef: input.paymentRef,
+      disputed: true,
+      disputeRef: dispute.id,
+      status: dispute.status,
+    }
   }
 
   verifySignature(rawBody: Buffer, signatureHeader: string): boolean {

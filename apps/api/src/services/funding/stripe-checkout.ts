@@ -3,6 +3,7 @@ import { env } from '../../config/env.js'
 import { StripeFundingProcessor } from './stripe.js'
 import type {
   FundingClientSession,
+  FundingDisputeStatus,
   FundingInitiation,
   FundingParseResult,
   FundingPaymentStatus,
@@ -290,6 +291,18 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
     const paymentIntentId = await this.paymentIntentFor(input.paymentRef)
     const undo = await super.refund({ ...input, paymentRef: paymentIntentId })
     return { ...undo, provider: this.provider }
+  }
+
+  // The dispute interlock, same translate-then-delegate as the undos above: our
+  // stored ref names a Session, and the dispute hangs off the PaymentIntent's
+  // charge. Reusing paymentIntentFor also means a `pi_` ref left by the
+  // 2026-09-10 overwrite is tolerated here exactly as it is for a refund —
+  // which matters, because those are precisely the rows an operator reaches for.
+  override async getDisputeStatus(input: { paymentRef: string }): Promise<FundingDisputeStatus> {
+    const paymentIntentId = await this.paymentIntentFor(input.paymentRef)
+    const status = await super.getDisputeStatus({ paymentRef: paymentIntentId })
+    // Answer in the caller's vocabulary: they asked about the ref they hold.
+    return { ...status, paymentRef: input.paymentRef }
   }
 
   /**

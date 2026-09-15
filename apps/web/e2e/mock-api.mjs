@@ -216,6 +216,10 @@ async function rejectsEmptyJsonBody(req, res) {
 
 // ── Ops board slice 1 detail fixtures ────────────────────────────────────────
 const OPS_HELD_1 = '4e1d0001-0000-4000-8000-000000000003'
+// The loss path (PR #311): both holds are releasable, and neither may render
+// the sender_kyc_pending fallback copy.
+const OPS_HELD_DISPUTED = '4e1d0003-0000-4000-8000-00000000000a'
+const OPS_HELD_SUSPENDED = '4e1d0004-0000-4000-8000-00000000000b'
 const OPS_FAILED_1 = 'fa11ed01-0000-4000-8000-000000000005'
 const OPS_FAILED_ABANDONED = 'fa11ed02-0000-4000-8000-000000000006'
 // O-B action fixtures — reachable by URL only (not in the board's backlog, so
@@ -351,6 +355,16 @@ function opsDetailFixture(id) {
           requestId: 'req-e2e-1',
         },
       ],
+    })
+  }
+  if (id === OPS_HELD_DISPUTED) {
+    return opsDetailBase(id, {
+      transfer: { payoutHoldReason: 'funding_disputed', payoutHeldAt: '2026-08-01T08:01:00.000Z' },
+    })
+  }
+  if (id === OPS_HELD_SUSPENDED) {
+    return opsDetailBase(id, {
+      transfer: { payoutHoldReason: 'sender_suspended', payoutHeldAt: '2026-08-01T08:01:00.000Z' },
     })
   }
   if (id === OPS_HELD_STALE_QUOTE) {
@@ -708,7 +722,25 @@ const server = createServer(async (req, res) => {
   // a refactor that drops any of them cannot ship green. Outcomes keyed on the
   // fixture rows; refusals carry the API's own codes so the client's danger
   // branches are exercised end to end.
-  const OPS_RELEASABLE = ['fx_drift', 'payability', 'velocity_review', 'submit_error']
+  // Mirrors services/payout-holds.ts RELEASABLE_HOLD_REASONS exactly — the
+  // four human-actioned reasons plus the loss path's two. Still EXCLUDES
+  // sender_kyc_pending.
+  const OPS_RELEASABLE = [
+    'fx_drift',
+    'payability',
+    'velocity_review',
+    'submit_error',
+    'funding_disputed',
+    'sender_suspended',
+  ]
+  // The reason each held fixture row is actually parked on; anything else is
+  // the API's compare-and-swap 409.
+  const OPS_HELD_REASON = {
+    [OPS_HELD_1]: 'velocity_review',
+    [OPS_HELD_DISPUTED]: 'funding_disputed',
+    [OPS_HELD_SUSPENDED]: 'sender_suspended',
+    [OPS_HELD_STALE_QUOTE]: 'fx_drift',
+  }
   const opsNoteOk = (note) => typeof note === 'string' && note.trim().length >= 10 && note.trim().length <= 500
   if (method === 'POST' && pathname === '/v1/ops/transfers/hold-release') {
     const body = await readBody(req)
@@ -722,9 +754,25 @@ const server = createServer(async (req, res) => {
         error: { code: 'validation_error', message: 'mock: transferId, a releasable reason, and a 10–500 char note are required', requestId: 'mock' },
       })
     }
+    const heldReason = OPS_HELD_REASON[body.transferId]
+    if (heldReason === undefined) {
+      return json(res, 404, { error: { code: 'not_found', message: 'mock: Transfer not found', requestId: 'mock' } })
+    }
+    if (body.reason !== heldReason) {
+      return json(res, 409, {
+        error: {
+          code: 'conflict',
+          message: 'mock: The hold changed underneath you',
+          requestId: 'mock',
+          details: [{ path: 'reason', issue: `hold is ${heldReason}` }],
+        },
+      })
+    }
     // The board hides the button for this row; a stale tab (or a direct caller)
     // still gets the API's own refusal, which is NOT `conflict` — nothing
-    // changed underneath, so refreshing would not help.
+    // changed underneath, so refreshing would not help. Ordered AFTER the
+    // compare-and-swap, as services/payout-holds.ts orders it: a row that
+    // actually MOVED should still be told the hold changed.
     if (body.transferId === OPS_HELD_STALE_QUOTE) {
       return json(res, 409, {
         error: {
@@ -732,19 +780,6 @@ const server = createServer(async (req, res) => {
           message: 'mock: Releasing cannot clear this hold — cancel and refund it instead',
           requestId: 'mock',
           details: [{ path: 'reason', issue: 'stale_quote; quote age 6900min > max 240min' }],
-        },
-      })
-    }
-    if (body.transferId !== OPS_HELD_1) {
-      return json(res, 404, { error: { code: 'not_found', message: 'mock: Transfer not found', requestId: 'mock' } })
-    }
-    if (body.reason !== 'velocity_review') {
-      return json(res, 409, {
-        error: {
-          code: 'conflict',
-          message: 'mock: The hold changed underneath you',
-          requestId: 'mock',
-          details: [{ path: 'reason', issue: 'hold is velocity_review' }],
         },
       })
     }

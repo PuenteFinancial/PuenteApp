@@ -148,6 +148,26 @@ export interface FundingDisputeListItem {
   createdAt: string
 }
 
+/**
+ * Whether ONE payment has been disputed — the targeted question, as against
+ * listRecentDisputes' account-wide sweep (the dispute interlock, 2026-09-14).
+ *
+ * They are not interchangeable and the difference is the whole point. The
+ * sweep is windowed (`createdAfter`) and truncatable (a full page means
+ * TRUNCATED), so a dispute that is old enough or unlucky enough reads as
+ * absent. That is fine for recon, which is looking for what it MISSED and runs
+ * again in six hours. It is not fine for a gate on an irreversible money
+ * operation, where "absent" must mean absent.
+ */
+export interface FundingDisputeStatus {
+  paymentRef: string
+  disputed: boolean
+  /** The dispute id, when there is one. */
+  disputeRef?: string
+  /** Raw provider status (Stripe: needs_response, under_review, won, lost…). */
+  status?: string
+}
+
 // The result of a funding-undo op (slice 6). Persisted to
 // transfers.refund_payment_ref (one undo path per transfer). `pending` is for a
 // real async return (Stripe ACH refund); the mock void/refund is always
@@ -423,6 +443,31 @@ export interface FundingProcessor {
    * A full page means TRUNCATED, not "everything", exactly as for payments.
    */
   listRecentDisputes?(input: { createdAfter: Date; limit: number }): Promise<FundingDisputeListItem[]>
+  /**
+   * OPTIONAL — the DISPUTE INTERLOCK (2026-09-14). Has this one payment been
+   * clawed back?
+   *
+   * Asked before any operation that gives the sender their money back, because
+   * a disputed charge has ALREADY given it to them: refunding on top pays
+   * twice, and booking a refund we cannot issue leaves the ledger claiming a
+   * debt that does not exist. Found the hard way on staging — two transfers
+   * reached the processor before anything asked, and Stripe refused with
+   * "has been charged back; cannot issue a refund" mid-tail, stranding both.
+   *
+   * MUST THROW rather than answer when the provider cannot be reached. The
+   * caller treats a throw as a refusal (silence is not confirmation, exactly as
+   * in verifyPrincipalReturned); an implementation that swallowed a timeout into
+   * `disputed: false` would turn the interlock into a rubber stamp at the only
+   * moment it matters.
+   *
+   * ABSENT is not the same as `disputed: false`, and callers must not conflate
+   * them. A rail that cannot be disputed at all — the mock, and `manual`, where
+   * funds arrive by bank transfer on a rail we do not operate — simply has no
+   * such question to answer, and the caller proceeds on our own records. Only
+   * a rail that CAN be disputed should implement this, and having implemented
+   * it, must answer or throw.
+   */
+  getDisputeStatus?(input: { paymentRef: string }): Promise<FundingDisputeStatus>
   /**
    * OPTIONAL — only rails whose persisted funding_payment_ref can diverge
    * from what an echo-less event's paymentRef carries need to implement this.
