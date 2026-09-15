@@ -6,6 +6,47 @@ would make a future engineer ask "why on earth…" — that question is the incl
 
 ---
 
+**2026-09-14 · A sender can cancel before paying, and it lands on `PAYMENT_FAILED` rather than a new
+state.** `POST /:id/cancel` refused `PENDING_PAYMENT` since slice 6 ("unfunded — nothing to void;
+abandoned rows are reaped"), which was true about the money and wrong about the sender: a
+**confirmed** `PENDING_PAYMENT` row counts against the uncleared-exposure cap
+(`RISK_UNCLEARED_MAX_COUNT`, default 1), so abandoning a checkout locks the sender out of sending
+for the whole abandonment window — 4h on the interactive rails, 7 days on manual. Staging measured a
+mean dwell of 242.2 minutes to reap, across 12 rows. Meanwhile the Checkout Session stays payable at
+Stripe for 24h, past our own ceiling.
+
+**`PAYMENT_FAILED`, not `CANCELED` and not a new state.** `CANCELED` means the sender was charged
+and an undo is owed; nothing is collected here and **no ledger batch posts**, which reconciliation
+already asserts for this state (`unexpected_postings_before_funding`). A distinct state would have
+had to be added to two CHECK constraints, the TS union, `UNWOUND_STATES`, `ABANDONED_STATES`,
+`SETTLED_STATES`, web's `STATES` guard and that reconciliation rule — eight places, for a row where
+no money ever moved. Reuse costs exactly one thing: the state alone cannot say whether the sender
+chose to stop, so `transfers.canceled_before_payment_at` carries that bit to the read path (the same
+denormalization as `payment_claimed_at`, and droppable with one `alter table`). Explicitly **not** a
+§1005.34 cancellation: no payment, no 30-minute clock, nothing owed, `cancelable_until` still null.
+
+**Close the processor's object FIRST, fail the row second** — the reaper's ordering, for the
+reaper's reason. Reversed, a stale tab pays a transfer already marked dead and the funding webhook
+hits `transition_conflict` and is acked: a charge with no transfer. So the route is gated on being
+able to PROVE the door is shut. `expireFunding` was added to the bare `stripe` PI rail (which also
+stops the reaper leaking PIs — the unbuilt slice-6 leaf) and to `mock`, whose object is imaginary.
+The onramp rails deliberately do **not** get it (Stripe exposes no cancel for a crypto onramp
+session), and neither does **`manual`** — `manualpay_…` is a bookkeeping token with no payable
+object behind it, and the sender can wire for days afterwards, so a trivially-'expired' answer would
+be true about the processor and a lie about the money. All three refuse with
+`cancellation_requires_support`. That restraint is what lets the sender-facing copy say **"you were
+never charged"** at all: the button is only offered where a real object was provably closed or none
+ever existed. Contrast the existing `paymentFailed` copy, which deliberately makes no such claim
+because the reaper fires on webhook silence and cannot know. A `not_open` answer is `409 funding_in_progress` and never fails the row; an unreachable
+processor is a 502 with nothing written.
+
+**Found while verifying: the reaper's reason string had drifted from its own clock.**
+`abandonmentReason` branched on `isOnrampSessionRail` while `pendingFundingWindowMs` branched on the
+wider `hasInteractivePayStep`. `stripe_checkout` is in the second and not the first, so the live
+prod rail waited 4 hours and then wrote `funding_not_received_within_30_minutes` into the permanent
+transition log — 6 staging rows carry it. Fixed by branching both on the same predicate. Same class
+as #242 one layer up: the two clocks already shared a function; their label did not.
+
 **2026-09-14 · `fx_drift` is one hold reason with two conditions, and the board now offers Release
 hold only for the one it can resolve.** `payout-submit` places `fx_drift` when the live Bridge rate
 drifted past `FX_MAX_DRIFT_BPS` **or** the quote is older than `FX_MAX_QUOTE_AGE_MINUTES` (default

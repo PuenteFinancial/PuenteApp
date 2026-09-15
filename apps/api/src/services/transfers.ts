@@ -74,6 +74,12 @@ export interface TransferRow {
   // (funding-ops slice 4). Same orthogonal-flag posture as the cancellation
   // request: a signal to ops, never a state change or a release.
   payment_claimed_at: string | null
+  // Set-once when the sender cancels BEFORE paying. The row lands on
+  // PAYMENT_FAILED like any other abandonment, so this is the one bit that
+  // separates "you chose to stop" from "your payment failed" on the read path —
+  // transfer_transitions records the same fact but is not sender-visible.
+  // Written only by the cancel route; no worker or webhook can know this.
+  canceled_before_payment_at: string | null
   completed_at: string | null
   created_at: string
 }
@@ -684,6 +690,7 @@ export function toApiTransfer(row: TransferRow) {
     cancelableUntil: row.cancelable_until,
     cancellationRequestedAt: row.cancellation_requested_at,
     paymentClaimedAt: row.payment_claimed_at,
+    canceledBeforePaymentAt: row.canceled_before_payment_at,
     providerTransferRef: row.provider_transfer_ref,
     completedAt: row.completed_at,
     createdAt: row.created_at,

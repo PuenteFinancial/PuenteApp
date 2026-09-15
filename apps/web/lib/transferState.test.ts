@@ -4,12 +4,14 @@ import {
   TIMELINE_STEPS,
   badgeTone,
   showCancellationBanner,
+  canCancelBeforePayment,
   canRequestCancel,
   classifyCancelResponse,
   isOnHappyPath,
   isSettled,
   isTransferShape,
   outcomeFor,
+  outcomeForTransfer,
   timelineFor,
   type TrackedTransfer,
   type TransferState,
@@ -138,6 +140,51 @@ describe('isSettled', () => {
   it('keeps polling while in flight', () => {
     for (const state of ['PENDING_PAYMENT', 'FUNDED', 'SUBMITTED', 'IN_FLIGHT'] as const) {
       expect(isSettled(state)).toBe(false)
+    }
+  })
+})
+
+describe('canCancelBeforePayment', () => {
+  it('is offered at PENDING_PAYMENT with no clock — cancelableUntil is null before funding', () => {
+    expect(
+      canCancelBeforePayment(transfer({ state: 'PENDING_PAYMENT', cancelableUntil: null })),
+    ).toBe(true)
+  })
+
+  it('is not offered once money exists — that is the Reg E cancel, with its own window', () => {
+    for (const state of ['FUNDED', 'SUBMITTED', 'IN_FLIGHT', 'COMPLETED', 'PAYMENT_FAILED'] as const) {
+      expect(canCancelBeforePayment(transfer({ state }))).toBe(false)
+    }
+  })
+})
+
+describe('outcomeForTransfer', () => {
+  it('reads a sender-canceled PAYMENT_FAILED as canceled, not failed', () => {
+    const t = transfer({
+      state: 'PAYMENT_FAILED',
+      canceledBeforePaymentAt: '2026-09-14T12:00:00.000Z',
+    })
+    expect(outcomeForTransfer(t)).toBe('canceledBeforePay')
+    // The state-only view is unchanged — it cannot know, which is the point.
+    expect(outcomeFor(t.state)).toBe('paymentFailed')
+  })
+
+  it('a genuine funding failure still reads as paymentFailed', () => {
+    expect(outcomeForTransfer(transfer({ state: 'PAYMENT_FAILED' }))).toBe('paymentFailed')
+  })
+
+  it('the stamp is ignored on any other state', () => {
+    expect(
+      outcomeForTransfer(
+        transfer({ state: 'COMPLETED', canceledBeforePaymentAt: '2026-09-14T12:00:00.000Z' }),
+      ),
+    ).toBe('completed')
+  })
+
+  it('every outcome it can return has copy in both languages', () => {
+    for (const lang of ['en', 'es'] as const) {
+      expect(translations[lang].send.track.outcomes.canceledBeforePay.title).toBeTruthy()
+      expect(translations[lang].send.track.outcomes.canceledBeforePay.body).toBeTruthy()
     }
   })
 })

@@ -41,6 +41,12 @@ const FIXED = new Map([
   // the outcome banner IS the cancellation story there, so exactly ONE banner
   // may render (PR6b review fix — the pair used to stack and contradict).
   ['transfer-e2e-cancel-review', 'UNDER_REVIEW'],
+  // The PRE-PAYMENT cancel: still PENDING_PAYMENT, so the sender can leave
+  // before any money moves. Its cancel returns PAYMENT_FAILED + the stamp.
+  ['transfer-e2e-prepay-cancel', 'PENDING_PAYMENT'],
+  // …and the race: the funding object was no longer open, so the API refuses
+  // and the row is untouched.
+  ['transfer-e2e-prepay-raced', 'PENDING_PAYMENT'],
 ])
 const mutableStates = new Map()
 
@@ -101,6 +107,10 @@ function transferBody(id, state = stateOf(id)) {
     providerTransferRef: null,
     // A flag ORTHOGONAL to state — set on both an in-flight and a settled
     // fixture, because the banner must key off the request AND the state.
+    canceledBeforePaymentAt:
+      id === 'transfer-e2e-prepay-cancel' && state === 'PAYMENT_FAILED'
+        ? '2026-09-14T12:00:00.000Z'
+        : null,
     cancellationRequestedAt: id.startsWith('transfer-e2e-cancel-')
       ? new Date(START).toISOString()
       : null,
@@ -453,6 +463,24 @@ const server = createServer(async (req, res) => {
         messages: {
           en: "This transfer is already on its way to your recipient, so it can't be stopped automatically. We've recorded your cancellation request. If you asked within 30 minutes of paying and before the money was delivered, you'll get a full refund. This page will update when it's resolved.",
           es: 'Esta transferencia ya va camino a tu destinatario, así que no se puede detener automáticamente. Registramos tu solicitud de cancelación. Si la hiciste dentro de los 30 minutos después de pagar y antes de que se entregara el dinero, recibirás un reembolso completo. Esta página se actualizará cuando se resuelva.',
+        },
+      })
+    }
+
+    // Pre-payment cancel: 200 with the FAILED row and the stamp, which is what
+    // tells the tracker to say "canceled" instead of "your payment failed".
+    if (id === 'transfer-e2e-prepay-cancel') {
+      return json(res, 200, transferBody(id, 'PAYMENT_FAILED'))
+    }
+
+    // The race the ordering exists to lose safely: the funding object was not
+    // open, so nothing is failed and the sender is told to check back.
+    if (id === 'transfer-e2e-prepay-raced') {
+      return json(res, 409, {
+        error: {
+          code: 'funding_in_progress',
+          message: 'We could not cancel this. Your payment may have gone through, so check back in a moment.',
+          requestId: 'mock',
         },
       })
     }

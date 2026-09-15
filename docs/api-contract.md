@@ -63,6 +63,7 @@ input + response schema validation; authenticated routes write an audit-log entr
 | 409 | `idempotency_conflict` | Idempotency-Key reused with different body |
 | 409 | `quote_expired` | Quote past `expires_at` |
 | 409 | `transfer_not_cancelable` | Not in `FUNDED`, or already claimed for payout submission |
+| 409 | `funding_in_progress` | Pre-payment cancel only: the funding object is no longer open, so the payment may have landed. Nothing was changed; re-read in a moment |
 | 409 | `refund_owed` | Ops deny refused: the request met both §1005.34 conditions — a refund is owed; no tool may deny it |
 | 409 | `claim_abandoned` | Ops resolve refused: a prior refund run abandoned its claim — manual-refund runbook, never retry |
 | 409 | `deposit_evidence_conflict` | Ops deny refused: cited `depositedAt` provably wrong; `details[]` carries the legal bounds |
@@ -222,7 +223,7 @@ reconciliation but never cross the wire.
 | GET | `/v1/transfers` | ✓ | — | List (owner-scoped). `?scope=history` hides abandoned (never-funded) sends — `PENDING_PAYMENT`/`PAYMENT_FAILED`; `?scope=all` (default) returns everything. |
 | GET | `/v1/transfers/:id` | ✓ | — | Status, snapshotted terms, disclosure. |
 | GET | `/v1/transfers/:id/funding-session` | ✓ | — | Pay-step bootstrap (S3): `{ provider, clientSecret?, publishableKey? }`. `PENDING_PAYMENT` only. |
-| POST | `/v1/transfers/:id/cancel` | ✓ | **required** | Pre-claim `FUNDED` → cancels. `SUBMITTED`/`IN_FLIGHT`/`FUNDED`-post-claim → **202**, request recorded (below). Else `transfer_not_cancelable`. |
+| POST | `/v1/transfers/:id/cancel` | ✓ | **required** | **`PENDING_PAYMENT` → the pre-payment cancel (2026-09-14):** closes the processor's funding object, then `PENDING_PAYMENT → PAYMENT_FAILED` (actor `user`, no ledger, `canceled_before_payment_at` stamped). Refusals, in order: `payment_claimed_at` set or the rail has no `expireFunding` → 409 `cancellation_requires_support`; object not open → 409 `funding_in_progress` (row untouched); processor unreachable → 502 `provider_unavailable` (nothing written). Pre-claim `FUNDED` → cancels. `SUBMITTED`/`IN_FLIGHT`/`FUNDED`-post-claim → **202**, request recorded (below). Else `transfer_not_cancelable`. |
 
 **202 `cancellation_requires_support`** — the payout is already with Bridge, so the cancel is
 *recorded* and resolved when the payout settles (slice-7 PR6b). The wire shape is unchanged from

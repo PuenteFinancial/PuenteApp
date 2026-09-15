@@ -326,6 +326,31 @@ describe('reconcilePendingTransfers — per-row rail', () => {
     })
   })
 
+  // REGRESSION (2026-09-14). The reason string branched on isOnrampSessionRail
+  // while the CLOCK branched on hasInteractivePayStep. stripe_checkout is in the
+  // second and not the first, so the live rail waited 4 hours and then recorded
+  // "within_30_minutes" in the permanent transition log — 6 staging rows carry
+  // it against a measured mean dwell of 242.2 minutes. The label must name the
+  // clock that actually ran.
+  it('a stripe_checkout row reports the 4-hour window it actually waited, not 30 minutes', async () => {
+    envMock.FUNDING_PROCESSOR = 'stripe_checkout'
+    envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 4
+    mockPendingSelect([
+      row('tr-checkout-dead', 5 * HOURS, 'cs_test_dead', 'stripe_checkout'),
+      // Still inside the window it is actually given: a 40-minute-old Checkout
+      // row must not be reaped at all. Under the old 30-minute label the clock
+      // was already right, so this pins the pair together.
+      row('tr-checkout-midpay', 40 * 60_000, 'cs_test_live', 'stripe_checkout'),
+    ])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    const [input] = transition.mock.calls[0] as [Record<string, unknown>]
+    expect(input.transferId).toBe('tr-checkout-dead')
+    expect(input.reason).toBe('funding_not_received_within_4_hours')
+  })
+
   it('a stripe_crypto-stamped row keeps its hours window after the process flips back to manual', async () => {
     envMock.FUNDING_PROCESSOR = 'manual'
     envMock.MANUAL_PENDING_MAX_AGE_DAYS = 7

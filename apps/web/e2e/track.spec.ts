@@ -24,8 +24,14 @@ test('tracker renders the status timeline for a pending transfer', async ({ cont
   await expect(page.getByText(/^(delivered|entregada)$/i)).toBeVisible()
   await expect(page.getByText(/1,689\.52 MXN/)).toBeVisible()
 
-  // Not cancelable before funding, and no outcome banner while in flight.
-  await expect(page.getByRole('button', { name: /cancel transfer|cancelar transferencia/i })).toHaveCount(0)
+  // The Reg E cancel needs a payment, so it is absent here — but the sender is
+  // NOT trapped: the pre-payment cancel is offered instead (2026-09-14). The two
+  // are different acts with different copy, and this pins that they do not swap.
+  await expect(page.getByRole('button', { name: /^(cancel transfer|cancelar transferencia)$/i })).toHaveCount(0)
+  await expect(
+    page.getByRole('button', { name: /cancel this transfer|cancelar esta transferencia/i }),
+  ).toBeVisible()
+  await expect(page.getByText(/haven't been charged|no se te ha cobrado/i)).toBeVisible()
 })
 
 test('simulate payment advances the transfer to funded', async ({ context, page }, testInfo) => {
@@ -56,7 +62,7 @@ test('the tracker polls and picks up a state change with no user action', async 
   await page.goto('/dashboard/send/transfer-e2e-advance-1')
 
   await expect(page.getByText(/waiting for payment|esperando el pago/i)).toBeVisible()
-  await expect(page.getByRole('button', { name: /cancel transfer|cancelar transferencia/i })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^(cancel transfer|cancelar transferencia)$/i })).toHaveCount(0)
 
   // Poll interval is 5 s; allow a margin without making the spec slow.
   await expect(
@@ -190,4 +196,46 @@ test('UNDER_REVIEW shows exactly one banner: the outcome owns the cancellation s
   await expect(
     page.getByText(/got your request to cancel|recibimos tu solicitud para cancelar/i),
   ).toHaveCount(0)
+})
+
+// ── The pre-payment cancel ──────────────────────────────────────────────────
+test('cancelling before paying reports canceled, not a payment failure', async ({
+  context,
+  page,
+}) => {
+  await signIn(context)
+  await page.goto('/dashboard/send/transfer-e2e-prepay-cancel')
+
+  const cancel = page.getByRole('button', {
+    name: /cancel this transfer|cancelar esta transferencia/i,
+  })
+  await cancel.click()
+  // Two taps, the same guard the Reg E cancel uses.
+  await page.getByRole('button', { name: /tap again|toca de nuevo/i }).click()
+
+  // The row lands on PAYMENT_FAILED, but the sender CHOSE this — so the copy
+  // must not tell them their payment failed. This is the whole reason
+  // canceled_before_payment_at exists.
+  await expect(page.getByText(/transfer canceled|transferencia cancelada/i)).toBeVisible()
+  await expect(page.getByText(/never charged|nunca se te cobró/i)).toBeVisible()
+  await expect(page.getByText(/payment failed|el pago falló/i)).toHaveCount(0)
+})
+
+test('a payment that landed mid-cancel refuses, and says to check back', async ({
+  context,
+  page,
+}) => {
+  await signIn(context)
+  await page.goto('/dashboard/send/transfer-e2e-prepay-raced')
+
+  await page
+    .getByRole('button', { name: /cancel this transfer|cancelar esta transferencia/i })
+    .click()
+  await page.getByRole('button', { name: /tap again|toca de nuevo/i }).click()
+
+  await expect(
+    page.getByText(/may have gone through|se haya procesado/i),
+  ).toBeVisible()
+  // Nothing was failed: the transfer is still waiting for its webhook.
+  await expect(page.getByText(/transfer canceled|transferencia cancelada/i)).toHaveCount(0)
 })

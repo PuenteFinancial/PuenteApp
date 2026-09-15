@@ -22,7 +22,7 @@ user confirms a quote, entering the machine at `PENDING_PAYMENT`.
 stateDiagram-v2
     [*] --> PENDING_PAYMENT: user confirms quote
     PENDING_PAYMENT --> FUNDED: funding rail confirms (five doors — see Funding rails)
-    PENDING_PAYMENT --> PAYMENT_FAILED: rail rejects / rail-aware staleness reaper
+    PENDING_PAYMENT --> PAYMENT_FAILED: rail rejects / staleness reaper / sender cancels pre-payment
     FUNDED --> SUBMITTED: submit job claims + creates Bridge payout
     FUNDED --> CANCELED: user cancels (pre-claim, in-window) OR ops cancels an undeliverable held payout
     SUBMITTED --> IN_FLIGHT: Bridge accepts payout
@@ -111,12 +111,12 @@ payment* (new debit against Puente), not a reversal of the original entries. The
 
 | State | Meaning | Terminal? |
 |---|---|---|
-| `PENDING_PAYMENT` | Transfer created from an accepted quote; collecting funds via the configured rail. The `transfer.reconcile-pending` cron marks stale rows `PAYMENT_FAILED` on a **rail-aware clock**: 30 min (mock/stripe — a webhook should have arrived), `ONRAMP_PENDING_MAX_AGE_HOURS` = 4h (onramp — the sender is walking through a widget), `MANUAL_PENDING_MAX_AGE_DAYS` = 7d (manual — a real bank transfer takes days, #205 made the state livable). May carry `payment_claimed_at` (sender says "I've sent it" — a signal to ops, never a transition) and a `deposit_instructions` row (manual rail coordinates). | no |
+| `PENDING_PAYMENT` | Transfer created from an accepted quote; collecting funds via the configured rail. The `transfer.reconcile-pending` cron marks stale rows `PAYMENT_FAILED` on a **rail-aware clock** (`pendingFundingWindowMs`): `ONRAMP_PENDING_MAX_AGE_HOURS` = 4h for every rail with an INTERACTIVE pay step — the onramp rails **and `stripe_checkout`** (`hasInteractivePayStep`), `MANUAL_PENDING_MAX_AGE_DAYS` = 7d (manual — a real bank transfer takes days, #205 made the state livable), 30 min otherwise (mock / the bare PI rail — a webhook should have arrived). **The sender can also leave on their own (2026-09-14):** `POST /:id/cancel` at `PENDING_PAYMENT` closes the processor's funding object and then fails the row — see Pre-payment cancellation below. May carry `payment_claimed_at` (sender says "I've sent it" — a signal to ops, never a transition) and a `deposit_instructions` row (manual rail coordinates). | no |
 | `FUNDED` | The funding rail confirmed collection (see **Funding rails** below — five doors). `funding_cleared` flag tracked here. May carry a `payout_hold_reason` (see Payout holds) — a held transfer stays `FUNDED` until ops releases it. | no |
 | `SUBMITTED` | Payout request sent to Bridge with an idempotency key. | no |
 | `IN_FLIGHT` | Bridge is executing the FX + SPEI payout. | no |
 | `COMPLETED` | Recipient credited at their CLABE. | ✅ success |
-| `PAYMENT_FAILED` | The rail rejected collection (Stripe decline, onramp `rejected`) or the staleness reaper fired; no funds collected. Terminal — no retry against this transfer. User returns to the quote screen; a new quote + new transfer is required. | ✅ |
+| `PAYMENT_FAILED` | The rail rejected collection (Stripe decline, onramp `rejected`), the staleness reaper fired, or **the sender canceled before paying** (2026-09-14 — `canceled_before_payment_at` is set, and is the only thing distinguishing a choice from a failure on the read path); no funds collected. Terminal — no retry against this transfer. User returns to the quote screen; a new quote + new transfer is required. | ✅ |
 | `CANCELED` | The transfer was stopped pre-delivery — by the sender inside their Reg E window, or by an operator whose payout could never be delivered (2026-09-14) — and the void/refund follows. On mock/stripe the undo settles synchronously → `REFUNDED`. On manual/onramp the undo needs a human disbursement, so this is a **resting state** until the runbook runs; on the ops path `refunds_payable` stays open while it rests, which is the ledger saying the sender has not been paid. | → REFUNDED |
 | `PAYOUT_FAILED` | Bridge could not deliver (bad CLABE, bank reject); triggers refund. | → REFUNDED |
 | `REFUNDED` | Funds returned to sender (from CANCELED, PAYOUT_FAILED, or UNDER_REVIEW). | ✅ |
@@ -306,6 +306,56 @@ cron, which synthesizes the same event shape from `GET` responses. Both paths in
 | **onramp deposit event** (provider_ref ≠ the payout's `provider_transfer_ref`) | **`ignored`** — the onramp-event guard (funding-ops slice 3): a Bridge event about the *sender's deposit* must never drive the payout machine, or an onramp `payment_processed` could fake `COMPLETED` and an onramp `returned` could invoke the payout refund tail. Deposit evidence lookups are bounded to the payout's own ref for the same reason |
 
 Replays are RPC no-ops; out-of-order events are marked `ignored`.
+
+## Pre-payment cancellation (2026-09-14)
+
+**Not a §1005.34 cancellation** — no payment has been made, so no 30-minute clock has started,
+nothing is owed, and `cancelable_until` is still null. Read it as abandonment the sender asked for,
+not as the exercise of a right.
+
+Until now `POST /:id/cancel` refused `PENDING_PAYMENT` outright ("unfunded — nothing to void"),
+leaving `reconcile-pending` as the only exit. The wait is not cosmetic: a **confirmed**
+`PENDING_PAYMENT` row (i.e. `disclosure_accepted_at` set) counts against the uncleared-exposure cap
+(`RISK_UNCLEARED_MAX_COUNT`, default 1), so an abandoned checkout **blocks the sender's next send**
+for the whole window — 4h on the interactive rails, 7 days on manual. Measured on staging: mean
+dwell to reap 242.2 min across 12 rows.
+
+**The order is the safety property, and it is the reaper's order:** close the processor's funding
+object FIRST, fail our row second. Reversed, a stale tab can pay a transfer already marked dead —
+the funding webhook then hits `transition_conflict` and is acked, leaving a charge with no transfer.
+A Checkout Session lives 24h at Stripe, well past our own ceiling, so this is live behaviour and not
+a thought experiment.
+
+The ladder, fail-closed:
+
+| Condition | Answer |
+|---|---|
+| `payment_claimed_at` set | `409 cancellation_requires_support` — money may be wiring; only a human can reconcile it |
+| `funding_payment_ref` null | cancel — nothing was ever created (deferred rails pre-pay-step) |
+| `expireFunding` → `'expired'` | cancel — the door is shut |
+| `expireFunding` → `'not_open'` | `409 funding_in_progress` — paid in the race window (a webhook is coming) or already closed upstream; the row is **not** failed |
+| `expireFunding` throws | `502 provider_unavailable` — the check did not run, nothing written, retry |
+| rail has no `expireFunding` | `409 cancellation_requires_support` — we cannot prove the door is shut |
+
+`expireFunding` exists on `stripe_checkout`, the bare `stripe` PI rail, and `mock`. Three rails
+deliberately do **not** implement it, and so take the last row:
+
+- **`stripe_onramp` / `stripe_crypto`** — Stripe exposes no cancel for a crypto onramp session.
+- **`manual`** — `manualpay_…` is a bookkeeping token, not a payable object. The money arrives out
+  of band and the sender holds deposit instructions they can act on for days, so nothing here can
+  be closed and no honest "you were never charged" could be said. `payment_claimed_at` only catches
+  the senders who told us. The 7-day window therefore stays for this rail, on purpose.
+
+That the copy can say **"you were never charged"** is a direct consequence: the button is only
+offered where a real payable object was provably closed (or never existed).
+
+**Terminal state is `PAYMENT_FAILED`, not `CANCELED`.** `CANCELED` means the sender was charged and
+an undo is owed; here nothing was collected and **no ledger batch posts at all**, which
+reconciliation independently asserts for this state (`unexpected_postings_before_funding`).
+`PAYMENT_FAILED` is also already in `UNWOUND_STATES` (so the cap frees immediately) and
+`ABANDONED_STATES` (so the row leaves the sender's history). The cost of the reuse is that the state
+alone cannot say whether the sender chose to stop; `transfers.canceled_before_payment_at` carries
+that one bit to the read path, the same denormalization as `payment_claimed_at`.
 
 ## Cancellation window (Reg E)
 

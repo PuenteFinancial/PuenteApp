@@ -2,6 +2,7 @@ import { env } from '../config/env.js'
 import { supabaseAdmin } from '../services/supabase.js'
 import {
   getFundingProcessor,
+  hasInteractivePayStep,
   isOnrampSessionRail,
   pendingFundingWindowMs,
   processorFor,
@@ -18,10 +19,21 @@ import { transitionTransfer, TransferRpcError } from '../services/transfers.js'
 // which is exactly what #242 was.
 const staleAfterMs = pendingFundingWindowMs
 
+// The reason must name the clock that ACTUALLY ran, so it branches on the same
+// predicate pendingFundingWindowMs does. It used to say isOnrampSessionRail,
+// which is narrower: `stripe_checkout` has an interactive pay step but is not an
+// onramp session rail, so the live rail waited 4 hours and then recorded
+// "within_30_minutes" in the permanent transition log. Measured on staging
+// 2026-09-14 — 6 rows carrying that reason, mean dwell 242.2 min.
+//
+// Same class of drift #242 fixed, one layer up: the two CLOCKS already share a
+// function; their LABEL did not. Keep this branching on hasInteractivePayStep
+// for as long as pendingFundingWindowMs does.
 function abandonmentReason(row: RailRow): string {
   const rail = processorNameFor(row)
   if (rail === 'manual') return `funding_not_received_within_${env.MANUAL_PENDING_MAX_AGE_DAYS}_days`
-  if (isOnrampSessionRail(rail)) return `funding_not_received_within_${env.ONRAMP_PENDING_MAX_AGE_HOURS}_hours`
+  if (hasInteractivePayStep(rail))
+    return `funding_not_received_within_${env.ONRAMP_PENDING_MAX_AGE_HOURS}_hours`
   return 'funding_not_received_within_30_minutes'
 }
 

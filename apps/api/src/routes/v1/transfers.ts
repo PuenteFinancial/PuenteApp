@@ -42,7 +42,7 @@ const TRANSFER_COLUMNS =
   'funding_source_type, funding_cleared, disclosure_accepted_at, payment_at, ' +
   'cancelable_until, idempotency_key, funding_payment_ref, provider_transfer_ref, ' +
   'refund_payment_ref, refunded_at, submit_attempted_at, cancellation_requested_at, ' +
-  'payment_claimed_at, completed_at, created_at, funding_processor'
+  'payment_claimed_at, canceled_before_payment_at, completed_at, created_at, funding_processor'
 
 const moneySchema = (currency: string) =>
   ({
@@ -82,6 +82,7 @@ const transferResponseSchema = {
     cancelableUntil: { type: ['string', 'null'] },
     cancellationRequestedAt: { type: ['string', 'null'] },
     paymentClaimedAt: { type: ['string', 'null'] },
+    canceledBeforePaymentAt: { type: ['string', 'null'] },
     providerTransferRef: { type: ['string', 'null'] },
     completedAt: { type: ['string', 'null'] },
     createdAt: { type: 'string' },
@@ -187,6 +188,164 @@ function fundingConfigured(): boolean {
  * This is the only sanctioned swallow in this PR, and it is loud: the sender
  * still gets their 202, and ops gets paged to record the ask by hand.
  */
+/**
+ * The PRE-PAYMENT cancel: the sender confirmed a quote and changed their mind
+ * before paying. Slice 6 refused this outright ("unfunded — nothing to void"),
+ * leaving the reconcile-pending reaper as the only exit — 4 hours on the
+ * interactive rails, 7 days on manual. That wait is not cosmetic: a committed
+ * PENDING_PAYMENT row counts against the uncleared-exposure cap
+ * (RISK_UNCLEARED_MAX_COUNT, default 1), so an abandoned checkout blocks the
+ * sender's NEXT send for the whole window.
+ *
+ * NOT a §1005.34 cancellation. No payment was made, so no 30-minute clock ever
+ * started, nothing is owed, and `cancelable_until` is still null. It posts NO
+ * ledger batch either — reconciliation asserts zero postings for this state
+ * (`unexpected_postings_before_funding`), and that is the whole reason this
+ * lands on PAYMENT_FAILED rather than CANCELED, which means "the sender was
+ * charged and an undo is owed".
+ *
+ * THE ORDER IS THE SAFETY PROPERTY, and it is the reaper's order for the
+ * reaper's reason (jobs/reconcile-pending.ts): close the processor's object
+ * FIRST, fail our row second. Reversed, a stale tab could pay a transfer we had
+ * already marked dead — the funding webhook then hits transition_conflict and
+ * is acked, leaving a charge with no transfer. A Checkout Session lives 24h at
+ * Stripe, well past our own ceiling, so this is a live shape and not a theory.
+ */
+async function cancelBeforePayment(
+  server: FastifyInstance,
+  reply: FastifyReply,
+  transfer: TransferRow,
+  userId: string,
+) {
+  // The sender has told us money is on its way out of band. Failing the row now
+  // would strand a real wire against a dead transfer, and no button should make
+  // that call — the claim is a signal to ops precisely because only a human can
+  // reconcile it (docs/decisions.md 2026-08-19).
+  if (transfer.payment_claimed_at) {
+    return sendError(
+      reply,
+      409,
+      'cancellation_requires_support',
+      'Please contact support to cancel this transfer.',
+    )
+  }
+
+  const processor = processorFor(transfer)
+
+  if (transfer.funding_payment_ref) {
+    // A rail that cannot close its own payment object cannot prove the door is
+    // shut, so it does not get the button. Today that is the onramp rails:
+    // Stripe exposes no cancel for a crypto onramp session (their voidFunding
+    // returns a pending MANUAL undo, which is an obligation, not a close), and
+    // guessing would risk exactly the charge-with-no-transfer this ordering
+    // exists to prevent. Fail closed and route to a human.
+    if (!processor.expireFunding) {
+      return sendError(
+        reply,
+        409,
+        'cancellation_requires_support',
+        'Please contact support to cancel this transfer.',
+      )
+    }
+
+    let closed: 'expired' | 'not_open'
+    try {
+      closed = await processor.expireFunding({ paymentRef: transfer.funding_payment_ref })
+    } catch (err) {
+      // The check did not run, so NOTHING is written — the same posture as the
+      // ops refund route's Bridge-unreachable arm. A 502 says "retry shortly";
+      // a 500 would read as "something broke" and hide that retrying is right.
+      server.log.error(
+        { userId, transferId: transfer.id, err },
+        'cancel: could not close the funding object — nothing written',
+      )
+      return sendError(
+        reply,
+        502,
+        'provider_unavailable',
+        'We could not reach the payment provider, so nothing was changed. Try again shortly.',
+      )
+    }
+
+    if (closed === 'not_open') {
+      // Two shapes arrive here and the seam does not distinguish them: the
+      // sender paid in the race window (a funding webhook is coming and this
+      // row must NOT be failed), or the object was already closed upstream. The
+      // copy therefore asserts neither — it says the payment may have gone
+      // through and to check back, which is true in both.
+      return sendError(
+        reply,
+        409,
+        'funding_in_progress',
+        'We could not cancel this. Your payment may have gone through, so check back in a moment.',
+      )
+    }
+  }
+
+  // No ref at all (a deferred-initiation rail before the pay step) falls
+  // straight through: nothing was ever created, so there is nothing to close.
+  try {
+    const failed = await transitionTransfer({
+      transferId: transfer.id,
+      fromState: 'PENDING_PAYMENT',
+      toState: 'PAYMENT_FAILED',
+      actor: 'user',
+      reason: 'sender canceled before paying',
+    })
+
+    // Stamped AFTER the transition, and best-effort: the cancel itself is the
+    // money-relevant act and it has already committed. This column only decides
+    // whether the UI says "canceled" or "your payment didn't go through", so a
+    // failure here is a copy regression, not a correctness one — log it and
+    // still report success rather than 500 a cancel that actually happened.
+    const { error: stampError } = await supabaseAdmin
+      .from('transfers')
+      .update({ canceled_before_payment_at: new Date().toISOString() })
+      .eq('id', transfer.id)
+      .is('canceled_before_payment_at', null)
+    if (stampError) {
+      server.log.error(
+        { userId, transferId: transfer.id, supabaseError: stampError.code },
+        'cancel: transfer canceled but the pre-payment stamp did not persist',
+      )
+      return reply.status(200).send(toApiTransfer(failed))
+    }
+
+    return reply
+      .status(200)
+      .send(toApiTransfer({ ...failed, canceled_before_payment_at: new Date().toISOString() }))
+  } catch (err) {
+    if (err instanceof TransferRpcError) {
+      if (err.code === 'transfer_not_found') {
+        return sendError(reply, 404, 'not_found', 'Transfer not found')
+      }
+      // The row moved between our read and the RPC. With the door already shut
+      // above, the realistic winner is a funding webhook that was in flight —
+      // so re-read and answer for what the transfer IS now rather than
+      // reporting a failure for a transfer that is merely further along.
+      const { data: fresh } = await supabaseAdmin
+        .from('transfers')
+        .select(TRANSFER_COLUMNS)
+        .eq('id', transfer.id)
+        .eq('user_id', userId)
+        .single()
+      const f = fresh as unknown as TransferRow | null
+      if (f?.state === 'PAYMENT_FAILED') {
+        // Someone else finished the same job — the sender's ask is satisfied.
+        return reply.status(200).send(toApiTransfer(f))
+      }
+      return sendError(
+        reply,
+        409,
+        'funding_in_progress',
+        'We could not cancel this. Your payment may have gone through, so check back in a moment.',
+      )
+    }
+    server.log.error({ userId, transferId: transfer.id }, 'pre-payment cancel failed')
+    return sendError(reply, 500, 'internal_error', 'Failed to cancel transfer')
+  }
+}
+
 async function submissionInProgressResponse(
   server: FastifyInstance,
   reply: FastifyReply,
@@ -732,6 +891,9 @@ export async function transfersRoute(server: FastifyInstance) {
           400: errorResponseSchema,
           404: errorResponseSchema,
           409: errorResponseSchema,
+          // Pre-payment cancel only: the funding processor could not be
+          // reached, so the door was not shut and nothing was written.
+          502: errorResponseSchema,
         },
       },
     },
@@ -762,6 +924,13 @@ export async function transfersRoute(server: FastifyInstance) {
       // Idempotent terminal: the sender is already made whole.
       if (transfer.state === 'REFUNDED') {
         return reply.status(200).send(toApiTransfer(transfer))
+      }
+
+      // Before any money exists. Its own path, not a widening of the FUNDED
+      // cancel below: nothing to void, no ledger, no Reg E clock — and it must
+      // close the funding object before it fails the row.
+      if (transfer.state === 'PENDING_PAYMENT') {
+        return cancelBeforePayment(server, reply, transfer, userId)
       }
 
       // Being submitted (a claimed-but-still-FUNDED row: the submit job set
@@ -840,10 +1009,10 @@ export async function transfersRoute(server: FastifyInstance) {
           return sendError(reply, 500, 'internal_error', 'Failed to cancel transfer')
         }
       } else if (transfer.state !== 'CANCELED') {
-        // PENDING_PAYMENT (unfunded — nothing to void; abandoned rows are reaped
-        // by the reconcile-pending job), COMPLETED (funds delivered — the right
-        // has extinguished; lawful denial), PAYOUT_FAILED (auto-refunds via PR2),
-        // and any other state → not cancelable through this path.
+        // COMPLETED (funds delivered — the right has extinguished; lawful
+        // denial), PAYOUT_FAILED (auto-refunds via PR2), PAYMENT_FAILED (already
+        // over), and any other state → not cancelable through this path.
+        // PENDING_PAYMENT no longer reaches here: it returns above.
         return sendError(reply, 409, 'transfer_not_cancelable', 'This transfer cannot be canceled')
       }
 

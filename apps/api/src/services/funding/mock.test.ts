@@ -192,3 +192,9 @@ describe('mock parseEvent', () => {
     ).toEqual({ outcome: 'malformed' })
   })
 })
+
+describe('mock expireFunding — there is no door, and saying so is honest', () => {
+  it("reports 'expired': nothing at a processor can pay this row", async () => {
+    await expect(processor.expireFunding!({ paymentRef: 'mockpay_1' })).resolves.toBe('expired')
+  })
+})

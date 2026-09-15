@@ -330,6 +330,63 @@ const REFUND_INPUT = {
   idempotencyKey: 'idem:refund',
 }
 
+describe('stripe expireFunding — closing an unpaid PI so nothing can pay it', () => {
+  it('cancels a PI still awaiting payment', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'requires_payment_method' }))
+    const cancel = vi.fn(async () => ({ id: 'pi_123', status: 'canceled' }))
+    const { processor: p } = undoClient({ retrieve, cancel })
+
+    await expect(p.expireFunding!({ paymentRef: 'pi_123' })).resolves.toBe('expired')
+    expect(cancel).toHaveBeenCalledWith('pi_123', { cancellation_reason: 'abandoned' })
+  })
+
+  // The whole point of the read-first: a paid row must never be closed OR
+  // failed. `processing` counts as paid here because on this rail
+  // payment_intent.processing is the instant-front door to FUNDED.
+  it.each(['succeeded', 'processing', 'canceled'])(
+    'refuses to touch a %s PI — not ours to close',
+    async (status) => {
+      const retrieve = vi.fn(async () => ({ id: 'pi_123', status }))
+      const { processor: p } = undoClient({ retrieve })
+
+      await expect(p.expireFunding!({ paymentRef: 'pi_123' })).resolves.toBe('not_open')
+    },
+  )
+
+  it('a sender who confirms between the read and the cancel answers not_open, not a throw', async () => {
+    const retrieve = vi
+      .fn()
+      .mockResolvedValueOnce({ id: 'pi_123', status: 'requires_confirmation' })
+      .mockResolvedValueOnce({ id: 'pi_123', status: 'succeeded' })
+    const cancel = vi.fn(async () => {
+      throw Object.assign(new Error('nope'), { code: 'payment_intent_unexpected_state' })
+    })
+    const { processor: p } = undoClient({ retrieve, cancel })
+
+    await expect(p.expireFunding!({ paymentRef: 'pi_123' })).resolves.toBe('not_open')
+  })
+
+  it('an unrelated Stripe failure propagates — the caller must not read it as closed', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'requires_payment_method' }))
+    const cancel = vi.fn(async () => {
+      throw new Error('network down')
+    })
+    const { processor: p } = undoClient({ retrieve, cancel })
+
+    await expect(p.expireFunding!({ paymentRef: 'pi_123' })).rejects.toThrow('network down')
+  })
+
+  it('never issues a refund — a PI it cannot close is a refusal, not a payout', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'succeeded' }))
+    const create = vi.fn()
+    const { processor: p } = undoClient({ retrieve, create })
+
+    await p.expireFunding!({ paymentRef: 'pi_123' })
+
+    expect(create).not.toHaveBeenCalled()
+  })
+})
+
 describe('stripe voidFunding', () => {
   it('cancels the PaymentIntent — voided, succeeded, sub-keyed :cancel', async () => {
     const cancel = vi.fn(async () => ({ id: 'pi_123', status: 'canceled' }))

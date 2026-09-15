@@ -68,6 +68,21 @@ export class ManualFundingProcessor implements FundingProcessor {
     return { outcome: 'malformed' }
   }
 
+  // NO expireFunding, deliberately — and this absence is load-bearing.
+  //
+  // The pre-payment cancel refuses any rail that cannot PROVE nothing can still
+  // pay the row, and it detects that by this method being absent. `manualpay_…`
+  // is a bookkeeping token, not a payable object: there is no door here to
+  // shut, and the sender holds deposit instructions they can act on for as long
+  // as their bank allows. An `expireFunding` returning 'expired' would be
+  // true about this processor and a LIE about the money — it would let the
+  // tracker tell someone who wired an hour ago that they were never charged.
+  //
+  // So a manual-rail sender who wants out goes through support, where a human
+  // can check whether the wire landed. The cost is that the 7-day window stays
+  // for them; the alternative was a confident false statement about their money.
+  // (`payment_claimed_at` only catches the senders who told us.)
+
   async voidFunding(): Promise<FundingUndo> {
     return this.undo()
   }

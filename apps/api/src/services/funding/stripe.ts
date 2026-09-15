@@ -415,6 +415,50 @@ export class StripeFundingProcessor implements FundingProcessor {
     return unhandled
   }
 
+  /**
+   * Close an unpaid PaymentIntent so nothing can pay the row we are about to
+   * abandon — the sender's pre-payment cancel, and the reaper, which until now
+   * failed its row and left the PI alive (the slice-6 leaf "PENDING_PAYMENT
+   * cancel → void the real Stripe intent").
+   *
+   * Status is READ FIRST, the Checkout rail's posture and for its reason: only
+   * a PI still awaiting payment is ours to close.
+   *   · `succeeded` / `processing` — the money is already moving. On this rail
+   *     `payment_intent.processing` is the instant-front door to FUNDED, so a
+   *     funding event is coming and the row must NOT be failed.
+   *   · `canceled` — already shut by a prior run or another actor; nothing to
+   *     do (the Checkout rail answers the same way for an already-`expired`
+   *     Session).
+   * Both are `not_open`: "not ours to close", never "we closed it".
+   *
+   * NOT voidFunding. That one is an UNDO of a collected pull and may fall back
+   * to a real refund; this one must never move money — a PI it cannot close is
+   * a refusal, not a refund.
+   */
+  async expireFunding(input: { paymentRef: string }): Promise<'expired' | 'not_open'> {
+    const pi = await this.client.paymentIntents.retrieve(input.paymentRef)
+    if (pi.status === 'succeeded' || pi.status === 'processing' || pi.status === 'canceled') {
+      return 'not_open'
+    }
+    try {
+      await this.client.paymentIntents.cancel(input.paymentRef, {
+        cancellation_reason: 'abandoned',
+      })
+    } catch (err) {
+      // The sender can confirm between the retrieve and this call. Re-read and
+      // answer for the state we can see, rather than letting "the caller skips
+      // on any throw" be the thing that keeps a paid row safe.
+      if (isNotCancelable(err)) {
+        const now = await this.client.paymentIntents.retrieve(input.paymentRef)
+        if (now.status !== 'requires_payment_method' && now.status !== 'requires_confirmation') {
+          return 'not_open'
+        }
+      }
+      throw err
+    }
+    return 'expired'
+  }
+
   // ── The undo ops (PR-S2) ──────────────────────────────────────────────────
   // Settlement decides the mechanism, and the LIVE PaymentIntent is the
   // authority (never transfers.funding_cleared — a webhook mirror that lags):

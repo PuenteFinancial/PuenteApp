@@ -146,6 +146,87 @@ describe.skipIf(!runDb)('cancel_transfer (integration, local Supabase)', () => {
     await db.end()
   })
 
+  // ── The PRE-PAYMENT cancel ──────────────────────────────────────────────
+  // Not cancel_transfer at all: a PENDING_PAYMENT row has no FUNDED batch to
+  // reverse and no Reg E window to be inside, so it takes the generic
+  // transition. These pin the two DATABASE-level facts the route depends on.
+  it('PENDING_PAYMENT → PAYMENT_FAILED by the sender: no ledger rows exist, at all', async () => {
+    const transferId = await seedPendingTransfer()
+
+    await db.query(
+      `select public.transition_transfer($1, 'PENDING_PAYMENT', 'PAYMENT_FAILED', 'user',
+        'sender canceled before paying')`,
+      [transferId],
+    )
+    await db.query(
+      'update public.transfers set canceled_before_payment_at = now() where id = $1',
+      [transferId],
+    )
+
+    expect(await stateOf(transferId)).toBe('PAYMENT_FAILED')
+    // Reconciliation flags ANY posting on a PENDING_PAYMENT/PAYMENT_FAILED row
+    // (`unexpected_postings_before_funding`). Zero is the invariant, and it is
+    // the whole reason this path reuses PAYMENT_FAILED instead of CANCELED.
+    expect(await accountTotals(transferId)).toEqual({})
+
+    const trans = await db.query(
+      `select from_state, to_state, actor, reason from public.transfer_transitions
+        where transfer_id = $1 and to_state = 'PAYMENT_FAILED'`,
+      [transferId],
+    )
+    expect(trans.rows).toEqual([
+      {
+        from_state: 'PENDING_PAYMENT',
+        to_state: 'PAYMENT_FAILED',
+        actor: 'user',
+        reason: 'sender canceled before paying',
+      },
+    ])
+
+    const stamped = await db.query(
+      'select canceled_before_payment_at from public.transfers where id = $1',
+      [transferId],
+    )
+    expect(stamped.rows[0].canceled_before_payment_at).not.toBeNull()
+  })
+
+  it('frees the uncleared-exposure slot immediately — the lockout this exists to end', async () => {
+    // The cap (services/risk.ts assessUnclearedCap) counts committed, un-unwound,
+    // uncleared sends. Asserted here as the SQL predicate it compiles to, so a
+    // change to UNWOUND_STATES that silently re-traps the sender fails here.
+    const countBlockers = async (): Promise<number> => {
+      const res = await db.query(
+        `select count(*)::int as n from public.transfers
+          where user_id = $1
+            and disclosure_accepted_at is not null
+            and state not in ('PAYMENT_FAILED', 'CANCELED', 'REFUNDED', 'FUNDING_REVERSED')
+            and funding_cleared = false`,
+        [USER],
+      )
+      return res.rows[0].n as number
+    }
+
+    const transferId = await seedPendingTransfer()
+    // CONFIRM is what commits a transfer, by stamping disclosure_accepted_at —
+    // creation alone does not, and the cap counts only committed rows. So the
+    // lockout starts at confirm, which is exactly when the sender lands on the
+    // pay step with no way out. Mirrored here rather than assumed.
+    await db.query(
+      'update public.transfers set disclosure_accepted_at = now() where id = $1',
+      [transferId],
+    )
+    const before = await countBlockers()
+    expect(before).toBeGreaterThan(0)
+
+    await db.query(
+      `select public.transition_transfer($1, 'PENDING_PAYMENT', 'PAYMENT_FAILED', 'user',
+        'sender canceled before paying')`,
+      [transferId],
+    )
+
+    expect(await countBlockers()).toBe(before - 1)
+  })
+
   it('FUNDED → CANCELED: state moves, one transition appended, FUNDED batch reversed to zero', async () => {
     const transferId = await seedFundedTransfer()
 
