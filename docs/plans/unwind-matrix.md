@@ -141,11 +141,14 @@ The row is invisible to the freeze CLI too (`sender-freeze.ts:212` matches only 
 `funding_disputed` hold or the `FUNDING_REVERSED` state, and the in-flight arm sets neither). One
 Sentry `fatal` at `webhooks.ts:616` is the entire detection surface.
 
-Worse, the two coupled failure modes have no guard between them: `refunds.ts` never reads
-`funding_disputed_at` either, so a disputed transfer whose payout then FAILS runs the ordinary refund
-tail. In practice the processor refuses a refund on a charged-back charge, so the row **strands**
-rather than double-paying: a throw with the claim left standing, `bridge_return` already posted and
-`transfer_payable` still open. The genuine double payment is the REVERSE order — refund first,
+~~Worse, the two coupled failure modes have no guard between them: `refunds.ts` never reads
+`funding_disputed_at` either.~~ **Closed 2026-09-15.** All three disbursing tails now run
+`verifyFundingNotDisputed` before taking the refund claim — #346 for the PAYOUT_FAILED tail, #350
+correcting its placement, and the cancellation-review tail last. See *Guard coverage* below for which
+paths carry which guard and why. What that guard prevents is the *strand*: without it a disputed
+transfer whose payout then FAILED ran the ordinary refund tail, the processor refused the refund on a
+charged-back charge, and the row stranded — a throw with the claim left standing, `bridge_return`
+already posted and `transfer_payable` still open. The genuine double payment is the REVERSE order — refund first,
 dispute second — which falls to `no_exposure` (`funding-apply.ts:472`) on the belief that a refunded
 transfer has no open exposure. For a `refunded`-mode undo that is wrong: we paid real cash out and
 the network then claws the original charge back as well. Nothing blocks it and nothing books it.
@@ -168,6 +171,49 @@ ever complain about. `transfer_aging` watches transfer states, not this balance.
 on a refund. When a transfer is undone, `fee_revenue` is debited back but
 `provider_fees` stays. That is correct accounting, and it means **every unwind is a
 real loss of the Stripe fee.** Worth knowing when pricing.
+
+## Guard coverage
+
+The matrix above answers *which ledger entries*. This answers *which checks run first* — and it
+exists because that question had no written answer until 2026-09-15, which cost six days of a live
+double-payment exposure.
+
+Four paths hand a sender their money back. Three guards are meant to apply to all of them:
+
+| | `claimRefund` | dispute interlock | manual-disbursement |
+|---|---|---|---|
+| `refundPayoutFailure` — the PAYOUT_FAILED tail | ✅ | ✅ | ❌ **B6** |
+| `cancelHeldTransfer` — undeliverable payout | ✅ | ✅ | ✅ |
+| `refundCancellation` — the Reg E correction | ✅ | ✅ | ❌ **B6** |
+| the sender's own cancel route | ⬜ *by design* | ⬜ *by design* | ✅ |
+
+**What each one asks, and what it costs to skip:**
+
+- **`claimRefund`** — *is anyone else already refunding this?* One lock, so two operators or a
+  webhook racing a job cannot each call the processor. Skipping it double-pays.
+- **`verifyFundingNotDisputed`** — *did the card network already take this money back?* A chargeback
+  has already made the sender whole. Skipping it pays them twice, out of our float. Guarded on
+  `refund_payment_ref === null` in all three: past that point the money has already left and refusing
+  would only strand a row nothing else can finish (#350).
+- **`undoRequiresManualDisbursement`** — *can this rail actually send the money?* The manual and
+  onramp rails answer `pending`, because a human wires it. Skipping it books REFUNDED and tells the
+  sender they were made whole while nobody has sent anything.
+
+**The two ⬜ cells are decisions, not gaps.** The sender cancel route guards concurrency with a
+write-once `.is(refund_payment_ref, null)` update plus the processor's own `:void` idempotency key —
+it is the only path whose undo is a void rather than a refund. And it runs inside the 30-minute Reg E
+window, where a card dispute (days) cannot plausibly have arrived yet. Revisit the second if that
+window is ever widened.
+
+**The two ❌ cells are real and open** (B6). Both rest in states inside reconciliation's
+`AGING_OR_FILTER` — `PAYOUT_FAILED` and `UNDER_REVIEW` — so the rows stay visible while the sender
+waits, which is why this is a lie told to the sender rather than a row lost entirely. That is also
+why the fix is simpler than it was for `cancelHeldTransfer`, whose resting `CANCELED` nothing watches
+and which therefore needed a Sentry page of its own.
+
+**This table is enforced, not decorative.** `services/money-return-guards.test.ts` fails if a fifth
+disbursing path appears, if a declared path loses a guard, or if an exemption outlives the gap it
+describes. Update the test and this table together; they are the same statement.
 
 ## What to do with this
 

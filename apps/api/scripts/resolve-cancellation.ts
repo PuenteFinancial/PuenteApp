@@ -239,6 +239,13 @@ function refusalMessage(outcome: Extract<ReviewOutcome, { done: false }>): strin
         'NEVER COMPLETED. The sender MAY ALREADY HAVE BEEN PAID. Confirm in the funding processor ' +
         'before doing anything else — see docs/runbooks/manual-refund.md, "Abandoned claims".'
       )
+    case 'funding_disputed':
+      return (
+        `the funding behind this transfer was DISPUTED — ${outcome.detail}. The card network has ` +
+        'already returned this money to the sender, so a correction payment on top of it would ' +
+        'make them whole TWICE, at our expense. This row belongs to the loss path: see ' +
+        'docs/runbooks/payout-holds.md. Nothing was written and no claim was taken.'
+      )
   }
 }
 
