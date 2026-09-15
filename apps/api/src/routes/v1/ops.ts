@@ -279,13 +279,24 @@ const resolveBodySchema = {
   },
 } as const
 
-const resolveResponseSchema = {
+export const resolveResponseSchema = {
   type: 'object',
   properties: {
     transferId: { type: 'string' },
+    // Must list EVERY `done: true` arm of ReviewOutcome. Fastify serializes
+    // through fast-json-stringify, which enforces this enum at response time —
+    // and TypeScript cannot connect the two, so a new arm silently fails on the
+    // wire rather than at the build. routes/v1/outcome-wire.test.ts is what
+    // actually holds these together.
     outcome: {
       type: 'string',
-      enum: ['refunded', 'denied', 'already_disbursed', 'already_refunded'],
+      enum: [
+        'refunded',
+        'denied',
+        'already_disbursed',
+        'already_refunded',
+        'awaiting_disbursement',
+      ],
     },
   },
 } as const

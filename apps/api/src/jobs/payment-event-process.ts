@@ -331,6 +331,15 @@ async function driveRefund(transfer: TransferRow, event: EventRow): Promise<bool
   // Everything reaching here is terminal for the event: either the tail settled
   // it, or it refused for a reason a re-drive cannot change (wrong state, no
   // such transfer) and ops has been paged where that could still owe a sender.
+  //
+  // ONE done-outcome leaves the sender genuinely owed: `awaiting_disbursement`,
+  // where the rail could not disburse and a human must wire the money. Terminal
+  // for the EVENT all the same — re-driving cannot make a manual rail pay — and
+  // deliberately NOT paged from here. The row rests at PAYOUT_FAILED, which is
+  // inside reconciliation's AGING_OR_FILTER, so it is already surfaced by the
+  // aging check; a second alarm for a row that is on the board is how ops learns
+  // to ignore the board. (ops-cancel.ts pages only because its resting CANCELED
+  // is watched by nothing.)
   return true
 }
 

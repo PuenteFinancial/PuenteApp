@@ -331,35 +331,62 @@ export async function trigger(
   if (!outcome.done) {
     fail(`refund refused: ${outcome.reason} — ${refusalMessage(outcome)}`)
   }
-  pass(
-    {
-      refunded: 'sender refunded (send + fee) and state settled',
-      already_disbursed:
-        'the disbursement had already gone out — no second payment; state settled by this run',
-      already_settled: 'ALREADY REFUNDED before this run — nothing was written',
-    }[outcome.outcome],
-  )
+  const awaiting = outcome.outcome === 'awaiting_disbursement'
+  if (awaiting) {
+    // NOT a success message, the cancel CLI's precedent. The books say the
+    // sender is owed; nobody has paid them.
+    console.log(
+      `⚠ the undo is recorded (${outcome.refundRef}) but the funds were collected on a rail we do\n` +
+        '  not operate — a human must send them back. The transfer rests at PAYOUT_FAILED and the\n' +
+        '  ledger shows the debt open on transfer_payable until they do. No page was raised: this\n' +
+        "  state is inside reconciliation's aging check, so the row is already on the board.\n" +
+        '  Follow docs/runbooks/manual-refund.md, then the state settles to REFUNDED.',
+    )
+  } else {
+    pass(
+      {
+        refunded: 'sender refunded (send + fee) and state settled',
+        already_disbursed:
+          'the disbursement had already gone out — no second payment; state settled by this run',
+        already_settled: 'ALREADY REFUNDED before this run — nothing was written',
+      }[outcome.outcome],
+    )
+  }
 
   // 3) Prove the batches landed under their distinct keys — both on a
-  //    submitted row, REFUNDED alone on a pre-submit one (#254).
+  //    submitted row, REFUNDED alone on a pre-submit one (#254). An undo still
+  //    awaiting an out-of-band disbursement has posted NO REFUNDED batch, by
+  //    design: expecting one here would fail a run that did exactly the right
+  //    thing, which is how a correct guard trains an operator to ignore it.
   begin('verify the ledger batches')
   const batches = await refundLedgerBatches(transferId)
   const keys = batches.map((b) => b.idempotency_key)
-  const expectedKeys = preSubmit
-    ? [`${transferId}:REFUNDED`]
-    : [`${transferId}:bridge_return`, `${transferId}:REFUNDED`]
+  const expectedKeys = [
+    ...(preSubmit ? [] : [`${transferId}:bridge_return`]),
+    ...(awaiting ? [] : [`${transferId}:REFUNDED`]),
+  ]
   for (const expected of expectedKeys) {
     if (!keys.includes(expected)) fail(`missing ledger batch ${expected}`)
     console.log(`   ${expected}`)
   }
-  pass(preSubmit ? 'REFUNDED batch posted (no bridge_return — pre-submit)' : 'both refund batches posted')
+  pass(
+    expectedKeys.length === 0
+      ? 'no batch expected yet — pre-submit row awaiting an out-of-band disbursement'
+      : awaiting
+        ? 'bridge_return posted; REFUNDED waits on the out-of-band disbursement'
+        : preSubmit
+          ? 'REFUNDED batch posted (no bridge_return — pre-submit)'
+          : 'both refund batches posted',
+  )
 
   // Never claim credit for a run that wrote nothing: the verify query below
   // would show a different actor and make the tool look like it lied.
   console.log(
     outcome.outcome === 'already_settled'
       ? `\n✅ ${transferId} was already REFUNDED — this run changed nothing`
-      : `\n✅ ${transferId} refunded by ops:${operator}`,
+      : awaiting
+        ? `\n⚠ ${transferId} is owed an out-of-band refund — NOT yet refunded`
+        : `\n✅ ${transferId} refunded by ops:${operator}`,
   )
   console.log(
     `   verify: select actor, from_state, to_state from public.transfer_transitions ` +
