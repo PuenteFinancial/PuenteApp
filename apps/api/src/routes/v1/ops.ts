@@ -10,6 +10,7 @@ import {
 } from '../../services/deposit-instructions.js'
 import { recordOpsAction } from '../../services/ops-actions.js'
 import { errorResponseSchema, sendError } from '../../utils/errors.js'
+import { assertNever } from '../../utils/assert-never.js'
 import {
   opsWriteEnabled,
   opsReadAllowed,
@@ -539,6 +540,24 @@ export const opsRoute: FastifyPluginAsync = async (server) => {
                 },
               ],
             )
+          // Same wording as the PAYOUT_FAILED tail's arm on purpose: an
+          // operator who meets this refusal on one money-return path should not
+          // have to recognise it again in different words on another.
+          case 'funding_disputed':
+            return sendError(
+              reply,
+              409,
+              'conflict',
+              'The funding behind this transfer was disputed — a correction payment would pay the sender twice',
+              [{ path: 'transferId', issue: outcome.detail }],
+            )
+          default:
+            // The third switch of this shape (ops-transfers.ts has the other
+            // two, fixed in #351). Without it the new arm above would have
+            // fallen out of the switch and out of the try, and the handler
+            // would return undefined — Fastify sends no reply and the
+            // operator's request hangs.
+            return assertNever(outcome, 'ops/cancellations/resolve refusal')
         }
       } catch (err) {
         // Same fail-closed-and-loud posture as the read route: message only,

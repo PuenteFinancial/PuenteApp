@@ -75,6 +75,12 @@ const reviewing = (over: Record<string, unknown> = {}) => ({
     idempotency_key: 'bridge-key-1',
     refund_claimed_at: null,
     refund_claimed_by: null,
+    // Read by the dispute interlock. Present as null rather than absent on
+    // purpose: the interlock reads `undefined` as "the caller did not select
+    // this column" and falls through to the provider, so a fixture that omits
+    // them would exercise a different branch than production does.
+    payout_hold_reason: null,
+    funding_disputed_at: null,
     ...over,
   },
   error: null,
@@ -100,6 +106,62 @@ beforeEach(() => {
   pendingCancellationFor.mockResolvedValue(request())
   resolveCancellationRequest.mockResolvedValue(true)
   from.mockImplementation((table: string) => chain(queues[table]?.shift() ?? { data: null, error: null }))
+})
+
+describe('refundCancellation — the dispute interlock', () => {
+  // The third of three disbursing tails to get this, and the one that needed it
+  // most: UNDER_REVIEW means the sender asked to cancel and we delivered
+  // anyway, so this is by construction the sender most likely to have also
+  // called their bank. A chargeback already returned their money; a correction
+  // payment on top of it makes them whole twice at our expense.
+  it('refuses when our own record says the funding was disputed', async () => {
+    q('transfers', reviewing({ funding_disputed_at: '2026-09-14T22:20:00.000Z' }))
+
+    await expect(refundCancellation({ transferId: T, operator: 'jphelps' })).resolves.toMatchObject({
+      done: false,
+      reason: 'funding_disputed',
+      source: 'record',
+    })
+
+    // Refused BEFORE the irreversible half. The claim is never released on a
+    // throw, so a refusal that arrived after it would strand the row until it
+    // aged into `abandoned` — the STOP state that needs the manual runbook.
+    expect(claimRefund).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+  })
+
+  it('refuses when the row rests on the funding_disputed hold', async () => {
+    q('transfers', reviewing({ payout_hold_reason: 'funding_disputed' }))
+
+    await expect(refundCancellation({ transferId: T, operator: 'jphelps' })).resolves.toMatchObject({
+      done: false,
+      reason: 'funding_disputed',
+      source: 'record',
+    })
+    expect(claimRefund).not.toHaveBeenCalled()
+  })
+
+  it('still settles a row whose correction payment ALREADY left, dispute or not', async () => {
+    // Matches the two siblings since #350: the interlock asks only while there
+    // is still something to give back. A row carrying refund_payment_ref is the
+    // crash-recovery case — the money LEFT and only the settle is missing — and
+    // refusing it would strand it with nothing able to finish it.
+    q(
+      'transfers',
+      reviewing({
+        refund_payment_ref: 'mockrefund_prev',
+        funding_disputed_at: '2026-09-14T22:20:00.000Z',
+      }),
+    )
+
+    await expect(refundCancellation({ transferId: T, operator: 'jphelps' })).resolves.toEqual({
+      done: true,
+      outcome: 'already_disbursed',
+    })
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).toHaveBeenCalled()
+  })
 })
 
 describe('refundCancellation', () => {

@@ -6,6 +6,7 @@ import {
 } from './transfers.js'
 import {  undoModeForRef, processorFor } from './funding/index.js'
 import { claimRefund, isClaimAbandoned } from './refunds.js'
+import { verifyFundingNotDisputed } from './dispute-interlock.js'
 import { pendingCancellationFor, resolveCancellationRequest } from './cancellations.js'
 import { earliestDepositEvidenceAt } from './payment-events.js'
 
@@ -43,10 +44,18 @@ interface ReviewableTransfer {
   idempotency_key: string
   refund_claimed_at: string | null
   refund_claimed_by: string | null
+  /** Read only by the dispute interlock, and selected EXPLICITLY for the reason
+   *  refunds.ts gives on the same pair: the interlock treats `undefined` as "not
+   *  asked" and falls through to the provider, so a caller that forgot the
+   *  column would silently weaken the gate instead of failing loudly. */
+  payout_hold_reason: string | null
+  funding_disputed_at: string | null
 }
 
 const REVIEWABLE_COLUMNS =
-  'id, state, send_amount_minor, fee_amount_minor, margin_minor, payment_at, refund_payment_ref, funding_payment_ref, funding_processor, idempotency_key, refund_claimed_at, refund_claimed_by'
+  'id, state, send_amount_minor, fee_amount_minor, margin_minor, payment_at, refund_payment_ref, ' +
+  'funding_payment_ref, funding_processor, idempotency_key, refund_claimed_at, refund_claimed_by, ' +
+  'payout_hold_reason, funding_disputed_at'
 
 export type ReviewOutcome =
   // `already_disbursed` = the money left in a PRIOR run (a crash between the
@@ -74,6 +83,18 @@ export type ReviewOutcome =
     }
   | { done: false; reason: 'claim_taken'; claimedAt: string | null; claimedBy: string | null }
   | { done: false; reason: 'claim_abandoned'; claimedAt: string | null; claimedBy: string | null }
+  // The card network already returned this sender's money, so a correction
+  // payment on top of it would be the SECOND time they were made whole. Same
+  // arm, same fields as the other two disbursing tails — deliberately
+  // identical, because an operator meeting this refusal on one path and a
+  // differently-shaped one on another has to learn it twice.
+  | {
+      done: false
+      reason: 'funding_disputed'
+      source: 'record' | 'provider'
+      disputeRef: string | null
+      detail: string
+    }
 
 async function loadReviewable(transferId: string): Promise<ReviewableTransfer | null> {
   const { data, error } = await supabaseAdmin
@@ -126,6 +147,36 @@ export async function refundCancellation(input: {
   // honour, and paying would be a gift of company money with no record of why.
   const request = await pendingCancellationFor(transfer.id)
   if (!request) return { done: false, reason: 'no_pending_request' }
+
+  // THE DISPUTE INTERLOCK. Third of the three disbursing tails to get it, and
+  // the one that needed it most: UNDER_REVIEW means the sender asked to cancel
+  // and we delivered anyway, so this is BY CONSTRUCTION the sender most likely
+  // to have also called their bank. A chargeback has already returned their
+  // money through the card network; a correction payment on top of it pays them
+  // twice, out of loss_cancellation_correction, with nothing downstream to
+  // notice.
+  //
+  // Before claimRefund, matching ops-cancel.ts: the claim is the start of the
+  // irreversible half, and a refusal that arrives after it leaves the claim
+  // standing — never released on a throw — until it ages into `abandoned`, the
+  // STOP state that needs a human and the manual-refund runbook.
+  //
+  // Only while there is still something to give back, matching both siblings
+  // since #350: a row already carrying refund_payment_ref is the crash-recovery
+  // case below, where the money LEFT and only the settle is missing. Refusing
+  // that row would strand it with nothing able to finish it.
+  if (transfer.refund_payment_ref === null) {
+    const verdict = await verifyFundingNotDisputed(transfer)
+    if (verdict.disputed) {
+      return {
+        done: false,
+        reason: 'funding_disputed',
+        source: verdict.source,
+        disputeRef: verdict.disputeRef,
+        detail: verdict.detail,
+      }
+    }
+  }
 
   const alreadyDisbursed = transfer.refund_payment_ref !== null
   // Carried to the settle, where the undo's MODE picks the correction batch —
