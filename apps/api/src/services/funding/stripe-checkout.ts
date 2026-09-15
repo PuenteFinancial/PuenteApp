@@ -301,7 +301,7 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
    * failed. `expired` is Stripe's own 24h clock having beaten ours; nothing to
    * do. Only `open` is ours to close.
    */
-  async expireFunding(input: { paymentRef: string }): Promise<'expired' | 'not_open'> {
+  override async expireFunding(input: { paymentRef: string }): Promise<'expired' | 'not_open'> {
     const session = await this.client.checkout.sessions.retrieve(input.paymentRef)
     if (session.status !== 'open') return 'not_open'
     try {

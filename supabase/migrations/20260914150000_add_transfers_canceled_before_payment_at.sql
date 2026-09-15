@@ -1,0 +1,33 @@
+-- Migration: record that a PAYMENT_FAILED row got there because the SENDER
+--            canceled before paying, not because funding failed
+-- Created: 20260914150000
+-- Alters: public.transfers — one nullable column. No constraint, index or
+--         default changes; nothing backfills.
+-- Rollback:
+--   alter table public.transfers drop column canceled_before_payment_at;
+
+-- WHY A COLUMN AND NOT A STATE. A sender who cancels before paying lands on
+-- PAYMENT_FAILED, which already has four writers (the reconcile-pending cron,
+-- the funding webhook's rail decline, and operators by hand). Reusing it is
+-- right: the row has ZERO ledger postings, which reconciliation asserts for
+-- exactly this state (`unexpected_postings_before_funding`), it is already in
+-- risk.ts's UNWOUND_STATES so the uncleared-exposure slot frees immediately,
+-- and it is already in the history view's ABANDONED_STATES so the row stops
+-- cluttering the sender's list. A distinct state would have to be added to all
+-- of those plus two CHECK constraints, the TS union and the web state guard —
+-- eight places, for a row where no money ever moved.
+--
+-- The cost of that reuse is one honest sentence of copy: PAYMENT_FAILED renders
+-- as "your payment didn't go through", which is false for someone who chose to
+-- stop. transfer_transitions already records who and why, but it is not on the
+-- sender's read path, so this denormalizes the one bit the UI needs — the same
+-- shape and the same reason as payment_claimed_at and cancellation_requested_at
+-- on this table.
+--
+-- Set ONCE, after the transition commits, by the cancel route. Never written by
+-- a worker or a webhook: no machine can know a sender changed their mind.
+-- Nullable with no default because the answer for every historical row is
+-- genuinely unknown, and guessing "false" would assert that none of the five
+-- hand-failed staging rows was a cancel.
+alter table public.transfers
+  add column canceled_before_payment_at timestamptz;

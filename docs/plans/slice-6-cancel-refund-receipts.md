@@ -273,7 +273,7 @@ push, or open PRs without explicit per-action approval.**
   window (else add the void→refund fallback).
 - Full compliant `SUBMITTED`/`IN_FLIGHT` cancel handling (pending-cancel resolution) + the
   error-resolution track it routes into.
-- `PENDING_PAYMENT` cancel → void the real Stripe intent (once lingering intents have a cost).
+- `PENDING_PAYMENT` cancel → void the real Stripe intent (once lingering intents have a cost) — **DONE 2026-09-14**: the pre-payment cancel; `expireFunding` now exists on the PI rail and the route closes the object before failing the row (docs/transfer-state-machine.md, "Pre-payment cancellation").
 
 ## Verification
 

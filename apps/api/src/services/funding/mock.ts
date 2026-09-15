@@ -79,6 +79,21 @@ export class MockFundingProcessor implements FundingProcessor {
     }
   }
 
+  /**
+   * The mock's payment object is imaginary, so closing it is a no-op that is
+   * nonetheless TRUE: after this, nothing can pay the row. The dev simulate
+   * route is the only thing that could, and it gates on
+   * `state === 'PENDING_PAYMENT'` — a row failed right after this call 409s
+   * there rather than funding a canceled transfer.
+   *
+   * Implemented so the pre-payment cancel works on the local/dev rail at all:
+   * the route refuses any rail that cannot prove the door is shut, and without
+   * this the mock would be that rail.
+   */
+  async expireFunding(): Promise<'expired' | 'not_open'> {
+    return 'expired'
+  }
+
   async voidFunding(): Promise<FundingUndo> {
     // No real money exists behind the mock: the void just mints a ref the
     // cancel path records. The key is deliberately ignored — a fresh ref each

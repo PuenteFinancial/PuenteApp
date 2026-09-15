@@ -14,6 +14,27 @@ export type ApiErrorCode =
   | 'idempotency_conflict'
   | 'quote_expired'
   | 'transfer_not_cancelable'
+  // 409 on the PRE-PAYMENT cancel only: the funding object could not be closed
+  // because it is no longer open at the processor. Deliberately its own code
+  // rather than `transfer_not_cancelable`, which means "this transfer is past
+  // the point of cancelling" — this means the opposite, that the answer is not
+  // settled yet and a moment's wait resolves it. Also deliberately NOT named
+  // near `transfer_in_progress` above: that one is the uncleared-exposure cap
+  // refusing a NEW send, and the two would be read for each other in a log.
+  //
+  // Covers both non-open shapes the processor seam reports as `not_open` — the
+  // sender paid in the race window (a funding webhook is coming), or the object
+  // was already closed upstream. The copy must not assert which; it says the
+  // payment may have gone through and to check back.
+  | 'funding_in_progress'
+  // Dual use, and deliberately one code: as the 202 body's `code` when a
+  // post-submission cancel is RECORDED for out-of-band handling, and as a 409
+  // when a pre-payment cancel refuses (an out-of-band payment was claimed, or
+  // the rail cannot close its own funding object). Both say the same thing to
+  // the sender — a human has to take it from here — and the web already maps
+  // this string to that copy. The status distinguishes them for the client;
+  // `classifyCancelResponse` branches on status before code.
+  | 'cancellation_requires_support'
   // The sender freeze (loss path, 2026-09-10), 403: a chargeback or ACH return
   // withdrew this account's privilege to transact. Its own code rather than a
   // bare `forbidden` because the client owes the sender an accurate reason —

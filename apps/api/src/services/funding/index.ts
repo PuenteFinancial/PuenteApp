@@ -552,7 +552,7 @@ const WEBHOOK_PENDING_WINDOW_MS = 30 * 60_000
  * something narrower ("has a provider session object to re-read") and gates
  * real webhook and reconcile behaviour.
  */
-function hasInteractivePayStep(rail: string): boolean {
+export function hasInteractivePayStep(rail: string): boolean {
   return isOnrampSessionRail(rail) || rail === 'stripe_checkout'
 }
 

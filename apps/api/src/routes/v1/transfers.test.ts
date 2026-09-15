@@ -58,6 +58,12 @@ vi.mock('../../services/deposit-instructions.js', () => ({
   getDepositInstructions: (...args: unknown[]) => getDepositInstructions(...args),
 }))
 const isConfigured = vi.fn(() => true)
+// The pre-payment cancel's door-closing call. `hasExpireFunding` toggles its
+// PRESENCE, not just its answer: the route's refusal for a rail that cannot
+// close its own funding object (the onramp rails) keys on the method being
+// absent, so a mock that always has it could never exercise that branch.
+const expireFunding = vi.fn<() => Promise<'expired' | 'not_open'>>(async () => 'expired')
+const hasExpireFunding = vi.fn(() => true)
 const deferredInitiation = vi.fn(() => false)
 // C4: the send gate reads identityFlow, and it is a SEPARATE knob from
 // deferredInitiation on purpose. The two coincided only while the crypto rail
@@ -90,6 +96,7 @@ vi.mock('../../services/funding/index.js', async (importOriginal) => {
     initiateFunding,
     voidFunding,
     getClientSession,
+    ...(hasExpireFunding() ? { expireFunding } : {}),
     // Present only on the deferred rail, like the real registry (K5): the
     // funding-session route feature-detects this method.
     ...(deferredInitiation() ? { getDeferredClientBootstrap, getPaymentStatus } : {}),
@@ -240,6 +247,9 @@ beforeEach(() => {
   from.mockReset()
   createTransferFromQuote.mockReset()
   cancelTransfer.mockReset()
+  expireFunding.mockReset()
+  expireFunding.mockResolvedValue('expired')
+  hasExpireFunding.mockReturnValue(true)
   transitionTransfer.mockReset()
   deferredInitiation.mockReset()
   deferredInitiation.mockReturnValue(false)
@@ -1040,7 +1050,9 @@ describe('POST /v1/transfers/:id/cancel', () => {
     await app.close()
   })
 
-  it.each(['PENDING_PAYMENT', 'COMPLETED', 'PAYOUT_FAILED'] as const)(
+  // PENDING_PAYMENT is deliberately NOT in this list any more — it has its own
+  // path (the pre-payment cancel below), not a flat refusal.
+  it.each(['COMPLETED', 'PAYOUT_FAILED', 'PAYMENT_FAILED'] as const)(
     '%s → 409 transfer_not_cancelable',
     async (state) => {
       routeTables({ transfers: () => chain({ data: { ...fundedRow, state } }) })
@@ -1052,6 +1064,160 @@ describe('POST /v1/transfers/:id/cancel', () => {
       await app.close()
     },
   )
+
+  // ── The PRE-PAYMENT cancel ──────────────────────────────────────────────
+  // Before any money exists. The ordering assertion (close the processor's
+  // object BEFORE failing our row) is the one that matters most here: reversed,
+  // a stale tab can pay a transfer we already marked dead.
+  describe('PENDING_PAYMENT (pre-payment cancel)', () => {
+    const pendingRow = {
+      ...transferRow,
+      state: 'PENDING_PAYMENT',
+      funding_payment_ref: 'mockpay_1',
+      cancelable_until: null,
+    }
+    const failedRow = { ...pendingRow, state: 'PAYMENT_FAILED' }
+
+    it('closes the funding object, then fails the row, and posts NO ledger batch', async () => {
+      routeTables({ transfers: () => chain({ data: pendingRow }) })
+      transitionTransfer.mockResolvedValue(failedRow)
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(200)
+      expect(res.body).toMatchObject({ id: TRANSFER_ID, state: 'PAYMENT_FAILED' })
+      expect(expireFunding).toHaveBeenCalledWith({ paymentRef: 'mockpay_1' })
+
+      const arg = transitionTransfer.mock.calls[0]![0] as Record<string, unknown>
+      expect(arg).toMatchObject({
+        fromState: 'PENDING_PAYMENT',
+        toState: 'PAYMENT_FAILED',
+        actor: 'user',
+      })
+      // A PENDING_PAYMENT row has zero postings and reconciliation asserts it
+      // (`unexpected_postings_before_funding`). Passing entries here would be
+      // the bug that check exists to catch.
+      expect(arg.ledgerEntries).toBeUndefined()
+      // Never the sender's Reg E cancel: that one reverses a FUNDED batch.
+      expect(cancelTransfer).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('closes the door BEFORE the state write, never after', async () => {
+      const order: string[] = []
+      expireFunding.mockImplementation(async () => {
+        order.push('expire')
+        return 'expired'
+      })
+      transitionTransfer.mockImplementation(async () => {
+        order.push('transition')
+        return failedRow
+      })
+      routeTables({ transfers: () => chain({ data: pendingRow }) })
+      const app = await buildApp()
+
+      await cancel(app)
+
+      expect(order).toEqual(['expire', 'transition'])
+      await app.close()
+    })
+
+    it('a row with no funding ref cancels without calling the processor at all', async () => {
+      // Deferred-initiation rails before the pay step: nothing was ever created.
+      routeTables({ transfers: () => chain({ data: { ...pendingRow, funding_payment_ref: null } }) })
+      transitionTransfer.mockResolvedValue(failedRow)
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(200)
+      expect(expireFunding).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it("not_open → 409 funding_in_progress, and the row is NOT failed", async () => {
+      // The sender paid in the race window; a funding webhook is coming.
+      expireFunding.mockResolvedValue('not_open')
+      routeTables({ transfers: () => chain({ data: pendingRow }) })
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(409)
+      expect(res.body.error.code).toBe('funding_in_progress')
+      expect(transitionTransfer).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('a processor throw → 502 and NOTHING is written', async () => {
+      expireFunding.mockRejectedValue(new Error('stripe unreachable'))
+      routeTables({ transfers: () => chain({ data: pendingRow }) })
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(502)
+      expect(res.body.error.code).toBe('provider_unavailable')
+      expect(transitionTransfer).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('a rail that cannot close its funding object refuses rather than guessing', async () => {
+      // The onramp rails: Stripe exposes no cancel for a crypto onramp session.
+      hasExpireFunding.mockReturnValue(false)
+      routeTables({ transfers: () => chain({ data: pendingRow }) })
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(409)
+      expect(res.body.error.code).toBe('cancellation_requires_support')
+      expect(transitionTransfer).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('a claimed out-of-band payment refuses before touching the processor', async () => {
+      routeTables({
+        transfers: () =>
+          chain({ data: { ...pendingRow, payment_claimed_at: '2026-07-17T20:05:00.000Z' } }),
+      })
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(409)
+      expect(res.body.error.code).toBe('cancellation_requires_support')
+      expect(expireFunding).not.toHaveBeenCalled()
+      expect(transitionTransfer).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    it('the webhook winning the race reports the transfer, not a failure', async () => {
+      // Door shut, but the row moved anyway: answer for what it IS now.
+      routeTables({ transfers: seqTransfers(pendingRow, failedRow) })
+      transitionTransfer.mockRejectedValue(new TransferRpcError('transition_conflict'))
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(200)
+      expect(res.body).toMatchObject({ state: 'PAYMENT_FAILED' })
+      await app.close()
+    })
+
+    it('a conflict that did NOT land on PAYMENT_FAILED is a 409, not a false success', async () => {
+      routeTables({ transfers: seqTransfers(pendingRow, { ...pendingRow, state: 'FUNDED' }) })
+      transitionTransfer.mockRejectedValue(new TransferRpcError('transition_conflict'))
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(409)
+      expect(res.body.error.code).toBe('funding_in_progress')
+      await app.close()
+    })
+  })
 
   it('lost the race after our read (re-read shows the submit job won) → compliant 202, not a flat 409', async () => {
     // initial load reads FUNDED+unclaimed; RPC raises transfer_not_cancelable;

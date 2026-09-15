@@ -60,6 +60,13 @@ export interface Transfer {
    * separate operator decision.
    */
   paymentClaimedAt: string | null
+  /**
+   * Set when the sender canceled BEFORE paying. Such a transfer lands on
+   * PAYMENT_FAILED, so this is what tells a UI to say "canceled" rather than
+   * "your payment didn't go through" — the two are the same state and only
+   * this separates them.
+   */
+  canceledBeforePaymentAt: string | null
   /** Set at FUNDED — starts the Reg E cancellation clock. */
   paymentAt: string | null
   cancelableUntil: string | null

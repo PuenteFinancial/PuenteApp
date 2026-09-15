@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { env } from '../../config/env.js'
 import { undoModeForRef } from './index.js'
 import { ManualFundingProcessor } from './manual.js'
+import type { FundingProcessor } from './index.js'
 
 // Instantiated directly rather than through getFundingProcessor(): the factory
 // memoizes on FUNDING_PROCESSOR, which the suite pins to 'mock'.
@@ -111,4 +112,17 @@ describe('undoRequiresManualDisbursement — the REFUNDED gate', () => {
       expect(undoRequiresManualDisbursement(ref)).toBe(false)
     },
   )
+})
+
+describe('manual expireFunding — absent on purpose', () => {
+  it('does not implement it, which is what makes the pre-payment cancel refuse this rail', () => {
+    // Not a gap: money arrives out of band here, so nothing at a processor can
+    // be closed and "you were never charged" could not be honestly said.
+    // Asserted through the INTERFACE, because that is what the cancel route
+    // feature-detects on (`processorFor` returns a FundingProcessor, where
+    // expireFunding is optional). The class not declaring it is already a
+    // compile-time guarantee; this pins the runtime shape the route branches on.
+    const asProcessor: FundingProcessor = processor
+    expect(asProcessor.expireFunding).toBeUndefined()
+  })
 })

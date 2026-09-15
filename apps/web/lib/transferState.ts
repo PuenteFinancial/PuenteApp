@@ -51,6 +51,8 @@ export interface TrackedTransfer {
    * cached responses simply do not carry it.
    */
   paymentClaimedAt?: string | null
+  // Optional: absent on a server that predates the column (deploy skew).
+  canceledBeforePaymentAt?: string | null
   completedAt: string | null
   createdAt: string
 }
@@ -87,6 +89,10 @@ const OUTCOMES = {
   CANCELED: 'canceled',
   REFUNDED: 'refunded',
   PAYMENT_FAILED: 'paymentFailed',
+  // Not a state: outcomeForTransfer substitutes it for paymentFailed when the
+  // sender canceled before paying. Listed here so it is part of TransferOutcome
+  // and therefore must have copy.
+  CANCELED_BEFORE_PAY: 'canceledBeforePay',
   PAYOUT_FAILED: 'payoutFailed',
   FUNDING_REVERSED: 'fundingReversed',
   UNDER_REVIEW: 'underReview',
@@ -109,6 +115,23 @@ export function isOnHappyPath(state: TransferState): boolean {
 // renders fully done beneath a success banner.
 export function outcomeFor(state: TransferState): TransferOutcome | null {
   return OUTCOMES[state as keyof typeof OUTCOMES] ?? null
+}
+
+/**
+ * The outcome for a whole transfer, which is `outcomeFor` plus the one fact the
+ * state cannot carry: a PAYMENT_FAILED row the sender CHOSE to cancel before
+ * paying reads "Transfer canceled", not "Payment failed". Same state, opposite
+ * story, and `canceledBeforePaymentAt` is the only thing separating them.
+ *
+ * Prefer this over `outcomeFor` on any sender-facing surface. `outcomeFor`
+ * survives for the state-keyed exhaustiveness checks and for callers that
+ * genuinely have only a state.
+ */
+export function outcomeForTransfer(transfer: TrackedTransfer): TransferOutcome | null {
+  if (transfer.state === 'PAYMENT_FAILED' && transfer.canceledBeforePaymentAt) {
+    return 'canceledBeforePay'
+  }
+  return outcomeFor(transfer.state)
 }
 
 export type BadgeTone = 'success' | 'progress' | 'neutral' | 'error'
@@ -196,6 +219,20 @@ export function canRequestCancel(transfer: TrackedTransfer, nowMs: number): bool
   if (transfer.state !== 'FUNDED') return false
   if (!transfer.cancelableUntil) return false
   return new Date(transfer.cancelableUntil).getTime() > nowMs
+}
+
+/**
+ * Whether to offer the PRE-PAYMENT cancel. A separate predicate from
+ * `canRequestCancel`, not a widening of it, because there is no clock here:
+ * `cancelableUntil` is null until funding, and the §1005.34 window this UI
+ * counts down has not started — no payment has been made.
+ *
+ * Affordance only, like its sibling. The server re-checks and owns the refusals
+ * this cannot see: an out-of-band payment already claimed, or a rail that
+ * cannot close its own funding object.
+ */
+export function canCancelBeforePayment(transfer: TrackedTransfer): boolean {
+  return transfer.state === 'PENDING_PAYMENT'
 }
 
 // The answers POST /transfers/:id/cancel can give. `support` is the Reg E

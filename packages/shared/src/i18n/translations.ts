@@ -308,6 +308,12 @@ export type Translations = {
       cancel: string
       cancelConfirm: string
       canceling: string
+      // The PRE-PAYMENT cancel (before any money moves). A different act from
+      // the Reg E cancel above and the copy must not blur them: no payment was
+      // made, so there is no 30-minute clock, nothing to refund, and nothing to
+      // promise. Says only what is true — you haven't been charged.
+      cancelBeforePay: string
+      cancelBeforePayNote: string
       simulate: string
       simulating: string
       simulateNote: string
@@ -555,6 +561,10 @@ export type Translations = {
         canceled: { title: string; body: string }
         refunded: { title: string; body: string }
         paymentFailed: { title: string; body: string }
+        // PAYMENT_FAILED reached by the sender's own pre-payment cancel. Same
+        // state as paymentFailed, opposite story — chosen, not failed — and
+        // canceledBeforePaymentAt is the only thing that separates them.
+        canceledBeforePay: { title: string; body: string }
         payoutFailed: { title: string; body: string }
         fundingReversed: { title: string; body: string }
         underReview: { title: string; body: string }
@@ -589,6 +599,12 @@ export type Translations = {
       transfer_in_progress: string
       quote_expired: string
       transfer_not_cancelable: string
+      /**
+       * Pre-payment cancel refused: the funding object was no longer open, so
+       * either the payment landed in the race window or it was already closed
+       * upstream. Asserts neither — a moment's wait resolves which.
+       */
+      funding_in_progress: string
       /** The sender is frozen after a chargeback or ACH return (loss path). */
       account_suspended: string
       conflict: string
@@ -1330,6 +1346,8 @@ const en: Translations = {
       cancel: 'Cancel transfer',
       cancelConfirm: 'Tap again to cancel',
       canceling: 'Canceling…',
+      cancelBeforePay: 'Cancel this transfer',
+      cancelBeforePayNote: "You haven't been charged. You can cancel until you pay.",
       simulate: 'Simulate payment',
       simulating: 'Simulating…',
       simulateNote: 'Test environment only, stands in for card and bank payment.',
@@ -1553,6 +1571,14 @@ const en: Translations = {
           // 30-min timeout) — not proof of no charge, so don't claim it (PR7).
           body: 'We couldn’t confirm your payment, so this transfer was not sent. If your bank shows a charge for it, contact us at support@puentefinancial.com and we’ll make it right. Start a new transfer to try again.',
         },
+        canceledBeforePay: {
+          title: 'Transfer canceled',
+          // Unlike paymentFailed above, "you were never charged" IS safe to
+          // state here: the route closes the funding object at the processor
+          // BEFORE it fails the row, and refuses outright when it cannot (an
+          // already-paid object answers not_open and never reaches this copy).
+          body: 'You canceled this transfer before paying, so you were never charged. You can start a new transfer whenever you’re ready.',
+        },
         payoutFailed: {
           title: 'Couldn’t be delivered',
           // PR7 truthfulness pass: states the ENTITLEMENT (owed in full, incl.
@@ -1606,6 +1632,8 @@ const en: Translations = {
         'You already have a transfer in progress. You can send again once it clears, usually within a few business days.',
       quote_expired: 'This rate expired. Get a new quote to continue.',
       transfer_not_cancelable: 'This transfer can no longer be canceled.',
+      funding_in_progress:
+        "We couldn't cancel this. Your payment may have gone through, so check back in a moment.",
       account_suspended:
         'Your account is on hold while we review a problem with a payment. Contact support to continue.',
       conflict: 'This can’t be updated right now. Refresh and try again.',
@@ -2342,6 +2370,8 @@ const es: Translations = {
       cancel: 'Cancelar transferencia',
       cancelConfirm: 'Toca de nuevo para cancelar',
       canceling: 'Cancelando…',
+      cancelBeforePay: 'Cancelar esta transferencia',
+      cancelBeforePayNote: 'Todavía no se te ha cobrado. Puedes cancelar hasta que pagues.',
       simulate: 'Simular pago',
       simulating: 'Simulando…',
       simulateNote: 'Solo en el entorno de pruebas, sustituye el pago con tarjeta o banco.',
@@ -2546,6 +2576,11 @@ const es: Translations = {
           // NEEDS LEGAL REVIEW (ES) — PR7 truthfulness pass, mirrors en.
           body: 'No pudimos confirmar tu pago, así que esta transferencia no se envió. Si tu banco muestra un cargo por ella, escríbenos a support@puentefinancial.com y lo resolveremos. Inicia una nueva transferencia para intentarlo otra vez.',
         },
+        canceledBeforePay: {
+          title: 'Transferencia cancelada',
+          // NEEDS LEGAL REVIEW (ES) — mirrors en.
+          body: 'Cancelaste esta transferencia antes de pagar, así que nunca se te cobró. Puedes iniciar una nueva transferencia cuando quieras.',
+        },
         payoutFailed: {
           title: 'No se pudo entregar',
           // NEEDS LEGAL REVIEW (ES) — PR7 truthfulness pass, mirrors en.
@@ -2585,6 +2620,8 @@ const es: Translations = {
         'Ya tienes una transferencia en curso. Podrás enviar otra cuando se procese tu pago, normalmente en unos días hábiles.',
       quote_expired: 'Este tipo de cambio expiró. Obtén una nueva cotización para continuar.',
       transfer_not_cancelable: 'Esta transferencia ya no se puede cancelar.',
+      funding_in_progress:
+        'No pudimos cancelarla: es posible que tu pago se haya procesado. Vuelve a consultar en un momento.',
       account_suspended:
         'Tu cuenta está en revisión por un problema con un pago. Comunícate con soporte para continuar.',
       conflict: 'Esto no se puede actualizar ahora. Actualiza e inténtalo de nuevo.',

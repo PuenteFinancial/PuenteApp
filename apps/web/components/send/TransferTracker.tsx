@@ -17,7 +17,8 @@ import {
   isOnHappyPath,
   isSettled,
   isTransferShape,
-  outcomeFor,
+  canCancelBeforePayment,
+  outcomeForTransfer,
   timelineFor,
   type TrackedTransfer,
 } from '@/lib/transferState'
@@ -173,7 +174,15 @@ export default function TransferTracker({
 
       if (outcome.kind === 'refunded') {
         setTransfer(outcome.transfer)
-        posthog.capture('send_transfer_canceled', { transfer_id: transferId, outcome: 'refunded' })
+        // `kind` only means "200 with a transfer". WHICH cancel it was is the
+        // returned state: a pre-payment cancel lands on PAYMENT_FAILED and
+        // refunded nothing, so reporting it as 'refunded' would overstate the
+        // one funnel number this event exists to answer.
+        posthog.capture('send_transfer_canceled', {
+          transfer_id: transferId,
+          outcome:
+            outcome.transfer.state === 'PAYMENT_FAILED' ? 'canceled_before_pay' : 'refunded',
+        })
       } else if (outcome.kind === 'support') {
         // Reg E: the request was ACCEPTED for out-of-band handling, not denied.
         // Show the server's own copy in the sender's language when we have it;
@@ -204,7 +213,7 @@ export default function TransferTracker({
     }
   }
 
-  const outcome = outcomeFor(transfer.state)
+  const outcome = outcomeForTransfer(transfer)
   const cancellationPending = showCancellationBanner(transfer)
   const steps = timelineFor(transfer.state)
 
@@ -223,6 +232,10 @@ export default function TransferTracker({
     </a>
   )
   const showCancel = nowMs !== null && canRequestCancel(transfer, nowMs)
+  // No clock and no countdown: nothing has been paid, so there is no Reg E
+  // window to run down. Its own flag rather than folding into showCancel, whose
+  // render block is gated on cancelableUntil — null until funding.
+  const showCancelBeforePay = canCancelBeforePayment(transfer)
   const supportText = supportMessage
     ? supportMessage[lang]
     : supportFallback
@@ -402,6 +415,23 @@ export default function TransferTracker({
             onBlur={() => setArmed(false)}
           >
             {canceling ? s.canceling : armed ? s.cancelConfirm : s.cancel}
+          </button>
+        </div>
+      )}
+
+      {showCancelBeforePay && (
+        <div style={{ marginBottom: 14 }}>
+          <p style={{ fontSize: 12.5, color: 'var(--muted)', margin: '0 0 8px', lineHeight: 1.5 }}>
+            {s.cancelBeforePayNote}
+          </p>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            disabled={canceling}
+            onClick={handleCancel}
+            onBlur={() => setArmed(false)}
+          >
+            {canceling ? s.canceling : armed ? s.cancelConfirm : s.cancelBeforePay}
           </button>
         </div>
       )}
