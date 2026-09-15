@@ -24,7 +24,7 @@ idempotent worker path.
 | `bridge_wallet_float` | treasury wallet USDC+USDB at par vs `bridge_wallet_float` balance | warning |
 | `provider_fee_accrual` | accrued Bridge fees for a service period vs the recorded Bridge invoice, + accrual days no invoice covers | warning |
 | `stripe_receivables` | live PI status vs our state + `funding_cleared` (detection only) | error |
-| `stripe_orphans` | PIs (7-day window) with no/unknown `metadata.transfer_id` | error — incident |
+| `stripe_orphans` | PIs (7-day window) with no/unknown `metadata.transfer_id`, excluding payments stamped with another `book_ref` | error — incident |
 
 Stripe checks report `skipped` unless `FUNDING_PROCESSOR=stripe` with full keys; the float check
 skips without `BRIDGE_TREASURY_WALLET_ID`; `provider_fee_accrual` skips when both
@@ -66,7 +66,8 @@ tunable policy.
    transaction with a note (fx_slippage vs provider_fees per ledger-rules).
 4. **Orphan external object → incident.** Something moved money outside the state machine.
    Figure out what created it before touching anything; if real money moved, that's a sev-1
-   design breach. Manual-rail onramps are NOT orphans since funding-ops slice 3: auto-created
+   design breach. On `stripe_orphans`, read the `book_ref` in the finding first: it is the
+   fingerprint of the database the payment was created for (see below). Manual-rail onramps are NOT orphans since funding-ops slice 3: auto-created
    onramps always carry `client_reference_id` = the transfer id, so `bridge_orphans` resolves
    them to their row (hand-created ones via the runbook curl do too). A persistent orphan is
    once again a true anomaly — the only expected exceptions are direct treasury prefunds made
@@ -74,6 +75,33 @@ tunable policy.
 5. Every finding gets: a written note (what, cause, fix), the correcting ledger transaction if
    money is involved (new transaction, never an edit), and the Sentry issue resolved only when
    the underlying condition is actually gone.
+
+## `book_ref` — whose money is this, on a shared Stripe account
+
+One Stripe **test** account is shared by staging and by any local stack pointed at it, so a
+payment that is nobody's problem looks exactly like the worst thing this check can find. On
+2026-09-15 (NODE-26) a Checkout Session was created against a local database, paid with a test
+card, and the database was then torn down: a succeeded PaymentIntent remained whose
+`transfer_id` matched no row anywhere. Read as staging's, that is money collected with no
+transfer to show for it.
+
+So every PaymentIntent we create carries `metadata.book_ref`, an 8-hex fingerprint of the
+`SUPABASE_URL` **hostname** of the deployment that created it (`apps/api/src/config/book.ts`).
+`stripe_orphans` then reads three cases:
+
+| `book_ref` on the payment | What it means | What the check does |
+|---|---|---|
+| ours | our book, and no transfer matches | **finding** — the incident above |
+| another book's | created by an API serving a different database | counted as `foreignBook` in the run summary, not paged |
+| absent | created before 2026-09-15, or not by us at all | **finding** — absence is not an answer |
+
+The run summary carries `book` (ours) beside `foreignBook`, which is how you turn a fingerprint
+seen in the Stripe dashboard back into a name.
+
+**The one way this can hide a real orphan:** if a deployment's database HOST changes, payments
+stamped by the old host read as another book. Nothing else does this — the stamp ignores scheme,
+port, path and case — so treat `foreignBook` going non-zero in **production** (where no other
+environment shares the live account) as a finding in its own right and read the payments by hand.
 
 ## Bridge's monthly invoice
 

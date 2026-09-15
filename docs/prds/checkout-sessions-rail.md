@@ -250,6 +250,10 @@ not yet spent. Two things C2 measured that this document had wrong or could not 
   `funding_payment_ref LIKE 'pi_%'` while this rail stores `cs_…`, and classifies PaymentIntent
   status vocabulary rather than the Session's `open/unpaid` shape. So the two checks that catch a
   payment at Stripe with no transfer, and a receivable open with no match, are silently skipped.
+  **CLOSED by #304** — both checks now run on this rail (`STRIPE_RECEIVABLE_RAILS`), and
+  `stripe_orphans` reads the PaymentIntent behind each paid Session. Since 2026-09-15 each
+  payment also carries `metadata.book_ref`, so a session paid against a local database (the
+  shared TEST account) is counted, not paged — see the reconciliation runbook.
   Closing it is a real slice, not a gate flip.
 - **Vercel deployment protection blocks driving the staging web app** — a headless browser lands on
   Vercel's login. The drive therefore runs the LOCAL web against the STAGING API, which loses

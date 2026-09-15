@@ -1,5 +1,6 @@
 import type Stripe from 'stripe'
 import { env } from '../../config/env.js'
+import { bookRef } from '../../config/book.js'
 import { StripeFundingProcessor } from './stripe.js'
 import type {
   FundingClientSession,
@@ -101,17 +102,23 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
             verification_method: 'instant',
           },
         },
-        // The routing echo, matching the PI rail exactly: the join key and
-        // nothing else. No user id, no PII — money-following never carries
-        // sender→recipient routing (that lives on the transfers row).
-        metadata: { transfer_id: input.transferId },
+        // The routing echo, matching the PI rail exactly: the join key and the
+        // book it belongs to, nothing else. No user id, no PII —
+        // money-following never carries sender→recipient routing (that lives
+        // on the transfers row), and book_ref fingerprints the deployment's
+        // database, not the sender (config/book.ts).
+        metadata: { transfer_id: input.transferId, book_ref: bookRef() },
         // The SAME echo on the PaymentIntent the Session creates. Not
         // redundant: clearing and post-settlement failure arrive as
         // payment_intent.* events, which carry the Session's metadata only if
         // we put it there. Without this the parent class's parser would see a
         // PI it cannot join to a transfer and ack it as unhandled — and a card
         // transfer would never clear. See the note on checkoutEventType.
-        payment_intent_data: { metadata: { transfer_id: input.transferId } },
+        // The book stamp is copied for a second reason: reconciliation lists
+        // PAYMENT INTENTS, so a stamp left on the Session alone is never read.
+        payment_intent_data: {
+          metadata: { transfer_id: input.transferId, book_ref: bookRef() },
+        },
         // A Customer is what makes saving possible AND what shows a returning
         // sender the bank they already linked. `customer` and `customer_email`
         // are mutually exclusive at Stripe, so the Customer wins when we have

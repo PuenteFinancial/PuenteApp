@@ -3,6 +3,7 @@ import Stripe from 'stripe'
 import { env } from '../../config/env.js'
 import { undoModeForRef, type FundingProcessor } from './index.js'
 import { StripeFundingProcessor } from './stripe.js'
+import { bookRef } from '../../config/book.js'
 
 // setup.ts provides STRIPE_WEBHOOK_SECRET (and deliberately NOT
 // STRIPE_SECRET_KEY — isConfigured tests below rely on that split).
@@ -108,6 +109,9 @@ describe('stripe initiateFunding', () => {
       payment_method_options: { us_bank_account: { verification_method: 'instant' } },
       metadata: { transfer_id: TRANSFER_ID },
     })
+    // The join key AND the book it belongs to, so reconciliation can tell a
+    // payment created against another database from money we have lost.
+    expect(params.metadata).toEqual({ transfer_id: TRANSFER_ID, book_ref: bookRef() })
     // No PII rides to Stripe — the PI carries only the transfer join key.
     expect(JSON.stringify(params)).not.toContain('user-1')
     expect(options).toEqual({ idempotencyKey: `funding_init_${TRANSFER_ID}` })
@@ -668,6 +672,61 @@ describe('normalizePiStatus — the PI in reconciliation\'s vocabulary', () => {
     }
     // Unknown vocabulary is "not alarmed", never "page on every row".
     expect(normalizePiStatus('some_future_status')).toBe('awaiting')
+  })
+})
+
+describe('stripe listRecentPayments (the orphan sweep\'s eyes)', () => {
+  it('reads back both echoes, and reports a missing one as null rather than guessing', async () => {
+    const list = vi.fn(async () => ({
+      data: [
+        {
+          id: 'pi_ours',
+          status: 'succeeded',
+          created: 1_757_000_000,
+          metadata: { transfer_id: TRANSFER_ID, book_ref: 'deadbeef' },
+        },
+        // Created before stamping shipped, or by something that is not us.
+        { id: 'pi_bare', status: 'processing', created: 1_757_000_100, metadata: {} },
+        // Present-but-empty is the same as absent: an empty string would
+        // silently match no book and no transfer.
+        {
+          id: 'pi_empty',
+          status: 'processing',
+          created: 1_757_000_200,
+          metadata: { transfer_id: '', book_ref: '' },
+        },
+      ],
+    }))
+    const p = new StripeFundingProcessor({ paymentIntents: { list } } as unknown as Stripe)
+
+    const after = new Date('2026-09-08T00:00:00.000Z')
+    await expect(p.listRecentPayments({ createdAfter: after, limit: 100 })).resolves.toEqual([
+      {
+        paymentRef: 'pi_ours',
+        transferRef: TRANSFER_ID,
+        bookRef: 'deadbeef',
+        status: 'succeeded',
+        createdAt: new Date(1_757_000_000 * 1000).toISOString(),
+      },
+      {
+        paymentRef: 'pi_bare',
+        transferRef: null,
+        bookRef: null,
+        status: 'processing',
+        createdAt: new Date(1_757_000_100 * 1000).toISOString(),
+      },
+      {
+        paymentRef: 'pi_empty',
+        transferRef: null,
+        bookRef: null,
+        status: 'processing',
+        createdAt: new Date(1_757_000_200 * 1000).toISOString(),
+      },
+    ])
+    expect(list).toHaveBeenCalledWith({
+      created: { gte: Math.floor(after.getTime() / 1000) },
+      limit: 100,
+    })
   })
 })
 

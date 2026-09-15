@@ -134,6 +134,11 @@ export interface FundingPaymentListItem {
   paymentRef: string
   /** Our transfers.id echoed in processor metadata; null = orphan candidate. */
   transferRef: string | null
+  /** The book (database) this payment was created for — config/book.ts. A ref
+   *  that is not ours means another environment sharing this provider account;
+   *  null means unstamped (created before stamping, or not by us at all) and
+   *  is NOT a pass — see runStripeOrphans. */
+  bookRef: string | null
   status: string
   createdAt: string
 }

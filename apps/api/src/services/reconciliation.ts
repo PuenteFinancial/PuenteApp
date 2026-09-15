@@ -1,4 +1,5 @@
 import { env } from '../config/env.js'
+import { bookRef } from '../config/book.js'
 import { supabaseAdmin } from './supabase.js'
 import { getAccountBalance } from './ledger.js'
 import { getBridgeWalletBalances, listBridgeTransfers } from './bridge.js'
@@ -1040,9 +1041,21 @@ async function runStripeOrphans(): Promise<CheckOutcome> {
     // Same silent-cap rule as bridge_orphans: an incomplete window pages.
     findings.push({ key: 'stripe-orphans-truncated', detail: { listed: listed.length } })
   }
+  // A payment stamped with a DIFFERENT book was created by an API serving a
+  // different database — typically a local stack against the shared Stripe
+  // TEST account, whose database may not exist any more (NODE-26, 2026-09-15:
+  // a paid session outlived the local DB that knew its transfer, and read here
+  // as money we had lost). Not our money, and no row of ours is missing.
+  // Counted in the summary rather than dropped, because a non-zero count on a
+  // rail where nothing else should share the account is itself worth seeing.
+  // An UNSTAMPED payment still pages: absence is not an answer, and every
+  // payment created before stamping shipped has none.
+  const ourBook = bookRef()
+  const foreignBook = listed.filter((p) => p.bookRef != null && p.bookRef !== ourBook).length
+  const ours = listed.filter((p) => p.bookRef == null || p.bookRef === ourBook)
   // Non-UUID echoes can't be our transfers — leave them out of the lookup
   // (22P02 guard) and let them fall through as orphans below.
-  const withRef = listed.filter((p) => p.transferRef != null && UUID_RE.test(p.transferRef))
+  const withRef = ours.filter((p) => p.transferRef != null && UUID_RE.test(p.transferRef))
   let knownIds = new Set<string>()
   if (withRef.length > 0) {
     const { data, error } = await supabaseAdmin
@@ -1052,13 +1065,14 @@ async function runStripeOrphans(): Promise<CheckOutcome> {
     if (error || data == null) failClosed('stripe-orphans select', error)
     knownIds = new Set((data as { id: string }[]).map((r) => r.id))
   }
-  for (const p of listed) {
+  for (const p of ours) {
     if (p.transferRef == null || !knownIds.has(p.transferRef)) {
       findings.push({
         key: `stripe-orphan:${p.paymentRef}`,
         detail: {
           paymentRef: p.paymentRef,
           transferRef: p.transferRef,
+          bookRef: p.bookRef,
           piStatus: p.status,
           createdAt: p.createdAt,
         },
@@ -1072,6 +1086,11 @@ async function runStripeOrphans(): Promise<CheckOutcome> {
       listed: listed.length,
       windowDays: ORPHAN_WINDOW_MS / (24 * 60 * 60_000),
       truncated,
+      // Ours, so a stamp seen in the Stripe dashboard can be named without
+      // going to the code — the one cost of fingerprinting rather than
+      // labelling the book.
+      book: ourBook,
+      foreignBook,
     },
   }
 }
