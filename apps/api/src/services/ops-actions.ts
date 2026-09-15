@@ -40,6 +40,16 @@ export type OpsActionKind =
   // `ops:<operator uuid>` with a typed note (scripts/unfreeze-sender.ts) —
   // never system-initiated, because no event says a person is trustworthy.
   | 'sender_unfreeze'
+  // An operator judged a reconciliation finding understood and silenced it
+  // until a stated date (scripts/acknowledge-finding.ts). The acknowledgement
+  // row is the STATE; these two are the append-only history of silencing and
+  // un-silencing, which is the question an auditor actually asks in order.
+  // Split in two rather than one action with a before/after to squint at:
+  // "what are we not being told right now" and "what did we start watching
+  // again" are read for opposite reasons. transfer_id is null on both — a
+  // finding is keyed on (check, key), and most checks are not transfer-scoped.
+  | 'reconciliation_ack'
+  | 'reconciliation_ack_revoke'
 
 export interface OpsActionInput {
   /** `ops:<admin user id>` — the same vocabulary as transfer_transitions.actor. */

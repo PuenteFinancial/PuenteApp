@@ -61,6 +61,9 @@ export interface OpsCheck {
   name: string
   status: string
   findingsCount: number
+  /** Optional across deploy skew: the web can be live against an API that predates the
+   *  acknowledgements migration, which had no such count to send. */
+  acknowledgedCount?: number
   error?: string
   summary?: Record<string, unknown>
 }
@@ -68,7 +71,9 @@ export interface OpsCheck {
 export interface OpsReconciliationRun {
   createdAt: string
   status: string
+  /** UNACKNOWLEDGED findings — the actionable number the status is computed from. */
   findingsCount: number
+  acknowledgedCount?: number
   checks: OpsCheck[]
 }
 

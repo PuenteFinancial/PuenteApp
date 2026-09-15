@@ -687,6 +687,9 @@ export type Translations = {
     reconRunsEmpty: string
     reconStatus: { pass: string; findings: string; error: string }
     findingsCount: string
+    /** Count of findings an operator silenced until a stated date. A run that passes only
+     *  because something is acknowledged must never render as an empty one. */
+    acknowledgedCount: string
     workerHeartbeat: string
     workerHeartbeatEmpty: string
     heartbeatLive: string
@@ -1803,6 +1806,7 @@ const en: Translations = {
     reconRunsEmpty: 'No runs recorded yet.',
     reconStatus: { pass: 'pass', findings: 'findings', error: 'error' },
     findingsCount: 'findings',
+    acknowledgedCount: 'acknowledged',
     workerHeartbeat: 'Worker heartbeat',
     workerHeartbeatEmpty: 'No heartbeat recorded yet.',
     heartbeatLive: 'beating',
@@ -2806,6 +2810,7 @@ const es: Translations = {
     reconRunsEmpty: 'A\u00fan no hay corridas registradas.',
     reconStatus: { pass: 'limpia', findings: 'hallazgos', error: 'error' },
     findingsCount: 'hallazgos',
+    acknowledgedCount: 'reconocidos',
     workerHeartbeat: 'Latido del worker',
     workerHeartbeatEmpty: 'A\u00fan no se registra ning\u00fan latido.',
     heartbeatLive: 'activo',

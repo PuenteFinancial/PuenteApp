@@ -559,14 +559,17 @@ describe('buildOpsOverview', () => {
       createdAt: '2026-08-01T06:00:04.000Z',
       status: 'findings',
       findingsCount: 2,
+      // Rows written before the acknowledgements migration carry no count; 0 is accurate
+      // history for them, not a filler value.
+      acknowledgedCount: 0,
       checks: [
-        { name: 'ledger_net_zero', status: 'pass', findingsCount: 0 },
+        { name: 'ledger_net_zero', status: 'pass', findingsCount: 0, acknowledgedCount: 0 },
         // The summary rides along — it is the check's own counts and refs, and
         // it is what lets a findings card name the discrepancy instead of
         // counting it. Which of its keys reach the WIRE is the route response
         // schema's call, not this service's.
-        { name: 'bridge_wallet_float', status: 'findings', findingsCount: 2, summary: { diffMinor: -500 } },
-        { name: 'stripe_receivables', status: 'error', findingsCount: 0, error: 'stripe timeout' },
+        { name: 'bridge_wallet_float', status: 'findings', findingsCount: 2, acknowledgedCount: 0, summary: { diffMinor: -500 } },
+        { name: 'stripe_receivables', status: 'error', findingsCount: 0, acknowledgedCount: 0, error: 'stripe timeout' },
       ],
     })
     expect(overview.ledgerBalances).toEqual({
@@ -575,6 +578,31 @@ describe('buildOpsOverview', () => {
         { code: 'cash_clearing', amountMinor: -199, currency: 'USD' },
         { code: 'funding_receivable', amountMinor: 123_400, currency: 'USD' },
       ],
+    })
+  })
+
+  it('carries acknowledged_count through, so a muted pass is not rendered as an empty one', async () => {
+    runsResult = {
+      data: [
+        runRow({
+          status: 'pass',
+          findings_count: 0,
+          acknowledged_count: 3,
+          checks: [
+            { name: 'stripe_disputes', status: 'findings', findings_count: 0, acknowledged_count: 3 },
+          ],
+        }),
+      ],
+      error: null,
+    }
+
+    const overview = await buildOpsOverview()
+
+    expect(overview.reconciliationRuns[0]).toMatchObject({
+      status: 'pass',
+      findingsCount: 0,
+      acknowledgedCount: 3,
+      checks: [{ name: 'stripe_disputes', findingsCount: 0, acknowledgedCount: 3 }],
     })
   })
 
