@@ -1,4 +1,3 @@
-import { env } from '../config/env.js'
 import { getBridgeDepositInstructions, BridgeApiError } from './bridge.js'
 import { parseDecimalToMinor, PayoutValidationError } from './payouts.js'
 import { supabaseAdmin } from './supabase.js'
@@ -134,9 +133,4 @@ export async function getDepositInstructions(
     .eq('transfer_id', transferId)
     .maybeSingle()
   return (data as DepositInstructionsRow | null) ?? null
-}
-
-/** True when the manual processor is live — the only mode that renders these. */
-export function depositInstructionsEnabled(): boolean {
-  return env.FUNDING_PROCESSOR === 'manual'
 }
