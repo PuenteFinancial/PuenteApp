@@ -343,6 +343,32 @@ describe('cancelHeldTransfer', () => {
     expect(processorRefund).toHaveBeenCalledTimes(1)
   })
 
+  it('finishes that row even when a dispute landed afterwards', async () => {
+    // The interlock asks only while there is still something to give back.
+    //
+    // This is the crash-recovery shape with a dispute mark added: the money
+    // already LEFT and the settling transition is all that is missing. Refusing
+    // here would strand the row permanently — payout-poll's self-heal scan
+    // filters on `.is('refund_payment_ref', null)` so it skips these, and
+    // `not_our_cancel` keeps every other tail out of a row this one canceled.
+    // Nothing else in the system would ever finish it.
+    q('transfer_transitions', opsTransition)
+    q(
+      'transfers',
+      held({
+        state: 'CANCELED',
+        refund_payment_ref: 're_1',
+        funding_disputed_at: '2026-09-15T10:00:00.000Z',
+      }),
+    )
+
+    await expect(cancelHeldTransfer(input(), log)).resolves.toEqual({
+      done: true,
+      outcome: 'already_disbursed',
+    })
+    expect(processorRefund).not.toHaveBeenCalled()
+  })
+
   it('finishes a row whose disbursement already went out, paying nothing more', async () => {
     // The crash-recovery shape: ref persisted, state never settled. The mode
     // comes off the ref namespace — `re_` is unknown, so `refunded`.

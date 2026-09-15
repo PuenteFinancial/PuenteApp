@@ -65,14 +65,29 @@ export type ApplyFundingOutcome =
   | { outcome: 'stale' }
   | { outcome: 'unknown_transfer' }
 
+// `maybeSingle` + an explicit throw, matching loadRefundable and loadCancelable.
+//
+// This read used `.single()` and destructured only `data`, which silently broke
+// the module contract above: `.single()` sets `error` for a genuine transport,
+// timeout or RLS fault exactly as it does for a missing row, and both collapse
+// to `data === null`. That became `unknown_transfer`, which webhooks.ts answers
+// with a 200 ack on the stated grounds that "a retry cannot fix it" — true of a
+// transfer we really do not have, false of a database we could not reach. One
+// blip on a funding_succeeded event therefore acked the event away for good:
+// the processor never redelivers, the sender's money stays collected, and the
+// transfer sits at PENDING_PAYMENT with no FUNDED batch and no payout.
+//
+// A throw is the whole fix. The webhook's catch turns it into a 500, and a 500
+// is what asks the provider to try again.
 async function loadFundingTransfer(transferId: string): Promise<FundingTransferRow | null> {
-  const { data } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from('transfers')
     .select(
       'id, state, user_id, send_amount_minor, fee_amount_minor, margin_minor, funding_cleared, funding_payment_ref, funding_disputed_at',
     )
     .eq('id', transferId)
-    .single()
+    .maybeSingle()
+  if (error) throw new Error(`funding transfer load failed: ${error.message}`)
   return (data as FundingTransferRow | null) ?? null
 }
 
@@ -755,11 +770,17 @@ export async function recordManualFunding(input: {
   amountMinor: number
   operator: string
 }): Promise<RecordManualFundingResult> {
-  const { data } = await supabaseAdmin
+  // Same rule as loadFundingTransfer above: a read fault must not arrive at the
+  // operator dressed as `transfer_not_found`. Smaller blast radius here — this
+  // one is a human on the ops board who would retry — but "the row isn't there"
+  // and "we could not look" are different answers and only one of them is safe
+  // to act on.
+  const { data, error } = await supabaseAdmin
     .from('transfers')
     .select('id, state, send_amount_minor, fee_amount_minor, funding_payment_ref, funding_processor')
     .eq('id', input.transferId)
     .maybeSingle()
+  if (error) throw new Error(`manual funding transfer load failed: ${error.message}`)
   const transfer = data as {
     id: string
     state: string

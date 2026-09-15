@@ -233,21 +233,33 @@ export async function refundPayoutFailure(input: {
 
   // Is this funding still ours to give back? A chargeback has ALREADY returned
   // the sender's money through the card network, so the refund below would pay
-  // them a second time. ops-cancel.ts has asked this since 2026-09-14; this
-  // tail is the OLDER of the two paths that hand money back and asked nobody.
+  // them a second time. ops-cancel.ts has asked this since 2026-09-14; this tail
+  // is the SECOND of three disbursing paths to adopt it — cancellation-review.ts
+  // is the third and still asks nobody.
   //
   // Asked BEFORE the bridge_return post, so a refusal leaves the row completely
   // untouched for whoever picks it up — a half-posted sequence is worse than an
   // unstarted one. A provider that cannot answer THROWS (fails closed): silence
   // is not confirmation, the same rule verifyPrincipalReturned follows.
-  const verdict = await verifyFundingNotDisputed(transfer)
-  if (verdict.disputed) {
-    return {
-      done: false,
-      reason: 'funding_disputed',
-      source: verdict.source,
-      disputeRef: verdict.disputeRef,
-      detail: verdict.detail,
+  //
+  // ONLY while there is still something to give back. A row that already carries
+  // refund_payment_ref is the crash-recovery case below — the money LEFT, and the
+  // only thing missing is the settling transition. Refusing that row protects
+  // nobody and strands it permanently: payout-poll's self-heal scan filters on
+  // `.is('refund_payment_ref', null)` and therefore skips exactly these rows, and
+  // this tail is the only other thing that would finish them. The payable would
+  // stay open forever with recon paging every six hours, and the CLI would print
+  // "nothing was written" about a row whose money is already gone.
+  if (transfer.refund_payment_ref === null) {
+    const verdict = await verifyFundingNotDisputed(transfer)
+    if (verdict.disputed) {
+      return {
+        done: false,
+        reason: 'funding_disputed',
+        source: verdict.source,
+        disputeRef: verdict.disputeRef,
+        detail: verdict.detail,
+      }
     }
   }
 
