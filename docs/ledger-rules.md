@@ -198,6 +198,14 @@ CANCELED → REFUNDED  (the OPERATOR's cancel of an undeliverable payout — IMP
   A transfer whose undo needs a HUMAN (manual / onramp rails) rests at CANCELED with
   `refunds_payable` open — the honest statement that the sender has not been paid.
 
+  NOT FOR A CHARGED-BACK FUNDING. If the sender disputed the charge, the network has already
+  returned their money: posting this pair would recognize a refund debt that does not exist and
+  then claim to pay it. The dispute interlock (services/ops-cancel.ts, 2026-09-14) refuses such a
+  row before the CANCELED leg commits; it belongs to the loss path instead. Staging 2026-09-14 is
+  the worked example of getting this wrong — two rows reached the processor first, Stripe refused
+  ("has been charged back"), and both were left at CANCELED with `refunds_payable` overstated
+  until a correcting `DR refunds_payable / CR cash_clearing` squared them.
+
 PAYOUT_FAILED → REFUNDED  (after SUBMITTED; Bridge returns principal; undo mode REFUNDED —
   the funding had settled, so a real Stripe Refund pays the sender back)
   1) Bridge returns the $98:

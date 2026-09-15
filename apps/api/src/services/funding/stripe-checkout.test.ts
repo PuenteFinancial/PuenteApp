@@ -494,3 +494,66 @@ describe('StripeCheckoutFundingProcessor — signature verification', () => {
     expect(make().verifySignature(body, 't=1,v1=deadbeef')).toBe(false)
   })
 })
+
+describe('StripeCheckoutFundingProcessor — getDisputeStatus resolves the session first', () => {
+  const disputeClient = (disputes: unknown[]) => {
+    const retrieveSession = vi.fn().mockResolvedValue({
+      id: SESSION_ID,
+      status: 'complete',
+      payment_status: 'paid',
+      payment_intent: 'pi_resolved',
+    })
+    const list = vi.fn().mockResolvedValue({ data: disputes })
+    return {
+      retrieveSession,
+      list,
+      processor: make({
+        checkout: { sessions: { create: vi.fn(), retrieve: retrieveSession } },
+        disputes: { list },
+      }),
+    }
+  }
+
+  // The bug the interlock exists to close is on THIS rail: our ref names a
+  // Session, a dispute hangs off the PaymentIntent, and querying by the session
+  // id would find nothing — answering "not disputed" about a charged-back
+  // charge, which is the one wrong answer that matters.
+  it('translates the Session to its PaymentIntent before asking', async () => {
+    const { retrieveSession, list, processor } = disputeClient([
+      { id: 'du_1', status: 'needs_response' },
+    ])
+
+    await expect(processor.getDisputeStatus({ paymentRef: SESSION_ID })).resolves.toEqual({
+      // Answered in the caller's vocabulary: they asked about the ref they hold.
+      paymentRef: SESSION_ID,
+      disputed: true,
+      disputeRef: 'du_1',
+      status: 'needs_response',
+    })
+    expect(retrieveSession).toHaveBeenCalledWith(SESSION_ID)
+    expect(list).toHaveBeenCalledWith({ payment_intent: 'pi_resolved', limit: 1 })
+  })
+
+  it('reports no dispute without inventing one', async () => {
+    const { processor } = disputeClient([])
+
+    await expect(processor.getDisputeStatus({ paymentRef: SESSION_ID })).resolves.toEqual({
+      paymentRef: SESSION_ID,
+      disputed: false,
+    })
+  })
+
+  // Same tolerance as the undos: the 2026-09-10 overwrite left rows whose
+  // funding_payment_ref is already a PI, and those are exactly the rows an
+  // operator reaches for.
+  it('accepts a ref that is already the PaymentIntent', async () => {
+    const { retrieveSession, list, processor } = disputeClient([])
+
+    await expect(processor.getDisputeStatus({ paymentRef: 'pi_direct' })).resolves.toMatchObject({
+      paymentRef: 'pi_direct',
+      disputed: false,
+    })
+    expect(retrieveSession).not.toHaveBeenCalled()
+    expect(list).toHaveBeenCalledWith({ payment_intent: 'pi_direct', limit: 1 })
+  })
+})

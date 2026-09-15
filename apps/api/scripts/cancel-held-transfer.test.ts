@@ -158,6 +158,34 @@ describe('refusalMessage', () => {
     expect(message).toContain('second refund batch')
   })
 
+  it('names the chargeback and sends the row to the loss path', () => {
+    const message = refusalMessage({
+      done: false,
+      reason: 'funding_disputed',
+      source: 'provider',
+      disputeRef: 'du_1UEAUGIbCQghJX8LxAXiQE5S',
+      detail: 'the funding charge is disputed at the provider (needs_response)',
+    })
+    expect(message).toContain('du_1UEAUGIbCQghJX8LxAXiQE5S')
+    expect(message).toContain('pay them twice')
+    expect(message).toContain('funding-reversal.md')
+    // A provider-only catch means our own records missed it, which is a second
+    // problem the operator should go and look at.
+    expect(message).toContain('charge.dispute.created')
+  })
+
+  it('omits the missed-webhook warning when OUR record caught it', () => {
+    const message = refusalMessage({
+      done: false,
+      reason: 'funding_disputed',
+      source: 'record',
+      disputeRef: null,
+      detail: "the payout is held on 'funding_disputed'",
+    })
+    expect(message).not.toContain('charge.dispute.created')
+    expect(message).toContain('funding-reversal.md')
+  })
+
   it('explains hold_not_cancelable as a policy, not an accident', () => {
     const message = refusalMessage({
       done: false,
@@ -177,6 +205,8 @@ describe('refusalMessage', () => {
       { done: false, reason: 'hold_reason_mismatch', actual: 'fx_drift' },
       { done: false, reason: 'submit_in_progress' },
       { done: false, reason: 'not_our_cancel' },
+      { done: false, reason: 'funding_disputed', source: 'provider', disputeRef: 'du_1', detail: 'x' },
+      { done: false, reason: 'funding_disputed', source: 'record', disputeRef: null, detail: 'x' },
       { done: false, reason: 'changed_underneath', state: 'CANCELED' },
       { done: false, reason: 'claim_taken', claimedAt: null, claimedBy: null },
       { done: false, reason: 'claim_abandoned', claimedAt: null, claimedBy: null },
