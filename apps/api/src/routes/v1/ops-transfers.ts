@@ -596,6 +596,16 @@ export const opsTransfersRoute: FastifyPluginAsync = async (server) => {
                 'claim_abandoned',
                 'A prior refund run abandoned its claim — follow the manual-refund runbook',
               )
+            // The card network already returned this sender's money. Refunding
+            // on top of it pays them twice, so the loss path owns this row.
+            case 'funding_disputed':
+              return sendError(
+                reply,
+                409,
+                'conflict',
+                'The funding behind this transfer was disputed — refunding would pay the sender twice',
+                [{ path: 'transferId', issue: outcome.detail }],
+              )
           }
         }
 

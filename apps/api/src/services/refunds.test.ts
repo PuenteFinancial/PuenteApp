@@ -19,10 +19,16 @@ const postLedger = vi.hoisted(() => vi.fn())
 vi.mock('./ledger.js', () => ({ postLedgerTransaction: (...a: unknown[]) => postLedger(...a) }))
 
 const refund = vi.hoisted(() => vi.fn())
+const getDisputeStatus = vi.hoisted(() => vi.fn())
 vi.mock('./funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./funding/index.js')>()
-  // real undoModeForRef — step 3 picks its REFUNDED batch off the ref prefix
-  const fake = { refund: (...a: unknown[]) => refund(...a) }
+  // real undoModeForRef — step 3 picks its REFUNDED batch off the ref prefix.
+  // getDisputeStatus is present so the interlock takes its record_and_provider
+  // path, the one a live rail takes; the default answer is "not disputed".
+  const fake = {
+    refund: (...a: unknown[]) => refund(...a),
+    getDisputeStatus: (...a: unknown[]) => getDisputeStatus(...a),
+  }
   return { ...actual, getFundingProcessor: () => fake, processorFor: () => fake }
 })
 
@@ -99,6 +105,8 @@ const parked = (over: Record<string, unknown> = {}) => ({
     margin_minor: 0,
     refund_payment_ref: null,
     funding_payment_ref: 'mockpay_1',
+    payout_hold_reason: null,
+    funding_disputed_at: null,
     // Submitted: the normal parked row. Pre-submit rows null this out — see
     // the #254 cases below.
     provider_transfer_ref: 'bridge_tr_1',
@@ -139,6 +147,7 @@ beforeEach(() => {
   postLedger.mockResolvedValue({ id: 'lt-1' })
   refund.mockResolvedValue({ provider: 'mock', ref: 'mockrefund_x', status: 'succeeded' })
   transition.mockResolvedValue({ id: T, state: 'REFUNDED' })
+  getDisputeStatus.mockResolvedValue({ disputed: false })
   resolveCancellationRequest.mockResolvedValue(true)
   from.mockImplementation((table: string) =>
     chain(table, queues[table]?.shift() ?? { data: null, error: null }),
@@ -346,6 +355,61 @@ describe('refundPayoutFailure', () => {
     expect(postLedger).not.toHaveBeenCalled()
     expect(refund).not.toHaveBeenCalled()
     expect(transition).not.toHaveBeenCalled()
+  })
+
+  // THE DISPUTE INTERLOCK on the refund tail (2026-09-15). A chargeback has
+  // already returned the sender's money through the card network, so paying the
+  // refund on top of it pays them twice. ops-cancel.ts has asked this since
+  // 2026-09-14; this tail — the OLDER of the two paths that hand money back —
+  // did not ask at all.
+  it('refuses to refund when our own record says the funding was disputed', async () => {
+    q('transfers', parked({ funding_disputed_at: '2026-09-14T22:20:00.000Z' }))
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' }),
+    ).resolves.toMatchObject({ done: false, reason: 'funding_disputed', source: 'record' })
+
+    // refused BEFORE any write — not even the idempotent bridge_return batch
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+  })
+
+  it('refuses a row parked on the funding_disputed hold', async () => {
+    q('transfers', parked({ payout_hold_reason: 'funding_disputed' }))
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' }),
+    ).resolves.toMatchObject({ done: false, reason: 'funding_disputed', source: 'record' })
+    expect(refund).not.toHaveBeenCalled()
+  })
+
+  // The half that earns the name: our record is a MIRROR of a webhook, and on
+  // staging three real disputes left no trace because the handler shipped hours
+  // after they arrived. A gate trusting the record alone would have passed all
+  // three and paid all three senders twice.
+  it('refuses when the record is clean but the PROVIDER says disputed', async () => {
+    q('transfers', parked())
+    getDisputeStatus.mockResolvedValue({ disputed: true, disputeRef: 'du_1', status: 'lost' })
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' }),
+    ).resolves.toMatchObject({ done: false, reason: 'funding_disputed', source: 'provider' })
+
+    expect(postLedger).not.toHaveBeenCalled()
+    expect(refund).not.toHaveBeenCalled()
+  })
+
+  // Fails closed: silence is not confirmation.
+  it('refuses when the provider cannot answer (a throw is a refusal, not a pass)', async () => {
+    q('transfers', parked())
+    getDisputeStatus.mockRejectedValue(new Error('stripe 503'))
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'a', reason: 'r' }),
+    ).rejects.toThrow('stripe 503')
+
+    expect(refund).not.toHaveBeenCalled()
   })
 
   it('never refunds a transfer that is not PAYOUT_FAILED (a delivered transfer must not reverse)', async () => {
