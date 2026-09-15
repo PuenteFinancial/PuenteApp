@@ -80,6 +80,23 @@ function stubTransfer(data: unknown) {
   })
 }
 
+/**
+ * The same stub, but the terminal read FAILS — a transport fault, a timeout, an
+ * RLS refusal. Deliberately returns `data: null` alongside the error, because
+ * that is exactly what PostgREST does and exactly what made this class of bug
+ * invisible: a loader that reads only `data` cannot tell this apart from a row
+ * that is not there.
+ */
+function stubTransferReadError(error: { message: string; code?: string }) {
+  from.mockImplementation(() => {
+    const b: Record<string, unknown> = {}
+    for (const m of ['select', 'eq', 'update']) b[m] = () => b
+    b['maybeSingle'] = async () => ({ data: null, error })
+    b['single'] = async () => ({ data: null, error })
+    return b
+  })
+}
+
 function call(overrides: Record<string, unknown> = {}) {
   return recordManualFunding({
     transferId: TRANSFER_ID,
@@ -133,6 +150,16 @@ describe('recordManualFunding — refusals', () => {
   it('refuses an unknown transfer', async () => {
     stubTransfer(null)
     expect(await call()).toEqual({ done: false, reason: 'transfer_not_found' })
+    expect(transitionTransfer).not.toHaveBeenCalled()
+  })
+
+  it('a READ FAULT throws rather than telling the operator the transfer is missing', async () => {
+    // Smaller blast radius than the webhook's version — the reader here is a
+    // human on the ops board who would try again — but "the row is not there"
+    // and "we could not look" are different answers and only one is safe to act
+    // on. An operator told `transfer_not_found` goes hunting for a typo.
+    stubTransferReadError({ message: 'connection reset' })
+    await expect(call()).rejects.toThrow(/manual funding transfer load failed/)
     expect(transitionTransfer).not.toHaveBeenCalled()
   })
 
@@ -321,6 +348,21 @@ describe('applyOnrampFunded — the amount guard (#213)', () => {
   it('unknown transfers stay the ack-and-log path', async () => {
     stubTransfer(null)
     expect(await funded(MATCHING)).toEqual({ outcome: 'unknown_transfer' })
+  })
+
+  it('a READ FAULT throws instead of masquerading as an unknown transfer', async () => {
+    // The distinction this asserts is worth a sentence, because getting it wrong
+    // loses a sender's money silently: webhooks.ts answers `unknown_transfer`
+    // with a 200 ack, on the stated grounds that a retry cannot fix it. True of
+    // a transfer we genuinely do not have; false of a database we could not
+    // reach. The loader used to collapse both into `data === null`, so one blip
+    // on a funding_succeeded event acked it away for good — money collected, no
+    // FUNDED batch, no payout, and no redelivery to notice it.
+    //
+    // A throw becomes the webhook's 500, and a 500 is what asks the processor to
+    // try again. The test above and this one must stay a matched pair.
+    stubTransferReadError({ message: 'timeout', code: '57014' })
+    await expect(funded(MATCHING)).rejects.toThrow(/funding transfer load failed/)
   })
 })
 

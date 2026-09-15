@@ -336,14 +336,25 @@ export async function cancelHeldTransfer(
   // Placed after the REFUNDED early-return above: a settled transfer is done,
   // and a dispute arriving afterwards is the loss path's business, not this
   // tail's.
-  const verdict = await verifyFundingNotDisputed(loaded)
-  if (verdict.disputed) {
-    return {
-      done: false,
-      reason: 'funding_disputed',
-      source: verdict.source,
-      disputeRef: verdict.disputeRef,
-      detail: verdict.detail,
+  //
+  // The same reasoning extends one step further, and the original placement
+  // missed it: a row already carrying refund_payment_ref has ALSO passed the
+  // point where refusing helps. That is the crash-recovery case step 2 resumes
+  // — the disbursement succeeded and only the settling transition is missing.
+  // Refusing it strands the row for good, because nothing else finishes these:
+  // payout-poll's self-heal scan filters on `.is('refund_payment_ref', null)`
+  // and skips them, and `not_our_cancel` keeps every other tail out of a row
+  // this one canceled. Ask only while there is still something to give back.
+  if (loaded.refund_payment_ref === null) {
+    const verdict = await verifyFundingNotDisputed(loaded)
+    if (verdict.disputed) {
+      return {
+        done: false,
+        reason: 'funding_disputed',
+        source: verdict.source,
+        disputeRef: verdict.disputeRef,
+        detail: verdict.detail,
+      }
     }
   }
 

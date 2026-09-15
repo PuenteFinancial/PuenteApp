@@ -360,8 +360,38 @@ describe('refundPayoutFailure', () => {
   // THE DISPUTE INTERLOCK on the refund tail (2026-09-15). A chargeback has
   // already returned the sender's money through the card network, so paying the
   // refund on top of it pays them twice. ops-cancel.ts has asked this since
-  // 2026-09-14; this tail — the OLDER of the two paths that hand money back —
-  // did not ask at all.
+  // 2026-09-14; this tail — the SECOND of three paths that hand money back to
+  // adopt it — did not ask at all.
+  it('still settles a row whose refund ALREADY left, dispute or not', async () => {
+    // The interlock asks only while there is still something to give back.
+    //
+    // A row carrying refund_payment_ref is the crash-recovery case: the money
+    // LEFT and the settling transition is all that is missing. Refusing it
+    // protects nobody and strands it permanently — payout-poll's self-heal scan
+    // filters on `.is('refund_payment_ref', null)` so it skips exactly these
+    // rows, and this tail is the only other thing that would finish them. The
+    // payable would stay open forever with recon paging every six hours.
+    //
+    // Guarding the interlock on the ref is what keeps that from happening; this
+    // test is the thing that notices if the guard moves back.
+    q(
+      'transfers',
+      parked({
+        refund_payment_ref: 'mockrefund_prev',
+        funding_disputed_at: '2026-09-14T22:20:00.000Z',
+      }),
+    )
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' }),
+    ).resolves.toEqual({ done: true, outcome: 'already_disbursed' })
+
+    // No second disbursement — the ref is what proves the first one happened.
+    expect(refund).not.toHaveBeenCalled()
+    // …but the row DOES reach its terminal state rather than sitting open.
+    expect(transition).toHaveBeenCalled()
+  })
+
   it('refuses to refund when our own record says the funding was disputed', async () => {
     q('transfers', parked({ funding_disputed_at: '2026-09-14T22:20:00.000Z' }))
 
