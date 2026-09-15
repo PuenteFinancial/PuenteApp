@@ -11,6 +11,7 @@ import {
 import { postLedgerTransaction, type LedgerEntryInput } from './ledger.js'
 import { processorFor, undoModeForRef } from './funding/index.js'
 import { getBridgeTransfer } from './bridge.js'
+import { verifyFundingNotDisputed } from './dispute-interlock.js'
 
 // The PAYOUT_FAILED → REFUNDED refund-from-float tail (ledger-rules.md), lifted
 // out of the payment-event job in slice-7 PR6a so the automated path (job, gated
@@ -62,12 +63,17 @@ interface RefundableTransfer {
   idempotency_key: string
   refund_claimed_at: string | null
   refund_claimed_by: string | null
+  /** Read only by the dispute interlock. Selected explicitly: the interlock
+   *  treats UNDEFINED as "not asked" and falls through to the provider, so a
+   *  caller that forgot the column would silently weaken the gate. */
+  payout_hold_reason: string | null
+  funding_disputed_at: string | null
 }
 
 const REFUNDABLE_COLUMNS =
   'id, state, send_amount_minor, fee_amount_minor, margin_minor, refund_payment_ref, ' +
   'funding_payment_ref, funding_processor, provider_transfer_ref, idempotency_key, ' +
-  'refund_claimed_at, refund_claimed_by'
+  'refund_claimed_at, refund_claimed_by, payout_hold_reason, funding_disputed_at'
 
 // How long an unfinished claim stays "in progress" before it is ABANDONED.
 //
@@ -148,6 +154,16 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export type RefundOutcome =
   | { done: true; outcome: 'refunded' | 'already_disbursed' | 'already_settled' }
   | { done: false; reason: 'not_payout_failed'; state: string }
+  /** The funding behind this transfer was clawed back. Refunding on top of a
+   *  chargeback pays the sender twice — the loss path owns this row, not the
+   *  refund tail. */
+  | {
+      done: false
+      reason: 'funding_disputed'
+      source: 'record' | 'provider'
+      disputeRef: string | null
+      detail: string
+    }
   | { done: false; reason: 'transfer_not_found' }
   // Two ARMS, not one arm with a union of reasons, because callers must be
   // unable to collapse them: `claim_taken` is silent and `claim_abandoned`
@@ -213,6 +229,26 @@ export async function refundPayoutFailure(input: {
   // PAYOUT_FAILED — never one that delivered.
   if (transfer.state !== 'PAYOUT_FAILED') {
     return { done: false, reason: 'not_payout_failed', state: transfer.state }
+  }
+
+  // Is this funding still ours to give back? A chargeback has ALREADY returned
+  // the sender's money through the card network, so the refund below would pay
+  // them a second time. ops-cancel.ts has asked this since 2026-09-14; this
+  // tail is the OLDER of the two paths that hand money back and asked nobody.
+  //
+  // Asked BEFORE the bridge_return post, so a refusal leaves the row completely
+  // untouched for whoever picks it up — a half-posted sequence is worse than an
+  // unstarted one. A provider that cannot answer THROWS (fails closed): silence
+  // is not confirmation, the same rule verifyPrincipalReturned follows.
+  const verdict = await verifyFundingNotDisputed(transfer)
+  if (verdict.disputed) {
+    return {
+      done: false,
+      reason: 'funding_disputed',
+      source: verdict.source,
+      disputeRef: verdict.disputeRef,
+      detail: verdict.detail,
+    }
   }
 
   // 1) Book the returned principal back to cash — a stand-alone post (state

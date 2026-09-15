@@ -208,6 +208,17 @@ export async function list(): Promise<void> {
 /** The refusal copy. Each says what happened AND what the operator does next. */
 function refusalMessage(outcome: Extract<RefundOutcome, { done: false }>): string {
   switch (outcome.reason) {
+    case 'funding_disputed':
+      return (
+        `the funding behind this transfer was DISPUTED — ${outcome.detail}` +
+        (outcome.disputeRef ? ` (${outcome.disputeRef})` : '') +
+        '.\n' +
+        '  The card network has already returned this money to the sender, so refunding here\n' +
+        '  would pay them a SECOND time. Nothing was written.\n' +
+        `  Source: ${outcome.source === 'provider' ? 'the live charge at the processor' : 'our own record'}.\n` +
+        '  This row belongs to the loss path, not the refund tail — the funding reversal books\n' +
+        '  the loss and freezes the sender. See docs/runbooks/manual-refund.md.'
+      )
     case 'claim_taken':
       return (
         `another run is refunding this transfer RIGHT NOW (claimed at ${outcome.claimedAt} by ` +
