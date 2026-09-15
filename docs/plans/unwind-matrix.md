@@ -129,14 +129,26 @@ every payout that later fails.
 
 The hole is one step later — **nothing books it when delivery resolves.** `payment-event-process.ts`
 never reads `funding_disputed_at`, so a disputed transfer reaching `COMPLETED` or `PAYOUT_FAILED`
-posts its ordinary batch and no loss at all. The only backstop is reconciliation's `stripe_disputes`
-check paging a human.
+posts its ordinary batch and no loss at all.
+
+**And there is no backstop.** An earlier revision of this section claimed reconciliation's
+`stripe_disputes` check pages a human for it. It cannot, structurally. That check's whole predicate
+is `recorded = row.funding_disputed_at != null` (`reconciliation.ts:990`), and `markFundingDisputed`
+stamps that field in EVERY arm of `applyFundingReversed` before the state branch
+(`funding-apply.ts:421`) — including the in-flight arm that books nothing. The row marks itself
+"recorded" and the check passes forever. It tests *did our webhook run*, not *was the loss handled*.
+The row is invisible to the freeze CLI too (`sender-freeze.ts:212` matches only the
+`funding_disputed` hold or the `FUNDING_REVERSED` state, and the in-flight arm sets neither). One
+Sentry `fatal` at `webhooks.ts:616` is the entire detection surface.
 
 Worse, the two coupled failure modes have no guard between them: `refunds.ts` never reads
 `funding_disputed_at` either, so a disputed transfer whose payout then FAILS runs the ordinary refund
-tail and **pays back a sender whose funding was already clawed back** — the money leaves twice. Today
-`AUTO_REFUND` being off in prod means that parks at `PAYOUT_FAILED` for a human, so the guard is a
-person, not the code.
+tail. In practice the processor refuses a refund on a charged-back charge, so the row **strands**
+rather than double-paying: a throw with the claim left standing, `bridge_return` already posted and
+`transfer_payable` still open. The genuine double payment is the REVERSE order — refund first,
+dispute second — which falls to `no_exposure` (`funding-apply.ts:472`) on the belief that a refunded
+transfer has no open exposure. For a `refunded`-mode undo that is wrong: we paid real cash out and
+the network then claws the original charge back as well. Nothing blocks it and nothing books it.
 
 The fix is therefore two things, and neither is "book it at in-flight": recognize the loss at the
 transition that resolves delivery, when the amount is finally known, and refuse a refund on a
