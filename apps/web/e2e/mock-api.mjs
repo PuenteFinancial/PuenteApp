@@ -620,6 +620,28 @@ const server = createServer(async (req, res) => {
           submitAttempted: true,
           cancellationRequested: false,
         },
+        {
+          // A stripe_checkout PENDING_PAYMENT row: the shape that wore two
+          // manual-rail lies until 2026-09-14 — a 7-day threshold (its real
+          // reaper window is 4h) and "no deposit instructions attached" (a
+          // table that rail does not use). fundingInitiated true + onrampRef
+          // null is exactly how a Checkout row looks.
+          transferId: '0e171d83-0000-4000-8000-00000000000c',
+          state: 'PENDING_PAYMENT',
+          sendAmountMinor: 500,
+          enteredStateAt: '2026-08-01T11:20:00.000Z',
+          dwellMinutes: 40,
+          thresholdMinutes: 240,
+          overThreshold: false,
+          holdReason: null,
+          fundingCleared: false,
+          submitAttempted: false,
+          cancellationRequested: false,
+          fundingInitiated: true,
+          fundingProcessor: 'stripe_checkout',
+          onrampRef: null,
+          feeAmountMinor: 0,
+        },
       ],
       floatCeiling: { configured: true, tripped: true, balanceMinor: 500_100, ceilingMinor: 500_000 },
       transferCounts: [
