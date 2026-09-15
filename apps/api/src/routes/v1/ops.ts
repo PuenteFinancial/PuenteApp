@@ -189,6 +189,9 @@ const overviewResponseSchema = {
           createdAt: { type: 'string' },
           status: { type: 'string' },
           findingsCount: { type: 'number' },
+          // Without this on the allowlist a 'pass' that is only a pass because findings are
+          // silenced would reach the board indistinguishable from an empty run.
+          acknowledgedCount: { type: 'number' },
           checks: {
             type: 'array',
             items: {
@@ -197,6 +200,7 @@ const overviewResponseSchema = {
                 name: { type: 'string' },
                 status: { type: 'string' },
                 findingsCount: { type: 'number' },
+                acknowledgedCount: { type: 'number' },
                 error: { type: 'string' },
                 summary: checkSummarySchema,
               },

@@ -163,6 +163,8 @@ export interface OpsCheck {
   name: string
   status: string
   findingsCount: number
+  /** Findings this check produced that an active acknowledgement silenced. */
+  acknowledgedCount: number
   error?: string
   /** The check's own counts/refs for the run. The route's response schema is
    *  the allowlist that decides which of these keys actually reach the wire. */
@@ -172,7 +174,12 @@ export interface OpsCheck {
 export interface OpsReconciliationRun {
   createdAt: string
   status: string
+  /** UNACKNOWLEDGED findings — the actionable number the run's status is computed from. */
   findingsCount: number
+  /** Findings an operator silenced until a stated date (reconciliation_acknowledgements). A
+   *  'pass' carrying a non-zero count here is a pass BECAUSE something is muted, and the board
+   *  must be able to say so rather than render it as an empty run. */
+  acknowledgedCount: number
   checks: OpsCheck[]
 }
 
@@ -346,10 +353,13 @@ interface RunRow {
   created_at: string
   status: string
   findings_count: number
+  /** Added 2026-09-15; absent on rows written before the acknowledgements migration. */
+  acknowledged_count?: number
   checks: Array<{
     name: string
     status: string
     findings_count: number
+    acknowledged_count?: number
     error?: string
     summary?: Record<string, unknown>
   }>
@@ -363,7 +373,7 @@ async function readReconciliationRuns(): Promise<{
   // The runbook's own query (docs/runbooks/reconciliation.md "Reading a run").
   const { data, error } = await supabaseAdmin
     .from('reconciliation_runs')
-    .select('created_at, status, findings_count, checks, balances')
+    .select('created_at, status, findings_count, acknowledged_count, checks, balances')
     .order('created_at', { ascending: false })
     .limit(7)
   if (error || data == null) {
@@ -374,10 +384,14 @@ async function readReconciliationRuns(): Promise<{
     createdAt: row.created_at,
     status: row.status,
     findingsCount: row.findings_count,
+    // Coerced with a 0 default rather than read straight: rows written before the column existed
+    // carry no acknowledgements by construction, so 0 is accurate history, not a filler.
+    acknowledgedCount: Number(row.acknowledged_count ?? 0),
     checks: (row.checks ?? []).map((check) => ({
       name: check.name,
       status: check.status,
       findingsCount: Number(check.findings_count ?? 0),
+      acknowledgedCount: Number(check.acknowledged_count ?? 0),
       ...(typeof check.error === 'string' && { error: check.error }),
       ...(check.summary != null && typeof check.summary === 'object' && { summary: check.summary }),
     })),

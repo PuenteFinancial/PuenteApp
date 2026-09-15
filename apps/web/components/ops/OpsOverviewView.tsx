@@ -463,6 +463,14 @@ export default function OpsOverviewView({ overview }: { overview: OpsOverview })
                       {r.findingsCount} {s.findingsCount}
                     </span>
                   )}
+                  {/* A 'pass' carrying acknowledged findings is a pass BECAUSE they are silenced.
+                      Rendering it identically to an empty run is the one thing this panel must
+                      not do — the count is why the acknowledgement path is safe to have. */}
+                  {(r.acknowledgedCount ?? 0) > 0 && (
+                    <span style={{ fontFamily: 'var(--mono)', color: 'var(--muted)', fontSize: 12 }}>
+                      {r.acknowledgedCount} {s.acknowledgedCount}
+                    </span>
+                  )}
                   <Pill
                     label={s.reconStatus[r.status as keyof typeof s.reconStatus] ?? r.status}
                     tone={r.status === 'pass' ? 'success' : r.status === 'findings' ? 'progress' : 'error'}

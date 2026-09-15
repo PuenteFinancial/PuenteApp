@@ -130,9 +130,73 @@ select created_at, status, findings_count, checks, balances
 from reconciliation_runs order by created_at desc limit 7;
 ```
 
-`checks` is the per-check array (status, findings_count, summary); `balances` is the full
-chart snapshot — both render on the read-only ops page at `/dashboard/ops` (8.5-v1, admin-allowlisted). Findings detail lives in Sentry, not the row —
-the row carries counts and refs only, never PII.
+`checks` is the per-check array (status, findings_count, acknowledged_count, summary); `balances`
+is the full chart snapshot — both render on the read-only ops page at `/dashboard/ops` (8.5-v1,
+admin-allowlisted). Findings detail lives in Sentry, not the row — the row carries counts and refs
+only, never PII.
+
+`findings_count` is the **actionable** number: findings with an active acknowledgement are counted
+under `acknowledged_count` instead, and the run's `status` is computed from the actionable one. A
+`pass` with a non-zero `acknowledged_count` is a pass *because something is silenced* — always read
+the two together.
+
+## Acknowledging a finding
+
+Every check is a stateless diff re-run on a tick, so a discrepancy that is real, understood, and
+settled keeps paging until its own lookback window ages out — 60 days for `stripe_disputes`. An
+acknowledgement records that a human answered for it, and stops the page until a stated date.
+
+**Use it when** the finding names something with nothing left to do: the cause is history rather
+than a defect, or the money question is already closed. The worked example is the three 2026-09-10
+staging disputes, which went unrecorded because they *predate* the loss path that records them
+(#310, #313) — not a defect, not fixable, and otherwise paging until 2026-11-09.
+
+**Do not use it** when the finding names something still open — money in flight, a balance that
+does not reconcile, a transfer nobody has decided about. The page is not the problem; it is the
+only thing watching.
+
+```bash
+# what is already acknowledged
+pnpm exec tsx scripts/acknowledge-finding.ts --list
+
+# dry run (no --confirm), then the real thing
+doppler run -- pnpm exec tsx scripts/acknowledge-finding.ts \
+  --check stripe_disputes --key 'stripe-dispute-unrecorded:du_1ABC' \
+  --operator <your-user-uuid> --note "investigated 9/15: predates #310, money settled" \
+  --days 60 --confirm
+
+# changed your mind — it pages again from the next run
+doppler run -- pnpm exec tsx scripts/acknowledge-finding.ts \
+  --revoke <ack-uuid> --operator <your-user-uuid> --note "reopened: dispute escalated" --confirm
+```
+
+The `--key` is the finding key verbatim — the part of the Sentry title after the em dash.
+
+Four things the tool will not let you do, each deliberate:
+
+| refusal | why |
+|---|---|
+| no `--days`, or more than 90 | There is no "forever". A permanent acknowledgement is a permanent blind spot, so the worst case of a wrong call is bounded and self-healing. The cap is a CHECK constraint, so a direct INSERT cannot buy more either. |
+| a **fatal** check | `ledger_net_zero` and its siblings are the invariants the whole book rests on. If one fires the answer is a human, now — not a note and a date. Enforced again in the runner, on the severity of the check actually running. |
+| a check name that is not in the registry | A typo would write a row that silences nothing and reads, forever after, as though someone had handled it. |
+| a second acknowledgement on a live one | You should read the first operator's note before deciding this is handled. Revoke to replace. |
+
+Suppression is on the finding **key**, not its detail: a dispute moving `needs_response` → `lost`
+keeps the same key and stays quiet. That is the deliberate trade — keying on detail would re-page
+on every incidental field change — and the expiry cap is what bounds it. If it ever bites, the
+escape hatch is a `detail_fingerprint` column compared in the runner's filter: additive, no
+backfill.
+
+If the acknowledgements table cannot be read, the run **fails open**: every finding pages, and a
+separate `acknowledgements unreadable` page fires so a silently-disabled suppression layer cannot
+pass for a system with nothing acknowledged.
+
+```sql
+-- who silenced what, and when they let it ring again
+select created_at, actor, action, note from ops_actions
+where action in ('reconciliation_ack', 'reconciliation_ack_revoke')
+order by created_at desc limit 20;
+```
 
 ## Known gaps (phase 2)
 

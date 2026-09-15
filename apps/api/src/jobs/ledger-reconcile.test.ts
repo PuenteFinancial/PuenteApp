@@ -19,6 +19,15 @@ vi.mock('../services/supabase.js', () => ({
   },
 }))
 
+// The ack SERVICE is covered in services/reconciliation-ack.test.ts. Here only the LOAD is
+// mocked — partitionFindings stays real, because "a fatal check is never suppressed" is a runner
+// guarantee and mocking the function that enforces it would test nothing.
+const loadActiveAcknowledgements = vi.hoisted(() => vi.fn())
+vi.mock('../services/reconciliation-ack.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/reconciliation-ack.js')>()),
+  loadActiveAcknowledgements: (...args: unknown[]) => loadActiveAcknowledgements(...args),
+}))
+
 const captureMessage = vi.hoisted(() => vi.fn())
 const setFingerprint = vi.hoisted(() => vi.fn())
 const setContext = vi.hoisted(() => vi.fn())
@@ -59,6 +68,7 @@ let warnSpy: ReturnType<typeof vi.spyOn>
 
 beforeEach(() => {
   buildChecks.mockReset()
+  loadActiveAcknowledgements.mockReset().mockResolvedValue(new Map())
   insert.mockReset().mockResolvedValue({ error: null })
   from.mockReset().mockImplementation((table: string) => {
     if (table === 'reconciliation_runs') return { insert }
@@ -249,5 +259,157 @@ describe('reconcileLedger', () => {
     insert.mockResolvedValue({ error: { message: 'insert denied' } })
 
     await expect(reconcileLedger()).rejects.toThrow(/reconciliation_runs insert failed: insert denied/)
+  })
+})
+
+// ── acknowledgements ────────────────────────────────────────────────────────
+// The runner's three guarantees. The service's own rules (expiry, fatal refusal at write time,
+// duplicate refusal) live in services/reconciliation-ack.test.ts.
+//
+// Keys are built with the REAL ackKey rather than a hand-written separator: hardcoding it here
+// would let the runner and the service drift apart with every test still green.
+const { ackKey } = await import('../services/reconciliation-ack.js')
+
+describe('reconcileLedger acknowledgements', () => {
+  const ack = (checkName: string, findingKey: string) => ({
+    id: 'ack-1',
+    checkName,
+    findingKey,
+    actor: 'ops:someone',
+    note: 'investigated, predates the loss path',
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    revokedAt: null,
+    createdAt: '2026-09-15T00:00:00.000Z',
+  })
+  const finding = (key: string) => ({ key, detail: {} })
+  const activeFor = (checkName: string, findingKey: string) =>
+    new Map([[ackKey(checkName, findingKey), ack(checkName, findingKey)]])
+
+  it('an acknowledged finding does not page, and the run passes', async () => {
+    loadActiveAcknowledgements.mockResolvedValue(activeFor('stripe_disputes', 'dispute:du_1'))
+    buildChecks.mockReturnValue([
+      mkCheck('stripe_disputes', 'error', {
+        status: 'findings',
+        findings: [finding('dispute:du_1')],
+      }),
+    ])
+
+    await expect(reconcileLedger()).resolves.toBe(0)
+
+    expect(captureMessage).not.toHaveBeenCalled()
+    expect(insertedRow()).toMatchObject({
+      status: 'pass',
+      findings_count: 0,
+      acknowledged_count: 1,
+      checks: [{ name: 'stripe_disputes', findings_count: 0, acknowledged_count: 1 }],
+    })
+  })
+
+  it('a clean-looking run says so on stdout when something is only silent', async () => {
+    loadActiveAcknowledgements.mockResolvedValue(activeFor('stripe_disputes', 'dispute:du_1'))
+    buildChecks.mockReturnValue([
+      mkCheck('stripe_disputes', 'error', {
+        status: 'findings',
+        findings: [finding('dispute:du_1')],
+      }),
+    ])
+
+    await reconcileLedger()
+
+    // The whole point: a pass that is only a pass because something is muted must not read like
+    // an empty one on the Railway stream.
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1 acknowledged'))
+  })
+
+  it('only the acknowledged key is suppressed — its neighbours still page', async () => {
+    loadActiveAcknowledgements.mockResolvedValue(activeFor('stripe_disputes', 'dispute:du_1'))
+    buildChecks.mockReturnValue([
+      mkCheck('stripe_disputes', 'error', {
+        status: 'findings',
+        findings: [finding('dispute:du_1'), finding('dispute:du_2')],
+      }),
+    ])
+
+    await expect(reconcileLedger()).resolves.toBe(1)
+
+    expect(captureMessage).toHaveBeenCalledTimes(1)
+    expect(captureMessage).toHaveBeenCalledWith(
+      'reconciliation: stripe_disputes — dispute:du_2',
+      'error',
+    )
+    expect(insertedRow()).toMatchObject({
+      status: 'findings',
+      findings_count: 1,
+      acknowledged_count: 1,
+    })
+  })
+
+  it('an acknowledgement for one check never silences the same key on another', async () => {
+    loadActiveAcknowledgements.mockResolvedValue(activeFor('stripe_disputes', 'shared-key'))
+    buildChecks.mockReturnValue([
+      mkCheck('bridge_orphans', 'error', { status: 'findings', findings: [finding('shared-key')] }),
+    ])
+
+    await expect(reconcileLedger()).resolves.toBe(1)
+    expect(captureMessage).toHaveBeenCalledWith(
+      'reconciliation: bridge_orphans — shared-key',
+      'error',
+    )
+  })
+
+  it('a FATAL check is never suppressed, even with a row saying otherwise', async () => {
+    loadActiveAcknowledgements.mockResolvedValue(activeFor('ledger_net_zero', 'imbalance'))
+    buildChecks.mockReturnValue([
+      mkCheck('ledger_net_zero', 'fatal', { status: 'findings', findings: [finding('imbalance')] }),
+    ])
+
+    await expect(reconcileLedger()).resolves.toBe(1)
+
+    expect(captureMessage).toHaveBeenCalledWith(
+      'reconciliation: ledger_net_zero — imbalance',
+      'fatal',
+    )
+    expect(insertedRow()).toMatchObject({
+      status: 'findings',
+      findings_count: 1,
+      acknowledged_count: 0,
+    })
+  })
+
+  it('an unreadable acknowledgements table FAILS OPEN — everything pages, loudly', async () => {
+    loadActiveAcknowledgements.mockRejectedValue(new Error('select denied'))
+    buildChecks.mockReturnValue([
+      mkCheck('stripe_disputes', 'error', {
+        status: 'findings',
+        findings: [finding('dispute:du_1')],
+      }),
+    ])
+
+    await expect(reconcileLedger()).resolves.toBe(1)
+
+    // The finding pages...
+    expect(captureMessage).toHaveBeenCalledWith(
+      'reconciliation: stripe_disputes — dispute:du_1',
+      'error',
+    )
+    // ...and so does the fact that suppression was not applied. A silently-disabled suppression
+    // layer looks exactly like a system with nothing acknowledged.
+    expect(captureMessage).toHaveBeenCalledWith(
+      'reconciliation: acknowledgements unreadable — every finding paged',
+      'error',
+    )
+    expect(insertedRow()).toMatchObject({ status: 'error' })
+  })
+
+  it('acknowledged_count is omitted per-check when nothing was silenced', async () => {
+    buildChecks.mockReturnValue([mkCheck('a', 'warning', pass)])
+
+    await reconcileLedger()
+
+    const row = insertedRow()
+    expect(row['acknowledged_count']).toBe(0)
+    expect((row['checks'] as Array<Record<string, unknown>>)[0]).not.toHaveProperty(
+      'acknowledged_count',
+    )
   })
 })
