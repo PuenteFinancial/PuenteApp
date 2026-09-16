@@ -40,23 +40,34 @@ import { refundPayoutFailure, releaseStaleRefundClaim } from './refunds.js'
 const refundCalls: unknown[] = []
 vi.mock('./funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./funding/index.js')>()
-  const spied = () =>
-    new Proxy(actual.getFundingProcessor(), {
-      get(target, prop, recv) {
-        if (prop !== 'refund') return Reflect.get(target, prop, recv)
+  const spy = (target: object) =>
+    new Proxy(target, {
+      get(t, prop, recv) {
+        if (prop !== 'refund') return Reflect.get(t, prop, recv)
         return (input: unknown) => {
           refundCalls.push(input)
-          return (target as { refund: (i: unknown) => unknown }).refund(input)
+          return (t as { refund: (i: unknown) => unknown }).refund(input)
         }
       },
     })
   return {
     ...actual,
-    getFundingProcessor: spied,
-    // The refund paths resolve the processor per ROW (transfers.funding_processor,
-    // audit corner 1). Rows seeded here carry no stamp, so the accessor must
-    // hand back the same spied instance the process would.
-    processorFor: spied,
+    getFundingProcessor: () => spy(actual.getFundingProcessor()),
+    // WRAPS the real resolver rather than aliasing getFundingProcessor.
+    //
+    // It used to alias it, justified by "rows seeded here carry no stamp, so the
+    // accessor must hand back the same spied instance the process would." True
+    // of those rows, and it made this file structurally unable to tell the two
+    // accessors apart — which is the exact shape of the bug #343 fixed, a
+    // CONFIRMED production double-pay where the pay step read the process rail
+    // instead of the row's. A suite covering the refund tail should be able to
+    // catch that, and aliasing guaranteed it never could.
+    //
+    // Delegating preserves every existing test (an unstamped row still falls
+    // back to the process processor, inside actual.processorFor) and lets a row
+    // stamped `manual` actually resolve the manual adapter — which is what the
+    // awaiting-disbursement test below needs to be real rather than decorative.
+    processorFor: (row: unknown) => spy(actual.processorFor(row as never)),
   }
 })
 
@@ -74,6 +85,12 @@ const T_CLAIM = '00000000-0000-4000-8000-000000000085'
 // PR-S2: the VOIDED undo arm — the REFUNDED batch reverses FUNDED instead of
 // crediting cash, proven against the real RPC + net-zero constraint.
 const T_VOID = '00000000-0000-4000-8000-000000000086'
+// B6/#353: an undo the rail cannot actually perform. Stamped `manual`, so
+// processorFor resolves the manual adapter and `refund` answers `pending`.
+const T_MANUAL = '00000000-0000-4000-8000-000000000087'
+// B2/#350: the crash-recovery row (ref persisted, state unsettled) that a
+// dispute lands on afterwards. The interlock must NOT refuse it.
+const T_DISPUTED_LATE = '00000000-0000-4000-8000-000000000088'
 
 const S = 19801 // quoted send principal
 const FEE = 199
@@ -142,6 +159,8 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
     await seedFundedTransfer(T_REFUND, destination.rows[0].id)
     await seedFundedTransfer(T_OPS, destination.rows[0].id)
     await seedFundedTransfer(T_VOID, destination.rows[0].id)
+    await seedFundedTransfer(T_MANUAL, destination.rows[0].id)
+    await seedFundedTransfer(T_DISPUTED_LATE, destination.rows[0].id)
   })
 
   afterAll(async () => {
@@ -556,5 +575,76 @@ describe.skipIf(!runDb)('refund tail ledger walk (integration, local Supabase)',
     ).resolves.toEqual({ done: false, reason: 'not_payout_failed', state: 'PENDING_PAYMENT' })
 
     expect(await countEntries(other)).toBe(0)
+  })
+
+  // The two branches #350 and #353 added had, until now, only ever met a mocked
+  // Supabase. Both turn on a column the service SELECTS and a rail the row
+  // STAMPS — neither of which a mock can get wrong, and both of which real
+  // PostgREST can.
+  it('B6: a rail that cannot disburse rests at PAYOUT_FAILED and posts no REFUNDED batch', async () => {
+    await walkToPayoutFailed(T_MANUAL)
+    // The stamp is the whole point: processorFor reads it, resolves the manual
+    // adapter, and that adapter answers `pending` because the funds were
+    // collected somewhere we do not operate.
+    await db.query(`update public.transfers set funding_processor = 'manual' where id = $1`, [
+      T_MANUAL,
+    ])
+
+    const outcome = await refundPayoutFailure({
+      transferId: T_MANUAL,
+      actor: 'ops:jphelps',
+      reason: 'operator-triggered refund on a manual rail',
+    })
+    expect(outcome).toMatchObject({ done: true, outcome: 'awaiting_disbursement' })
+
+    const row = await db.query(
+      'select state, refund_payment_ref from public.transfers where id = $1',
+      [T_MANUAL],
+    )
+    // Rests, with the debt recorded. Settling REFUNDED here would tell the
+    // sender their money came back when nobody has sent it.
+    expect(row.rows[0].state).toBe('PAYOUT_FAILED')
+    expect(row.rows[0].refund_payment_ref).toMatch(/^manualrefund_/)
+
+    // bridge_return posted (the principal DID come back from Bridge); REFUNDED
+    // did not. This is the assertion the ops route's step 4 depends on — it
+    // stops expecting the second batch precisely because it never posts here.
+    const keys = (
+      await db.query(
+        `select idempotency_key from public.ledger_transactions where transfer_id = $1`,
+        [T_MANUAL],
+      )
+    ).rows.map((r: { idempotency_key: string }) => r.idempotency_key)
+    expect(keys).toContain(`${T_MANUAL}:bridge_return`)
+    expect(keys).not.toContain(`${T_MANUAL}:REFUNDED`)
+  })
+
+  it('B2: a dispute arriving AFTER the money left still settles, rather than stranding forever', async () => {
+    await walkToPayoutFailed(T_DISPUTED_LATE)
+    // The crash-recovery shape: a prior run disbursed and persisted the ref, then
+    // died before the settling transition. Then a chargeback lands.
+    await db.query(
+      `update public.transfers
+         set refund_payment_ref = 'mockrefund_prior_run',
+             funding_disputed_at = now()
+       where id = $1`,
+      [T_DISPUTED_LATE],
+    )
+
+    await expect(
+      refundPayoutFailure({
+        transferId: T_DISPUTED_LATE,
+        actor: 'ops:jphelps',
+        reason: 'settle a crash-recovery row',
+      }),
+    ).resolves.toEqual({ done: true, outcome: 'already_disbursed' })
+
+    // If the interlock ran here it would refuse, and NOTHING else could finish
+    // this row: payout-poll's self-heal scan filters on refund_payment_ref is
+    // null and skips exactly these. The payable would stay open forever.
+    const row = await db.query('select state from public.transfers where id = $1', [
+      T_DISPUTED_LATE,
+    ])
+    expect(row.rows[0].state).toBe('REFUNDED')
   })
 })
