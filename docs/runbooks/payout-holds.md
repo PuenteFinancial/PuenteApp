@@ -131,10 +131,15 @@ It **fails closed**: a provider that cannot be reached stops the run rather than
 that exposes no dispute check at all (mock, `manual`) is different — there is nothing to dispute —
 and proceeds on our record, which the dry run states explicitly.
 
-**It also refuses a transfer already `CANCELED` by the SENDER** (`not_our_cancel`). That row's
-books are square — the sender's cancel posts the FUNDED-batch reversal — so finishing it here
-would post a second refund batch against a liability that was never recognized. What such a row
-is waiting for is the disbursement: [manual-refund.md](manual-refund.md).
+**It also refuses a transfer `CANCELED` by the SENDER** (`not_our_cancel`). That row's books are
+square — the sender's cancel posts the FUNDED-batch reversal — so finishing it here would post a
+second refund batch against a liability that was never recognized. What such a row is waiting for
+is the disbursement: [manual-refund.md](manual-refund.md).
+
+That refusal can also arrive on a transfer that read `FUNDED` when you started, if the sender
+cancels inside their 30-minute window while the tool is running. Nothing is wrong and nothing was
+written — the tool asked whose cancel it was before it disbursed, and the answer came back "not
+ours". Treat the row exactly as above.
 
 **Verify afterwards:** the tool prints both ledger keys (`<id>:CANCELED`, `<id>:REFUNDED`) and the
 transition query. The `ops_actions` row is `action = 'transfer_cancel'`.
