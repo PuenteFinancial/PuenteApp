@@ -277,6 +277,50 @@ describe('refundPayoutFailure', () => {
 
   // PR-S2: the undo's MODE picks the REFUNDED batch. Under real ACH timing the
   // Stripe adapter usually VOIDS (the PI is still processing when a payout
+  it('rests at PAYOUT_FAILED when the undo needs a human to move the money', async () => {
+    // The manual and onramp rails collected the funds somewhere we do not
+    // operate, so `refund` answers `pending` and a person wires it back.
+    // funding/manual.ts: "Returning status: 'succeeded' would book a
+    // disbursement that never happened and tell the sender they had been made
+    // whole." Settling REFUNDED here would be exactly that lie.
+    q('transfers', parked(), claimWon, persistOk)
+    refund.mockResolvedValue({
+      provider: 'manual',
+      ref: 'manualrefund_1',
+      status: 'pending',
+      mode: 'refunded',
+    })
+
+    await expect(
+      refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' }),
+    ).resolves.toEqual({
+      done: true,
+      outcome: 'awaiting_disbursement',
+      refundRef: 'manualrefund_1',
+    })
+
+    // The settle is the whole point: no REFUNDED transition, so no REFUNDED
+    // ledger batch, so transfer_payable stays open saying what is owed.
+    expect(transition).not.toHaveBeenCalled()
+  })
+
+  it('does NOT page for that rest — unlike ops-cancel, and deliberately', async () => {
+    // PAYOUT_FAILED is inside reconciliation's AGING_OR_FILTER, so the row is
+    // already surfaced by the aging check. ops-cancel.ts pages only because its
+    // resting CANCELED is watched by nothing. A second alarm for a row that is
+    // already on the board is how ops learns to ignore the board.
+    q('transfers', parked(), claimWon, persistOk)
+    refund.mockResolvedValue({
+      provider: 'manual',
+      ref: 'manualrefund_1',
+      status: 'pending',
+      mode: 'refunded',
+    })
+
+    await refundPayoutFailure({ transferId: T, actor: 'ops:jphelps', reason: 'r' })
+    expect(captureMessage).not.toHaveBeenCalled()
+  })
+
   // fails), and posting the cash batch for a void would credit cash_clearing
   // for money that never moved.
   it('a VOIDED undo settles with the FUNDED reversal — no cash line', async () => {

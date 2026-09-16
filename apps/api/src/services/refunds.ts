@@ -9,7 +9,7 @@ import {
   type LedgerEntryJson,
 } from './transfers.js'
 import { postLedgerTransaction, type LedgerEntryInput } from './ledger.js'
-import { processorFor, undoModeForRef } from './funding/index.js'
+import { processorFor, undoModeForRef, undoRequiresManualDisbursement } from './funding/index.js'
 import { getBridgeTransfer } from './bridge.js'
 import { verifyFundingNotDisputed } from './dispute-interlock.js'
 
@@ -153,6 +153,18 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // exactly that — so using it for a run that wrote nothing would be a lie.
 export type RefundOutcome =
   | { done: true; outcome: 'refunded' | 'already_disbursed' | 'already_settled' }
+  /**
+   * The undo is RECORDED but the money has not moved: the funding was collected
+   * on a rail we do not operate (manual, onramp), so `refund` answered `pending`
+   * and a human still has to send it. The transfer rests at PAYOUT_FAILED with
+   * the ref persisted — `transfer_payable` stays open and says what is owed.
+   *
+   * `done: true` because the run completed everything it could; NOT `refunded`,
+   * because nobody has been refunded. Callers that report a result to a human
+   * must say so — the whole reason this arm exists is that "refunded" would be
+   * a lie to the sender. Mirrors OpsCancelOutcome's arm of the same name.
+   */
+  | { done: true; outcome: 'awaiting_disbursement'; refundRef: string }
   | { done: false; reason: 'not_payout_failed'; state: string }
   /** The funding behind this transfer was clawed back. Refunding on top of a
    *  chargeback pays the sender twice — the loss path owns this row, not the
@@ -395,6 +407,29 @@ export async function refundPayoutFailure(input: {
     // one. A null is a logic fault — never guess a ledger batch over it.
     throw new Error(`refund settle reached with no disbursement ref for ${transfer.id}`)
   }
+  // AN UNDO THE PROVIDER CANNOT ACTUALLY PERFORM has issued nothing.
+  //
+  // On the manual and onramp rails the funds were collected somewhere we do not
+  // operate, so `refund` answers `pending` with a `manualrefund_`/`onramprefund_`
+  // ref and a human wires the money back. funding/manual.ts says why in as many
+  // words: "Returning status: 'succeeded' would book a disbursement that never
+  // happened and tell the sender they had been made whole."
+  //
+  // Settling REFUNDED here would be exactly that lie — in the ledger, on the ops
+  // board, and to the sender. The transfer rests at PAYOUT_FAILED with the ref
+  // recorded, which is the honest state: `transfer_payable` stays open and says
+  // precisely what is owed.
+  //
+  // No Sentry page, unlike the identical branch in ops-cancel.ts, and the
+  // difference is not an oversight: that tail rests at CANCELED, which nothing
+  // watches, so its page IS the follow-up. PAYOUT_FAILED is inside
+  // reconciliation's AGING_OR_FILTER, so this row is already surfaced by the
+  // aging check on the next run. A second alarm for a row that is already on the
+  // board trains ops to ignore the board.
+  if (undoRequiresManualDisbursement(disbursedRef)) {
+    return { done: true, outcome: 'awaiting_disbursement', refundRef: disbursedRef }
+  }
+
   const undoMode = undoModeForRef(disbursedRef)
   // Named in the ledger description so a pre-submit refund is legible in the
   // books without cross-referencing provider_transfer_ref.

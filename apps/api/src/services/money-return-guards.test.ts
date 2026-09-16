@@ -82,17 +82,11 @@ const PATHS: { file: string; what: string }[] = [
  * entry.
  */
 const EXEMPT: Record<string, Partial<Record<Guard, string>>> = {
-  'services/refunds.ts': {
-    undoRequiresManualDisbursement:
-      'KNOWN GAP (B6). On a manual or onramp rail this tail settles REFUNDED for money nobody has ' +
-      'sent yet. Its resting state, PAYOUT_FAILED, is inside reconciliation AGING_OR_FILTER, so the ' +
-      'row stays visible meanwhile — which is why this is a lie to the sender rather than a lost row.',
-  },
-  'services/cancellation-review.ts': {
-    undoRequiresManualDisbursement:
-      'KNOWN GAP (B6), same shape as the refund tail. Resting state UNDER_REVIEW is also inside ' +
-      'AGING_OR_FILTER.',
-  },
+  // services/refunds.ts and services/cancellation-review.ts had the only two
+  // KNOWN GAP entries this map has ever carried (B6, the manual-disbursement
+  // check). Both closed; both entries deleted, because this test demanded it —
+  // the "no exemption outlives the gap" case failed on the very next PR after
+  // the one that wrote them, which is the whole reason it exists.
   'routes/v1/transfers.ts': {
     claimRefund:
       'DELIBERATE. This path guards differently: a write-once `.is(refund_payment_ref, null)` update ' +
