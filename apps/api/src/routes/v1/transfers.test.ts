@@ -140,6 +140,10 @@ const { FundingInitiationError } = await import('../../services/funding/index.js
 const { idempotencyPlugin } = await import('../../plugins/idempotency.js')
 const { TransferRpcError } = await import('../../services/transfers.js')
 
+// The proxy's proof (src/test/setup.ts). Without it the API correctly ignores
+// the forwarded address, so these assertions would silently test the fallback.
+const PROXY_TRUST = 'test_proxy_trust_secret_at_least_32_chars'
+
 const mockAuth = fp(async (server) => {
   server.addHook('onRequest', async (request, reply) => {
     if (request.routeOptions?.config?.public) return
@@ -614,7 +618,9 @@ describe('POST /v1/transfers/:id/confirm', () => {
     routeTables()
     const app = await buildApp()
 
-    const res = await confirm(app).set('X-Client-Ip', '203.0.113.9')
+    const res = await confirm(app)
+      .set('X-Client-Ip', '203.0.113.9')
+      .set('x-proxy-trust', PROXY_TRUST)
 
     expect(res.status).toBe(200)
     const arg = initiateFunding.mock.calls[0]![0] as Record<string, unknown>

@@ -52,6 +52,10 @@ vi.mock('../../services/supabase.js', () => ({
 
 const { authRoute } = await import('./auth.js')
 
+// The proxy's proof (src/test/setup.ts). Without it the API correctly ignores
+// the forwarded address, so these assertions would silently test the fallback.
+const PROXY_TRUST = 'test_proxy_trust_secret_at_least_32_chars'
+
 describe('auth OTP routes', () => {
   let app: ReturnType<typeof Fastify>
 
@@ -293,6 +297,7 @@ describe('auth OTP routes', () => {
       const res = await supertest(app.server)
         .post('/v1/auth/otp/verify')
         .set('x-client-ip', '203.0.113.7')
+        .set('x-proxy-trust', PROXY_TRUST)
         .set('x-client-ua', 'Mozilla/5.0 (iPhone)')
         .send({ phone: '15555555555', token: '123456' })
 

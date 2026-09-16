@@ -18,6 +18,7 @@ import {
 import { getFundingProcessor } from '../../services/funding/index.js'
 import { UNSUPPORTED_CODES } from '../../services/funding/stripe-onramp.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
+import { clientIp, clientUserAgent } from '../../utils/client-origin.js'
 
 // K3 (KYC rehaul): the server surface for Link OAuth + crypto status. These
 // routes exist for the K5 send flow; until then they are a dark, authed
@@ -458,9 +459,9 @@ export async function cryptoRoute(server: FastifyInstance) {
       }
 
       // Real client IP (widget-rail contract): Stripe geo-checks it and
-      // refuses private/localhost addresses itself.
-      const forwardedIp = request.headers['x-client-ip']
-      const clientIp = (typeof forwardedIp === 'string' ? forwardedIp : request.ip) || ''
+      // refuses private/localhost addresses itself. Proxy-forwarded only when
+      // the proxy proved itself (utils/client-origin.ts).
+      const senderIp = clientIp(request) ?? ''
 
       try {
         const accessToken = await mintAccessToken(userId)
@@ -469,7 +470,7 @@ export async function cryptoRoute(server: FastifyInstance) {
           cryptoCustomerId,
           paymentTokenId: request.body.paymentTokenId,
           destinationAmountUsd: ((transfer.send_amount_minor + transfer.fee_amount_minor) / 100).toFixed(2),
-          clientIp,
+          clientIp: senderIp,
           accessToken,
         })
 
@@ -541,9 +542,8 @@ export async function cryptoRoute(server: FastifyInstance) {
         return sendError(reply, 409, 'conflict', 'This payment attempt can no longer be used — start again')
       }
 
-      const forwardedIp = request.headers['x-client-ip']
-      const clientIp = (typeof forwardedIp === 'string' ? forwardedIp : request.ip) || ''
-      const userAgent = request.headers['user-agent'] ?? ''
+      const senderIp = clientIp(request) ?? ''
+      const userAgent = clientUserAgent(request) ?? ''
 
       try {
         const accessToken = await mintAccessToken(userId)
@@ -551,7 +551,7 @@ export async function cryptoRoute(server: FastifyInstance) {
           sessionId: request.body.sessionId,
           accessToken,
           ...(request.body.paymentMethodType === 'us_bank_account' && {
-            achMandate: { clientIp, userAgent },
+            achMandate: { clientIp: senderIp, userAgent },
           }),
         })
         // client_secret goes to the SDK callback and nowhere else — never

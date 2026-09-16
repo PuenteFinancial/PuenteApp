@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { BRIDGE_TOS_VERSION, REQUIRED_CONSENTS, type ConsentDocument } from '@puente/shared'
 import { supabaseAdmin } from '../../services/supabase.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
+import { clientIp, clientUserAgent } from '../../utils/client-origin.js'
 
 // K1 (KYC rehaul): the consent leg of onboarding. Grants are append-only rows
 // in `consents`; what counts as "current" is REQUIRED_CONSENTS in
@@ -137,21 +138,18 @@ interface BridgeTosBody {
   locale?: 'en' | 'es'
 }
 
-// Which network endpoint and client presented a document — stored as
-// evidence, never logged. Browser traffic arrives via the Next.js proxy, so
-// the true address rides in x-client-ip (transfer-confirm precedent);
-// request.ip is the fallback for direct callers. An authenticated caller
-// spoofing the header only pollutes their own consent evidence.
+// Which network endpoint and client presented a document — stored as evidence,
+// never logged. THE MOST LOAD-BEARING CALLER of client-origin.ts: this row is
+// the E-SIGN record and the NACHA WEB-debit authorization, so an address here
+// may have to stand up years later. Browser traffic arrives via the Next.js
+// proxy, so the true address rides in x-client-ip — honoured only when the
+// proxy proves itself, otherwise the socket address. A forged header used to
+// land here indistinguishable from a real one.
 function consentEvidence(request: {
   headers: Record<string, string | string[] | undefined>
   ip: string
 }): { ip: string | null; user_agent: string | null } {
-  const forwardedIp = request.headers['x-client-ip']
-  const userAgent = request.headers['user-agent']
-  return {
-    ip: (typeof forwardedIp === 'string' ? forwardedIp : request.ip) || null,
-    user_agent: typeof userAgent === 'string' ? userAgent : null,
-  }
+  return { ip: clientIp(request), user_agent: clientUserAgent(request) }
 }
 
 export async function consentsRoute(server: FastifyInstance) {
