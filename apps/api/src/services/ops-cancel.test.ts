@@ -91,6 +91,12 @@ function chain(table: string, result: unknown): Record<string, unknown> {
 const T = '00000000-0000-4000-8000-000000000091'
 const ACTOR = 'ops:00000000-0000-4000-8000-0000000000aa'
 const S = 500
+// NON-ZERO ON PURPOSE. This tail refunds `send + fee`, and every fixture here
+// used to set the fee to 0 — so dropping the fee leg from the refund amount
+// left the WHOLE suite green (2491 tests, verified by mutation 2026-09-16) on
+// the one path whose entire job is making a sender whole. Same value as
+// refunds.test.ts and cancellation-review.test.ts, which do cover it.
+const FEE = 199
 const MARGIN = 5
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -102,7 +108,7 @@ const held = (over: Record<string, unknown> = {}) => ({
     id: T,
     state: 'FUNDED',
     send_amount_minor: S,
-    fee_amount_minor: 0,
+    fee_amount_minor: FEE,
     margin_minor: MARGIN,
     payout_hold_reason: 'payability',
     payout_held_at: '2026-09-09T22:11:47.807Z',
@@ -260,7 +266,7 @@ describe('cancelHeldTransfer', () => {
       holdReason: 'payability',
       ledgerEntries: cancelRefundOwedLedgerEntries({
         send_amount_minor: S,
-        fee_amount_minor: 0,
+        fee_amount_minor: FEE,
         margin_minor: MARGIN,
       }),
     })
@@ -271,7 +277,7 @@ describe('cancelHeldTransfer', () => {
     expect(processorRefund.mock.calls[0]![0]).toEqual({
       transferId: T,
       paymentRef: 'cs_test_1',
-      amountMinor: S,
+      amountMinor: S + FEE, // the fee leg, which a zero fixture could not see
       currency: 'USD',
       idempotencyKey: 'bridge-key-1:refund',
     })
@@ -285,7 +291,7 @@ describe('cancelHeldTransfer', () => {
       actor: ACTOR,
       ledgerEntries: refundOwedPaidLedgerEntries({
         send_amount_minor: S,
-        fee_amount_minor: 0,
+        fee_amount_minor: FEE,
         margin_minor: MARGIN,
       }),
     })
@@ -329,7 +335,7 @@ describe('cancelHeldTransfer', () => {
     expect(transition.mock.calls[0]![0]).toMatchObject({
       ledgerEntries: refundOwedVoidedLedgerEntries({
         send_amount_minor: S,
-        fee_amount_minor: 0,
+        fee_amount_minor: FEE,
         margin_minor: MARGIN,
       }),
     })
@@ -388,7 +394,7 @@ describe('cancelHeldTransfer', () => {
     expect(transition.mock.calls[0]![0]).toMatchObject({
       ledgerEntries: refundOwedPaidLedgerEntries({
         send_amount_minor: S,
-        fee_amount_minor: 0,
+        fee_amount_minor: FEE,
         margin_minor: MARGIN,
       }),
     })
@@ -403,7 +409,7 @@ describe('cancelHeldTransfer', () => {
     expect(transition.mock.calls[0]![0]).toMatchObject({
       ledgerEntries: refundOwedVoidedLedgerEntries({
         send_amount_minor: S,
-        fee_amount_minor: 0,
+        fee_amount_minor: FEE,
         margin_minor: MARGIN,
       }),
     })

@@ -76,12 +76,20 @@ const ACTOR = `ops:${OPERATOR}`
 
 // The staging shape this was built for, scaled to the db-test quote fixtures:
 // revenue carried in margin_minor, fee zero.
-const S = 20000 // the full charge
+const S = 20000 // the send amount
+// NON-ZERO, AND DELIBERATELY NOT EQUAL TO MARGIN. The sender is owed `send +
+// fee`, and revenue is `fee + margin` — with a zero fee both collapse into the
+// send amount and the arithmetic stops being testable. Verified by mutation
+// 2026-09-16: dropping the fee leg from this tail's refund left all 2491 tests
+// green. A value distinct from MARGIN also keeps `fee_revenue` from reading the
+// same under `fee + margin` as under `2 x margin`.
+const FEE = 250
 const MARGIN = 199
 const PRINCIPAL = S - MARGIN
-const TOTAL = S
+const REVENUE = FEE + MARGIN
+const TOTAL = S + FEE
 
-const amounts = { send_amount_minor: S, fee_amount_minor: 0, margin_minor: MARGIN }
+const amounts = { send_amount_minor: S, fee_amount_minor: FEE, margin_minor: MARGIN }
 const json = (entries: unknown) => JSON.stringify(entries)
 
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
@@ -95,7 +103,7 @@ describe.skipIf(!runDb)('ops cancel of an undeliverable payout (integration, loc
       `insert into public.quotes (user_id, payout_destination_id, send_amount_minor, send_currency,
          receive_amount_minor, receive_currency, fee_amount_minor, fee_currency,
          fx_rate, source_rate, fx_rate_at, expires_at, status, margin_minor)
-       values ($1, $2, ${S}, 'USD', 396014, 'MXN', 0, 'USD', 19.9997, 20.100251, now(),
+       values ($1, $2, ${S}, 'USD', 396014, 'MXN', ${FEE}, 'USD', 19.9997, 20.100251, now(),
          now() + interval '15 minutes', 'active', ${MARGIN}) returning id`,
       [USER, destinationId],
     )
@@ -237,6 +245,12 @@ describe.skipIf(!runDb)('ops cancel of an undeliverable payout (integration, loc
 
     expect(await stateOf(transferId)).toBe('REFUNDED')
     expect(refundCalls).toHaveLength(1)
+    // WHAT was sent back, not just that something was. The ledger assertions
+    // below net to zero whatever the processor was asked for — the batches are
+    // built from the row, and the disbursement amount is computed separately at
+    // the call site, so only this line connects the two. Dropping the fee leg
+    // from that expression left every balance assertion here green.
+    expect(refundCalls[0]).toMatchObject({ amountMinor: TOTAL, currency: 'USD' })
 
     // THE POINT. FUNDED + funding_cleared + CANCELED + REFUNDED nets every
     // touched account back to zero on a transfer whose ACH already settled.
@@ -585,7 +599,7 @@ describe.skipIf(!runDb)('ops cancel of an undeliverable payout (integration, loc
   it('PRINCIPAL and revenue split the total exactly (no float, no rounding slack)', () => {
     const entries = cancelRefundOwedLedgerEntries(amounts)
     expect(entries.find((e) => e.account_code === 'transfer_payable')!.amount_minor).toBe(PRINCIPAL)
-    expect(entries.find((e) => e.account_code === 'fee_revenue')!.amount_minor).toBe(MARGIN)
+    expect(entries.find((e) => e.account_code === 'fee_revenue')!.amount_minor).toBe(REVENUE)
     expect(entries.find((e) => e.account_code === 'refunds_payable')!.amount_minor).toBe(TOTAL)
   })
 })
