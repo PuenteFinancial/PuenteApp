@@ -32,8 +32,27 @@ vi.mock('../services/transfers.js', async (importOriginal) => {
 // registry would construct adapters that demand secrets, so the sweep's view
 // of the processor is a controllable fake.
 const getPaymentStatus = vi.hoisted(() => vi.fn())
+
+// TWO REGISTRIES, NOT ONE — and this file is the reason the distinction needs
+// teeth. This job calls BOTH accessors on purpose: the onramp poll asks the
+// PROCESS rail (`getFundingProcessor()`, outside the row loop), and the expiry
+// asks the ROW's rail (`processorFor(row)`, audit corner 1), with a comment at
+// each site saying which and why.
+//
+// Both used to be bound to the same object. Swapping either call site for the
+// other then failed NOTHING — and #343 was a CONFIRMED PRODUCTION DOUBLE-PAY of
+// exactly that shape, a row rail silently served by the process rail. So the
+// fake now answers the two questions differently: `byRail` serves a row's
+// stamp, `current` serves the process, and `rowArgs` records what
+// `processorFor` was actually handed.
+//
+// The fallback when a row carries no stamp mirrors the real `processorFor`,
+// which returns the process instance for an unstamped row — so every existing
+// fixture here (rail `null`) keeps its old meaning.
 const processorMock = vi.hoisted(() => ({
   current: { provider: 'mock' } as { provider: string; getPaymentStatus?: unknown; expireFunding?: unknown },
+  byRail: {} as Record<string, { provider: string; getPaymentStatus?: unknown; expireFunding?: unknown }>,
+  rowArgs: [] as unknown[],
 }))
 vi.mock('../services/funding/index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/funding/index.js')>()
@@ -45,11 +64,13 @@ vi.mock('../services/funding/index.js', async (importOriginal) => {
     // "No X export is defined on the mock" suite error.
     ...actual,
     getFundingProcessor: () => processorMock.current,
-    // The reaper asks the ROW's rail (audit corner 1) via processorFor, which
-    // calls getFundingProcessor through the module's own binding — the line
-    // above does not reach it. Same fake, or the expire tests below would run
-    // against the real mock-rail adapter and never see expireFunding.
-    processorFor: () => processorMock.current,
+    // Mocked separately because processorFor calls getFundingProcessor through
+    // the module's own binding, which the line above does not reach.
+    processorFor: (row: unknown) => {
+      processorMock.rowArgs.push(row)
+      const rail = (row as { funding_processor?: string | null } | null)?.funding_processor
+      return (rail != null ? processorMock.byRail[rail] : undefined) ?? processorMock.current
+    },
   }
 })
 
@@ -84,6 +105,8 @@ beforeEach(() => {
   envMock.MANUAL_PENDING_MAX_AGE_DAYS = 7
   envMock.ONRAMP_PENDING_MAX_AGE_HOURS = 4
   processorMock.current = { provider: 'mock' }
+  processorMock.byRail = {}
+  processorMock.rowArgs.length = 0
   vi.useFakeTimers({ toFake: ['Date'] })
   vi.setSystemTime(new Date(NOW))
 })
@@ -436,5 +459,67 @@ describe('reconcilePendingTransfers — closing the processor object before fail
 
     expect(count).toBe(1)
     expect(expireFunding).not.toHaveBeenCalled()
+  })
+
+  // THE #343 SHAPE, on the one job that asks both questions.
+  //
+  // Both rails can expire, so calling the wrong one still "works" — the row is
+  // closed, the count is right, and every other assertion in this file passes.
+  // The only thing that differs is WHICH provider was told to close the object,
+  // and on a real flip that is a session left payable at one provider while we
+  // fail the row: a charge with no transfer, which is the whole reason the
+  // expiry happens first.
+  it('expires at the ROW\'s rail, not the process\'s, after a flip', async () => {
+    const rowRailExpire = vi.fn().mockResolvedValue('expired')
+    envMock.FUNDING_PROCESSOR = 'stripe_crypto'
+    processorMock.current = { provider: 'stripe_crypto', expireFunding }
+    processorMock.byRail['stripe_checkout'] = {
+      provider: 'stripe_checkout',
+      expireFunding: rowRailExpire,
+    }
+    mockPendingSelect([row('tr-preflip', 5 * HOURS, 'cs_test_preflip', 'stripe_checkout')])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    expect(rowRailExpire).toHaveBeenCalledWith({ paymentRef: 'cs_test_preflip' })
+    expect(expireFunding).not.toHaveBeenCalled() // the PROCESS rail was not asked
+    // And it was asked about this row, not about nothing: `processorFor` takes
+    // an argument and `getFundingProcessor` does not, so the recorded argument
+    // is what tells the two accessors apart at all.
+    expect(processorMock.rowArgs).toEqual([
+      expect.objectContaining({ id: 'tr-preflip', funding_processor: 'stripe_checkout' }),
+    ])
+  })
+})
+
+// The mirror of the test above, on the other accessor. The onramp poll runs
+// ONCE for the whole tick, outside the row loop, off the PROCESS rail — a
+// pre-flip row is filtered by its ref prefix, not by asking its own adapter.
+// Swapping this site to the row's rail would poll each row at whatever provider
+// last touched it, which for `cos_` refs under a flipped env is a guaranteed
+// 404 storm rather than a fail-fast.
+describe('reconcilePendingTransfers — the poll reads the PROCESS rail', () => {
+  it('polls a cos_ row through the process adapter even when the row is stamped otherwise', async () => {
+    const rowRailStatus = vi.fn()
+    envMock.FUNDING_PROCESSOR = 'stripe_crypto'
+    processorMock.current = { provider: 'stripe_crypto', getPaymentStatus }
+    processorMock.byRail['stripe_checkout'] = {
+      provider: 'stripe_checkout',
+      getPaymentStatus: rowRailStatus,
+    }
+    getPaymentStatus.mockResolvedValue({ status: 'rejected', lastError: 'card_declined' })
+    mockPendingSelect([row('tr-mixed', 2 * MINUTES, 'cos_mixed', 'stripe_checkout')])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    expect(getPaymentStatus).toHaveBeenCalledWith({ paymentRef: 'cos_mixed' })
+    expect(rowRailStatus).not.toHaveBeenCalled()
+    expect(transition).toHaveBeenCalledTimes(1)
+    expect((transition.mock.calls[0] as [Record<string, unknown>])[0]).toMatchObject({
+      toState: 'PAYMENT_FAILED',
+      reason: 'card_declined',
+    })
   })
 })

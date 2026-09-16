@@ -160,6 +160,10 @@ const DETAIL = {
     status: 'accepted',
   },
   destination: { status: 'active', hasProviderAccountRef: true, recipientStatus: 'active' },
+  // Present, and with a BLOCKER set. An absent holdRelease is the shape the
+  // wire produces when the schema drops it, so a fixture that omits it cannot
+  // tell a working wire from a broken one — see the round-trip test below.
+  holdRelease: { blocker: 'stale_quote', quoteAgeMinutes: 6_900, maxQuoteAgeMinutes: 240 },
   refund: {
     claimStatus: 'unclaimed',
     claimedAt: null,
@@ -326,6 +330,38 @@ describe('GET /v1/ops/transfers/:id', () => {
       .get(`/v1/ops/transfers/${TRANSFER}`)
       .set('Authorization', `Bearer ${ADMIN}`)
     expect(on.body.actionsEnabled).toBe(true)
+  })
+
+  // THE OTHER DIRECTION, and the one nothing was checking.
+  //
+  // The test below proves the schema DENIES what the service should not send.
+  // This one proves it ADMITS everything the service does send — which
+  // `fast-json-stringify` decides silently: a field missing from the schema is
+  // dropped with no error, no type error, and no failing test, because both
+  // ends have their own fixtures and neither looks at the wire.
+  //
+  // `holdRelease` is why this exists. It answers "would releasing this hold
+  // actually accomplish anything", and the ops board reads it as
+  // `detail.holdRelease?.blocker ?? null` — so a dropped field is not a missing
+  // section, it is the string "no blocker", and the board re-offers a Release
+  // button that can only loop. That is #337, verbatim, and deleting the whole
+  // `holdRelease` block from the response schema left all 2493 API tests green
+  // (verified by mutation 2026-09-16).
+  //
+  // Deep equality against the service's own output, not a field list: a new
+  // field added to the service and forgotten in the schema fails HERE, which is
+  // the only place the two are compared.
+  it('admits everything the service produces — the wire drops nothing', async () => {
+    const app = await buildApp()
+    const res = await supertest(app.server)
+      .get(`/v1/ops/transfers/${TRANSFER}`)
+      .set('Authorization', `Bearer ${ADMIN}`)
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ...DETAIL, actionsEnabled: false })
+    // Named separately so the failure reads as what it is rather than as one
+    // line of a large diff.
+    expect(res.body.holdRelease).toEqual(DETAIL.holdRelease)
   })
 
   it('strips unknown fields through the response schema — the wire is the allowlist', async () => {
