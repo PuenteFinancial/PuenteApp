@@ -361,19 +361,9 @@ export async function cancelHeldTransfer(
   // ── 1) the cancel ──────────────────────────────────────────────────────────
   // An already-CANCELED row resumes at step 2 (a prior run died between the
   // cancel and the disbursement); anything else must pass the guards.
+  const canceledBeforeThisRun = loaded.state === 'CANCELED'
   let row = loaded
-  if (loaded.state === 'CANCELED') {
-    // …but ONLY if it is OUR cancel. A row resting at CANCELED from the
-    // SENDER's cancel route (its void needs an out-of-band disbursement, or it
-    // crashed between the void and the REFUNDED transition) has already posted
-    // the FUNDED-batch REVERSAL — its books are square and `refunds_payable`
-    // was never credited. Settling it here would post `{id}:REFUNDED` debiting
-    // a liability that does not exist, driving refunds_payable negative and
-    // crediting cash for a second time. Different door, different tail: those
-    // rows belong to the cancel route's void tail
-    // (docs/runbooks/manual-refund.md).
-    if (!(await canceledByOps(loaded.id))) return { done: false, reason: 'not_our_cancel' }
-  } else {
+  if (!canceledBeforeThisRun) {
     const refusal = cancelRefusal(loaded, input.holdReason)
     if (refusal != null) return refusal
 
@@ -420,6 +410,41 @@ export async function cancelHeldTransfer(
       }
       throw err
     }
+  }
+
+  // ── 1a) …but ONLY if it is OUR cancel ──────────────────────────────────────
+  // A row resting at CANCELED from the SENDER's cancel route (its void needs an
+  // out-of-band disbursement, or it crashed between the void and the REFUNDED
+  // transition) has already posted the FUNDED-batch REVERSAL — its books are
+  // square and `refunds_payable` was never credited. Settling it here would
+  // post `{id}:REFUNDED` debiting a liability that does not exist, driving
+  // refunds_payable negative and crediting cash for a second time. Different
+  // door, different tail: those rows belong to the cancel route's void tail
+  // (docs/runbooks/manual-refund.md).
+  //
+  // ASKED ON BOTH ARRIVALS, and that is the whole point of it living here. The
+  // RPC has TWO success shapes: it either canceled the row, or it found one
+  // already CANCELED and returned it as a no-op — and the return value is the
+  // same `transfers` row either way, so this caller cannot tell them apart.
+  // Guarding only the pre-read branch (as this did until 2026-09-16) left the
+  // replay arm as a way in: read FUNDED, the sender cancels inside their
+  // 30-minute window before our RPC fires, the RPC replays without error, and
+  // the tail treats a sender cancel as its own — reaching the exact double-book
+  // this refusal exists to prevent, through the one door that skipped it.
+  //
+  // Not a fix in the RPC: distinguishing its arms would mean a migration and a
+  // new stable raise string, and the caller would still have to ask this
+  // question on its other branch. One question, asked once, where the answer is
+  // true for the first time on every path into step 2.
+  //
+  // Costs one extra read on the happy path. The RPC's own transition insert is
+  // committed by the time it returns, so this reads our own stamp back.
+  if (!(await canceledByOps(row.id))) return { done: false, reason: 'not_our_cancel' }
+
+  // After the guard, never before it: on the replay arm above this run did not
+  // cancel anything, and an audit line claiming it did is exactly the kind of
+  // false record the guard is here to keep out of the books.
+  if (!canceledBeforeThisRun) {
     log.info(
       { audit: true, transferId: row.id, holdReason: input.holdReason, actor: input.actor },
       'held transfer canceled by ops — payout undeliverable',

@@ -39,6 +39,25 @@ vi.mock('./funding/index.js', async (importOriginal) => {
   return { ...actual, getFundingProcessor: spied, processorFor: spied }
 })
 
+// A seam for the one race that cannot be staged any other way. The RPC's replay
+// arm is only reachable when the row goes CANCELED strictly BETWEEN the
+// service's read and its call — a window that exists for microseconds against a
+// real database and cannot be seeded, because seeding it produces the OTHER
+// shape (the pre-read branch) instead. So the interleaving is injected rather
+// than raced: the real RPC still runs, against real Postgres, and really does
+// take its replay arm.
+const beforeOpsCancel = { impl: null as null | (() => Promise<void>) }
+vi.mock('./transfers.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./transfers.js')>()
+  return {
+    ...actual,
+    opsCancelHeldTransfer: async (...args: Parameters<typeof actual.opsCancelHeldTransfer>) => {
+      if (beforeOpsCancel.impl) await beforeOpsCancel.impl()
+      return actual.opsCancelHeldTransfer(...args)
+    },
+  }
+})
+
 const { cancelHeldTransfer } = await import('./ops-cancel.js')
 const {
   fundedLedgerEntries,
@@ -468,6 +487,66 @@ describe.skipIf(!runDb)('ops cancel of an undeliverable payout (integration, loc
       'funding_cleared',
     ])
     expect((await accountTotals(transferId))['refunds_payable']).toBeUndefined()
+  })
+
+  // THE SAME REFUSAL, REACHED THROUGH THE RPC'S REPLAY ARM.
+  //
+  // Above, the row already read CANCELED. Here it reads FUNDED — the refusal
+  // gate passes — and the sender cancels before the RPC fires. The guarded
+  // UPDATE finds nothing, `v_current = 'CANCELED'`, and the function returns
+  // the row with NO error: a success the caller cannot tell apart from a cancel
+  // it performed itself. Until 2026-09-16 that was a way past `not_our_cancel`
+  // into step 2, on a row whose books the sender's cancel had already squared.
+  //
+  // The assertion that matters is the ledger. cancel_transfer posted the
+  // FUNDED-batch reversal, so refunds_payable was never credited; a `:REFUNDED`
+  // batch on top of it would debit a liability that does not exist.
+  it('refuses when the sender cancels between our read and the RPC', async () => {
+    refundCalls.length = 0
+    const transferId = await seedHeldTransfer({ windowOpen: true })
+    beforeOpsCancel.impl = async () => {
+      await db.query(
+        `select public.cancel_transfer($1, 'user', 'sender canceled', 'transfer CANCELED', $2::jsonb)`,
+        [transferId, json(canceledLedgerEntries(amounts))],
+      )
+    }
+
+    try {
+      await expect(
+        cancelHeldTransfer(
+          {
+            transferId,
+            actor: ACTOR,
+            holdReason: 'payability',
+            note: 'the sender got there first',
+            requestId: null,
+          },
+          log,
+        ),
+      ).resolves.toEqual({ done: false, reason: 'not_our_cancel' })
+    } finally {
+      beforeOpsCancel.impl = null
+    }
+
+    // Nothing posted beyond what the sender's cancel wrote — in particular no
+    // second CANCELED batch from our RPC (its replay arm posts nothing) and no
+    // REFUNDED batch from the settle we refused to reach.
+    const keys = await db.query(
+      `select transition from public.ledger_transactions where transfer_id = $1`,
+      [transferId],
+    )
+    expect((keys.rows as Array<{ transition: string }>).map((r) => r.transition).sort()).toEqual([
+      'CANCELED',
+      'FUNDED',
+      'funding_cleared',
+    ])
+    expect((await accountTotals(transferId))['refunds_payable']).toBeUndefined()
+    expect(await stateOf(transferId)).toBe('CANCELED')
+    // And no disbursement attempt. The sender's void and this tail's refund use
+    // different processor sub-keys (`:void` vs `:refund`), so they would NOT
+    // have deduped at the provider — this is the half of the race that pays
+    // twice, not merely the half that books twice.
+    expect(refundCalls).toHaveLength(0)
   })
 
   it('books the UNCLEARED shape back to zero too, through the voided arm', async () => {

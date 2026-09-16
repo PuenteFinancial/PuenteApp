@@ -241,6 +241,9 @@ describe('cancelRefusal', () => {
 
 describe('cancelHeldTransfer', () => {
   it('cancels, disburses once, and settles REFUNDED with the two keyed batches', async () => {
+    // Every path through the RPC now reads this back too: the 'whose cancel is
+    // this?' guard runs on BOTH arrivals at CANCELED, not just the pre-read one.
+    q('transfer_transitions', opsTransition)
     q('transfers', held(), claimWon, persistOk) // load, claim, ref persist
 
     await expect(cancelHeldTransfer(input(), log)).resolves.toEqual({
@@ -301,6 +304,7 @@ describe('cancelHeldTransfer', () => {
       order.push('refund')
       return { provider: 'stripe_checkout', ref: 're_1', status: 'pending', mode: 'refunded' }
     })
+    q('transfer_transitions', opsTransition)
     q('transfers', held(), claimWon, persistOk)
 
     await cancelHeldTransfer(input(), log)
@@ -315,6 +319,7 @@ describe('cancelHeldTransfer', () => {
       status: 'succeeded',
       mode: 'voided',
     })
+    q('transfer_transitions', opsTransition)
     q('transfers', held(), claimWon, persistOk)
 
     await expect(cancelHeldTransfer(input(), log)).resolves.toEqual({
@@ -428,6 +433,7 @@ describe('cancelHeldTransfer', () => {
       status: 'pending',
       mode: 'refunded',
     })
+    q('transfer_transitions', opsTransition)
     q('transfers', held({ funding_processor: 'manual' }), claimWon, persistOk)
 
     await expect(cancelHeldTransfer(input(), log)).resolves.toEqual({
@@ -452,6 +458,7 @@ describe('cancelHeldTransfer', () => {
   // disbursement and not the transition, which would replay harmlessly but
   // report this run as the one that paid.
   it('refuses on a live claim without settling the state', async () => {
+    q('transfer_transitions', opsTransition)
     q('transfers', held(), claimLost, held({ state: 'CANCELED', refund_claimed_at: minutesAgo(1) }))
 
     await expect(cancelHeldTransfer(input(), log)).resolves.toMatchObject({
@@ -463,6 +470,7 @@ describe('cancelHeldTransfer', () => {
   })
 
   it('distinguishes an ABANDONED claim, which pages rather than waits', async () => {
+    q('transfer_transitions', opsTransition)
     q(
       'transfers',
       held(),
@@ -478,6 +486,7 @@ describe('cancelHeldTransfer', () => {
   })
 
   it('reports already_settled when the claim winner finished while we waited', async () => {
+    q('transfer_transitions', opsTransition)
     q('transfers', held(), claimLost, held({ state: 'REFUNDED', refund_payment_ref: 're_1' }))
 
     await expect(cancelHeldTransfer(input(), log)).resolves.toEqual({
@@ -520,6 +529,7 @@ describe('cancelHeldTransfer', () => {
 
   it('leaves the claim standing when the processor throws (never a retry green light)', async () => {
     processorRefund.mockRejectedValue(new Error('stripe timeout'))
+    q('transfer_transitions', opsTransition)
     q('transfers', held(), claimWon)
 
     await expect(cancelHeldTransfer(input(), log)).rejects.toThrow('stripe timeout')
@@ -533,6 +543,7 @@ describe('cancelHeldTransfer', () => {
   })
 
   it('records provenance with fixed keys and the operator note', async () => {
+    q('transfer_transitions', opsTransition)
     q('transfers', held(), claimWon, persistOk)
 
     await cancelHeldTransfer(input(), log)
@@ -569,6 +580,46 @@ describe('cancelHeldTransfer', () => {
     })
     expect(transition).not.toHaveBeenCalled()
     expect(processorRefund).not.toHaveBeenCalled()
+  })
+
+  // THE SAME DOUBLE-BOOK, THROUGH THE DOOR THAT USED TO SKIP THE GUARD.
+  //
+  // The row reads FUNDED when this run loads it, so the refusal above never
+  // applies — and then the sender cancels inside their 30-minute window before
+  // our RPC fires. ops_cancel_held_transfer's UPDATE no longer matches, it
+  // takes its REPLAY arm (`v_current = 'CANCELED'` → return the row, no
+  // error), and the return value is an ordinary `transfers` row identical in
+  // shape to the one a real cancel returns. Nothing in the reply says which arm
+  // produced it.
+  //
+  // Until 2026-09-16 the guard lived inside the pre-read branch only, so this
+  // arm walked straight into step 2 and settled a sender cancel as its own.
+  // `refund_payment_ref` is null here on purpose: that is the worse half of the
+  // race, where the tail would also CLAIM and call the processor a second time
+  // under a `:refund` sub-key that does not dedupe against the sender's
+  // `:void`.
+  it('refuses when the sender cancels between our read and the RPC', async () => {
+    q('transfer_transitions', senderTransition)
+    q('transfers', held()) // FUNDED at load: the refusal gate passes
+    opsCancel.mockResolvedValue(
+      // the replay arm's return: the sender's CANCELED row, hold never cleared
+      // (cancel_transfer does not touch payout_hold_reason)
+      row({ state: 'CANCELED', refund_payment_ref: null }),
+    )
+
+    await expect(cancelHeldTransfer(input(), log)).resolves.toEqual({
+      done: false,
+      reason: 'not_our_cancel',
+    })
+    expect(opsCancel).toHaveBeenCalledTimes(1) // we really did take the RPC path
+    expect(processorRefund).not.toHaveBeenCalled()
+    expect(transition).not.toHaveBeenCalled()
+    // No claim taken either — a refusal that leaves a claim standing would
+    // block the tail that DOES own this row.
+    expect(filters.some((f) => f.table === 'transfers' && f.method === 'update')).toBe(false)
+    // And no audit line claiming this run canceled anything, because it did
+    // not: the RPC replayed.
+    expect(log.info).not.toHaveBeenCalled()
   })
 
   it('fails closed if the transition lookup breaks — never resumes on a guess', async () => {
