@@ -90,7 +90,7 @@ export class MockFundingProcessor implements FundingProcessor {
    * the route refuses any rail that cannot prove the door is shut, and without
    * this the mock would be that rail.
    */
-  async expireFunding(): Promise<'expired' | 'not_open'> {
+  async expireFunding(): Promise<'expired' | 'already_closed' | 'paying'> {
     return 'expired'
   }
 

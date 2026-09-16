@@ -138,13 +138,20 @@ export async function reconcilePendingTransfers(): Promise<number> {
     // the ROW's rail (audit corner 1), never the process's.
     const processor = processorFor(row)
     if (processor.expireFunding && row.funding_payment_ref) {
-      let closed: 'expired' | 'not_open'
+      let closed: 'expired' | 'already_closed' | 'paying'
       try {
         closed = await processor.expireFunding({ paymentRef: row.funding_payment_ref })
       } catch {
         continue // transport failure — the age window backstops the next tick
       }
-      if (closed === 'not_open') continue // paid or already expired upstream; not ours to fail
+      // ONLY a payment in flight buys the row a reprieve. `already_closed` — an
+      // expired Session, a canceled PI — falls through and IS failed, because
+      // nothing can ever pay it and nothing else in the system fails a pending
+      // row. Until 2026-09-16 both answers arrived as one `not_open` and both
+      // skipped, so such a row was skipped on every tick forever; the
+      // pre-payment cancel route could mint one by closing the object and then
+      // failing to transition.
+      if (closed === 'paying') continue
     }
     try {
       await transitionTransfer({

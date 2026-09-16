@@ -62,7 +62,7 @@ const isConfigured = vi.fn(() => true)
 // PRESENCE, not just its answer: the route's refusal for a rail that cannot
 // close its own funding object (the onramp rails) keys on the method being
 // absent, so a mock that always has it could never exercise that branch.
-const expireFunding = vi.fn<() => Promise<'expired' | 'not_open'>>(async () => 'expired')
+const expireFunding = vi.fn<() => Promise<'expired' | 'already_closed' | 'paying'>>(async () => 'expired')
 const hasExpireFunding = vi.fn(() => true)
 const deferredInitiation = vi.fn(() => false)
 // C4: the send gate reads identityFlow, and it is a SEPARATE knob from
@@ -1145,9 +1145,9 @@ describe('POST /v1/transfers/:id/cancel', () => {
       await app.close()
     })
 
-    it("not_open → 409 funding_in_progress, and the row is NOT failed", async () => {
+    it("paying → 409 funding_in_progress, and the row is NOT failed", async () => {
       // The sender paid in the race window; a funding webhook is coming.
-      expireFunding.mockResolvedValue('not_open')
+      expireFunding.mockResolvedValue('paying')
       routeTables({ transfers: () => chain({ data: pendingRow }) })
       const app = await buildApp()
 
@@ -1156,6 +1156,68 @@ describe('POST /v1/transfers/:id/cancel', () => {
       expect(res.status).toBe(409)
       expect(res.body.error.code).toBe('funding_in_progress')
       expect(transitionTransfer).not.toHaveBeenCalled()
+      await app.close()
+    })
+
+    // THE OTHER NON-OPEN SHAPE, which used to get the same 409.
+    //
+    // A funding object that is already DEAD — Stripe's 24h clock, or an earlier
+    // attempt of this very route that closed it and then failed to transition —
+    // cannot be paid by anyone. Telling the sender "your payment may have gone
+    // through, check back" was false, and it was also a dead end: the same 409
+    // came back on every retry while the reaper skipped the row for good. The
+    // cancel they asked for is the one unambiguously right answer here.
+    it('already_closed → the cancel goes through; a dead object is not a reason to refuse', async () => {
+      expireFunding.mockResolvedValue('already_closed')
+      routeTables({ transfers: () => chain({ data: pendingRow }) })
+      transitionTransfer.mockResolvedValue(failedRow)
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(200)
+      expect(transitionTransfer).toHaveBeenCalledTimes(1)
+      expect(transitionTransfer.mock.calls[0]![0]).toMatchObject({
+        fromState: 'PENDING_PAYMENT',
+        toState: 'PAYMENT_FAILED',
+      })
+      await app.close()
+    })
+
+    // THE PARTIAL COMPLETION (B7). The door is shut and the state write then
+    // fails with something that is not a TransferRpcError — the one arm that
+    // can leave the sender holding a dead payment object against a row that
+    // still reads PENDING_PAYMENT. It returned a bare 500 after a log line that
+    // did not even carry `err`, so the only diagnosis was discarded at the only
+    // place it existed, and nothing anywhere knew it had happened.
+    it('door shut + a non-RPC transition failure pages, and the log carries the error', async () => {
+      expireFunding.mockResolvedValue('expired')
+      transitionTransfer.mockRejectedValue(new Error('pg: connection terminated'))
+      routeTables({ transfers: () => chain({ data: pendingRow }) })
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(500)
+      expect(setFingerprint).toHaveBeenCalledWith(['prepayment-cancel-stranded', TRANSFER_ID])
+      expect(captureMessage.mock.calls.at(-1)?.[1]).toBe('error')
+      await app.close()
+    })
+
+    // Severity told honestly rather than uniformly. With no funding object
+    // there was nothing to shut, so the same failure leaves nothing dangling —
+    // it is a failed request, not a stranded transfer, and paging on it would
+    // train the page to be ignored.
+    it('the same failure with NOTHING to shut does not page', async () => {
+      transitionTransfer.mockRejectedValue(new Error('pg: connection terminated'))
+      routeTables({ transfers: () => chain({ data: { ...pendingRow, funding_payment_ref: null } }) })
+      const app = await buildApp()
+
+      const res = await cancel(app)
+
+      expect(res.status).toBe(500)
+      expect(expireFunding).not.toHaveBeenCalled()
+      expect(captureMessage).not.toHaveBeenCalled()
       await app.close()
     })
 

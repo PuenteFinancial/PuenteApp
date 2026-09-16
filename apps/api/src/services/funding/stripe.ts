@@ -434,20 +434,25 @@ export class StripeFundingProcessor implements FundingProcessor {
    *   · `succeeded` / `processing` — the money is already moving. On this rail
    *     `payment_intent.processing` is the instant-front door to FUNDED, so a
    *     funding event is coming and the row must NOT be failed.
-   *   · `canceled` — already shut by a prior run or another actor; nothing to
-   *     do (the Checkout rail answers the same way for an already-`expired`
-   *     Session).
-   * Both are `not_open`: "not ours to close", never "we closed it".
+   *   · `canceled` — already shut by a prior run or another actor. Nothing to
+   *     close, but the row IS ours to fail: a canceled PI can never pay, so
+   *     this answers 'already_closed' rather than 'paying' (the Checkout rail
+   *     says the same for an already-`expired` Session). Lumping the two
+   *     together under one "not ours" answer is what stranded rows at
+   *     PENDING_PAYMENT with nothing left to end them — see
+   *     FundingProcessor.expireFunding.
+   * Neither is 'expired': that word means "we closed it", never "it was shut".
    *
    * NOT voidFunding. That one is an UNDO of a collected pull and may fall back
    * to a real refund; this one must never move money — a PI it cannot close is
    * a refusal, not a refund.
    */
-  async expireFunding(input: { paymentRef: string }): Promise<'expired' | 'not_open'> {
+  async expireFunding(
+    input: { paymentRef: string },
+  ): Promise<'expired' | 'already_closed' | 'paying'> {
     const pi = await this.client.paymentIntents.retrieve(input.paymentRef)
-    if (pi.status === 'succeeded' || pi.status === 'processing' || pi.status === 'canceled') {
-      return 'not_open'
-    }
+    if (pi.status === 'canceled') return 'already_closed'
+    if (pi.status === 'succeeded' || pi.status === 'processing') return 'paying'
     try {
       await this.client.paymentIntents.cancel(input.paymentRef, {
         cancellation_reason: 'abandoned',
@@ -458,8 +463,9 @@ export class StripeFundingProcessor implements FundingProcessor {
       // on any throw" be the thing that keeps a paid row safe.
       if (isNotCancelable(err)) {
         const now = await this.client.paymentIntents.retrieve(input.paymentRef)
+        if (now.status === 'canceled') return 'already_closed'
         if (now.status !== 'requires_payment_method' && now.status !== 'requires_confirmation') {
-          return 'not_open'
+          return 'paying'
         }
       }
       throw err
