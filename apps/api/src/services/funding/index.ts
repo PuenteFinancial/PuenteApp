@@ -436,14 +436,28 @@ export interface FundingProcessor {
    * the money for a transfer we had already marked PAYMENT_FAILED — the
    * webhook then hits transition_conflict and is acked. Charge, no transfer.
    *
-   * 'expired'  — closed now; safe to fail the row.
-   * 'not_open' — the object was already complete/expired at the processor. A
-   *              completed one means a payment webhook is coming: the reaper
-   *              must NOT fail the row, and leaves it to that webhook.
+   * THREE answers, because two were not enough (2026-09-16). The seam used to
+   * report every non-open object as one `not_open` meaning "not ours to fail",
+   * which is right for a PAID one and wrong for a DEAD one — and the reaper
+   * skips on it, so a PENDING_PAYMENT row whose object was already expired was
+   * skipped on every tick FOREVER. Nothing else fails a pending row. The
+   * pre-payment cancel route could create exactly that state: close the object,
+   * then fail to transition.
+   *
+   * 'expired'        — we closed it just now. Safe to fail the row.
+   * 'already_closed' — it was already dead before we got here (an `expired`
+   *                    Session, a `canceled` PaymentIntent). Nobody can pay it,
+   *                    so this is ALSO safe to fail — that is the whole point of
+   *                    separating it. A caller that treats this like 'paying'
+   *                    leaks the row.
+   * 'paying'         — the sender's money is complete or in flight (`complete`,
+   *                    `succeeded`, `processing`). A funding webhook is coming:
+   *                    the row must NOT be failed, and is left to that webhook.
+   *
    * Throws on a transport failure — the reaper skips the row this tick and
    * the age window backstops the next one.
    */
-  expireFunding?(input: { paymentRef: string }): Promise<'expired' | 'not_open'>
+  expireFunding?(input: { paymentRef: string }): Promise<'expired' | 'already_closed' | 'paying'>
   listRecentPayments?(input: { createdAfter: Date; limit: number }): Promise<FundingPaymentListItem[]>
   /**
    * OPTIONAL — reconciliation's dispute sweep (the loss path, 2026-09-10).

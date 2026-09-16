@@ -317,15 +317,25 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
   /**
    * Expire an unpaid Session so the reaper can fail its row without leaving a
    * payable form alive somewhere. Status is READ FIRST rather than relying on
-   * Stripe's error for a non-open session: `complete` means the sender paid in
-   * the window between our sweep's select and this call, and the
-   * checkout.session.completed webhook is on its way — that row must not be
-   * failed. `expired` is Stripe's own 24h clock having beaten ours; nothing to
-   * do. Only `open` is ours to close.
+   * Stripe's error for a non-open session. Only `open` is ours to close; the
+   * other two are the seam's two DIFFERENT non-open answers, and telling them
+   * apart is the point (see FundingProcessor.expireFunding):
+   *
+   *   `complete` — the sender paid in the window between our sweep's select and
+   *                this call, and checkout.session.completed is on its way.
+   *                The row must NOT be failed → 'paying'.
+   *   `expired`  — Stripe's own 24h clock beat ours, or a prior run of ours
+   *                expired it and then failed to move the row. Nobody can pay
+   *                this Session ever again, so the row SHOULD be failed →
+   *                'already_closed'. Answering 'paying' here (which this did
+   *                until 2026-09-16) strands the row at PENDING_PAYMENT with
+   *                nothing left that can end it.
    */
-  override async expireFunding(input: { paymentRef: string }): Promise<'expired' | 'not_open'> {
+  override async expireFunding(
+    input: { paymentRef: string },
+  ): Promise<'expired' | 'already_closed' | 'paying'> {
     const session = await this.client.checkout.sessions.retrieve(input.paymentRef)
-    if (session.status !== 'open') return 'not_open'
+    if (session.status !== 'open') return session.status === 'expired' ? 'already_closed' : 'paying'
     try {
       await this.client.checkout.sessions.expire(input.paymentRef)
     } catch (err) {
@@ -339,7 +349,7 @@ export class StripeCheckoutFundingProcessor extends StripeFundingProcessor {
       // failure and propagates.
       if (isInvalidRequest(err)) {
         const now = await this.client.checkout.sessions.retrieve(input.paymentRef)
-        if (now.status !== 'open') return 'not_open'
+        if (now.status !== 'open') return now.status === 'expired' ? 'already_closed' : 'paying'
       }
       throw err
     }

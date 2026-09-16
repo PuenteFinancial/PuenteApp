@@ -359,17 +359,30 @@ describe('stripe expireFunding — closing an unpaid PI so nothing can pay it', 
   // The whole point of the read-first: a paid row must never be closed OR
   // failed. `processing` counts as paid here because on this rail
   // payment_intent.processing is the instant-front door to FUNDED.
-  it.each(['succeeded', 'processing', 'canceled'])(
-    'refuses to touch a %s PI — not ours to close',
+  it.each(['succeeded', 'processing'])(
+    'refuses to touch a %s PI — the money is moving, the row is not ours to fail',
     async (status) => {
       const retrieve = vi.fn(async () => ({ id: 'pi_123', status }))
       const { processor: p } = undoClient({ retrieve })
 
-      await expect(p.expireFunding!({ paymentRef: 'pi_123' })).resolves.toBe('not_open')
+      await expect(p.expireFunding!({ paymentRef: 'pi_123' })).resolves.toBe('paying')
     },
   )
 
-  it('a sender who confirms between the read and the cancel answers not_open, not a throw', async () => {
+  // A canceled PI used to answer the same as a succeeded one, and that is the
+  // conflation the third answer exists to end: nothing can ever pay a canceled
+  // intent, so its row is precisely the row the reaper should fail. Same word
+  // for both meant such rows were skipped on every tick.
+  it('a canceled PI is already_closed — nothing to close, but the row IS ours to fail', async () => {
+    const retrieve = vi.fn(async () => ({ id: 'pi_123', status: 'canceled' }))
+    const cancel = vi.fn()
+    const { processor: p } = undoClient({ retrieve, cancel })
+
+    await expect(p.expireFunding!({ paymentRef: 'pi_123' })).resolves.toBe('already_closed')
+    expect(cancel).not.toHaveBeenCalled()
+  })
+
+  it('a sender who confirms between the read and the cancel answers paying, not a throw', async () => {
     const retrieve = vi
       .fn()
       .mockResolvedValueOnce({ id: 'pi_123', status: 'requires_confirmation' })
@@ -379,7 +392,22 @@ describe('stripe expireFunding — closing an unpaid PI so nothing can pay it', 
     })
     const { processor: p } = undoClient({ retrieve, cancel })
 
-    await expect(p.expireFunding!({ paymentRef: 'pi_123' })).resolves.toBe('not_open')
+    await expect(p.expireFunding!({ paymentRef: 'pi_123' })).resolves.toBe('paying')
+  })
+
+  // The same race arriving at the other non-open status — someone else canceled
+  // it while we were deciding. Releases the row rather than protecting it.
+  it('a PI canceled between the read and the cancel answers already_closed', async () => {
+    const retrieve = vi
+      .fn()
+      .mockResolvedValueOnce({ id: 'pi_123', status: 'requires_confirmation' })
+      .mockResolvedValueOnce({ id: 'pi_123', status: 'canceled' })
+    const cancel = vi.fn(async () => {
+      throw Object.assign(new Error('nope'), { code: 'payment_intent_unexpected_state' })
+    })
+    const { processor: p } = undoClient({ retrieve, cancel })
+
+    await expect(p.expireFunding!({ paymentRef: 'pi_123' })).resolves.toBe('already_closed')
   })
 
   it('an unrelated Stripe failure propagates — the caller must not read it as closed', async () => {

@@ -232,6 +232,11 @@ async function cancelBeforePayment(
 
   const processor = processorFor(transfer)
 
+  // Hoisted out of the block below so the catch at the bottom can tell whether
+  // THIS request shut the sender's payment door. 'none' = there was nothing to
+  // shut; a failure after that leaves nothing dangling.
+  let fundingClosed: 'none' | 'expired' | 'already_closed' = 'none'
+
   if (transfer.funding_payment_ref) {
     // A rail that cannot close its own payment object cannot prove the door is
     // shut, so it does not get the button. Today that is the onramp rails:
@@ -248,7 +253,7 @@ async function cancelBeforePayment(
       )
     }
 
-    let closed: 'expired' | 'not_open'
+    let closed: 'expired' | 'already_closed' | 'paying'
     try {
       closed = await processor.expireFunding({ paymentRef: transfer.funding_payment_ref })
     } catch (err) {
@@ -267,12 +272,18 @@ async function cancelBeforePayment(
       )
     }
 
-    if (closed === 'not_open') {
-      // Two shapes arrive here and the seam does not distinguish them: the
-      // sender paid in the race window (a funding webhook is coming and this
-      // row must NOT be failed), or the object was already closed upstream. The
-      // copy therefore asserts neither — it says the payment may have gone
-      // through and to check back, which is true in both.
+    if (closed === 'paying') {
+      // The sender paid in the race window: a funding webhook is coming and
+      // this row must NOT be failed. The copy asserts nothing more than that —
+      // it says the payment may have gone through and to check back.
+      //
+      // `already_closed` deliberately does NOT land here. The seam used to
+      // report it as the same answer, so a sender whose Session had already
+      // expired was told their payment might have gone through and sent away —
+      // on a row that could never be paid and, until the reaper learned the
+      // difference, could never be failed either. A dead funding object is the
+      // one case where the cancel they asked for is unambiguously right, so it
+      // falls through to the transition below.
       return sendError(
         reply,
         409,
@@ -280,6 +291,7 @@ async function cancelBeforePayment(
         'We could not cancel this. Your payment may have gone through, so check back in a moment.',
       )
     }
+    fundingClosed = closed
   }
 
   // No ref at all (a deferred-initiation rail before the pay step) falls
@@ -341,7 +353,47 @@ async function cancelBeforePayment(
         'We could not cancel this. Your payment may have gone through, so check back in a moment.',
       )
     }
-    server.log.error({ userId, transferId: transfer.id }, 'pre-payment cancel failed')
+    // THE PARTIAL COMPLETION, and the only one this handler can produce.
+    //
+    // `err` is IN the log line now. It was not, so the one diagnosis that
+    // matters — why a guarded RPC threw something that is not a
+    // TransferRpcError — was discarded at the only place it existed.
+    server.log.error(
+      { userId, transferId: transfer.id, fundingClosed, err },
+      'pre-payment cancel failed',
+    )
+
+    // Only when we actually shut the door. With `fundingClosed: 'none'` nothing
+    // was touched and a 500 is just a failed request; with the door shut the
+    // sender is holding a dead payment object against a row that still reads
+    // PENDING_PAYMENT, so their pay step fails and the uncleared cap stays
+    // consumed. Every comparable partial-completion site in this repo pages;
+    // this one did not.
+    //
+    // RECOVERABLE, and the page says which way, because a page that does not
+    // name the remedy is just noise: retrying the cancel now answers
+    // `already_closed` and goes through, and failing that the reaper ends the
+    // row once it is past its staleness window. Neither was true before
+    // 2026-09-16 — the retry got a permanent 409 and the reaper skipped the row
+    // on every tick — which is why this is a page and not a silent log.
+    if (fundingClosed === 'expired') {
+      Sentry.withScope((scope) => {
+        scope.setFingerprint(['prepayment-cancel-stranded', transfer.id])
+        scope.setContext('prepayment_cancel_stranded', {
+          transferId: transfer.id,
+          fundingPaymentRef: transfer.funding_payment_ref,
+          // The message only — never the error object. Provider bodies can
+          // carry PII, the same rule the detail route's catch follows.
+          error: err instanceof Error ? err.message : String(err),
+          remedy: 'the sender retrying cancel now succeeds; the reaper ends it at the age window',
+          runbook: 'docs/runbooks/stuck-transfer.md',
+        })
+        Sentry.captureMessage(
+          'pre-payment cancel closed the funding object but could not fail the row',
+          'error',
+        )
+      })
+    }
     return sendError(reply, 500, 'internal_error', 'Failed to cancel transfer')
   }
 }

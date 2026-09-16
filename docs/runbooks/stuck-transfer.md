@@ -14,7 +14,7 @@ A transfer is "stuck" when it stops moving, not when it's merely slow. Dwell thr
 
 | State | Expected dwell | Pages after | Knob |
 |---|---|---|---|
-| `PENDING_PAYMENT` | minutes (user paying) | never — the 30-min auto-fail cron owns it (O2's daily audit watches THAT cron's liveness) | — |
+| `PENDING_PAYMENT` | minutes (user paying) | never from this cron — the per-rail auto-fail sweep owns it (O2's daily audit watches THAT cron's liveness). One page can still arrive from the pre-payment cancel route: see below | — |
 | `FUNDED` | seconds (gate + submission) | 15 min | `STUCK_FUNDED_AFTER_MINUTES` |
 | `SUBMITTED` | seconds–minutes (Bridge accepts) | 30 min | `STUCK_SUBMITTED_AFTER_MINUTES` |
 | `IN_FLIGHT` | seconds (SPEI settles in seconds) | 1 h | `STUCK_IN_FLIGHT_AFTER_MINUTES` |
@@ -59,6 +59,34 @@ daily `transfer_aging` = the coarse audit backstop. One incident can page two of
    - Stuck `SUBMITTED`/`IN_FLIGHT`: `GET /v0/transfers/{provider_transfer_ref}` — Bridge's
      actual state vs ours, and Bridge webhook delivery logs (`GET /v0/webhooks/{id}/logs`) —
      delivery has been empirically flaky before (2026-07-13 incident).
+
+## `pre-payment cancel closed the funding object but could not fail the row`
+
+The only page a `PENDING_PAYMENT` row produces, and the only one raised by a request rather
+than a cron. The sender tapped cancel before paying; the route shut their funding object
+first (that ordering is the safety property — a stale tab must not be able to pay a row we
+have marked dead), and the state write then failed with something that was not a
+`TransferRpcError`. So the payment object is dead while the row still reads
+`PENDING_PAYMENT`: the sender's pay step will fail against it, and their uncleared-exposure
+cap stays consumed.
+
+**Both remedies are automatic; this page exists so you know it happened, not so you fix it
+by hand.**
+
+1. **The sender retrying cancel succeeds.** The second attempt finds the object already dead,
+   gets `already_closed` from the seam, and goes straight through to `PAYMENT_FAILED`.
+2. **The pending sweep ends it** (`jobs/reconcile-pending.ts`) once the row is past its
+   per-rail staleness window — 30 min on the webhook rails, 4 h onramp, days-scale manual.
+
+Check the Sentry context's `error` for WHY the transition threw; a `TransferRpcError` is
+handled in the route and never reaches here, so this is a genuine fault — a PostgREST outage,
+a connection reset, a schema problem — and it is usually the more interesting half of the page.
+
+**Before 2026-09-16 neither remedy existed.** The seam reported an already-dead object with
+the same word as a PAID one, so the retry got a permanent 409 and the sweep skipped the row on
+every tick, forever. If you are reading this on a row created before that change, the sweep
+will not have taken it: retry the cancel through the API, or fail the row with a script that
+writes the transition (never a bare `UPDATE` — see **Never** below).
 
 ## Repair actions (in order of preference)
 

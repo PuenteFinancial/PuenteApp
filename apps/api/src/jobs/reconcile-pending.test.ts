@@ -423,14 +423,40 @@ describe('reconcilePendingTransfers — closing the processor object before fail
     )
   })
 
-  it("a session that is not open is not ours to fail — the sender paid, the webhook is coming", async () => {
-    expireFunding.mockResolvedValue('not_open')
+  it("a session being PAID is not ours to fail — the webhook is coming", async () => {
+    expireFunding.mockResolvedValue('paying')
     mockPendingSelect([row('tr-paid-late', 5 * 60 * MINUTES, 'cs_test_paid')])
 
     const count = await reconcilePendingTransfers()
 
     expect(count).toBe(0)
     expect(transition).not.toHaveBeenCalled()
+  })
+
+  // THE ROW THAT USED TO BE SKIPPED FOREVER.
+  //
+  // An already-dead funding object — Stripe's own 24h clock, or a pre-payment
+  // cancel that closed the Session and then failed to move the row — arrived
+  // here as the same `not_open` a PAID session gives, and this loop skips on
+  // that. Nothing else in the system fails a PENDING_PAYMENT row, so it was
+  // skipped on THIS tick and every tick after it, for good.
+  //
+  // Now it falls through and is failed, which is the only correct answer: no
+  // one can pay a dead object, and the sender is owed nothing because they were
+  // never charged.
+  it('an ALREADY dead object is failed, not skipped — nothing else would ever end it', async () => {
+    expireFunding.mockResolvedValue('already_closed')
+    mockPendingSelect([row('tr-orphan', 5 * 60 * MINUTES, 'cs_test_dead')])
+
+    const count = await reconcilePendingTransfers()
+
+    expect(count).toBe(1)
+    expect(transition).toHaveBeenCalledTimes(1)
+    expect((transition.mock.calls[0] as [Record<string, unknown>])[0]).toMatchObject({
+      transferId: 'tr-orphan',
+      fromState: 'PENDING_PAYMENT',
+      toState: 'PAYMENT_FAILED',
+    })
   })
 
   it('a transport failure skips that row this tick and still handles the others', async () => {

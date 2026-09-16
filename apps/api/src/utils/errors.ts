@@ -22,10 +22,14 @@ export type ApiErrorCode =
   // near `transfer_in_progress` above: that one is the uncleared-exposure cap
   // refusing a NEW send, and the two would be read for each other in a log.
   //
-  // Covers both non-open shapes the processor seam reports as `not_open` — the
-  // sender paid in the race window (a funding webhook is coming), or the object
-  // was already closed upstream. The copy must not assert which; it says the
-  // payment may have gone through and to check back.
+  // NARROWED 2026-09-16: this is now the PAYING shape only — the sender paid in
+  // the race window and a funding webhook is coming. It used to cover an
+  // already-dead object too, because the processor seam reported both as one
+  // `not_open`; that told the sender their payment might have gone through when
+  // nothing could ever pay it, and left them with a 409 that would never
+  // change. A dead object now answers `already_closed` and the cancel simply
+  // succeeds. The copy still asserts nothing beyond "check back", which is the
+  // honest thing to say about a payment genuinely in flight.
   | 'funding_in_progress'
   // Dual use, and deliberately one code: as the 202 body's `code` when a
   // post-submission cancel is RECORDED for out-of-band handling, and as a 409
