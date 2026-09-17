@@ -323,6 +323,57 @@ describe('POST /v1/quotes', () => {
     await app.close()
   })
 
+  it('400s below_payout_minimum for an amount that PRICES but cannot be paid out', async () => {
+    // Distinct from the case above, which is an amount too small to price at
+    // all (QuoteAmountError). This one prices perfectly — $1.00 → ~198 MXN
+    // minor — and is refused because the receiving rail will not pay it: SPEI's
+    // floor is 50 MXN. Its own code, because the remedy is the opposite of
+    // limit_exceeded's: send MORE.
+    //
+    // 2026-09-17: the first real prod ACH was exactly this shape. Nothing
+    // refused it, so Bridge did — with a sync 400, five days later, after the
+    // sender's money had been collected.
+    from
+      .mockReturnValueOnce(chain({ data: approvedUser }))
+      .mockReturnValueOnce(chain({ data: ownedDestination }))
+    getExchangeRate.mockResolvedValue(sandboxRate)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/quotes')
+      .set('Authorization', 'Bearer test-token')
+      .send({ ...validBody, totalAmount: { amountMinor: 100, currency: 'USD' } })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('below_payout_minimum')
+    // The refusal lands BEFORE the insert: no quote for an undeliverable
+    // amount is ever persisted, so none can later become a transfer.
+    expect(from).toHaveBeenCalledTimes(2)
+    await app.close()
+  })
+
+  it('still prices an amount comfortably above the payout minimum', async () => {
+    // The guard rejects what it must and nothing else — the happy path above
+    // ($200) is far over the floor, and this pins that the bound is checked
+    // against the RECEIVE leg rather than accidentally against the send.
+    const insert = chain({ data: quoteRow })
+    from
+      .mockReturnValueOnce(chain({ data: approvedUser }))
+      .mockReturnValueOnce(chain({ data: ownedDestination }))
+      .mockReturnValueOnce(insert)
+    getExchangeRate.mockResolvedValue(sandboxRate)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/quotes')
+      .set('Authorization', 'Bearer test-token')
+      .send({ ...validBody, totalAmount: { amountMinor: 1_000, currency: 'USD' } })
+
+    expect(res.status).toBe(201)
+    expect(from).toHaveBeenNthCalledWith(3, 'quotes')
+    await app.close()
+  })
+
   it('401s without a token', async () => {
     const app = await buildApp()
     const res = await supertest(app.server).post('/v1/quotes').send(validBody)

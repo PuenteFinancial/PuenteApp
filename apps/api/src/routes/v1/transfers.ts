@@ -25,6 +25,7 @@ import {
   type CancellationRequestState,
 } from '../../services/cancellations.js'
 import { requireOnboardedUser } from './recipients.js'
+import { isBelowPayoutMinimum, payoutMinimumReceiveMinor } from '../../services/payouts.js'
 import { ensureStripeCustomer } from '../../services/stripe-customers.js'
 import {
   assessTransferRisk,
@@ -548,6 +549,20 @@ export async function transfersRoute(server: FastifyInstance) {
         quote.payout_destinations.recipients.status !== 'active'
       ) {
         return sendError(reply, 409, 'conflict', 'Payout destination is archived')
+      }
+
+      // Destination-rail minimum, re-checked (2026-09-17). The quote route is
+      // the friendly gate; this is the one that actually protects money. A
+      // quote minted before this bound existed — or before it was raised — is
+      // still sitting in the database, and creating a transfer from it is the
+      // step that leads to an ACH pull for a payout Bridge will never make.
+      if (isBelowPayoutMinimum(quote.receive_amount_minor)) {
+        return sendError(
+          reply,
+          400,
+          'below_payout_minimum',
+          `Payout below the destination minimum of ${payoutMinimumReceiveMinor()} MXN minor units`,
+        )
       }
 
       // Read the locale the disclosure will be presented in.

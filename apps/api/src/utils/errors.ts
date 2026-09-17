@@ -8,6 +8,12 @@ export type ApiErrorCode =
   | 'forbidden'
   | 'kyc_required'
   | 'limit_exceeded'
+  // The mirror of limit_exceeded at the other end: too SMALL for the
+  // destination rail to pay out (PAYOUT_MIN_RECEIVE_MINOR; MXN/SPEI is 50 MXN).
+  // Its own code because the sender's remedy is the opposite one — send more,
+  // not less — and a client that showed "limit exceeded" here would be telling
+  // them to do exactly the wrong thing.
+  | 'below_payout_minimum'
   | 'transfer_in_progress'
   | 'not_found'
   | 'conflict'

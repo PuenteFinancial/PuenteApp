@@ -342,6 +342,20 @@ const envSchema = z.object({
   // FX submission backstop: max quote age before the submit job holds the
   // transfer (fx_drift). Fires only on transfers stuck for hours.
   FX_MAX_QUOTE_AGE_MINUTES: z.coerce.number().int().min(1).default(240),
+  // The smallest payout the DESTINATION RAIL will accept, in receive-currency
+  // minor units. MXN/SPEI via Bridge is 50 MXN on every route, so 5000 — see
+  // apidocs.bridge.xyz .../what-we-support/payment-routes.
+  //
+  // Denominated in the RECEIVE leg because that is where the rail's rule lives:
+  // the equivalent USD send floats with the rate, so a USD bound would be
+  // wrong twice a day. At ~18-20 MXN/USD this refuses sends under ~$2.75.
+  //
+  // 2026-09-17: before this existed, `amountMinor: { minimum: 1 }` was the only
+  // floor — ONE CENT. A sender could be quoted, accept the Reg E prepayment
+  // disclosure, and have their ACH pulled for a payout Bridge would never make;
+  // the first real prod ACH ($1.00 ≈ 18 MXN) died exactly that way, five days
+  // later, and had to be canceled and refunded.
+  PAYOUT_MIN_RECEIVE_MINOR: z.coerce.number().int().min(0).default(5_000),
   // Per-user transaction limits (slice-7 PR5) — the AML "Transaction Limits at
   // Launch" policy: a per-transaction send cap plus rolling-window send-amount
   // caps (day / month / 6 months) and a belt-and-suspenders per-day send count.

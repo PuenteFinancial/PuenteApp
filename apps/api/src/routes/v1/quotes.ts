@@ -9,6 +9,7 @@ import {
   QuoteAmountError,
 } from '../../services/quotes.js'
 import { requireOnboardedUser } from './recipients.js'
+import { isBelowPayoutMinimum, payoutMinimumReceiveMinor } from '../../services/payouts.js'
 import { assessUnclearedCap, UNCLEARED_CAP_MESSAGE } from '../../services/risk.js'
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 
@@ -213,6 +214,22 @@ export async function quotesRoute(server: FastifyInstance) {
           return sendError(reply, 503, 'rate_unavailable', 'Exchange rate is unavailable, try again shortly')
         }
         throw err
+      }
+
+      // Destination-rail minimum (2026-09-17). The EARLIEST place the answer
+      // can be known: the floor is denominated in MXN, so it takes a priced
+      // quote to evaluate at all — but it lands before the quote is persisted,
+      // before the Reg E disclosure, and long before any money is collected.
+      // Bridge would refuse this payout with a sync 400 days from now, on the
+      // one code path with no way to tell the sender anything.
+      if (isBelowPayoutMinimum(priced.receiveMinor)) {
+        return sendError(
+          reply,
+          400,
+          'below_payout_minimum',
+          `Payout below the destination minimum of ${payoutMinimumReceiveMinor()} MXN minor units`,
+          [{ path: 'totalAmount.amountMinor', issue: 'receive amount below destination rail minimum' }],
+        )
       }
 
       const expiresAt = new Date(fxRateAt.getTime() + env.QUOTE_EXPIRY_SECONDS * 1000)
