@@ -366,6 +366,25 @@ describe('POST /v1/transfers', () => {
     await app.close()
   })
 
+  it('400s below_payout_minimum on a quote the rail cannot pay out', async () => {
+    // The backstop, not the friendly gate. The quote route now refuses these
+    // up front, but quotes minted BEFORE that bound existed — or before it was
+    // raised — are still in the table, and creating a transfer from one is the
+    // step that leads to an ACH pull for a payout Bridge will never make.
+    // ~198 MXN against SPEI's 5,000-minor floor (transfer 8bf376a9, 2026-09-17).
+    routeTables({ quotes: () => chain({ data: { ...quoteRow, receive_amount_minor: 1_980 } }) })
+    const app = await buildApp()
+
+    const res = await create(app)
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('below_payout_minimum')
+    // Nothing was created: no transfer, and so no disclosure to accept and no
+    // payment to collect.
+    expect(createTransferFromQuote).not.toHaveBeenCalled()
+    await app.close()
+  })
+
   it('403s unapproved users before touching quotes', async () => {
     routeTables({ users: () => chain({ data: { ...approvedUser, kyc_status: 'pending' } }) })
     const app = await buildApp()

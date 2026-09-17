@@ -10,6 +10,8 @@ const envStub = vi.hoisted(() => ({
   BRIDGE_SPEI_FEE_MINOR: 0,
   BRIDGE_ORCHESTRATION_BPS: 0,
   FX_MAX_QUOTE_AGE_MINUTES: 240,
+  // MXN/SPEI's 50 MXN floor, in receive minor units.
+  PAYOUT_MIN_RECEIVE_MINOR: 5_000,
 }))
 vi.mock('../config/env.js', () => ({ env: envStub }))
 
@@ -29,6 +31,8 @@ const {
   submittedLedgerEntries,
   computeDriftBps,
   assessQuoteAge,
+  isBelowPayoutMinimum,
+  payoutMinimumReceiveMinor,
   parseDecimalToMinor,
   minorToDecimal,
   checkPayability,
@@ -41,6 +45,7 @@ beforeEach(() => {
   envStub.BRIDGE_SPEI_FEE_MINOR = 0
   envStub.BRIDGE_ORCHESTRATION_BPS = 0
   envStub.FX_MAX_QUOTE_AGE_MINUTES = 240
+  envStub.PAYOUT_MIN_RECEIVE_MINOR = 5_000
   getBalance.mockReset()
   from.mockReset()
 })
@@ -321,6 +326,38 @@ describe('assessQuoteAge', () => {
     // Fail-closed beats the shortcut: an unreadable quote must not be waved
     // through just because the money arrived.
     expect(() => assessQuoteAge('not-a-date', true, NOW)).toThrow(PayoutValidationError)
+  })
+})
+
+// The destination rail's floor (2026-09-17). Bridge enforces it by rejecting
+// POST /v0/transfers with a sync 400; the only question was ever where we find
+// out, and the answer used to be "days after the sender paid".
+describe('isBelowPayoutMinimum', () => {
+  it('refuses below the floor, accepts at and above it', () => {
+    // Strict <, so the floor itself is deliverable — matching how Bridge
+    // documents the minimum (at least 50 MXN, not more than).
+    expect(isBelowPayoutMinimum(4_999)).toBe(true)
+    expect(isBelowPayoutMinimum(5_000)).toBe(false)
+    expect(isBelowPayoutMinimum(5_001)).toBe(false)
+  })
+
+  it('refuses the prod case that proved this was missing', () => {
+    // $1.00 at ~19.8 MXN/USD ≈ 1,980 MXN minor. Transfer 8bf376a9, 2026-09-17.
+    expect(isBelowPayoutMinimum(1_980)).toBe(true)
+  })
+
+  it('reads the bound at call time, so raising it takes effect at once', () => {
+    envStub.PAYOUT_MIN_RECEIVE_MINOR = 10_000
+    expect(isBelowPayoutMinimum(5_000)).toBe(true)
+    expect(payoutMinimumReceiveMinor()).toBe(10_000)
+  })
+
+  it('a zero bound disables the gate rather than refusing everything', () => {
+    // The off switch has to be the harmless direction: a misread or unset
+    // bound must not start refusing sends that were fine yesterday.
+    envStub.PAYOUT_MIN_RECEIVE_MINOR = 0
+    expect(isBelowPayoutMinimum(0)).toBe(false)
+    expect(isBelowPayoutMinimum(1)).toBe(false)
   })
 })
 

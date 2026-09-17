@@ -596,6 +596,15 @@ export type Translations = {
       not_found: string
       kyc_required: string
       limit_exceeded: string
+      /**
+       * Too SMALL for the destination rail to pay out (MXN/SPEI's 50 MXN
+       * minimum, PAYOUT_MIN_RECEIVE_MINOR). The mirror of limit_exceeded, and
+       * the copy must mirror it in the opposite direction — the remedy here is
+       * to send MORE. Deliberately says "recipient" and a floor in pesos: the
+       * rule is the receiving bank's and lives in MXN, so a dollar figure
+       * would be a different number every hour.
+       */
+      below_payout_minimum: string
       transfer_in_progress: string
       quote_expired: string
       transfer_not_cancelable: string
@@ -1639,6 +1648,8 @@ const en: Translations = {
       kyc_required: 'You’ll need to verify your identity before sending money.',
       limit_exceeded:
         'This goes over your sending limit right now. Try a smaller amount or come back later.',
+      below_payout_minimum:
+        'This amount is too small to send to Mexico. Banks there require the recipient to receive at least 50 pesos. Try a larger amount.',
       transfer_in_progress:
         'You already have a transfer in progress. You can send again once it clears, usually within a few business days.',
       quote_expired: 'This rate expired. Get a new quote to continue.',
@@ -2634,6 +2645,8 @@ const es: Translations = {
       kyc_required: 'Necesitas verificar tu identidad antes de enviar dinero.',
       limit_exceeded:
         'Esto supera tu límite de envío por ahora. Prueba con un monto menor o vuelve más tarde.',
+      below_payout_minimum:
+        'Este monto es muy pequeño para enviar a México. Los bancos allá exigen que quien recibe obtenga al menos 50 pesos. Prueba con un monto mayor.',
       transfer_in_progress:
         'Ya tienes una transferencia en curso. Podrás enviar otra cuando se procese tu pago, normalmente en unos días hábiles.',
       quote_expired: 'Este tipo de cambio expiró. Obtén una nueva cotización para continuar.',

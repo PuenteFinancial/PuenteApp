@@ -273,6 +273,35 @@ export function assessQuoteAge(
   }
 }
 
+/**
+ * Is this receive amount one the destination rail will actually pay out?
+ *
+ * The rail has a floor (PAYOUT_MIN_RECEIVE_MINOR; MXN/SPEI is 50 MXN) and
+ * Bridge enforces it by rejecting `POST /v0/transfers` with a synchronous 400.
+ * The only open question was ever WHERE we find out. Until 2026-09-17 the
+ * answer was: at the very last step, days after the sender's money was
+ * collected, on the one code path that cannot tell the sender anything.
+ *
+ * ASKED OF THE RECEIVE LEG, NOT THE SEND. The rail's rule is denominated in
+ * MXN and the USD equivalent moves with the rate all day, so a send-side floor
+ * would be a different bound every hour and wrong at both ends of the range.
+ * `receiveMinor` is the number Bridge is actually handed.
+ *
+ * A PREDICATE, NOT A ROUTE CONCERN, because two callers must agree: the quote
+ * (so a sender hears it before they are priced) and transfer creation (so a
+ * quote minted before this bound existed — or before it was raised — cannot
+ * still become a transfer). Neither is authoritative over Bridge; Bridge is.
+ * Both are simply ahead of the money, which the submit gate is not.
+ */
+export function isBelowPayoutMinimum(receiveMinor: number): boolean {
+  return receiveMinor < env.PAYOUT_MIN_RECEIVE_MINOR
+}
+
+/** The floor itself, for the refusal that has to say what to do instead. */
+export function payoutMinimumReceiveMinor(): number {
+  return env.PAYOUT_MIN_RECEIVE_MINOR
+}
+
 // ── Decimal ↔ minor-unit converters (2-dp currencies) ──────────────────────
 
 // The plan's "strict 2-dp; alert on more precision" gate for Bridge
