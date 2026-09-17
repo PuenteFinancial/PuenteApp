@@ -69,9 +69,13 @@ interface HoldRow {
   payout_hold_reason: string | null
   payout_held_at: string | null
   quote_id: string
+  // Read for assessQuoteAge, which switches the age arm off once the funding
+  // has cleared — the refusal below must ask the same question the submit gate
+  // asks, on the same row (services/payouts.ts).
+  funding_cleared: boolean
 }
 
-const HOLD_COLUMNS = 'id, state, payout_hold_reason, payout_held_at, quote_id'
+const HOLD_COLUMNS = 'id, state, payout_hold_reason, payout_held_at, quote_id, funding_cleared'
 
 async function readHoldRow(transferId: string): Promise<HoldRow | null> {
   const { data, error } = await supabaseAdmin
@@ -128,7 +132,7 @@ async function assessReleaseCanClear(
   // row means the read is broken, never an absent condition.
   if (data == null) throw new Error('hold release quote load failed: no row for a required join')
 
-  const quoteAge = assessQuoteAge((data as { created_at: string }).created_at)
+  const quoteAge = assessQuoteAge((data as { created_at: string }).created_at, row.funding_cleared)
   if (!quoteAge.stale) return null
   return { done: false, reason: 'hold_cannot_clear', cause: 'stale_quote', quoteAge }
 }

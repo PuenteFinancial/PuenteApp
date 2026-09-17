@@ -328,7 +328,7 @@ export async function submitPayout(transferId: string): Promise<number> {
     // release can clear the hold are literally the same code. Two conditions,
     // one reason: only the drift half is releasable — the age half only grows,
     // so a release re-lands here within the minute (see assessQuoteAge).
-    const quoteAge = assessQuoteAge(quote.created_at)
+    const quoteAge = assessQuoteAge(quote.created_at, transfer.funding_cleared)
     if (driftBps > env.FX_MAX_DRIFT_BPS || quoteAge.stale) {
       await placeHold(transfer.id, 'fx_drift', {
         driftBps,

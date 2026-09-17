@@ -207,6 +207,38 @@ export function computeDriftBps(liveRate: string, sourceRate: string): number {
  * The escape hatch is the bound itself: raising FX_MAX_QUOTE_AGE_MINUTES (with
  * Joshua's sign-off, like every other risk bound) makes the same quote fresh
  * and the release goes through. Nothing here is written down to contradict it.
+ *
+ * AGE IS A STUCK-DETECTOR, NOT AN FX CONTROL — and that is why `fundingCleared`
+ * switches it off (2026-09-17). Read the arm's own charter
+ * (prds/remittance-mvp.md, "FX submission backstop", decided 2026-07-18): it
+ * "caps the unbounded-slippage tail on transfers stuck behind a float-ceiling
+ * trip / dry treasury / downed worker", and "fires ~never by design; the 50 bps
+ * buffer prices the normal 15-min quote window". Both halves assumed the
+ * instant-payout rail it was written for, where `funding_cleared` defaulted OFF
+ * and a quote that outlived 15 minutes meant something was WRONG.
+ *
+ * `WAIT_FOR_CLEARING=true` on the live Stripe ACH rail broke that assumption.
+ * Micro-deposit verification (1-2 business days) plus ACH settlement (~4) means
+ * a transfer reaches this gate with a quote ~5.5 DAYS old on the happy path —
+ * measured in prod 2026-09-17, the first real ACH: quote 7,866 minutes old,
+ * drift 122 bps, comfortably inside FX_MAX_DRIFT_BPS. A 240-minute bound is not
+ * merely tight on that rail, it is UNSATISFIABLE: every ACH-funded transfer
+ * would hold on `fx_drift` forever, for doing exactly what it is supposed to do.
+ *
+ * So the age arm now asks its original question rather than a proxy for it.
+ * Once the funding has cleared, the quote's age is settlement latency we CHOSE
+ * to wait for — not evidence the transfer is stuck — and the thing age was
+ * standing in for has its own detector now (jobs/stuck-watch.ts). An UNCLEARED
+ * row that is old is still genuinely stuck, and still holds: that is the
+ * float-ceiling / dry-treasury / downed-worker tail the charter names, intact.
+ *
+ * The FX exposure this leaves is bounded by the arm that actually measures it:
+ * drift is re-read LIVE against FX_MAX_DRIFT_BPS on the same sweep, whatever
+ * the quote's age. Age never bounded slippage on its own — it only ever
+ * guessed that a stuck row might have drifted, and the line above it knows.
+ *
+ * Reversal cost, deliberately near zero: this is one predicate, no column, no
+ * migration, no backfill. Re-arming the old behaviour is deleting `!fundingCleared`.
  */
 export interface QuoteAgeVerdict {
   /** Past FX_MAX_QUOTE_AGE_MINUTES — the submit job will re-hold on this alone. */
@@ -215,7 +247,18 @@ export interface QuoteAgeVerdict {
   maxAgeMinutes: number
 }
 
-export function assessQuoteAge(quoteCreatedAt: string, nowMs: number = Date.now()): QuoteAgeVerdict {
+/**
+ * @param fundingCleared The row's `transfers.funding_cleared`. REQUIRED and
+ * positional on purpose: it is the difference between "old because stuck" and
+ * "old because we waited for the money", every caller can answer it, and a new
+ * caller that cannot must fail to compile rather than silently re-arm the arm
+ * on a rail where it cannot be satisfied.
+ */
+export function assessQuoteAge(
+  quoteCreatedAt: string,
+  fundingCleared: boolean,
+  nowMs: number = Date.now(),
+): QuoteAgeVerdict {
   const createdMs = Date.parse(quoteCreatedAt)
   // Corrupt data, not a market condition: throwing keeps every caller failing
   // closed rather than treating an unparseable timestamp as "fresh".
@@ -224,7 +267,7 @@ export function assessQuoteAge(quoteCreatedAt: string, nowMs: number = Date.now(
   }
   const ageMinutes = (nowMs - createdMs) / 60_000
   return {
-    stale: ageMinutes > env.FX_MAX_QUOTE_AGE_MINUTES,
+    stale: !fundingCleared && ageMinutes > env.FX_MAX_QUOTE_AGE_MINUTES,
     ageMinutes,
     maxAgeMinutes: env.FX_MAX_QUOTE_AGE_MINUTES,
   }
