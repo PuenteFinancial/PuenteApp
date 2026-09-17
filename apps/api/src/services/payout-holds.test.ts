@@ -293,6 +293,7 @@ type HoldRow = {
   payout_hold_reason: string | null
   payout_held_at: string | null
   quote_id: string
+  funding_cleared: boolean
 }
 
 const QUOTE = 'dddddddd-1111-4222-8333-444444444444'
@@ -346,12 +347,15 @@ function holdScenario(
   }
 }
 
-const held = (reason: string | null, state = 'FUNDED'): HoldRow => ({
+// funding_cleared defaults FALSE: the uncleared row is the one the age arm was
+// written for, so every existing case keeps meaning exactly what it meant.
+const held = (reason: string | null, state = 'FUNDED', fundingCleared = false): HoldRow => ({
   id: TRANSFER,
   state,
   payout_hold_reason: reason,
   payout_held_at: reason ? HELD_AT : null,
   quote_id: QUOTE,
+  funding_cleared: fundingCleared,
 })
 
 const input = { transferId: TRANSFER, reason: 'velocity_review' as const, actor: ACTOR, note: NOTE, requestId: 'req-1' }
@@ -379,8 +383,12 @@ describe('releaseHold', () => {
     const out = await releaseHold(input, log)
 
     expect(out).toEqual({ done: true, outcome: 'released', enqueued: true })
-    // Pre-read columns: the four the classification and the `before` need.
-    expect(s.select).toHaveBeenCalledWith('id, state, payout_hold_reason, payout_held_at, quote_id')
+    // Pre-read columns: what the classification and the `before` need, plus
+    // funding_cleared — assessQuoteAge takes it, so a release refusal and the
+    // submit gate judge the same row on the same facts (services/payouts.ts).
+    expect(s.select).toHaveBeenCalledWith(
+      'id, state, payout_hold_reason, payout_held_at, quote_id, funding_cleared',
+    )
     expect(s.selectEq).toHaveBeenCalledWith('id', TRANSFER)
     // The CAS, verbatim from docs/runbooks/payout-holds.md.
     expect(s.update).toHaveBeenCalledWith({ payout_hold_reason: null, payout_held_at: null })
@@ -486,6 +494,23 @@ describe('releaseHold', () => {
       expect(s.quoteSelect).toHaveBeenCalledWith('created_at')
       expect(s.quoteEq).toHaveBeenCalledWith('id', QUOTE)
       expect(s.eq3).toHaveBeenCalledWith('payout_hold_reason', 'fx_drift')
+      expect(recordOpsAction).toHaveBeenCalledTimes(1)
+    })
+
+    it('releases a CLEARED row on the same ancient quote — settlement is not staleness', async () => {
+      // The prod defect, 2026-09-17. Byte-identical quote to the refusal case
+      // above; the only change is that the ACH settled. The release must go
+      // through AND write, because the submit gate will now honour it — a
+      // refusal here is what stranded the first real prod ACH.
+      const s = holdScenario([held('fx_drift', 'FUNDED', true)], [{ id: TRANSFER }], {
+        created_at: staleQuoteAt(),
+      })
+
+      expect(await releaseHold(fxInput, log)).toEqual({ done: true, outcome: 'released', enqueued: true })
+      // It still READ the quote — the age arm is evaluated, not skipped; it
+      // simply does not bite once the funding is in.
+      expect(s.quoteSelect).toHaveBeenCalledWith('created_at')
+      expect(s.update).toHaveBeenCalled()
       expect(recordOpsAction).toHaveBeenCalledTimes(1)
     })
 

@@ -460,6 +460,56 @@ describe('submitPayout — holds', () => {
     expect(createPayout).not.toHaveBeenCalled()
   })
 
+  it('an ancient quote on a CLEARED row SUBMITS — ACH settlement is not staleness', async () => {
+    // The prod defect, 2026-09-17. The first real ACH reached this gate with a
+    // 7,866-minute quote and held on fx_drift, though drift was 122 bps —
+    // comfortably inside the 200 cap. With WAIT_FOR_CLEARING on, the quote is
+    // old precisely BECAUSE the funding cleared, so every ACH transfer arrives
+    // this way and the 240-minute bound can never be met on that rail.
+    envMock.WAIT_FOR_CLEARING = true
+    const { claim } = setupHappy({ funding_cleared: true })
+    route(
+      'quotes',
+      chain({
+        data: { source_rate: 20.100251, created_at: new Date(Date.now() - 7_866 * 60_000).toISOString() },
+        error: null,
+      }),
+    )
+    driftBps.mockReturnValue(122)
+
+    expect(await submitPayout('tr-1')).toBe(1)
+    expect(createPayout).toHaveBeenCalledTimes(1)
+    // The claim chain was spent on the CLAIM, not on a hold: a placeHold would
+    // have written payout_hold_reason through this very chain.
+    expect(claim.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({ payout_hold_reason: 'fx_drift' }),
+    )
+  })
+
+  it('an ancient quote on a cleared row still holds when DRIFT is over the cap', async () => {
+    // Standing the age arm down does not widen the gate: drift is still read
+    // live on the same sweep and is the control that actually bounds slippage.
+    envMock.WAIT_FOR_CLEARING = true
+    const load = chain({ data: { ...baseTransfer, funding_cleared: true }, error: null })
+    const hold = chain({ data: [{ id: 'tr-1' }], error: null })
+    route('transfers', load, hold)
+    route(
+      'quotes',
+      chain({
+        data: { source_rate: 20.1, created_at: new Date(Date.now() - 7_866 * 60_000).toISOString() },
+        error: null,
+      }),
+    )
+    payability.mockResolvedValue({ payable: true, providerAccountRef: 'ext_1' })
+    floatCeiling.mockResolvedValue({ tripped: false, balanceMinor: 0, ceilingMinor: 100 })
+    exchangeRate.mockResolvedValue({ buyRate: '22.00' })
+    driftBps.mockReturnValue(945)
+
+    expect(await submitPayout('tr-1')).toBe(0)
+    expect(hold.update).toHaveBeenCalledWith(expect.objectContaining({ payout_hold_reason: 'fx_drift' }))
+    expect(createPayout).not.toHaveBeenCalled()
+  })
+
   it('rate-fetch failure → throws (never submit on unknown drift)', async () => {
     route('transfers', chain({ data: baseTransfer, error: null }))
     route('quotes', chain({ data: { source_rate: 20.1, created_at: new Date().toISOString() }, error: null }))

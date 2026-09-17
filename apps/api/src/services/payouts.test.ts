@@ -236,7 +236,7 @@ describe('assessQuoteAge', () => {
   const minutesAgo = (m: number) => new Date(NOW - m * 60_000).toISOString()
 
   it('is fresh below the bound and reports the age it measured', () => {
-    expect(assessQuoteAge(minutesAgo(30), NOW)).toEqual({
+    expect(assessQuoteAge(minutesAgo(30), false, NOW)).toEqual({
       stale: false,
       ageMinutes: 30,
       maxAgeMinutes: 240,
@@ -247,8 +247,8 @@ describe('assessQuoteAge', () => {
     // A quote AT the bound still submits. This is not a nicety: the release
     // refusal and the submit gate must agree on the boundary, or the board
     // refuses a release the job would have honoured (or worse, the reverse).
-    expect(assessQuoteAge(minutesAgo(240), NOW).stale).toBe(false)
-    expect(assessQuoteAge(minutesAgo(241), NOW).stale).toBe(true)
+    expect(assessQuoteAge(minutesAgo(240), false, NOW).stale).toBe(false)
+    expect(assessQuoteAge(minutesAgo(241), false, NOW).stale).toBe(true)
   })
 
   it('reads the bound at call time, so raising it un-stales an existing quote', () => {
@@ -257,9 +257,9 @@ describe('assessQuoteAge', () => {
     // fresh again and the release goes through. Nothing is written down to
     // contradict it.
     const old = minutesAgo(6_900) // the staging rows, 2026-09-14
-    expect(assessQuoteAge(old, NOW).stale).toBe(true)
+    expect(assessQuoteAge(old, false, NOW).stale).toBe(true)
     envStub.FX_MAX_QUOTE_AGE_MINUTES = 10_000
-    expect(assessQuoteAge(old, NOW)).toEqual({
+    expect(assessQuoteAge(old, false, NOW)).toEqual({
       stale: false,
       ageMinutes: 6_900,
       maxAgeMinutes: 10_000,
@@ -271,13 +271,56 @@ describe('assessQuoteAge', () => {
     // 10 becomes un-releasable by minute 241 with no new event, which is why
     // the cause is derived now and never recorded at hold time.
     const quote = minutesAgo(10)
-    expect(assessQuoteAge(quote, NOW).stale).toBe(false)
-    expect(assessQuoteAge(quote, NOW + 240 * 60_000).stale).toBe(true)
+    expect(assessQuoteAge(quote, false, NOW).stale).toBe(false)
+    expect(assessQuoteAge(quote, false, NOW + 240 * 60_000).stale).toBe(true)
   })
 
   it('throws on an unparseable timestamp rather than reading it as fresh', () => {
-    expect(() => assessQuoteAge('not-a-date', NOW)).toThrow(PayoutValidationError)
-    expect(() => assessQuoteAge('', NOW)).toThrow(PayoutValidationError)
+    expect(() => assessQuoteAge('not-a-date', false, NOW)).toThrow(PayoutValidationError)
+    expect(() => assessQuoteAge('', false, NOW)).toThrow(PayoutValidationError)
+  })
+
+  // ── The age arm stands down once the funding has cleared (2026-09-17) ──
+  //
+  // Every case above is an UNCLEARED row, which is the arm's charter intact:
+  // old + not funded = stuck behind a float-ceiling trip / dry treasury /
+  // downed worker (prds/remittance-mvp.md, 2026-07-18). These are the other
+  // half — old because ACH settlement took days, which is not stuckness.
+
+  it('is never stale once the funding has cleared, however old the quote', () => {
+    // The prod defect, 2026-09-17: the first real ACH reached the gate with a
+    // 7,866-minute quote against a 240-minute bound and held on fx_drift. With
+    // WAIT_FOR_CLEARING on, EVERY ACH transfer arrives like this — the bound is
+    // not tight on that rail, it is unsatisfiable.
+    expect(assessQuoteAge(minutesAgo(7_866), true, NOW).stale).toBe(false)
+    // Not a wider bound — no bound at all on this path. A year-old quote on a
+    // cleared row is still the drift arm's problem, never this one's.
+    expect(assessQuoteAge(minutesAgo(525_600), true, NOW).stale).toBe(false)
+  })
+
+  it('still reports the true age on a cleared row — the board shows it', () => {
+    // Standing down is not lying. The operator reading the detail page sees the
+    // real number and the real bound; only the VERDICT changes, so a genuinely
+    // odd age is still visible to a human even though it no longer holds.
+    expect(assessQuoteAge(minutesAgo(7_866), true, NOW)).toEqual({
+      stale: false,
+      ageMinutes: 7_866,
+      maxAgeMinutes: 240,
+    })
+  })
+
+  it('holds an uncleared row at the same age — clearing is the whole difference', () => {
+    // The one comparison that proves this is about funding and not about the
+    // bound: same quote, same clock, opposite verdicts.
+    const quote = minutesAgo(7_866)
+    expect(assessQuoteAge(quote, false, NOW).stale).toBe(true)
+    expect(assessQuoteAge(quote, true, NOW).stale).toBe(false)
+  })
+
+  it('still throws on a corrupt timestamp when the funding cleared', () => {
+    // Fail-closed beats the shortcut: an unreadable quote must not be waved
+    // through just because the money arrived.
+    expect(() => assessQuoteAge('not-a-date', true, NOW)).toThrow(PayoutValidationError)
   })
 })
 
