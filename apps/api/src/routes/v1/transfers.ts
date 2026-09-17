@@ -35,6 +35,7 @@ import {
 import { sendError, errorResponseSchema } from '../../utils/errors.js'
 import { getDepositInstructions } from '../../services/deposit-instructions.js'
 import { enqueueFundingOnrampPrepare } from '../../services/queue.js'
+import { clientIp } from '../../utils/client-origin.js'
 
 const TRANSFER_COLUMNS =
   'id, user_id, payout_destination_id, quote_id, state, send_amount_minor, send_currency, ' +
@@ -782,12 +783,10 @@ export async function transfersRoute(server: FastifyInstance) {
 
       // Real client IP for the onramp supportability pre-check (#213):
       // browser traffic arrives via the Next.js proxy, so the true address
-      // rides in x-client-ip (auth.ts precedent); request.ip is the fallback
-      // for direct callers. An authenticated caller spoofing the header only
-      // mislabels their own geo check. Name/email are the KYC prefill —
-      // never SSN, and never logged.
-      const forwardedIp = request.headers['x-client-ip']
-      const clientIp = (typeof forwardedIp === 'string' ? forwardedIp : request.ip) || undefined
+      // rides in x-client-ip — honoured only when the proxy proves itself
+      // (utils/client-origin.ts), otherwise the socket address. Name/email are
+      // the KYC prefill — never SSN, and never logged.
+      const senderIp = clientIp(request) ?? undefined
 
       // K4: the embedded rail can't create a session yet — the SDK must mint
       // a payment token first. Confirm's job ends at acceptance; the pay step
@@ -815,7 +814,7 @@ export async function transfersRoute(server: FastifyInstance) {
           userId,
           totalAmountMinor: transfer.send_amount_minor + transfer.fee_amount_minor,
           currency: 'USD',
-          ...(clientIp && { clientIp }),
+          ...(senderIp && { clientIp: senderIp }),
           customer: {
             ...(approvedUser.firstName && { firstName: approvedUser.firstName }),
             ...(approvedUser.lastName && { lastName: approvedUser.lastName }),

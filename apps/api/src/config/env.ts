@@ -196,6 +196,14 @@ const envSchema = z.object({
   // purpose — its absence 503s the funding webhook and confirm, which is the
   // production lock against mock funding. Doppler sets it dev/staging only.
   MOCK_FUNDING_WEBHOOK_SECRET: z.string().min(16).optional(),
+  // Shared with the Next.js app (Doppler `puente-web`, SAME VALUE, per tier) so
+  // this API can tell its own proxy from any other caller. Without it the
+  // `x-client-ip` / `x-client-ua` headers are ignored and evidence falls back
+  // to the socket address — see utils/client-origin.ts. Optional here so local
+  // dev and CI need no secret; the boot check in server.ts warns when a
+  // DEPLOYED instance is missing it, because silently degraded evidence is the
+  // failure mode nobody notices.
+  PROXY_TRUST_SECRET: z.string().min(32).optional(),
   // Stripe (PR-S1): secret key (sk_test_… until activation; sk_live_… after)
   // and the webhook endpoint signing secret (whsec_…). Optional here — only a
   // FUNDING_PROCESSOR=stripe selection requires them (superRefine below).

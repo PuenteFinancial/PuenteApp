@@ -131,6 +131,31 @@ if (env.OPS_ADMIN_USER_IDS.size > 0) {
   await server.register(opsTransfersRoute, { prefix: '/v1' })
 }
 
+// THE PROXY HOP'S SHARED SECRET, checked at boot because its absence is
+// invisible at runtime. Without it the API still serves every request happily
+// and simply stops believing x-client-ip — so consents, the NACHA WEB-debit
+// authorization and sign_in_events quietly start recording Vercel's egress
+// address instead of the sender's, and nothing in a response, a log or a test
+// says so. The first sign would be a compliance question years later.
+//
+// A WARNING, NOT A REFUSAL TO BOOT. An API that will not start because a
+// Doppler sync lagged is a worse outage than degraded evidence, and the
+// degradation is safe-by-direction: less precise, never false. Pairs with the
+// web side, which no-ops when the secret is absent.
+//
+// Keyed on SENTRY_ENVIRONMENT rather than NODE_ENV, which nothing sets for the
+// deployed API (the ENABLE_DEV_ENDPOINTS lesson — NODE_ENV fails open here).
+if (!env.PROXY_TRUST_SECRET && process.env.SENTRY_ENVIRONMENT) {
+  const message =
+    'PROXY_TRUST_SECRET is not set — x-client-ip is ignored, so consent and ' +
+    'sign-in records will store the proxy address, not the sender it claims'
+  server.log.warn({ environment: process.env.SENTRY_ENVIRONMENT }, message)
+  Sentry.withScope((scope) => {
+    scope.setFingerprint(['proxy-trust-secret-missing'])
+    Sentry.captureMessage(message, 'warning')
+  })
+}
+
 try {
   await server.listen({ port: env.PORT, host: env.HOST })
 } catch (err) {

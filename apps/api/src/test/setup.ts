@@ -21,3 +21,11 @@ process.env.STRIPE_WEBHOOK_SECRET ??= 'whsec_stripe_secret_test'
 // that exercise the crypto client (mirrors the STRIPE_SECRET_KEY approach).
 process.env.STRIPE_API_BASE ??= 'https://api.stripe.test'
 process.env.LINK_OAUTH_API_BASE ??= 'https://login.link.test'
+// The shared secret the Next.js proxy presents so the API believes its
+// x-client-ip / x-client-ua (utils/client-origin.ts). Set here rather than
+// per-suite because four route suites assert the forwarded address reaches an
+// evidence row, and without it every one of them would silently assert the
+// FALLBACK instead — which is the exact failure the gate exists to prevent,
+// passing as a green test. Suites that want the untrusted behaviour send no
+// trust header; client-origin.test.ts overrides the env directly.
+process.env.PROXY_TRUST_SECRET ??= 'test_proxy_trust_secret_at_least_32_chars'

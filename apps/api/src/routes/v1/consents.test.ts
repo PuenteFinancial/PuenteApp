@@ -14,6 +14,10 @@ vi.mock('../../services/supabase.js', () => ({
 
 const { consentsRoute, hasBridgeTos } = await import('./consents.js')
 
+// The proxy's proof (src/test/setup.ts). Without it the API correctly ignores
+// the forwarded address, so these assertions would silently test the fallback.
+const PROXY_TRUST = 'test_proxy_trust_secret_at_least_32_chars'
+
 // Stand-in for the real JWT plugin: any non-empty bearer token authenticates
 // as a fixed test user; requests without one get 401.
 const mockAuth = fp(async (server) => {
@@ -180,11 +184,53 @@ describe('POST /v1/users/me/consents', () => {
       .post('/v1/users/me/consents')
       .set('Authorization', 'Bearer test-token')
       .set('X-Client-Ip', '203.0.113.7')
+      .set('x-proxy-trust', PROXY_TRUST)
       .send(validBody)
 
     expect(res.status).toBe(200)
     const [rows] = upsert.mock.calls[0] as unknown as [Array<Record<string, unknown>>]
     expect((rows[0]!.evidence as Record<string, unknown>).ip).toBe('203.0.113.7')
+    await app.close()
+  })
+
+  // THE SECURITY HALF, on the row that IS the E-SIGN and NACHA WEB-debit
+  // evidence. The API answers the public internet directly, so anyone can send
+  // this header; without the proxy's proof the claimed address must not be the
+  // one we store. The assertion is `not.toBe` rather than a specific value
+  // because what matters is that the ATTACKER's chosen address never lands —
+  // whatever the socket address happens to be in this harness is fine.
+  it('stores an UNPROVEN x-client-ip nowhere — a forged address is not evidence', async () => {
+    const { table, upsert } = consentsTable()
+    from.mockReturnValue(table)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/consents')
+      .set('Authorization', 'Bearer test-token')
+      .set('X-Client-Ip', '203.0.113.7') // no x-proxy-trust
+      .send(validBody)
+
+    expect(res.status).toBe(200)
+    const [rows] = upsert.mock.calls[0] as unknown as [Array<Record<string, unknown>>]
+    expect((rows[0]!.evidence as Record<string, unknown>).ip).not.toBe('203.0.113.7')
+    await app.close()
+  })
+
+  it('stores nothing forged when the presented secret is WRONG', async () => {
+    const { table, upsert } = consentsTable()
+    from.mockReturnValue(table)
+    const app = await buildApp()
+
+    const res = await supertest(app.server)
+      .post('/v1/users/me/consents')
+      .set('Authorization', 'Bearer test-token')
+      .set('X-Client-Ip', '203.0.113.7')
+      .set('x-proxy-trust', 'z'.repeat(PROXY_TRUST.length))
+      .send(validBody)
+
+    expect(res.status).toBe(200)
+    const [rows] = upsert.mock.calls[0] as unknown as [Array<Record<string, unknown>>]
+    expect((rows[0]!.evidence as Record<string, unknown>).ip).not.toBe('203.0.113.7')
     await app.close()
   })
 
@@ -292,6 +338,7 @@ describe('POST /v1/users/me/bridge-tos (K6)', () => {
       .post('/v1/users/me/bridge-tos')
       .set('Authorization', 'Bearer test-token')
       .set('x-client-ip', '203.0.113.7')
+      .set('x-proxy-trust', PROXY_TRUST)
       .set('user-agent', 'drive/1.0')
       .send({ signed_agreement_id: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d', locale: 'es' })
 

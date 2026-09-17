@@ -9,8 +9,8 @@ exception. No secret ever lands in git, client code, or logs (Gitleaks enforces 
 
 | Store | Configs / scope | Contents |
 |---|---|---|
-| Doppler `puente-api` | `dev_main`, `stg_main`, `prd_main` → synced to Railway envs | Supabase URL/keys, Bridge keys (sandbox in stg, live in prd), CRS, Sentry, `TRUST_PROXY_SOURCES` (optional — the code default covers Railway; the old `TRUST_PROXY_HOPS` is dead, delete it), `BRIDGE_WEBHOOK_PUBLIC_KEY`. **Slice-5 worker vars:** `DATABASE_URL` + `BRIDGE_TREASURY_WALLET_ID` (no defaults — the worker asserts both at boot) and `FLOAT_CEILING_MINOR` (no default — the submit job refuses to submit payouts without it); tuning knobs with code defaults, env-overridable: `FX_MAX_DRIFT_BPS` (200), `FX_MAX_QUOTE_AGE_MINUTES` (240), `WORKER_POLL_INTERVAL_SECONDS` (300), and (slice-7 debt pass) `BRIDGE_TIMEOUT_SECONDS` (15), `LOSS_CORRECTION_ALERT_MINOR` (20000 = $200), `LOSS_CORRECTION_WINDOW_DAYS` (7). `MOCK_FUNDING_WEBHOOK_SECRET` — HMAC for the mock funding processor's webhook + `/confirm`. **dev + stg only, never prd**: its absence 503s the funding webhook + confirm (the production lock against mock funding); present in dev/stg it lets you exercise the funding path against Bridge sandbox. Generate `openssl rand -hex 24`; the value must match on both the API and whatever fires the webhook (the `fire-funding-webhook` script / e2e). **Slice-7 var:** `ENABLE_DEV_ENDPOINTS` (`'true'`/`'false'`, code default `false`) — set `true` in **dev + stg only, never prd**. It is the second, independent control on `POST /v1/dev/transfers/:id/simulate-funding` (the web "Simulate payment" button standing in for Stripe): that route drives a transfer to `FUNDED` — a real ledger batch — with no real payment, so it needs BOTH this flag and `MOCK_FUNDING_WEBHOOK_SECRET`. It is deliberately not keyed on `NODE_ENV`, which nothing in this repo sets for the deployed API and which therefore fails open. **Without it set, the Simulate payment button 404s on staging** |
-| Doppler `puente-web` | 3 configs → synced to Vercel | `INTERNAL_API_URL` + PostHog tokens (public), ~3 vars each |
+| Doppler `puente-api` | `dev_main`, `stg_main`, `prd_main` → synced to Railway envs | Supabase URL/keys, Bridge keys (sandbox in stg, live in prd), CRS, Sentry, `TRUST_PROXY_SOURCES` (optional — the code default covers Railway; the old `TRUST_PROXY_HOPS` is dead, delete it), **`PROXY_TRUST_SECRET`** (see the note below — the same value must be in `puente-web` at the same tier), `BRIDGE_WEBHOOK_PUBLIC_KEY`. **Slice-5 worker vars:** `DATABASE_URL` + `BRIDGE_TREASURY_WALLET_ID` (no defaults — the worker asserts both at boot) and `FLOAT_CEILING_MINOR` (no default — the submit job refuses to submit payouts without it); tuning knobs with code defaults, env-overridable: `FX_MAX_DRIFT_BPS` (200), `FX_MAX_QUOTE_AGE_MINUTES` (240), `WORKER_POLL_INTERVAL_SECONDS` (300), and (slice-7 debt pass) `BRIDGE_TIMEOUT_SECONDS` (15), `LOSS_CORRECTION_ALERT_MINOR` (20000 = $200), `LOSS_CORRECTION_WINDOW_DAYS` (7). `MOCK_FUNDING_WEBHOOK_SECRET` — HMAC for the mock funding processor's webhook + `/confirm`. **dev + stg only, never prd**: its absence 503s the funding webhook + confirm (the production lock against mock funding); present in dev/stg it lets you exercise the funding path against Bridge sandbox. Generate `openssl rand -hex 24`; the value must match on both the API and whatever fires the webhook (the `fire-funding-webhook` script / e2e). **Slice-7 var:** `ENABLE_DEV_ENDPOINTS` (`'true'`/`'false'`, code default `false`) — set `true` in **dev + stg only, never prd**. It is the second, independent control on `POST /v1/dev/transfers/:id/simulate-funding` (the web "Simulate payment" button standing in for Stripe): that route drives a transfer to `FUNDED` — a real ledger batch — with no real payment, so it needs BOTH this flag and `MOCK_FUNDING_WEBHOOK_SECRET`. It is deliberately not keyed on `NODE_ENV`, which nothing in this repo sets for the deployed API and which therefore fails open. **Without it set, the Simulate payment button 404s on staging** |
+| Doppler `puente-web` | 3 configs → synced to Vercel | `INTERNAL_API_URL` + PostHog tokens (public), ~3 vars each. **`PROXY_TRUST_SECRET`** — see the note below; NOT `NEXT_PUBLIC_` |
 | GitHub Actions — repo secrets | all workflows | `STAGING_DB_URL` (session-pooler string), `TURBO_TOKEN`, `TURBO_TEAM=puente-financial` |
 | GitHub Actions — `production` environment secret | readable **only** inside the approval-gated Promote job | `PROD_DB_URL` (session-pooler string) |
 | EAS environment variables (`eas env:set --scope project`) | mobile builds; per-environment (`production` / `preview` / `development`) | Expo/EAS-side **build-time** config. The app itself still calls no providers, so no runtime provider secrets live here. **`SENTRY_AUTH_TOKEN`** (`production` only, `--visibility secret` so it is write-only and unreadable afterwards) — used by the Xcode "Upload Debug Symbols to Sentry" phase, never shipped in the binary; get it from Sentry → Settings → Auth Tokens with `project:releases` scope, **not** from the Expo dashboard. Deliberately NOT in Doppler: Doppler syncs to Railway and Vercel, not EAS, and this is consumed only by the build. `simulator`/`preview` profiles set `SENTRY_DISABLE_AUTO_UPLOAD=true` in `eas.json` (a boolean, not a secret) and need no token |
@@ -18,6 +18,29 @@ exception. No secret ever lands in git, client code, or logs (Gitleaks enforces 
 
 Supabase DB passwords are **write-only** (reset-only in Database→Settings, new UI). Their only
 consumers are the two pipeline secrets above.
+
+
+### `PROXY_TRUST_SECRET` — the one secret that lives in BOTH projects
+
+Set the **same value** in `puente-api` and `puente-web` at the **same tier**
+(`stg_main` with `stg_main`, `prd_main` with `prd_main`). Different value per tier — a staging
+leak must not authenticate against prod. Generate with `openssl rand -hex 32`.
+
+It is how the API tells its own Next.js proxy from any other caller. `INTERNAL_API_URL` is a
+public-internet hop, not a private network: the Railway host answers a stranger's
+`GET /v1/health` with 200 (measured 2026-09-16). Web forwards the browser's real address in
+`x-client-ip`, and that value becomes `consents.ip` — the E-SIGN record and the NACHA WEB-debit
+authorization — plus `sign_in_events.ip`. Without the secret the API ignores those headers and
+stores the socket address instead.
+
+**Nothing breaks if it is missing, and that is the hazard.** Every request still succeeds; the
+evidence just quietly becomes Vercel's egress address. The API logs a warning and raises one
+Sentry issue at boot (`proxy-trust-secret-missing`) when it is unset on a deployed instance —
+that page is the only signal.
+
+**Order when rotating:** set the API side first, then web. The API accepts exactly one value, so
+a web-first rotation makes it distrust the proxy for the gap between the two syncs. Confirm the
+Railway service redeployed — a Doppler sync alone does not restart it.
 
 ## Rotation procedure (generic)
 
