@@ -40,7 +40,8 @@ that page is the only signal.
 
 **Order when rotating:** set the API side first, then web. The API accepts exactly one value, so
 a web-first rotation makes it distrust the proxy for the gap between the two syncs. Confirm the
-Railway service redeployed — a Doppler sync alone does not restart it.
+Railway service redeployed (see "Doppler → Railway" below — it normally redeploys itself, but
+confirm rather than assume).
 
 ## Rotation procedure (generic)
 
@@ -67,8 +68,31 @@ Railway service redeployed — a Doppler sync alone does not restart it.
   Rotating a Twilio credential means editing it there, in both, and nothing in Doppler or Railway
   changes. (Three unused `TWILIO_*` vars were declared in the API's env schema until 2026-08-05;
   they were read by nothing, so setting them looked like configuring SMS while doing nothing.)
-- **Doppler → Railway:** confirm the service redeployed after a sync; Railway does not restart on
-  every var change.
+- **Doppler → Railway: the sync DOES redeploy — corrected 2026-09-17.** This entry used to say
+  "Railway does not restart on every var change", and planning a manual redeploy around that is
+  how an operator ends up restarting prod services for no reason. **Measured:** a
+  `doppler secrets set` on `puente-api/prd_main` at `15:46:24.832Z` redeployed **both** prod
+  services (`@puente/api` and `puente-worker`) at `15:46:26/:27Z` — two seconds later, unprompted.
+  Confirm it landed rather than assuming in either direction; the check is the same either way:
+
+  ```bash
+  railway deployment list -s <service> -e production -p <projectId>
+  ```
+
+  Measured on `puente-api` only. `puente-web` → Vercel is a different integration and was not
+  tested here. **The API validates its whole env at boot** (`config/env.ts`), so until a service
+  actually restarts a synced var is inert — which is what makes the confirmation worth doing.
+- **A var that BOTH Railway services read must reach both.** The API and the worker are separate
+  services with separate boots, so a half-applied change is a live skew, not a slow rollout: after
+  the 2026-09-17 `FX_MAX_QUOTE_AGE_MINUTES` change, an API-only restart would have had the ops
+  board offer a Release the worker would re-hold within the minute. Check the deployment list for
+  **both**.
+- **Restarting a service without shipping new code:** plain `railway redeploy` re-runs the
+  **existing** deployment. Never add `--from-source` on production — that pulls the latest commit
+  from the configured branch, which is a deploy, not a restart. Verify what is actually serving
+  with `/v1/health`, which reports the short commit; it must match `origin/production`. Note the
+  `railway` CLI links to **staging** by default (`railway status`), so pass `-e production`
+  explicitly rather than relying on the linked environment.
 - **`DATABASE_URL` goes to BOTH Railway services (API + worker), not just the worker.** (Both
   services now run in **both** environments — the prod worker went live 2026-08-17, see
   `deploy-and-promote.md`.) It's the
