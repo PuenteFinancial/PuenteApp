@@ -19,19 +19,67 @@ export const BRIDGE_KYC_STATUS_MAP: Record<string, KycStatus> = {
   rejected: 'rejected',
 }
 
+// Bridge's machine-readable error code, IF it is safely one.
+//
+// The body stays unprintable (see BridgeApiError) because it can echo request
+// PII. `code` is the one field in it that is contractually a machine token, so
+// it is the one field we lift out — through an allowlist, never a denylist.
+//
+// The pattern is the safety argument: lowercase snake_case, 3-64 chars, which
+// no CLABE (digits), no email (`@`, `.`), and no human name as typed by a
+// sender survives. Anything else — an object, a free-text sentence, a
+// mixed-case value, an unexpected type — yields null and we are exactly as
+// blind as we were before, which is the failure mode to prefer.
+//
+// Deliberately NOT applied to `message` or `source`: those hold values, not
+// codes, and an allowlist that matched a sender's lowercase first name in a
+// free-text field is precisely the leak the non-enumerable body prevents.
+const BRIDGE_ERROR_CODE_PATTERN = /^[a-z][a-z0-9_]{2,63}$/
+
+export function safeBridgeErrorCode(body: unknown): string | null {
+  if (body == null || typeof body !== 'object') return null
+  const code = (body as { code?: unknown }).code
+  if (typeof code !== 'string') return null
+  return BRIDGE_ERROR_CODE_PATTERN.test(code) ? code : null
+}
+
 export class BridgeApiError extends Error {
   // Raw Bridge error body — readable for code branching (err.body.code), but
   // deliberately NON-ENUMERABLE so console.error / util.inspect / JSON never
   // print it: Bridge error bodies can echo request PII (names, CLABEs).
   declare readonly body: unknown
 
+  /**
+   * The allowlisted machine code from the body, or null.
+   *
+   * On the MESSAGE rather than only on the instance, because that is the one
+   * place both readers actually look: the worker logs `err.message`
+   * (worker.ts errMessage) and Sentry titles the issue by it. The worker's
+   * capture is a bare `Sentry.captureException(err)` with no scope, and
+   * ExtraErrorData is not enabled, so a property alone would reach neither.
+   *
+   * 2026-09-17 is the second incident this cost real time: a prod payout
+   * looped on `status 400` with no way to learn why from logs, Sentry, or the
+   * Bridge dashboard — a rejected request creates no object to inspect there.
+   *
+   * NON-ENUMERABLE like `body`, deliberately: the message is what carries it to
+   * the two readers, so the property never needs to be dumpable, and keeping it
+   * off `Object.keys` / `JSON.stringify` leaves the existing serialization
+   * guarantees byte-identical rather than loosening a second thing to fix one.
+   */
+  declare readonly code: string | null
+
   constructor(
     public readonly status: number,
     body: unknown,
   ) {
-    // Bridge error bodies can contain request PII — keep the message to status only
-    super(`Bridge API request failed with status ${status}`)
+    // Bridge error bodies can contain request PII — the message carries the
+    // status and, when the body offers one, the allowlisted machine code.
+    // Never the body, never `message`, never `source`.
+    const code = safeBridgeErrorCode(body)
+    super(`Bridge API request failed with status ${status}${code ? ` (code: ${code})` : ''}`)
     this.name = 'BridgeApiError'
+    Object.defineProperty(this, 'code', { value: code, enumerable: false })
     Object.defineProperty(this, 'body', { value: body, enumerable: false })
   }
 
