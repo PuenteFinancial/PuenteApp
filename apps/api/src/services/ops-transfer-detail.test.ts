@@ -503,9 +503,14 @@ describe('buildOpsTransferDetail', () => {
 // release would accomplish anything: fx_drift is placed by either of two
 // conditions, and only the drift one is something a release resolves.
 describe('holdRelease — whether releasing could clear the hold', () => {
-  const heldFxDrift = (quoteMinutesOld: number) => {
+  const heldFxDrift = (quoteMinutesOld: number, fundingCleared = false) => {
     results.transfers = {
-      data: transferRow({ state: 'FUNDED', payout_hold_reason: 'fx_drift', payout_held_at: minutesAgo(30) }),
+      data: transferRow({
+        state: 'FUNDED',
+        payout_hold_reason: 'fx_drift',
+        payout_held_at: minutesAgo(30),
+        funding_cleared: fundingCleared,
+      }),
       error: null,
     }
     const quote = results.quotes?.data as Record<string, unknown>
@@ -528,6 +533,21 @@ describe('holdRelease — whether releasing could clear the hold', () => {
     heldFxDrift(30)
     const detail = await buildOpsTransferDetail(T)
     expect(detail!.holdRelease).toEqual({ blocker: null, quoteAgeMinutes: 30, maxQuoteAgeMinutes: 240 })
+  })
+
+  it('offers the button on a CLEARED row with the very same ancient quote', async () => {
+    // The prod defect, 2026-09-17. Identical quote age to the stale_quote case
+    // above — the only difference is that the ACH settled, which is why the
+    // quote is old at all. The board must offer Release here: the submit gate
+    // will now honour it, so refusing would strand a payable transfer.
+    heldFxDrift(6_900, true)
+    const detail = await buildOpsTransferDetail(T)
+    expect(detail!.holdRelease).toEqual({
+      // The operator still reads the true age and the true bound beside it.
+      blocker: null,
+      quoteAgeMinutes: 6_900,
+      maxQuoteAgeMinutes: 240,
+    })
   })
 
   it('measures the age on the same clock as generatedAt', async () => {

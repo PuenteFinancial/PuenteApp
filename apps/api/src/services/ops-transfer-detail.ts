@@ -553,7 +553,7 @@ export async function buildOpsTransferDetail(transferId: string): Promise<OpsTra
   // reason reports null rather than a fabricated "no blocker".
   let holdRelease: OpsTransferDetail['holdRelease'] = null
   if (transfer.payout_hold_reason === 'fx_drift' && quote != null) {
-    const age = assessQuoteAge(quote.createdAt, nowMs)
+    const age = assessQuoteAge(quote.createdAt, transfer.funding_cleared, nowMs)
     holdRelease = {
       blocker: age.stale ? 'stale_quote' : null,
       quoteAgeMinutes: Math.round(age.ageMinutes),
