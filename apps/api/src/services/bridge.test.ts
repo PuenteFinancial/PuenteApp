@@ -15,6 +15,7 @@ import {
   isPayoutReady,
   listExternalAccounts,
   BridgeApiError,
+  safeBridgeErrorCode,
 } from './bridge.js'
 
 const fetchMock = vi.fn()
@@ -85,12 +86,69 @@ describe('createBridgeCustomer', () => {
     expect(err).toBeInstanceOf(BridgeApiError)
     expect((err as BridgeApiError).status).toBe(422)
     expect((err as BridgeApiError).body).toEqual({ code: 'invalid_email' })
-    // message must not leak the response body (may contain PII)
-    expect((err as BridgeApiError).message).not.toContain('invalid_email')
+    // The message carries the ALLOWLISTED machine code (2026-09-17). The rule
+    // this assertion has always encoded — "must not leak the response BODY" —
+    // is unchanged and pinned by the cases below; what changed is that one
+    // contractually-machine field is no longer treated as if it were the body.
+    // Without it a prod payout looped on a bare `status 400` with no way to
+    // learn why from logs, Sentry, or the dashboard (a rejected request makes
+    // no object to inspect there).
+    expect((err as BridgeApiError).message).toBe(
+      'Bridge API request failed with status 422 (code: invalid_email)',
+    )
+    expect((err as BridgeApiError).code).toBe('invalid_email')
     // body must be NON-ENUMERABLE: console.error / util.inspect / JSON print
-    // enumerable own properties, and Bridge error bodies can echo request PII
+    // enumerable own properties, and Bridge error bodies can echo request PII.
+    // `code` is non-enumerable for the same reason — the message is what
+    // carries it, so these serialization guarantees did not have to move.
     expect(Object.keys(err as object)).not.toContain('body')
+    expect(Object.keys(err as object)).not.toContain('code')
     expect(JSON.stringify(err)).not.toContain('invalid_email')
+  })
+})
+
+describe('safeBridgeErrorCode — the allowlist that keeps PII out of the message', () => {
+  it('lifts a machine code', () => {
+    expect(safeBridgeErrorCode({ code: 'amount_below_minimum' })).toBe('amount_below_minimum')
+  })
+
+  it('takes ONLY `code` — never message, source, or any other field', () => {
+    // The fields that hold VALUES are the ones that echo what we sent. A body
+    // with no `code` yields nothing, however much detail it carries.
+    expect(
+      safeBridgeErrorCode({
+        message: 'clabe 012180012345678901 for Juan Perez is invalid',
+        source: { key: 'destination.clabe', value: '012180012345678901' },
+      }),
+    ).toBeNull()
+  })
+
+  it.each([
+    ['a CLABE', '012180012345678901'],
+    ['an email', 'juan.perez@example.com'],
+    ['a human name', 'Juan Perez'],
+    ['free text', 'the amount is below the minimum'],
+    ['mixed case', 'Invalid_Amount'],
+    ['too short', 'ab'],
+    ['over-long', 'a'.repeat(65)],
+  ])('refuses %s', (_label, value) => {
+    expect(safeBridgeErrorCode({ code: value })).toBeNull()
+  })
+
+  it.each([
+    ['a non-string code', { code: { nested: 'invalid_amount' } }],
+    ['a numeric code', { code: 400 }],
+    ['a null body', null],
+    ['a string body', 'invalid_amount'],
+    ['no code at all', { detail: 'nope' }],
+  ])('yields null for %s — blind beats leaky', (_label, body) => {
+    expect(safeBridgeErrorCode(body)).toBeNull()
+  })
+
+  it('leaves the message bare when the code is refused', () => {
+    const err = new BridgeApiError(400, { code: 'Juan Perez' })
+    expect(err.message).toBe('Bridge API request failed with status 400')
+    expect(err.code).toBeNull()
   })
 })
 
@@ -168,14 +226,29 @@ describe('createExternalAccount', () => {
     expect(keys[0]).not.toBe(keys[1])
   })
 
-  it('throws BridgeApiError on non-2xx without leaking the body in the message', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(400, { code: 'invalid_clabe' }))
+  it('names the code in the message but never the CLABE that caused it', async () => {
+    // The sharpest version of the rule: a body carrying BOTH the machine code
+    // and the customer's actual CLABE. The code is exactly what an operator
+    // needs; the CLABE is exactly what must never reach a log or Sentry.
+    fetchMock.mockResolvedValue(
+      jsonResponse(400, {
+        code: 'invalid_clabe',
+        message: `clabe ${input.clabe} failed checksum for ${input.firstName} ${input.lastName}`,
+        source: { key: 'clabe', value: input.clabe },
+      }),
+    )
 
     const err = await createExternalAccount('cust_abc', input).catch((e: unknown) => e)
 
     expect(err).toBeInstanceOf(BridgeApiError)
     expect((err as BridgeApiError).status).toBe(400)
-    expect((err as BridgeApiError).message).not.toContain('invalid_clabe')
+    expect((err as BridgeApiError).message).toBe(
+      'Bridge API request failed with status 400 (code: invalid_clabe)',
+    )
+    expect((err as BridgeApiError).message).not.toContain(input.clabe)
+    expect((err as BridgeApiError).message).not.toContain(input.firstName)
+    expect((err as BridgeApiError).message).not.toContain('checksum')
+    expect(JSON.stringify(err)).not.toContain(input.clabe)
   })
 })
 
@@ -501,7 +574,14 @@ describe('createBridgePayout', () => {
 
     expect(err).toBeInstanceOf(BridgeApiError)
     expect((err as BridgeApiError).statusCode).toBe(400)
-    expect((err as BridgeApiError).message).not.toContain('insufficient_funds')
+    // The code rides the message (2026-09-17). THIS is the case that motivated
+    // it: `insufficient_funds` and `amount_below_minimum` are both sync 400s
+    // and the retry-vs-give-up answer is opposite for each, yet on 2026-09-17 a
+    // prod payout looped for half an hour showing only "status 400".
+    expect((err as BridgeApiError).message).toBe(
+      'Bridge API request failed with status 400 (code: insufficient_funds)',
+    )
+    expect((err as BridgeApiError).code).toBe('insufficient_funds')
   })
 
   it('throws statusCode 422 on idempotency-key body mismatch', async () => {

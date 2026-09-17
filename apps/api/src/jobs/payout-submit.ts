@@ -399,6 +399,10 @@ export async function submitPayout(transferId: string): Promise<number> {
         if (attemptingForMs < env.SUBMIT_RETRY_CEILING_MINUTES * 60_000) throw err
         await placeHold(transfer.id, 'submit_error', {
           statusCode: 400,
+          // Bridge's allowlisted machine code, when it gave one. The hold is
+          // where an operator looks days later, long after the log line that
+          // carried the same code has rotated away.
+          bridgeCode: err.code,
           cause: 'retry_ceiling_exhausted',
           attemptingForMinutes: Math.round(attemptingForMs / 60_000),
         })
@@ -406,7 +410,10 @@ export async function submitPayout(transferId: string): Promise<number> {
       }
       // 422 (idempotency mismatch) or other 4xx: an engineering incident, not
       // a transient — hold for the runbook.
-      await placeHold(transfer.id, 'submit_error', { statusCode: err.statusCode })
+      await placeHold(transfer.id, 'submit_error', {
+        statusCode: err.statusCode,
+        bridgeCode: err.code,
+      })
       return 0
     }
     throw err // 5xx / network: pg-boss retries
