@@ -5,6 +5,8 @@ Fintech monorepo. Credit-building remittance app targeting LATAM immigrants in t
 Live now: waitlist, credit score check, financial literacy content (puentefinancial.com).
 In progress: USD → MXN remittance MVP — pure money movement. Lending is a separate future stack.
 
+Company context lives in ../puente-brain. Read company.md and decisions.md before product or architecture work.
+
 ## Stack
 - Monorepo: Turborepo. `apps/mobile` (RN + Expo), `apps/web` (Next.js), `apps/api` (Fastify), `packages/shared` (types + portable client logic)
 - API: Fastify v5, TypeScript 6, Zod schema validation, Supabase (Postgres)
