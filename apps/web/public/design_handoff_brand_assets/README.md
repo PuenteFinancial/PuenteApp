@@ -1,14 +1,30 @@
 # Handoff: Puente Financial — Brand Assets (favicon, logo, OG image)
 
 ## Overview
-This bundle contains the launch brand assets for **Puente Financial** — a remittance-backed
-credit card landing page. It delivers a simplified single-color **bridge mark** (a *puente*),
-a favicon set, standalone logo files, and a social/Open-Graph share image. Everything is drawn
-from the palette already used on the landing page.
+This bundle contains the launch brand assets for **Puente Financial** — a credit-building
+remittance app (USD → MXN today; no card product, see below). It delivers a simplified
+single-color **bridge mark** (a *puente*), a favicon set, standalone logo files, and a
+social/Open-Graph share image.
 
-Your task: wire these assets into the real landing-page codebase (the `<head>` metadata, the
-nav/header logo, and the social tags). The mark is provided as **production-ready SVG/PNG** —
-you do not need to recreate it, just place the files and add the markup below.
+> **Superseded framing, kept for history:** this doc originally described a "remittance-backed
+> credit card" concept. That framing is dead — the shipped product is the app itself (send
+> money, build credit doing it), not a card. See `apps/web/PRODUCT.md` § Positioning /
+> Brand Commitments for the current, authoritative framing. The mark/logo/favicon files below
+> are still current and accurate; only the old product-framing prose has been corrected here.
+
+The mark is provided as **production-ready SVG/PNG** — you do not need to recreate it, just
+place the files and add the markup below.
+
+**Typography note:** the wordmark spec below (Hanken Grotesk alone) predates the shipped type
+system. The live site pairs **Bricolage Grotesque** (display/headings) with **Hanken Grotesk**
+(body) and **Space Mono** (monospace accent) — see `apps/web/app/layout.tsx`. Hanken Grotesk is
+still correct for the wordmark lockup itself; don't extend it to headings/body copy.
+
+**Compliance note:** credit reporting/furnishing to bureaus is **not built** (no furnisher
+integration exists). Marketing copy must keep credit-building claims forward-looking
+("coming soon"), never present-tense, until that ships and counsel signs off — see
+`apps/web/PRODUCT.md` § Capabilities and Constraints and the guard comment in
+`packages/shared/src/i18n/translations.ts` above the `hero.pills` copy.
 
 ## Fidelity
 **High-fidelity / final.** Colors, geometry, and proportions are final. The SVG/PNG files are
@@ -59,6 +75,9 @@ mark height. Letter-spacing `-0.02em`.
 | `logo-explore.html` | *Reference* — brand board showing the mark, treatments, favicon sizes (not shipped) | — |
 
 ## Drop-in `<head>` snippet
+This is illustrative markup only — `apps/web/app/layout.tsx` already wires favicons and OG/Twitter
+tags via Next.js `metadata`, with current copy. Don't copy the old title/description text below;
+it's kept only to show the tag shape.
 ```html
 <!-- Favicons -->
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -67,18 +86,18 @@ mark height. Letter-spacing `-0.02em`.
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/site.webmanifest">
 
-<!-- Open Graph -->
+<!-- Open Graph (see app/layout.tsx `metadata.openGraph` for the current, real copy) -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="Puente Financial — Send money home free. Build your credit.">
-<meta property="og:description" content="The only card that turns your remittances into credit history. Zero fees, zero catch.">
+<meta property="og:title" content="Puente Financial | Send money home. Build U.S. credit doing it.">
+<meta property="og:description" content="Send money home for $5 flat at the real exchange rate, and build your U.S. credit history with every payment. One app, built for newcomers.">
 <meta property="og:image" content="https://YOUR_DOMAIN/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 
 <!-- Twitter -->
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Puente Financial — Send money home free. Build your credit.">
-<meta name="twitter:description" content="The only card that turns your remittances into credit history. Zero fees, zero catch.">
+<meta name="twitter:title" content="Puente Financial | Send money home. Build U.S. credit doing it.">
+<meta name="twitter:description" content="Send money home for $5 flat at the real exchange rate, and build your U.S. credit history with every payment. One app, built for newcomers.">
 <meta name="twitter:image" content="https://YOUR_DOMAIN/og-image.png">
 ```
 
