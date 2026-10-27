@@ -172,8 +172,8 @@
         .marquee img{height:1.6rem;width:auto;display:block;filter:brightness(0) saturate(100%);opacity:.55;-webkit-user-drag:none}
         .marquee img.logo--tall{height:2.1rem}
         .marquee img.logo--wide{height:1.3rem}
-        /* PLACEHOLDER client logos until real ones are supplied */
-        .ph-logo{display:inline-flex;align-items:center;height:1.9rem;padding:0 1.1rem;border:1px dashed var(--line);border-radius:4px;font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);white-space:nowrap;user-select:none}
+        /* badge logos (white lettering on a dark block, recolored from brand color in the files) keep their knockout instead of the black filter */
+        .marquee img.logo--badge{height:2.8rem;filter:none;opacity:.55}
         .marquee.is-live{cursor:grab;touch-action:pan-y;-webkit-user-select:none;user-select:none}
         .marquee.is-live .marquee__track{animation:none}
         .marquee.is-dragging{cursor:grabbing}
@@ -186,12 +186,11 @@
           .marquee__set+.marquee__set,.marquee__set i{display:none}
         }
         </style>
-        <section class="band" aria-label="Selected clients">
-          <p class="label">Selected clients<sup>*</sup></p>
+        <section class="band" aria-label="Team with experience working at">
+          <p class="label">Team with experience working at</p>
           <div class="marquee" id="mq">
-            <div class="marquee__track" id="track"><div class="marquee__set"><span class="ph-logo" data-placeholder="logo">Client logo</span><i aria-hidden="true">·</i><span class="ph-logo" data-placeholder="logo">Client logo</span><i aria-hidden="true">·</i><span class="ph-logo" data-placeholder="logo">Client logo</span><i aria-hidden="true">·</i><span class="ph-logo" data-placeholder="logo">Client logo</span><i aria-hidden="true">·</i><span class="ph-logo" data-placeholder="logo">Client logo</span><i aria-hidden="true">·</i><span class="ph-logo" data-placeholder="logo">Client logo</span><i aria-hidden="true">·</i></div><div class="marquee__set"><span class="ph-logo" data-placeholder="logo" aria-hidden="true">Client logo</span><i aria-hidden="true">·</i><span class="ph-logo" data-placeholder="logo" aria-hidden="true">Client logo</span><i aria-hidden="true">·</i><span class="ph-logo" data-placeholder="logo" aria-hidden="true">Client logo</span><i aria-hidden="true">·</i><span class="ph-logo" data-placeholder="logo" aria-hidden="true">Client logo</span><i aria-hidden="true">·</i><span class="ph-logo" data-placeholder="logo" aria-hidden="true">Client logo</span><i aria-hidden="true">·</i><span class="ph-logo" data-placeholder="logo" aria-hidden="true">Client logo</span><i aria-hidden="true">·</i></div></div>
+            <div class="marquee__track" id="track"><div class="marquee__set"><img src="/ai/assets/logos/smuckers.svg" alt="Smucker's" class="logo--badge"><i aria-hidden="true">·</i><img src="/ai/assets/logos/vivint.png" alt="Vivint"><i aria-hidden="true">·</i><img src="/ai/assets/logos/savi.svg" alt="Savi" class="logo--tall"><i aria-hidden="true">·</i><img src="/ai/assets/logos/boostly.svg" alt="Boostly"><i aria-hidden="true">·</i><img src="/ai/assets/logos/goldman-sachs.svg" alt="Goldman Sachs" class="logo--badge"><i aria-hidden="true">·</i><img src="/ai/assets/logos/capital-one.svg" alt="Capital One" class="logo--tall"><i aria-hidden="true">·</i><img src="/ai/assets/logos/amazon.svg" alt="Amazon"><i aria-hidden="true">·</i><img src="/ai/assets/logos/home-depot.svg" alt="The Home Depot" class="logo--badge"><i aria-hidden="true">·</i></div><div class="marquee__set"><img src="/ai/assets/logos/smuckers.svg" alt="" class="logo--badge"><i aria-hidden="true">·</i><img src="/ai/assets/logos/vivint.png" alt=""><i aria-hidden="true">·</i><img src="/ai/assets/logos/savi.svg" alt="" class="logo--tall"><i aria-hidden="true">·</i><img src="/ai/assets/logos/boostly.svg" alt=""><i aria-hidden="true">·</i><img src="/ai/assets/logos/goldman-sachs.svg" alt="" class="logo--badge"><i aria-hidden="true">·</i><img src="/ai/assets/logos/capital-one.svg" alt="" class="logo--tall"><i aria-hidden="true">·</i><img src="/ai/assets/logos/amazon.svg" alt=""><i aria-hidden="true">·</i><img src="/ai/assets/logos/home-depot.svg" alt="" class="logo--badge"><i aria-hidden="true">·</i></div></div>
           </div>
-          <p class="note">*PE funds included if engaged at the fund or portco level</p>
         </section>
         </template>
       </div>
