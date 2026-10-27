@@ -1,0 +1,96 @@
+/* ============================================================
+   Puente /ai site chrome (from Topsail V02): nav, mobile menu, newsletter, footer.
+   The page sections bring their own styles inside shadow roots
+   (see mockups/homepage-composer and build_site.py); this file
+   only styles what sits outside them. Red accents are the default.
+   ============================================================ */
+:root {
+  color-scheme: light;
+  --ink: #16261d; --body: #39473f; --dim: #677a6f; --accent: #3d6b55; --page: #f4f2e9; --pale: #e8eedd;
+  --line: rgba(22,38,29, .14); --line2: rgba(22,38,29, .28);
+  --f-display: "Bricolage Grotesque", system-ui, sans-serif; --f-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* the small accents, in the live site's red (eyebrows, markers, the one highlighted box) */
+  --hi: #4a7a36; --hi-fill: #b7e64c; --hi-ring: rgba(74,122,54, .16); --hl-top: #b7e64c; --hl-left: #8db83a; --hl-right: #a4d63e;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; overflow-x: clip; scroll-padding-top: 64px; }
+body { margin: 0; background: var(--page); color: var(--ink); font-family: "Hanken Grotesk", system-ui, sans-serif; -webkit-font-smoothing: antialiased; overflow-x: clip; }
+img { max-width: 100%; }
+button { font: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+/* ---------- nav ---------- */
+.cnav { position: fixed; z-index: 50; top: 0; left: 0; right: 0; height: 64px; display: flex; align-items: center; gap: 24px; padding: 0 clamp(16px, 4vw, 48px);
+  background: rgba(244,242,233, .88); backdrop-filter: blur(12px) saturate(1.2); -webkit-backdrop-filter: blur(12px) saturate(1.2); border-bottom: 1px solid var(--line); }
+.cnav__brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: var(--ink); font: 500 13px var(--f-mono); letter-spacing: .3em; }
+.cnav__brand svg, .cfoot__brand svg { width: 30px; height: auto; color: var(--accent); }
+.cnav__links { display: flex; gap: 22px; margin-left: auto; }
+.cnav__links a { white-space: nowrap; padding: 4px 0; color: var(--body); text-decoration: none; font: 11px var(--f-mono); letter-spacing: .12em; text-transform: uppercase; }
+.cnav__links a:hover, .cnav__links a[aria-current="page"] { color: var(--ink); }
+.cnav__cta { background: var(--hi-fill); color: #16291a; text-decoration: none; font: 500 11px var(--f-mono); letter-spacing: .1em; text-transform: uppercase; padding: 10px 14px; border-radius: 4px; white-space: nowrap; }
+.cnav__cta:hover { background: #a4d63e; }
+.cnav__menu { display: none; border: 1px solid var(--line); background: transparent; color: var(--ink); border-radius: 4px; width: 38px; height: 38px; font-size: 18px; line-height: 1; cursor: pointer; }
+
+/* mobile menu (opened by app.js, which toggles .open on #mobileMenu) */
+.cmenu { display: none; }
+/* collapses earlier than Topsail (860px): the six Puente nav labels are longer and need ~1080px on one line */
+@media (max-width: 1080px) {
+  .cnav { gap: 12px; }
+  .cnav__links { display: none; }
+  .cnav__cta { margin-left: auto; }
+  .cnav__menu { display: grid; place-items: center; }
+  .cmenu { position: fixed; z-index: 49; top: 64px; left: 0; right: 0; flex-direction: column; gap: 2px; padding: 12px clamp(16px, 4vw, 48px) 20px;
+    background: var(--page); border-bottom: 1px solid var(--line); box-shadow: 0 16px 32px rgba(22,38,29, .12); }
+  .cmenu.open { display: flex; }
+  .cmenu a { padding: 12px 0; border-bottom: 1px solid var(--line); color: var(--ink); text-decoration: none; font: 12px var(--f-mono); letter-spacing: .12em; text-transform: uppercase; }
+  .cmenu a:last-child { border-bottom: 0; }
+}
+@media (max-width: 420px) { .cnav__cta { font-size: 10px; padding: 9px 10px; } .cnav__brand span { display: none; } }
+
+/* ---------- sections ---------- */
+#page { min-height: 60vh; }
+.slot { position: relative; }
+.slot__host { display: block; }
+
+/* ---------- newsletter (the form markup is shared with the other pages; app.js handles it) ---------- */
+.cnews { background: #fff; border-top: 1px solid var(--line); padding: clamp(64px, 8vw, 104px) clamp(16px, 4vw, 48px); }
+.cnews__in { max-width: 1280px; margin: 0 auto; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 28px clamp(32px, 5vw, 72px); align-items: end; }
+.cnews__k { margin: 0; font: 500 12px var(--f-mono); letter-spacing: .14em; text-transform: uppercase; color: var(--hi); }
+.cnews h2 { margin: 18px 0 0; font: 600 clamp(1.9rem, 3.4vw, 2.8rem)/1.08 var(--f-display); letter-spacing: -.015em; color: var(--ink); }
+.cnews__lede { margin: 16px 0 0; max-width: 32rem; font-size: 1.06rem; line-height: 1.55; color: var(--body); }
+.cnews .ins-sub__form { display: flex; flex-wrap: wrap; gap: 10px; position: relative; }
+.cnews .ins-sub__input { flex: 1 1 240px; min-width: 0; height: 48px; padding: 0 16px; border: 1px solid var(--line2); border-radius: 999px; background: var(--page);
+  color: var(--ink); font: 13px var(--f-mono); letter-spacing: .04em; }
+.cnews .ins-sub__input:focus { outline: none; border-color: var(--ink); background: #fff; }
+.cnews .ins-sub__hp { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
+.cnews .ins-sub__turnstile { flex-basis: 100%; }
+.cnews .ins-sub__turnstile:empty { display: none; }
+.cnews .btn { display: inline-flex; align-items: center; text-decoration: none; height: 48px; padding: 0 22px; border: 0; border-radius: 999px; background: var(--hi-fill); color: #16291a; cursor: pointer;
+  font: 500 12px var(--f-mono); letter-spacing: .12em; text-transform: uppercase; }
+.cnews .btn:hover { background: #a4d63e; }
+.cnews .btn[disabled] { opacity: .6; cursor: default; }
+.cnews .ins-sub__msg { flex-basis: 100%; margin: 4px 0 0; min-height: 1.2em; font: 12px var(--f-mono); letter-spacing: .04em; color: var(--dim); }
+.cnews .ins-sub__msg.is-ok { color: var(--accent); }
+.cnews .ins-sub__msg.is-bad { color: var(--hi-fill); }
+.cnews .ins-sub__msg a { color: inherit; }
+@media (max-width: 860px) { .cnews__in { grid-template-columns: 1fr; } }
+
+/* ---------- footer ---------- */
+.cfoot { background: var(--page); color: var(--body); padding: clamp(48px, 6vw, 72px) clamp(16px, 4vw, 48px) 40px; }
+.cfoot__in { max-width: 1280px; margin: 0 auto; padding-top: 28px; border-top: 1px solid var(--ink); display: grid; grid-template-columns: 1fr auto; gap: 40px 24px; }
+.cfoot__brand { display: flex; align-items: center; gap: 10px; color: var(--ink); font: 500 13px var(--f-mono); letter-spacing: .3em; text-decoration: none; }
+.cfoot p { margin: 0; }
+.cfoot__coords { margin-top: 14px !important; font: 11px var(--f-mono); letter-spacing: .12em; color: var(--dim); }
+.cfoot__nav { display: flex; gap: clamp(32px, 6vw, 96px); }
+.cfoot__nav div { display: flex; flex-direction: column; gap: 9px; }
+.cfoot__nav a { color: var(--ink); text-decoration: none; font: 16px/1.3 "Hanken Grotesk", system-ui, sans-serif; }
+.cfoot__nav a:hover { color: var(--hi-fill); }
+.cfoot__h { margin-bottom: 4px !important; font: 500 11px var(--f-mono); letter-spacing: .14em; text-transform: uppercase; color: var(--hi); }
+.cfoot__legal { grid-column: 1 / -1; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; padding-top: 20px; border-top: 1px solid var(--line);
+  font: 11px var(--f-mono); letter-spacing: .1em; color: var(--dim); }
+.cfoot__legal a { color: inherit; }
+@media (max-width: 640px) { .cfoot__in { grid-template-columns: 1fr; } .cfoot__nav { flex-wrap: wrap; } }
+
+/* app.js fades a page out briefly when you follow a link to another page */
+.leaving body { opacity: .5; transition: opacity .4s ease; }
+@media (prefers-reduced-motion: reduce) { .leaving body { transition: none; } }
